@@ -1,4 +1,4 @@
-# Machine Attestation Profiles
+# Machine SPDM Attestation Profiles
 
 **Implements:** [NVIDIA/infra-controller#4772](https://github.com/NVIDIA/infra-controller/issues/4772)
 — *SPEC-AS-12: Attestation Profiles*. Milestone v2.3.
@@ -71,7 +71,70 @@ separate work (§12).
 | **Profile**        | The stored policy for one hardware class.                                                                                          |
 | **Selection**      | The part of a profile naming which attesters are in or out.                                                                        |
 | **Pattern**        | One matcher inside a selection: `exact` (a full ID) or `prefix` (every ID starting with a string).                                 |
+| **Attester set**   | The SPDM-capable attesters one endpoint reported, taken together. The coverage table calls a distinct one a *variant*; see §7.5.    |
 | **Attester digest** | A hash of a machine's sorted SPDM-capable attester IDs. Describes what the hardware carries; it is not an identity; see §7.5.       |
+
+These terms fall into two groups that meet in only two places. `Hardware class`
+is one meeting point, because it is derived from hardware and is also the key an
+operator writes a profile against. `Attester` is the other, because a pattern is
+a string matcher and the strings it matches are attester IDs.
+
+```mermaid
+flowchart LR
+
+  subgraph HW["Hardware vocabulary — what a site has"]
+    direction TB
+    MA["Machine"]
+    BI["BMC interface"]
+    AT["Attester"]
+    SET["Attester set<br/>the CLI calls one a variant"]
+    DG["Attester digest"]
+    MA ---|"is reached through one"| BI
+    BI ---|"reports"| AT
+    AT ---|"the SPDM ones together form"| SET
+    SET ---|"is named by its"| DG
+  end
+
+  subgraph JOIN[" "]
+    direction TB
+    ANY["any"]
+    HC["Hardware class"]
+    ANY ---|"is the one reserved"| HC
+  end
+
+  subgraph POL["Policy vocabulary — what an operator writes"]
+    direction TB
+    PR["Profile"]
+    SL["Selection"]
+    MO["Mode<br/>ALL, NONE, ALLOWLIST, DENYLIST"]
+    PA["Pattern<br/>exact or prefix"]
+    PR ---|"holds one"| SL
+    SL ---|"has a"| MO
+    SL ---|"holds zero or more"| PA
+  end
+
+  BI ---|"reports the two fields that derive"| HC
+  SET ---|"is filed under"| HC
+  HC ---|"is the key of at most one"| PR
+  PA ---|"matches the ID of an"| AT
+
+  classDef term fill:#f2f2f2,stroke:#666666,stroke-width:1.2px,color:#111111
+  classDef bridge fill:#e0e0e0,stroke:#333333,stroke-width:2px,color:#111111
+  class MA,BI,AT,SET,DG,PR,SL,MO,PA term
+  class HC,ANY bridge
+
+  style HW fill:none,stroke:#999999,stroke-width:1px,stroke-dasharray:6 4
+  style POL fill:none,stroke:#999999,stroke-width:1px,stroke-dasharray:6 4
+  style JOIN fill:none,stroke:none
+
+  linkStyle default stroke:#777777,stroke-width:1.5px
+```
+
+`Attester set` and `Attester digest` have no counterpart on the policy side.
+They describe what hardware turned out to carry, and no profile term refers to
+them, which is why a variant only ever appears in the coverage table and never
+in a profile document. This diagram names concepts; §7.4 draws the tables that
+store them.
 
 ## 4 The profile
 
@@ -625,49 +688,42 @@ $ nico-admin-cli attestation spdm coverage
 +------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
 ```
 
-That table holds four findings. Nobody has written a profile for the six R750s,
-so `any` attests them with whatever their BMCs report. The four SR680a V3s have
-a profile of their own that attests nothing, which is a deliberate exclusion
-rather than an oversight — the two rows read differently and only this view
-tells them apart. The 72 GB200 trays share a profile, and the two variants under
-one class mean it has reported seven attesters as well as eight; whether a tray
-still differs from the rest today is in the per-set endpoint counts (§7.5),
-since a variant keeps its row after the endpoints reporting it are gone. And
-one endpoint has no class recorded yet, either because it is new or because its
-explorations are failing, so there is nothing to key on and `any` covers it
-too.
+Most of that table reads straight off the columns. The row worth pausing on is
+the SR680a V3s: they have a profile of their own that attests nothing, which is
+a deliberate exclusion and looks nothing like the R750s having no profile at
+all. Only this view tells those two apart.
 
-`EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
-because `hardware_class` is recorded per endpoint and a machine can present more
-than one. Hardware nobody has explored has no row at all.
-`VARIANTS` renders how many attester sets the class has recorded (§7.5); more
-than one means it has reported different SPDM-capable components, not that it
-spans them now. A set keeps its row once the endpoints reporting it are gone, so
-a class can carry one variant today and still count two. It does not move when
-an operator switches a component's integrity reporting off, which is a
-configuration difference rather than a hardware one. Zero means nothing has been
+`EXPLORED ENDPOINTS` counts rows of `explored_endpoints`, not machines, because
+`hardware_class` is recorded per endpoint and a machine can present more than
+one. Hardware nobody has explored has no row at all, and the `any` row carries
+no counts because `any` is never recorded on an endpoint.
+
+`VARIANTS` is how many attester sets the class has ever recorded (§7.5). A set
+keeps its row after the endpoints reporting it are gone, so more than one means
+the class has reported different SPDM-capable components at some point, not
+that it spans them today. Switching a component's integrity reporting off does
+not move it, since the digest ignores that flag. Zero means nothing has been
 recorded yet, which is every class before its first exploration.
-`ATTESTERS` renders how many attesters those sets hold, listing every distinct
-count because a class spanning variants of different sizes has no single one —
-`7, 8` is the drift `VARIANTS` counts, said in the units an operator reasons
-about. It is empty for a class with no set recorded, and `0` where a BMC reported
-an SPDM collection holding no SPDM members, which is a variant in its own right.
-Which digests those counts belong to, and how many endpoints report each, are in
-`--format json`, where an outlier of one endpoint against seventy-one is the
-useful detail.
-`OWN PROFILE` is `n/a` for the endpoints carrying no class, since no profile can
-be keyed to them.
-The `any` row carries no counts, because `any` is never recorded on an endpoint.
+
+`ATTESTERS` is how many attesters those sets hold, listing each distinct count
+because a class spanning sets of different sizes has no single one. It is empty
+for a class with no set recorded, and `0` where a BMC reported an SPDM
+collection holding no SPDM members, which is a set in its own right.
+
+`OWN PROFILE` is `n/a` for endpoints carrying no class, since no profile can be
+keyed to them. An endpoint has no class when it is new or when its explorations
+are failing.
 
 `WOULD USE` is the §5.3 rule applied per group, not a second implementation of
-it: the server reports which profile would supply the policy, and the CLI only
-spells it. The view contacts no BMC. It reports what was last recorded, so a
-change made since the last exploration or attestation is not yet reflected.
+it: the server reports which profile would supply the policy and the CLI only
+spells it. The view contacts no BMC, so it reports what was last recorded and
+not any change made since.
 
-`--format json` and `--format yaml` report the same rows, with the class `null`
-rather than labelled for the endpoints carrying none, and the counts `null` on
-the `any` row; every key is present. `--format` is a root-level flag
-and must precede the command path:
+`--format json` and `--format yaml` report the same rows plus each set's digest
+and how many endpoints report it, which is where an outlier of one endpoint
+against seventy-one shows up. The class is `null` rather than labelled for
+endpoints carrying none, the counts are `null` on the `any` row, and every key
+is present. `--format` is a root-level flag and must precede the command path:
 `nico-admin-cli --format json attestation spdm coverage`.
 
 ### 6.5 What editing a profile does not do
@@ -796,6 +852,9 @@ machine_interface_addresses (
 exists and is untouched.
 
 ### 7.4 How they connect
+
+Which tables hold what, and on which columns they join. §3 draws the same
+subject as concepts rather than as storage.
 
 ```mermaid
 erDiagram
