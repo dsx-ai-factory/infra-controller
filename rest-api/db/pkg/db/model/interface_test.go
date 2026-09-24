@@ -161,6 +161,13 @@ func TestInterface_EthernetKey(t *testing.T) {
 	invalidAddress.RequestedIpAddress = cutil.GetPtr("invalid-address")
 	otherInvalidAddress := prefixInterface
 	otherInvalidAddress.RequestedIpAddress = cutil.GetPtr("other-invalid-address")
+	withPrefixes := func(prefixes ...string) Interface {
+		ifc := base
+		ifc.InlineRoutingProfile = &InterfaceInlineRoutingProfile{AllowedAnycastPrefixes: prefixes}
+		return ifc
+	}
+	anycast := withPrefixes("192.0.2.0/24", "2001:db8::/64")
+	expandedAnycast := withPrefixes("192.0.2.0/24", "2001:0DB8:0000:0000::/64")
 
 	tests := []struct {
 		name  string
@@ -178,6 +185,12 @@ func TestInterface_EthernetKey(t *testing.T) {
 		{name: "different IPv6 addresses", left: ipv6, right: differentIPv6},
 		{name: "requested address differs from absent", left: ipv6, right: prefixInterface},
 		{name: "invalid address strings remain distinct", left: invalidAddress, right: otherInvalidAddress},
+		{name: "equivalent IPv6 anycast prefixes", left: anycast, right: expandedAnycast, equal: true},
+		{name: "anycast prefix length differs", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/65")},
+		{name: "anycast prefix host bits remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::1/64")},
+		{name: "anycast prefix order remains distinct", left: anycast, right: withPrefixes("2001:db8::/64", "192.0.2.0/24")},
+		{name: "duplicate anycast prefixes remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/64", "2001:db8::/64")},
+		{name: "invalid anycast prefixes remain distinct", left: withPrefixes("invalid-prefix"), right: withPrefixes("other-invalid-prefix")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,6 +202,7 @@ func TestInterface_EthernetKey(t *testing.T) {
 		})
 	}
 	assert.Equal(t, "2001:0DB8:0:0:0:0:0:1", *expandedIPv6.RequestedIpAddress)
+	assert.Equal(t, []string{"192.0.2.0/24", "2001:0DB8:0000:0000::/64"}, expandedAnycast.InlineRoutingProfile.AllowedAnycastPrefixes)
 }
 
 func TestInterfaceSQLDAO_Create(t *testing.T) {
