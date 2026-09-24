@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use carbide_instrument::{Event, emit, red};
 use carbide_rack::firmware_object::{
@@ -235,32 +234,46 @@ pub struct RmsBackend {
     /// Tracks firmware update job IDs keyed by device MAC address.
     firmware_jobs: Mutex<HashMap<MacAddress, Vec<RmsTrackedFirmwareJob>>>,
 
-    /// Artifact access tokens for the NVOS applies staged behind each switch's
-    /// firmware-object job, keyed by BMC MAC. Only the token lives here; the
-    /// durable row owns the rest of the apply and deliberately omits it.
-    staged_system_image_tokens: Mutex<HashMap<MacAddress, String>>,
+    /// The NVOS phase of each switch's in-flight mixed update, keyed by BMC
+    /// MAC, from the firmware-object submission until a status poll resolves
+    /// it. Held only in memory, including the artifact access token: a
+    /// nico-api restart mid-update drops the NVOS phase, and the update then
+    /// reports its firmware-object job's result alone.
+    staged_system_images: Mutex<HashMap<MacAddress, StagedSystemImage>>,
 }
 
-/// How long one status poll may hold the dispatch lease on a staged NVOS apply.
+/// The NVOS system-image phase of a switch update that also covers
+/// firmware-object components.
 ///
-/// Wide enough to cover the switch-identity lookups and the RMS call that one
-/// dispatch makes, so overlapping polls never race a submission still in
-/// flight; short enough that a poll killed mid-dispatch does not strand the
-/// apply past the next few polls.
-const STAGED_SYSTEM_IMAGE_LEASE: Duration = Duration::from_secs(300);
+/// RMS runs one job per node, so such an update cannot submit both applies at
+/// once: the second is rejected while the first is still active. The
+/// firmware-object apply goes first and the NVOS apply waits here for the
+/// status poll that observes it finish.
+#[derive(Clone)]
+enum StagedSystemImage {
+    /// Waiting on the firmware-object job, holding the apply to submit once it
+    /// completes.
+    Staged {
+        config_json: String,
+        options: FirmwareUpdateOptions,
+    },
+
+    /// Ended without dispatching, for this reason. Kept so later polls report
+    /// the failed phase rather than the firmware-object job's success alone;
+    /// no RMS job id exists to read the outcome back from.
+    Failed(String),
+}
 
 /// What a status poll should report for a staged NVOS apply.
 enum StagedSystemImageOutcome {
     /// The apply is still staged, either because the firmware-object job it
-    /// waits on has not finished or because another poll is dispatching it.
+    /// waits on has not finished or because a concurrent poll took it.
     Waiting,
 
     /// The apply was submitted and is now tracked as this job.
     Submitted(RmsTrackedFirmwareJob),
 
-    /// The apply will not be dispatched, for this reason. Reported as a failed
-    /// NVOS job by this poll and every later one: the staged row retains it,
-    /// since no RMS job id exists to poll in its place.
+    /// The apply will not be dispatched, for this reason.
     Abandoned(String),
 }
 
@@ -1095,7 +1108,7 @@ impl RmsBackend {
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
-            staged_system_image_tokens: Mutex::new(HashMap::new()),
+            staged_system_images: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1129,148 +1142,53 @@ impl RmsBackend {
         }
     }
 
-    /// Records the NVOS apply that has to wait for `bmc_mac`'s firmware-object
-    /// job, replacing any phase a superseded update left staged.
+    /// Records `error` as the outcome of the NVOS phase staged for `bmc_mac`
+    /// and reports it.
     ///
-    /// The durable row, not the in-memory entry, is what a later poll — in this
-    /// process or the one that replaces it — dispatches from. An error
-    /// therefore means the apply is not staged at all and will never run, so
-    /// the caller has to report the update as incomplete rather than carry an
-    /// intent a restart silently drops. Only the access token stays in memory,
-    /// matching the rack-maintenance path.
-    async fn stage_system_image(
-        &self,
-        bmc_mac: MacAddress,
-        config_json: &str,
-        options: &FirmwareUpdateOptions,
-    ) -> Result<(), db::DatabaseError> {
-        let token = options
-            .access_token
-            .as_deref()
-            .filter(|token| *token != RMS_NOAUTH_ACCESS_TOKEN);
-        let update = db::switch_staged_system_image::StagedUpdate {
-            config_json: config_json.to_owned(),
-            requires_access_token: token.is_some(),
-        };
-
-        if let Err(e) = db::switch_staged_system_image::stage(&self.db, bmc_mac, &update).await {
-            // Leave the switch owing no NVOS phase at all rather than one from
-            // a superseded update, which a later poll would otherwise dispatch
-            // behind this update's firmware-object job.
-            if let Err(clear_error) = self.clear_staged_system_image(bmc_mac).await {
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    error = %clear_error,
-                    "failed to clear a superseded staged switch NVOS update from database"
-                );
-            }
-            return Err(e);
-        }
-
-        let mut tokens = self.staged_system_image_tokens.lock().unwrap();
-        match token {
-            Some(token) => {
-                tokens.insert(bmc_mac, token.to_owned());
-            }
-            None => {
-                tokens.remove(&bmc_mac);
-            }
-        }
-        Ok(())
-    }
-
-    /// Clears any NVOS phase staged for `bmc_mac`, in the database and in
-    /// memory.
-    ///
-    /// Safe only once the phase is recorded elsewhere — its RMS job id is
-    /// persisted, or a new update supersedes it — because the row is otherwise
-    /// the only record that the phase is owed.
-    async fn clear_staged_system_image(
-        &self,
-        bmc_mac: MacAddress,
-    ) -> Result<(), db::DatabaseError> {
-        let deleted = db::switch_staged_system_image::delete(&self.db, bmc_mac).await;
-        self.staged_system_image_tokens
-            .lock()
-            .unwrap()
-            .remove(&bmc_mac);
-        deleted
-    }
-
-    /// Records `error` as the terminal outcome of the NVOS phase staged for
-    /// `bmc_mac` and reports it.
-    ///
-    /// The row is kept, holding the reason, so every later poll reports the
+    /// The phase is kept, holding the reason, so every later poll reports the
     /// failed NVOS phase instead of the firmware-object job's success alone.
-    async fn abandon_staged_system_image(
+    fn abandon_staged_system_image(
         &self,
         bmc_mac: MacAddress,
         error: String,
     ) -> StagedSystemImageOutcome {
-        match db::switch_staged_system_image::fail(&self.db, bmc_mac, &error).await {
-            Ok(()) => {
-                self.staged_system_image_tokens
-                    .lock()
-                    .unwrap()
-                    .remove(&bmc_mac);
-            }
-            Err(e) => {
-                // The phase stays staged, so a later poll reaches the same
-                // conclusion and records it then.
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    error = %e,
-                    "failed to record the staged switch NVOS update's failure to database"
-                );
-            }
-        }
+        self.staged_system_images
+            .lock()
+            .unwrap()
+            .insert(bmc_mac, StagedSystemImage::Failed(error.clone()));
         StagedSystemImageOutcome::Abandoned(error)
     }
 
     /// Advances the NVOS apply staged for `endpoint`, submitting it once the
     /// firmware-object job it waits on is terminal.
     ///
-    /// `jobs` is the switch's currently tracked firmware jobs and
-    /// `firmware_object_state` the state of the firmware-object one among them,
-    /// or `None` when the switch has no firmware-object job left to sequence
-    /// behind. A firmware-object job that failed or was cancelled abandons the
-    /// staged apply rather than installing NVOS over firmware that did not
-    /// land. Returns `None` when the switch has nothing left to advance.
+    /// `firmware_object_state` is that job's state, or `None` when the switch
+    /// has no firmware-object job left to sequence behind. A firmware-object
+    /// job that failed or was cancelled abandons the staged apply rather than
+    /// installing NVOS over firmware that did not land. Returns `None` when
+    /// the switch has nothing staged.
     async fn advance_staged_system_image(
         &self,
         endpoint: &SwitchEndpoint,
-        jobs: &[RmsTrackedFirmwareJob],
         firmware_object_state: Option<FirmwareState>,
     ) -> Option<StagedSystemImageOutcome> {
         let bmc_mac = endpoint.bmc_mac;
-        let staged = match db::switch_staged_system_image::get(&self.db, bmc_mac).await {
-            Ok(phase) => phase?,
-            Err(e) => {
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    error = %e,
-                    "failed to fetch the staged switch NVOS update from database"
-                );
-                return None;
-            }
-        };
-        // Terminal, and the row is its only record, so keep reporting it.
-        if let db::switch_staged_system_image::StagedPhase::Failed(error) = staged {
-            return Some(StagedSystemImageOutcome::Abandoned(error));
+        // Terminal, and this is its only record, so keep reporting it.
+        if let StagedSystemImage::Failed(error) =
+            self.staged_system_images.lock().unwrap().get(&bmc_mac)?
+        {
+            return Some(StagedSystemImageOutcome::Abandoned(error.clone()));
         }
 
         match firmware_object_state {
             Some(FirmwareState::Completed) => {}
             Some(FirmwareState::Failed | FirmwareState::Cancelled) => {
-                return Some(
-                    self.abandon_staged_system_image(
-                        bmc_mac,
-                        "NVOS update was skipped because the firmware-object update for this \
-                         switch did not complete"
-                            .to_owned(),
-                    )
-                    .await,
-                );
+                return Some(self.abandon_staged_system_image(
+                    bmc_mac,
+                    "NVOS update was skipped because the firmware-object update for this switch \
+                     did not complete"
+                        .to_owned(),
+                ));
             }
             Some(_) => return Some(StagedSystemImageOutcome::Waiting),
             None => {
@@ -1278,130 +1196,57 @@ impl RmsBackend {
                     self.abandon_staged_system_image(
                         bmc_mac,
                         "NVOS update was not submitted: the firmware-object job it waits on is no \
-                         longer tracked"
+                     longer tracked"
                             .to_owned(),
-                    )
-                    .await,
+                    ),
                 );
             }
         }
 
-        // The job id is recorded before the row is dropped, so a switch that
-        // still has a staged row *and* a system-image job is one whose drop did
-        // not land. Reconcile it here rather than submitting the apply twice.
-        if jobs
-            .iter()
-            .any(|job| matches!(job, RmsTrackedFirmwareJob::SwitchSystemImage(_)))
-        {
-            if let Err(e) = self.clear_staged_system_image(bmc_mac).await {
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    error = %e,
-                    "failed to clear an already-dispatched staged switch NVOS update from database"
-                );
-            }
-            return None;
-        }
-
-        // The lease is what keeps two overlapping status polls from dispatching
-        // one switch's apply twice. Not winning it means another poll is
-        // already submitting, which is progress, not a failure.
-        let claimed = match db::switch_staged_system_image::claim(
-            &self.db,
-            bmc_mac,
-            STAGED_SYSTEM_IMAGE_LEASE,
-        )
-        .await
-        {
-            Ok(Some(claimed)) => claimed,
-            Ok(None) => return Some(StagedSystemImageOutcome::Waiting),
-            Err(e) => {
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    error = %e,
-                    "failed to claim the staged switch NVOS update for dispatch"
-                );
-                return Some(StagedSystemImageOutcome::Waiting);
-            }
+        // Taking the apply out of the map is what keeps two concurrent status
+        // polls from submitting it twice: only one of them gets it. Losing
+        // that race means the other poll is dispatching, which is progress.
+        let taken = self.staged_system_images.lock().unwrap().remove(&bmc_mac);
+        let Some(StagedSystemImage::Staged {
+            config_json,
+            options,
+        }) = taken
+        else {
+            return Some(StagedSystemImageOutcome::Waiting);
         };
 
-        let token = self
-            .staged_system_image_tokens
-            .lock()
-            .unwrap()
-            .get(&bmc_mac)
-            .cloned();
-        let access_token = match (claimed.requires_access_token, token) {
-            (true, Some(token)) => token,
-            (true, None) => {
-                return Some(
-                    self.abandon_staged_system_image(
-                        bmc_mac,
-                        "NVOS update was not submitted: its artifact access token did not survive \
-                         a nico-api restart; re-run the NVOS update for this switch"
-                            .to_owned(),
-                    )
-                    .await,
-                );
-            }
-            (false, _) => RMS_NOAUTH_ACCESS_TOKEN.to_owned(),
-        };
-        let options = FirmwareUpdateOptions {
-            access_token: Some(access_token),
-            // RMS does not expose force_update on switch system-image updates.
-            force_update: false,
-        };
-
-        let job_id = match self
-            .submit_staged_system_image(endpoint, &claimed.config_json, &options)
-            .await
-        {
-            Ok(Some(job_id)) => job_id,
-            Ok(None) => {
-                return Some(
-                    self.abandon_staged_system_image(
-                        bmc_mac,
-                        "RMS accepted the NVOS update without a job id, so its progress cannot be \
-                         tracked"
-                            .to_owned(),
-                    )
-                    .await,
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    bmc_mac_address = %bmc_mac,
-                    %error,
-                    "staged switch NVOS update failed to submit"
-                );
-                return Some(self.abandon_staged_system_image(bmc_mac, error).await);
-            }
-        };
+        let submitted = self
+            .submit_staged_system_image(endpoint, &config_json, &options)
+            .await;
+        let job_id =
+            match submitted {
+                Ok(Some(job_id)) => job_id,
+                Ok(None) => {
+                    return Some(self.abandon_staged_system_image(
+                    bmc_mac,
+                    "RMS accepted the NVOS update without a job id, so its progress cannot be \
+                     tracked"
+                        .to_owned(),
+                ));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        bmc_mac_address = %bmc_mac,
+                        %error,
+                        "staged switch NVOS update failed to submit"
+                    );
+                    return Some(self.abandon_staged_system_image(bmc_mac, error));
+                }
+            };
 
         tracing::info!(
             bmc_mac_address = %bmc_mac,
             backend_job_id = %job_id,
             "Submitted the staged switch NVOS update after its firmware-object job completed"
         );
-
-        // Record the job id before dropping the row: until the id is durable
-        // the row is the apply's only recovery point, and dropping it first
-        // would lose an apply RMS has already accepted.
-        let job = RmsTrackedFirmwareJob::SwitchSystemImage(job_id);
-        let mut tracked = jobs.to_vec();
-        tracked.push(job.clone());
-        self.track_switch_firmware_jobs(bmc_mac, tracked).await;
-        if let Err(e) = self.clear_staged_system_image(bmc_mac).await {
-            // The job id is durable, so the reconcile above retires the
-            // leftover row on a later poll instead of resubmitting the apply.
-            tracing::warn!(
-                bmc_mac_address = %bmc_mac,
-                error = %e,
-                "failed to clear the dispatched switch NVOS update from database"
-            );
-        }
-
-        Some(StagedSystemImageOutcome::Submitted(job))
+        Some(StagedSystemImageOutcome::Submitted(
+            RmsTrackedFirmwareJob::SwitchSystemImage(job_id),
+        ))
     }
 
     /// Submits one staged NVOS apply, returning its backend job id.
@@ -3351,13 +3196,16 @@ impl NvSwitchManager for RmsBackend {
                 }
             }
 
-            let mut stage_this_switch = false;
+            let mut staged_system_image = None;
             if stage_system_image {
                 if tracked_jobs
                     .iter()
                     .any(|job| matches!(job, RmsTrackedFirmwareJob::FirmwareObject(_)))
                 {
-                    stage_this_switch = true;
+                    staged_system_image = Some(StagedSystemImage::Staged {
+                        config_json: bundle_version.to_owned(),
+                        options: options.clone(),
+                    });
                 } else {
                     // Nothing to sequence the NVOS apply behind, so it would
                     // race the node's lock exactly as before. Report it instead.
@@ -3440,28 +3288,13 @@ impl NvSwitchManager for RmsBackend {
 
             // The staged NVOS phase is per switch and the latest update owns
             // it: install this update's, or clear one a superseded update left
-            // behind.
-            if stage_this_switch {
-                if let Err(e) = self
-                    .stage_system_image(ep.bmc_mac, bundle_version, options)
-                    .await
-                {
-                    // Nothing durable is left for a status poll to dispatch
-                    // from, so the NVOS phase will not run. Report the update
-                    // as incomplete rather than let it go missing silently.
-                    success = false;
-                    errors.push(format!(
-                        "NVOS update was not staged behind the firmware-object job and will not \
-                         run; re-run the NVOS update for this switch: {e}"
-                    ));
-                }
-            } else if let Err(e) = self.clear_staged_system_image(ep.bmc_mac).await {
-                // A phase a superseded update left staged would otherwise
-                // dispatch behind this update's firmware-object job.
-                success = false;
-                errors.push(format!(
-                    "a superseded NVOS update staged for this switch was not cleared: {e}"
-                ));
+            // behind, so the switch never has more than one pending.
+            {
+                let mut staged = self.staged_system_images.lock().unwrap();
+                match staged_system_image {
+                    Some(phase) => staged.insert(ep.bmc_mac, phase),
+                    None => staged.remove(&ep.bmc_mac),
+                };
             }
 
             results.push(SwitchComponentResult {
@@ -3494,7 +3327,7 @@ impl NvSwitchManager for RmsBackend {
             // When the in-memory map has no jobs (e.g. after a pod restart), fall
             // back to the DB-persisted set written by queue_firmware_updates,
             // keyed by BMC MAC for both ingested and pre-ingestion switches.
-            let jobs: Vec<RmsTrackedFirmwareJob> = if !in_memory_jobs.is_empty() {
+            let mut jobs: Vec<RmsTrackedFirmwareJob> = if !in_memory_jobs.is_empty() {
                 in_memory_jobs.clone()
             } else {
                 match db::direct_dispatch_firmware_job::get_all(&self.db, bmc_mac).await {
@@ -3535,10 +3368,10 @@ impl NvSwitchManager for RmsBackend {
                 .iter()
                 .position(|job| matches!(job, RmsTrackedFirmwareJob::FirmwareObject(_)))
                 .map(|index| states[index]);
-            let advanced = self
-                .advance_staged_system_image(ep, &jobs, firmware_object_state)
-                .await;
-            match advanced {
+            match self
+                .advance_staged_system_image(ep, firmware_object_state)
+                .await
+            {
                 Some(StagedSystemImageOutcome::Submitted(job)) => {
                     let (state, error) = query_tracked_firmware_job_status(
                         self.client.as_ref(),
@@ -3550,6 +3383,8 @@ impl NvSwitchManager for RmsBackend {
                     if let Some(error) = error {
                         errors.push(error);
                     }
+                    jobs.push(job);
+                    self.track_switch_firmware_jobs(bmc_mac, jobs).await;
                 }
                 Some(StagedSystemImageOutcome::Abandoned(error)) => {
                     states.push(FirmwareState::Failed);
@@ -8523,83 +8358,54 @@ mod tests {
                 RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
             ]
         );
+    }
 
-        // The job id is recorded before the staged row is dropped, so a drop
-        // that did not land leaves both behind. A later poll has to retire the
-        // leftover row rather than submit the apply a second time.
-        db::switch_staged_system_image::stage(
-            &pool,
-            SW_MAC_1.parse().unwrap(),
-            &db::switch_staged_system_image::StagedUpdate {
-                config_json: r#"{"Id":"fw-json"}"#.to_string(),
-                requires_access_token: false,
-            },
+    // The staged apply is held in one map, so two status polls landing
+    // together on a switch whose firmware-object job has just completed must
+    // still produce exactly one NVOS submission.
+    #[carbide_macros::sqlx_test]
+    async fn sw_concurrent_polls_submit_the_staged_nvos_apply_once(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &eps,
+            &firmware_update_options(),
         )
-        .await
-        .unwrap();
-        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::Completed,
+        .await;
+
+        for _ in 0..2 {
+            mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+                rms::FirmwareJobState::Completed,
+            )))
+            .await;
+        }
+        mock.enqueue_apply_switch_system_image(Ok(MockRmsApi::switch_system_image_apply_ok(
+            &sw1.to_string(),
+            "sw-nvos-job",
         )))
         .await;
         mock.enqueue_get_switch_system_image_job_status(Ok(
             MockRmsApi::switch_system_image_job_status_ok("running"),
         ))
         .await;
-        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
-            .await
-            .unwrap();
 
-        assert_eq!(statuses[0].state, FirmwareState::InProgress);
+        let (first, second) = tokio::join!(
+            NvSwitchManager::get_firmware_status(&backend, &eps),
+            NvSwitchManager::get_firmware_status(&backend, &eps),
+        );
+        first.unwrap();
+        second.unwrap();
+
         assert_eq!(mock.apply_switch_system_image_calls().await.len(), 1);
         assert_eq!(
-            db::switch_staged_system_image::get(&pool, SW_MAC_1.parse().unwrap())
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    // The staged row is what a later poll dispatches the NVOS phase from, so a
-    // mixed update that cannot record it has no NVOS phase at all. The update
-    // reports itself incomplete rather than letting the phase go missing.
-    #[carbide_macros::sqlx_test]
-    async fn sw_mixed_update_fails_when_the_nvos_phase_cannot_be_staged(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
-        sqlx::raw_sql("DROP TABLE switch_staged_system_image_updates")
-            .execute(&pool)
-            .await
-            .unwrap();
-        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
-            &sw1.to_string(),
-            "sw-fw-job",
-        )))
-        .await;
-
-        let results = backend
-            .queue_firmware_updates(
-                &[make_sw_endpoint(SW_MAC_1)],
-                r#"{"Id":"fw-json"}"#,
-                &[NvSwitchComponent::Bmc, NvSwitchComponent::Nvos],
-                &firmware_update_options(),
-            )
-            .await
-            .unwrap();
-
-        assert!(!results[0].success);
-        assert!(
-            results[0]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("re-run the NVOS update for this switch")
-        );
-        // The firmware-object job the NVOS phase was to follow still ran, and
-        // stays pollable.
-        assert_eq!(
             tracked_jobs(&backend, SW_MAC_1),
-            vec![RmsTrackedFirmwareJob::FirmwareObject(
-                "sw-fw-job".to_string()
-            )]
+            vec![
+                RmsTrackedFirmwareJob::FirmwareObject("sw-fw-job".to_string()),
+                RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
+            ]
         );
     }
 
@@ -8703,94 +8509,6 @@ mod tests {
                 .contains("bad system image")
         );
         assert_eq!(mock.apply_switch_system_image_calls().await.len(), 1);
-    }
-
-    // The staged apply outlives a restart through its durable row, but the
-    // access token does not: an unauthenticated apply still goes out, while one
-    // that needs a token is failed with an explicit instruction to re-run it.
-    #[carbide_macros::sqlx_test]
-    async fn sw_staged_nvos_after_restart_needs_no_token_to_proceed(pool: sqlx::PgPool) {
-        let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
-        let tokened = vec![make_sw_endpoint(SW_MAC_1)];
-        let noauth = vec![make_sw_endpoint(SW_MAC_2)];
-        queue_mixed_switch_update(
-            &mock,
-            &backend,
-            &sw1.to_string(),
-            &tokened,
-            &firmware_update_options(),
-        )
-        .await;
-        queue_mixed_switch_update(
-            &mock,
-            &backend,
-            &sw2.to_string(),
-            &noauth,
-            &FirmwareUpdateOptions {
-                access_token: Some(RMS_NOAUTH_ACCESS_TOKEN.to_owned()),
-                force_update: false,
-            },
-        )
-        .await;
-
-        // A fresh backend over the same database has the staged rows but none
-        // of the in-memory tokens.
-        let restarted = RmsBackend::new(
-            mock.clone(),
-            Some(mock.clone()),
-            pool.clone(),
-            Arc::new(rack_profile_config()),
-            true,
-        );
-
-        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::Completed,
-        )))
-        .await;
-        let statuses = NvSwitchManager::get_firmware_status(&restarted, &tokened)
-            .await
-            .unwrap();
-        assert_eq!(statuses[0].state, FirmwareState::Failed);
-        assert!(
-            statuses[0]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("did not survive a nico-api restart")
-        );
-        assert!(mock.apply_switch_system_image_calls().await.is_empty());
-
-        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::Completed,
-        )))
-        .await;
-        mock.enqueue_apply_switch_system_image(Ok(MockRmsApi::switch_system_image_apply_ok(
-            &sw2.to_string(),
-            "sw-nvos-job",
-        )))
-        .await;
-        mock.enqueue_get_switch_system_image_job_status(Ok(
-            MockRmsApi::switch_system_image_job_status_ok("running"),
-        ))
-        .await;
-        let statuses = NvSwitchManager::get_firmware_status(&restarted, &noauth)
-            .await
-            .unwrap();
-
-        assert_eq!(statuses[0].state, FirmwareState::InProgress);
-        let apply_calls = mock.apply_switch_system_image_calls().await;
-        assert_eq!(apply_calls.len(), 1);
-        assert_eq!(
-            apply_calls[0].access_token.as_deref(),
-            Some(RMS_NOAUTH_ACCESS_TOKEN)
-        );
-        assert_eq!(
-            tracked_jobs(&restarted, SW_MAC_2),
-            vec![
-                RmsTrackedFirmwareJob::FirmwareObject("sw-fw-job".to_string()),
-                RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
-            ]
-        );
     }
 
     #[carbide_macros::sqlx_test]

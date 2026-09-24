@@ -98,7 +98,6 @@ pub mod sku;
 pub mod spx_partition;
 pub mod state_history;
 pub mod switch;
-pub mod switch_staged_system_image;
 pub mod tenant;
 pub mod tenant_identity_config;
 pub mod tenant_keyset;
