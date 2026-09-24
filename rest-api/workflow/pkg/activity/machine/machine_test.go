@@ -1480,7 +1480,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		require.Len(t, statusDetails, 1)
 		assert.Equal(t, cdbm.MachineStatusReady, statusDetails[0].Status)
 		require.NotNil(t, statusDetails[0].Message)
-		assert.Equal(t, "Machine is ready for assignment", *statusDetails[0].Message)
+		assert.Equal(t, "Machine lifecycle is Ready", *statusDetails[0].Message)
 	})
 
 	t.Run("leaves an unreported soft-deleted Machine untouched", func(t *testing.T) {

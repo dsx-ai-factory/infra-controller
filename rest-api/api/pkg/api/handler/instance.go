@@ -1262,10 +1262,11 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is missing on site, cannot be used for new Instance", machine.ID), nil)
 			}
 
-			// Always check if Machine is already assigned
+			// Machine readiness and instance deletion are reconciled independently.
+			// An existing assignment is a conflict even when the Machine is Ready.
 			if machine.IsAssigned {
 				logger.Warn().Str("MachineID", machine.ID).Bool("AllowUnhealthyMachine", allowUnhealthyMachine).Msg("Machine is already assigned to an Instance, cannot be used for new Instance")
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID), nil)
+				return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID), nil)
 			}
 
 			// Check if it's possible to provision the Machine

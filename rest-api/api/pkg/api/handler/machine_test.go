@@ -771,7 +771,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 		assert.NotNil(t, mi1)
 
 		common.TestBuildStatusDetail(t, dbSession, m.ID, cdbm.MachineStatusInitializing, cutil.GetPtr("Machine is being initialized"))
-		common.TestBuildStatusDetail(t, dbSession, m.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine is ready for assignment"))
+		common.TestBuildStatusDetail(t, dbSession, m.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine lifecycle is Ready"))
 
 		// Create MachineInstanceType
 		if i%2 == 0 {
@@ -841,12 +841,12 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	m31 := testMachineBuildMachine(t, dbSession, ip4.ID, site3.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 	assert.NotNil(t, m31)
 	common.TestBuildStatusDetail(t, dbSession, m31.ID, cdbm.MachineStatusInitializing, cutil.GetPtr("Machine is being initialized"))
-	common.TestBuildStatusDetail(t, dbSession, m31.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine is ready for assignment"))
+	common.TestBuildStatusDetail(t, dbSession, m31.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine lifecycle is Ready"))
 
 	m32 := testMachineBuildMachine(t, dbSession, ip4.ID, site3.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 	assert.NotNil(t, m32)
 	common.TestBuildStatusDetail(t, dbSession, m32.ID, cdbm.MachineStatusInitializing, cutil.GetPtr("Machine is being initialized"))
-	common.TestBuildStatusDetail(t, dbSession, m32.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine is ready for assignment"))
+	common.TestBuildStatusDetail(t, dbSession, m32.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine lifecycle is Ready"))
 
 	m33 := testMachineBuildMachine(t, dbSession, ip4.ID, site3.ID, nil, nil, false, true, cdbm.MachineStatusError)
 	assert.NotNil(t, m33)
@@ -856,7 +856,7 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	m34 := testMachineBuildMachine(t, dbSession, ip4.ID, site3.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 	assert.NotNil(t, m34)
 	common.TestBuildStatusDetail(t, dbSession, m34.ID, cdbm.MachineStatusInitializing, cutil.GetPtr("Machine is being initialized"))
-	common.TestBuildStatusDetail(t, dbSession, m34.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine is ready for assignment"))
+	common.TestBuildStatusDetail(t, dbSession, m34.ID, cdbm.MachineStatusReady, cutil.GetPtr("Machine lifecycle is Ready"))
 
 	ins31, err := isd.Create(
 		context.Background(), nil,
@@ -1396,15 +1396,28 @@ func TestMachineHandler_GetAll(t *testing.T) {
 			expectedTotal:    cutil.GetPtr(totalCount / 2),
 		},
 		{
-			name:             "success case when hasInstance is false in query",
+			name:             "success when Ready and unassigned filters select candidates",
 			reqOrgName:       ipOrg2,
 			user:             ipu,
 			querySiteID:      cutil.GetPtr(site2.ID.String()),
+			queryStatus:      []string{cdbm.MachineStatusReady},
 			queryHasInstance: cutil.GetPtr(false),
 			expectedErr:      false,
 			expectedStatus:   http.StatusOK,
-			expectedCnt:      totalCount / 2,
-			expectedTotal:    cutil.GetPtr(totalCount / 2),
+			expectedCnt:      5,
+			expectedTotal:    cutil.GetPtr(5),
+		},
+		{
+			name:             "success when unassigned filter excludes Ready assigned machines",
+			reqOrgName:       ipOrg1,
+			user:             ipu,
+			querySiteID:      cutil.GetPtr(site.ID.String()),
+			queryStatus:      []string{cdbm.MachineStatusReady},
+			queryHasInstance: cutil.GetPtr(false),
+			expectedErr:      false,
+			expectedStatus:   http.StatusOK,
+			expectedCnt:      0,
+			expectedTotal:    cutil.GetPtr(0),
 		},
 		{
 			name:             "failure case when hasInstance is true but user is not a privileged Tenant",

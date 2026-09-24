@@ -1156,7 +1156,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is being used by an Instance"
 		case controllerMachineStatePrefixReady:
 			machineStatus = cdbm.MachineStatusReady
-			statusMessage = "Machine is ready for assignment"
+			statusMessage = "Machine lifecycle is Ready"
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is being force deleted"

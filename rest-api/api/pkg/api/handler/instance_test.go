@@ -1462,6 +1462,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
 		verifyChildSpanner       bool
+		check                    func(t *testing.T)
 	}{
 		{
 			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
@@ -2427,7 +2428,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test Instance create API endpoint failure, specify a machine ID already assigned",
+			name: "test Instance create API endpoint conflict, specify a Ready machine ID already assigned",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2450,8 +2451,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
-				respCode:    http.StatusBadRequest,
+				respCode:    http.StatusConflict,
 				respMessage: "is assigned to an Instance, cannot be used for new Instance",
+			},
+			check: func(t *testing.T) {
+				machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, mcassigned.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+				assert.True(t, machine.IsAssigned)
+				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2",
+					mock.MatchedBy(func(req *corev1.InstanceAllocationRequest) bool {
+						return req.GetMachineId().GetId() == mcassigned.ID
+					}))
 			},
 			wantErr: false,
 		},
@@ -3927,6 +3938,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			require.Equal(t, tt.args.respCode, rec.Code)
 			if tt.args.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
+			}
+			if tt.check != nil {
+				tt.check(t)
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return

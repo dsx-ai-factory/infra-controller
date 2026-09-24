@@ -18,7 +18,7 @@ import (
 	"fmt"
 )
 
-// MachineStatus Status values for Machine objects
+// MachineStatus Status values for Machine objects. `Ready` alone does not mean a Machine is available for Instance creation. Check the full Machine object's `instanceId` as well; a non-null value indicates an existing Instance association even when `status` is `Ready`.
 type MachineStatus string
 
 // List of MachineStatus
