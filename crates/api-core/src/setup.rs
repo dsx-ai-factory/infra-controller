@@ -55,6 +55,7 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::context::RackStateHandlerServices;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
@@ -639,6 +640,22 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let default_redirect_policy = reqwest::redirect::Policy::default();
+    let firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher> = Arc::new(
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
+
+                if initial_origin == Some(attempt.url().origin()) {
+                    default_redirect_policy.redirect(attempt)
+                } else {
+                    attempt.error("firmware-object redirect changed the configured origin")
+                }
+            }))
+            .build()
+            .wrap_err("failed to build the firmware-object HTTP client")?,
+    );
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -668,6 +685,7 @@ pub(crate) async fn start_runtime(
         machine_state_handler_enqueuer: Enqueuer::new(db_pool),
         metric_emitter: ApiMetricsEmitter::new(&meter),
         component_manager,
+        firmware_object_fetcher,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
     });
@@ -1292,6 +1310,7 @@ async fn initialize_and_start_controllers<'a>(
         work_lock_manager_handle,
         rms_client,
         component_manager,
+        firmware_object_fetcher,
         dpf_sdk,
         credential_manager,
         ..
@@ -1920,21 +1939,6 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build PowerShelfStateController");
 
-    let default_redirect_policy = reqwest::redirect::Policy::default();
-
-    let firmware_object_fetcher = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
-
-            if initial_origin == Some(attempt.url().origin()) {
-                default_redirect_policy.redirect(attempt)
-            } else {
-                attempt.error("firmware-object redirect changed the configured origin")
-            }
-        }))
-        .build()
-        .wrap_err("failed to build the firmware-object HTTP client")?;
-
     StateController::<RackStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_racks", meter.clone())
@@ -1955,7 +1959,7 @@ async fn initialize_and_start_controllers<'a>(
                 nmx_cluster_switch_mtls_services: carbide_config
                     .rack_state_controller
                     .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
+                firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2130,7 +2134,7 @@ async fn initialize_and_start_controllers<'a>(
             preingestion_manager.with_rack_firmware(
                 carbide_config.rack_profiles.clone(),
                 manager.compute_tray.clone(),
-                Arc::new(firmware_object_fetcher),
+                firmware_object_fetcher.clone(),
             )
         }
         _ => preingestion_manager,

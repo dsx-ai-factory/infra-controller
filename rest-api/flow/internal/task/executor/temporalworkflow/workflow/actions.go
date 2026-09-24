@@ -220,7 +220,11 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		fwInfo.OverrideReadinessCheck = extractOverrideReadinessCheck(actx.operationInfo)
 	}
 
-	fwInfo.TargetVersion = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
+	targetVersion, selected := extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
+	if !selected {
+		return nil
+	}
+	fwInfo.TargetVersion = targetVersion
 
 	if err := workflow.ExecuteActivity(
 		ctx, activity.NameFirmwareControl, target, fwInfo,
@@ -919,20 +923,17 @@ var knownComponentTypeKeys = []string{"compute", "nvswitch", "powershelf"}
 // plain value (e.g. "1.3.1" → 1.3.1); object values are returned as raw
 // JSON for component managers that parse multi-field version payloads.
 // If the key is absent but the document contains another known
-// component-type key (i.e. it IS the layered format), an empty string
-// is returned; the component backend decides how to handle an empty target.
-// This does not guarantee that the update is skipped. If the
-// document does not look like the layered format (no known keys), the
-// original string is returned as-is for each selected component type. This
-// supports both a shared rack firmware object and single-component updates.
-func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) string {
+// component-type key, selected is false so the workflow skips that component.
+// If the document does not look layered, the original string is returned for
+// backward compatibility with single-component updates.
+func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) (string, bool) {
 	if rawVersion == "" {
-		return ""
+		return "", true
 	}
 
 	var layered map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(rawVersion), &layered); err != nil {
-		return rawVersion
+		return rawVersion, true
 	}
 
 	key := strings.ToLower(devicetypes.ComponentTypeToString(componentType))
@@ -940,17 +941,17 @@ func extractComponentTargetVersion(rawVersion string, componentType devicetypes.
 		if len(section) > 0 && section[0] == '"' {
 			var s string
 			if err := json.Unmarshal(section, &s); err == nil {
-				return s
+				return s, true
 			}
 		}
-		return string(section)
+		return string(section), true
 	}
 
 	for _, known := range knownComponentTypeKeys {
 		if _, found := layered[known]; found {
-			return ""
+			return "", false
 		}
 	}
 
-	return rawVersion
+	return rawVersion, true
 }

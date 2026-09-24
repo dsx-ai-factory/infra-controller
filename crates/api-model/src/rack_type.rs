@@ -431,9 +431,8 @@ pub struct RackCapabilitiesSet {
 /// Optional source for a rack-wide SOT firmware-object document.
 ///
 /// When present on a [`RackProfile`], NICo uses this document for compute-tray
-/// preingestion and fetches it separately for the rack maintenance firmware and
-/// switch NVOS image phases. RMS selects the matching artifacts from the
-/// document.
+/// preingestion, automatic rack maintenance, and rack-scale RMS firmware
+/// requests. RMS selects the matching artifacts from the document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RackFirmwareObjectConfig {
@@ -496,14 +495,16 @@ pub struct RackProfile {
     pub product_family: Option<RackProductFamily>,
 
     /// Default firmware-object source for compute-tray preingestion and
-    /// automatic rack maintenance.
+    /// rack-profile firmware operations.
     ///
     /// When absent, compute-tray preingestion skips its automatic update, and
     /// rack maintenance skips automatic firmware and NVOS updates unless an
     /// explicit maintenance request supplies a firmware object. If no firmware
     /// object is available while a switch in the maintenance scope is already
     /// waiting for an NVOS update, maintenance enters `Error` instead of
-    /// skipping the NVOS phase.
+    /// skipping the NVOS phase. Rack-scale RMS firmware requests with an
+    /// omitted or empty version resolve this source before dispatch and fail
+    /// when the source is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_object: Option<RackFirmwareObjectConfig>,
 

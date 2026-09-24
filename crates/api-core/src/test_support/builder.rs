@@ -21,6 +21,7 @@ use arc_swap::ArcSwap;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::credentials::CredentialManager;
@@ -69,6 +70,7 @@ pub struct TestApiBuilder {
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
     endpoint_explorer: Option<MockEndpointExplorer>,
+    firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
 }
 
 impl TestApiBuilder {
@@ -93,6 +95,7 @@ impl TestApiBuilder {
             component_manager: None,
             secrets_context: None,
             endpoint_explorer: None,
+            firmware_object_fetcher: None,
         }
     }
 
@@ -195,6 +198,17 @@ impl TestApiBuilder {
     pub fn with_endpoint_explorer(self, endpoint_explorer: MockEndpointExplorer) -> Self {
         Self {
             endpoint_explorer: Some(endpoint_explorer),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_firmware_object_fetcher(
+        self,
+        firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    ) -> Self {
+        Self {
+            firmware_object_fetcher: Some(firmware_object_fetcher),
             ..self
         }
     }
@@ -320,6 +334,9 @@ impl TestApiBuilder {
             machine_state_handler_enqueuer,
             metric_emitter,
             component_manager: self.component_manager.map(|cm| (*cm).clone()),
+            firmware_object_fetcher: self
+                .firmware_object_fetcher
+                .unwrap_or_else(|| Arc::new(reqwest::Client::new())),
             bmc_session_manager,
             bms_client: std::sync::OnceLock::new(),
             secrets_context: self.secrets_context,
