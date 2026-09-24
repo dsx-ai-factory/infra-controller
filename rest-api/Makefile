@@ -156,6 +156,11 @@ test-workflow:
 	$(MAKE) ensure-postgres
 	cd workflow && go test -p 1 ./... -count=1
 
+# Pure inline workflow YAML validation; no database, network service or shared environment.
+.PHONY: test-workflow-config-validation
+test-workflow-config-validation:
+	cd workflow && go test ./pkg/configvalidation -count=1
+
 test-proto:
 	cd proto && go test ./... -count=1
 

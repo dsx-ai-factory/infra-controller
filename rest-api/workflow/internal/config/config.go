@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 
 	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	configvalidation "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/configvalidation"
 )
 
 const (
@@ -110,7 +111,7 @@ const (
 const (
 	// DefaultMaxConcurrentActivityPollers is the poller count used when config.yaml
 	// doesn't set worker.maxConcurrentActivityPollers. Matches the historical hardcoded value.
-	DefaultMaxConcurrentActivityPollers = 10
+	DefaultMaxConcurrentActivityPollers = configvalidation.DefaultMaxConcurrentActivityPollers
 	// MaxMaxConcurrentActivityPollers caps the configurable poller count. Each poller can
 	// hold a DB connection from the shared pgx pool while its activity runs, and this worker
 	// also serves the cloud task queue. Lowered from an initial 200 (an unguessed
@@ -119,7 +120,7 @@ const (
 	// handful of pollers already saturates typical activity-execution-slot counts -- raising
 	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
 	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
-	MaxMaxConcurrentActivityPollers = 20
+	MaxMaxConcurrentActivityPollers = configvalidation.MaxConcurrentActivityPollers
 )
 
 // Maintain a global config object
@@ -142,12 +143,10 @@ func NewConfig() *Config {
 		v: viper.New(),
 	}
 
-	// Set defaults
-	c.v.SetDefault(ConfigLogLevel, "info")
-	c.v.SetDefault(ConfigDevMode, false)
+	// Shared startup defaults also apply to inline validation without environment access.
+	configvalidation.SetDefaults(c.v)
 
-	// Set config file
-	// Check environment variable. If not set, use default
+	// Set config file; only startup resolves CONFIG_FILE_PATH.
 	defaultPath := ProjectRoot + "/config.yaml"
 	if os.Getenv(ConfigFilePathEnv) != "" {
 		c.v.SetDefault(ConfigFilePath, os.Getenv(ConfigFilePathEnv))
@@ -155,23 +154,6 @@ func NewConfig() *Config {
 		log.Warn().Msg("config file path not set, using default")
 		c.v.SetDefault(ConfigFilePath, defaultPath)
 	}
-
-	c.v.SetDefault(ConfigDBHost, "localhost")
-	c.v.SetDefault(ConfigDBPort, 5432)
-	c.v.SetDefault(ConfigTemporalHost, "localhost")
-	c.v.SetDefault(ConfigTemporalPort, 7233)
-	c.v.SetDefault(ConfigTemporalTlsEnabled, true)
-
-	c.v.SetDefault(ConfigMetricsEnabled, true)
-	c.v.SetDefault(ConfigMetricsPort, 9360)
-	c.v.SetDefault(ConfigMetricsNamespace, DefaultMetricsNamespace)
-
-	c.v.SetDefault(ConfigHealthzEnabled, true)
-	c.v.SetDefault(ConfigHealthzPort, 8899)
-
-	c.v.SetDefault(ConfigTracingEnabled, false)
-
-	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityPollers, DefaultMaxConcurrentActivityPollers)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -199,12 +181,8 @@ func NewConfig() *Config {
 	c.setTemporalNamespace()
 	c.setTemporalQueue()
 
-	if c.GetTemporalEncryptionKey() == "" {
-		if c.GetTemporalEncryptionKeyPath() != "" {
-			c.SetTemporalEncryptionKey()
-		} else {
-			log.Panic().Msg("temporal encryption key or encryption key path config must be specified")
-		}
+	if c.GetTemporalEncryptionKey() == "" && c.GetTemporalEncryptionKeyPath() != "" {
+		c.SetTemporalEncryptionKey()
 	}
 
 	// Validate config
@@ -220,55 +198,14 @@ func NewConfig() *Config {
 
 // Validate validates the config
 func (c *Config) Validate() {
-	// Check configs that are essential but were not set
-	if c.GetDBName() == "" {
-		log.Panic().Msg("db name config must be specified")
+	if err := configvalidation.Validate(c.v); err != nil {
+		log.Panic().Msg(err.Error())
 	}
-
-	if c.GetDBUser() == "" {
-		log.Panic().Msg("db user config must be specified")
-	}
-
-	if c.GetDBPassword() == "" && c.GetDBPasswordPath() == "" {
-		log.Panic().Msg("db password or password path config must be specified")
-	}
-
-	if c.GetTemporalTlsEnabled() {
-		if c.GetTemporalCertPath() == "" {
-			log.Panic().Msg("temporal cert path config must be specified")
-		}
-
-		if c.GetTemporalKeyPath() == "" {
-			log.Panic().Msg("temporal key path config must be specified")
-		}
-
-		if c.GetTemporalCaPath() == "" {
-			log.Panic().Msg("temporal ca path config must be specified")
-		}
-	}
-
-	if c.GetTemporalServerName() == "" {
-		log.Panic().Msg("temporal server name config must be specified")
-	}
-
-	if c.GetTemporalNamespace() == "" {
-		log.Panic().Msg("temporal namespace config must be specified")
-	}
-
-	if c.GetTemporalQueue() == "" {
-		log.Panic().Msg("temporal queue config must be specified")
-	}
-
 	if c.GetTemporalEncryptionKey() == "" {
 		log.Error().Msg("temporal encryption key config was not specified, arguments won't be encrypted")
 	}
-
 	if c.GetNgcAPIBaseURL() == "" {
 		log.Warn().Msg("ngc api base url config not specified, NGC user lookups will be unavailable")
-	}
-
-	if p := c.GetMaxConcurrentActivityPollers(); p < 1 || p > MaxMaxConcurrentActivityPollers {
-		log.Panic().Msgf("worker max concurrent activity pollers %d must be between 1 and %d", p, MaxMaxConcurrentActivityPollers)
 	}
 }
 
