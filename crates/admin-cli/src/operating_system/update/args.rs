@@ -57,7 +57,7 @@ pub(crate) struct Args {
 
     #[clap(
         long,
-        help = "Set whether instances using this OS definition wait for a guest phone-home callback before reporting ready. If the callback never arrives, the instance remains in a provisioning state. REST workflows inject the cloud-init phone_home block and require valid cloud-init YAML; callers using Core directly must arrange the callback. See https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home."
+        help = "Set whether instances using this OS definition wait for a guest phone-home callback before reporting ready (user-data must use #cloud-config or #cloud-config-archive format). If the callback never arrives, the instance remains in a provisioning state. REST workflows inject the cloud-init phone_home block and require valid cloud-init YAML; callers using Core directly must arrange the callback. See https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home."
     )]
     pub(super) phone_home_enabled: Option<bool>,
 
