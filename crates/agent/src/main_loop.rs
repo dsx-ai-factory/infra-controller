@@ -135,6 +135,15 @@ pub(super) async fn setup_and_run(
     let agent_meter = get_dpu_agent_meter();
     let metrics = create_metrics(agent_meter);
 
+    // Containerized (DPF) mode starts not-ready: the pod should only become
+    // Ready once the first GetManagedHostNetworkConfig iteration has actually
+    // applied HBN, DHCP, and FMDS config (see `run_single_iteration`). DpuOs
+    // mode has no such probe wired up, so it stays ready by default.
+    let health_controller = metrics_endpoint::HealthController::new();
+    if options.agent_platform_type.is_containerized() {
+        health_controller.set_ready(false);
+    }
+
     match agent_config
         .telemetry
         .metrics_address
@@ -148,7 +157,7 @@ pub(super) async fn setup_and_run(
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
                 address: metrics_address,
                 registry: get_prometheus_registry(),
-                health_controller: None,
+                health_controller: Some(health_controller.clone()),
                 additional_prefix: None,
             };
             tokio::task::spawn(async move {
@@ -456,6 +465,7 @@ pub(super) async fn setup_and_run(
         extension_service_manager,
         nvue_context,
         dhcp_interface_translation_mode,
+        health_controller,
         current_network_version: CurrentNetworkVersion::default(),
         last_ovs_restart_version: None,
         ovs_restart_retry_backoff: None,
@@ -498,6 +508,10 @@ struct MainLoop {
     extension_service_manager: extension_services::ExtensionServiceManager,
     nvue_context: Option<NvueClientContext>,
     dhcp_interface_translation_mode: Option<InterfaceTranslationMode>,
+    /// Backs the metrics endpoint's `/ready`. Sticky: only ever flips to ready
+    /// (never back to not-ready) once the first HBN+DHCP+FMDS apply succeeds
+    /// in containerized (DPF) mode; unused in DpuOs mode.
+    health_controller: metrics_endpoint::HealthController,
     current_network_version: CurrentNetworkVersion,
     last_ovs_restart_version: Option<String>,
     ovs_restart_retry_backoff: Option<OvsRestartRetryBackoff>,
@@ -915,6 +929,9 @@ impl MainLoop {
         let mut is_healthy = false;
         let mut has_changed_configs = false;
         let mut has_changed_hbn_config = false;
+        // Readiness gate: only set once HBN+DHCP apply and the FMDS push both
+        // succeed in the same iteration. See `self.health_controller`.
+        let mut hbn_dhcp_applied_ok = false;
         let mut current_host_network_config_version = None;
         let mut current_instance_network_config_version = None;
         let mut current_instance_config_version = None;
@@ -1154,6 +1171,7 @@ impl MainLoop {
                                 .update_from(&conf, supplemental_config.as_deref());
                             has_changed_hbn_config = hbn_changed;
                             has_changed_configs = hbn_changed || dhcp_changed;
+                            hbn_dhcp_applied_ok = true;
                             if conf.astra_config.is_some() {
                                 status_out.astra_config_status = Some(astra_config_status);
                             }
@@ -1218,9 +1236,22 @@ impl MainLoop {
                 // It will guarantee that the Instance Config that is acknowledged to
                 // carbide via the status message is actually visible to the tenant via
                 // FMDS
-                self.fmds_updater
+                let fmds_applied_ok = self
+                    .fmds_updater
                     .update(instance_data.clone(), Some(conf.clone()))
                     .await;
+
+                // Mark the pod Ready once HBN, DHCP, and FMDS have all been
+                // applied successfully in the same iteration. Sticky: never
+                // reset back to not-ready by a later failure. No-op in DpuOs
+                // mode, which has no readiness probe wired up.
+                if self.options.agent_platform_type.is_containerized()
+                    && hbn_dhcp_applied_ok
+                    && fmds_applied_ok
+                {
+                    self.health_controller.set_ready(true);
+                }
+
                 status_out.instance_config_version = instance_data
                     .as_ref()
                     .map(|instance| instance.config_version.version_string());

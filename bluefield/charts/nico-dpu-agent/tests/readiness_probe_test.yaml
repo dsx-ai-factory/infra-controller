@@ -1,0 +1,52 @@
+suite: readiness probe
+templates:
+  - daemonset.yaml
+tests:
+  - it: should expose the metrics port on the main container
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8888
+            protocol: TCP
+
+  - it: should probe /ready on the metrics port for readiness
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /ready
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: metrics
+
+  - it: should follow a custom metricsPort in both the container port and the probe
+    set:
+      image:
+        repository: test
+        tag: test
+      metricsPort: 9999
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9999
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: metrics
+
+  - it: should not add a readinessProbe to the LLDP sidecar
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[1].readinessProbe
