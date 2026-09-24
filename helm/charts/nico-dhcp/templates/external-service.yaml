@@ -13,6 +13,13 @@ metadata:
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   internalTrafficPolicy: Local
+  {{- with .Values.externalService.externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     {{- include "nico-dhcp.selectorLabels" . | nindent 4 }}
   ports:

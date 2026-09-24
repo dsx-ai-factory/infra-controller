@@ -252,3 +252,5 @@ externalService:
   enabled: false
   type: LoadBalancer
   annotations: {}
+  externalIPs: []
+  externalTrafficPolicy: ""

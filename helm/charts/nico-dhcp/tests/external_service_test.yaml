@@ -1,0 +1,42 @@
+suite: DHCP external Service routing
+templates:
+  - external-service.yaml
+release:
+  namespace: forge-system
+tests:
+  - it: keeps the default LoadBalancer Service without an external IP
+    set:
+      externalService.enabled: true
+    asserts:
+      - equal:
+          path: spec.type
+          value: LoadBalancer
+      - notExists:
+          path: spec.externalIPs
+      - notExists:
+          path: spec.externalTrafficPolicy
+
+  - it: exposes DHCP on a routed node IP without requesting a load balancer
+    set:
+      externalService.enabled: true
+      externalService.type: NodePort
+      externalService.externalIPs:
+        - 10.86.160.134
+      externalService.externalTrafficPolicy: Local
+    asserts:
+      - equal:
+          path: spec.type
+          value: NodePort
+      - equal:
+          path: spec.externalIPs
+          value:
+            - 10.86.160.134
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: spec.ports[0].port
+          value: 67
+      - equal:
+          path: spec.ports[0].protocol
+          value: UDP
