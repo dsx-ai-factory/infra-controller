@@ -1442,21 +1442,31 @@ mod tests {
     /// reported nothing about its attesters, so the endpoint has to keep the
     /// digest it last observed. Clearing it would drop the endpoint out of its
     /// set's count and read as hardware losing its roots of trust.
+    ///
+    /// The same report re-keys the class, which is a change in how the BMC
+    /// spells its manufacturer (§5.2) and not a statement about attesters.
+    /// Retention therefore does not depend on the class holding still: the
+    /// re-keyed class is the case where the endpoint most needs to stay
+    /// counted under the set it still carries.
     #[crate::sqlx_test]
     async fn an_unavailable_collection_keeps_the_last_observed_digest(pool: sqlx::PgPool) {
-        async fn read_attester_digest(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT attester_digest FROM explored_endpoints WHERE address = $1",
+        async fn read_class_and_digest(
+            txn: &mut PgConnection,
+            address: IpAddr,
+        ) -> (Option<String>, Option<String>) {
+            sqlx::query_as(
+                "SELECT hardware_class, attester_digest FROM explored_endpoints WHERE address = $1",
             )
             .bind(address)
             .fetch_one(txn)
             .await
-            .expect("read attester_digest")
+            .expect("read the class and digest")
         }
 
         let mut txn = pool.begin().await.unwrap();
         let address: IpAddr = "10.0.6.2".parse().unwrap();
         let observed = EndpointExplorationReport {
+            hardware_class: Some(HARDWARE_CLASS.to_string()),
             component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
                 id: "HGX_ERoT_GPU_0".to_string(),
                 component_integrity_type: "SPDM".to_string(),
@@ -1466,11 +1476,13 @@ mod tests {
         };
 
         insert(address, &observed, false, &mut txn).await.unwrap();
-        let recorded = read_attester_digest(&mut txn, address).await;
+        let (class, recorded) = read_class_and_digest(&mut txn, address).await;
+        assert_eq!(class.as_deref(), Some(HARDWARE_CLASS));
         assert_eq!(recorded, observed.attester_set().map(|set| set.digest));
 
         let version = read_version(&mut txn, address).await;
         let unavailable = EndpointExplorationReport {
+            hardware_class: Some(OTHER_HARDWARE_CLASS.to_string()),
             component_integrities: None,
             component_integrity_unavailable: true,
             ..Default::default()
@@ -1482,7 +1494,11 @@ mod tests {
             ConditionalWrite::Applied(()),
         );
 
-        assert_eq!(read_attester_digest(&mut txn, address).await, recorded);
+        assert_eq!(
+            read_class_and_digest(&mut txn, address).await,
+            (Some(OTHER_HARDWARE_CLASS.to_string()), recorded),
+            "the re-keyed class moves and the digest it last observed survives"
+        );
     }
 
     /// An operator reads this to decide what to profile, so every class the
