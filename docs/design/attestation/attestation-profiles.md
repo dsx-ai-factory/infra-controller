@@ -377,7 +377,8 @@ not in what the field means.
 Two things make it survivable rather than breaking.
 
 - The new class has no profile, so `any` applies and the machine still attests.
-- Coverage (§6.4) lists the new class and its endpoint count, so it is visible.
+- Coverage (§6.4) lists the new class and its endpoint count, so it is visible,
+  and keeps the old one at zero endpoints rather than dropping it.
 
 Re-authoring the profile for the new class is the operator's step. NICo does not
 carry a policy across on its own, and will not: a matching attester digest is
@@ -676,7 +677,9 @@ $ nico-admin-cli attestation spdm coverage
 +------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
 | HARDWARE CLASS               | EXPLORED ENDPOINTS | ATTESTERS | VARIANTS | OWN PROFILE | WOULD USE                   |
 +==============================+====================+===========+==========+=============+=============================+
-| dell-inc_poweredge-r750      | 6                  | 2         | 1        | no          | any (all)                   |
+| dell-inc_poweredge-r750      | 0                  | 2         | 1        | no          | any (all)                   |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| dell_poweredge-r750          | 6                  | 2         | 1        | no          | any (all)                   |
 +------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
 | lenovo_thinksystem-sr680a-v3 | 4                  | 4         | 1        | yes         | its own profile (none)      |
 +------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
@@ -693,10 +696,20 @@ the SR680a V3s: they have a profile of their own that attests nothing, which is
 a deliberate exclusion and looks nothing like the R750s having no profile at
 all. Only this view tells those two apart.
 
+The two Dell rows are one re-keying (§5.2): a firmware update changed the
+reported manufacturer, so the same six endpoints now answer to
+`dell_poweredge-r750` and the old key stays at zero holding the set it
+recorded. The view does not say the rows are related, since nothing records an
+endpoint's class changing. The shared digest that `--format json` reports is
+the only hint, and a hint rather than proof (§7.5); naming the candidate is
+§12's.
+
 `EXPLORED ENDPOINTS` counts rows of `explored_endpoints`, not machines, because
 `hardware_class` is recorded per endpoint and a machine can present more than
 one. Hardware nobody has explored has no row at all, and the `any` row carries
-no counts because `any` is never recorded on an endpoint.
+no counts because `any` is never recorded on an endpoint. A count of `0` is a
+class no endpoint reports any more, kept because the attester inventory still
+holds its sets (§7.5), and distinct from the `any` row's `—`.
 
 `VARIANTS` is how many attester sets the class has ever recorded (§7.5). A set
 keeps its row after the endpoints reporting it are gone, so more than one means
@@ -931,14 +944,16 @@ it to its host (§12).
 
 ### 7.5 The attester inventory
 
-Pattern matching alone cannot see every kind of drift: a prefix such as
-`HGX_IRoT_GPU_` still matches when a tray reports seven GPU roots of trust
-instead of eight. Recording the sets makes that visible.
+Pattern matching alone cannot see every kind of drift. A prefix such as
+`HGX_IRoT_GPU_` matches whatever a tray reports, and §5.3 asks only whether
+each pattern matched something, not how many, so a tray with seven GPU roots of
+trust instead of eight attests as cleanly as its eight-root peers. Recording
+the sets makes the difference visible.
 
 ```sql
 -- Each distinct set of SPDM-capable attesters seen for a hardware class.
--- More than one row for a class means the class spans hardware with differing
--- attestable components.
+-- More than one row means the class has reported differing attestable
+-- components. A row outlives the endpoints that reported it.
 CREATE TABLE hardware_class_attesters (
     hardware_class  text        NOT NULL,
     attester_digest text        NOT NULL,
@@ -974,6 +989,18 @@ one endpoint last reported, which is what makes an odd set traceable to hardware
 grouping endpoints by `(hardware_class, attester_digest)` gives the per-set
 endpoint counts in `attester_sets` (§6.1), so 71 trays on one set and one on
 another is visible rather than just "two sets exist".
+
+**The table is append-only.** Growth is not driven by time: the digest covers
+member IDs only, so re-seeing a set, a firmware update, and a disabled device
+all produce the row already recorded. A row appears only on a combination of
+IDs the class has not reported before, which is the drift the table exists to
+catch.
+
+A class re-keyed by changed BMC reporting (§5.2), or whose endpoints were
+removed, leaves its sets behind with nothing reporting them. Coverage still
+lists such a class, at zero explored endpoints, so the residue stays visible.
+Deleting it is deliberately not done: `first_seen` dates the drift, and
+dropping a row would erase that the class ever carried a second set.
 
 **A digest is a property, not an identity.** Two classes can share one, since
 machines from different vendors can be built around the same baseboard. So a
@@ -1188,8 +1215,11 @@ onto a new one.
 - **Adopting a moved class in one command,** as a `profile create --copy-from
 <class>` flag plus the coverage hint that names a candidate. Deferred, not
 rejected: §5.2's re-authoring step is the whole cost of a class moving, and this
-is what removes it. Any candidate it names has to be scoped to a matching
-manufacturer field, since a digest alone can match across vendors (§7.5).
+is what removes it. The candidate should come from the class an endpoint
+previously reported — which `try_update` holds in the row it overwrites and
+nothing stores today — rather than from a shared digest, which can match
+another vendor's class and so needs scoping to a matching manufacturer field
+(§7.5).
 - **Resolving a class through a matching attester digest,** so a moved class
 inherits a policy with no operator step at all. Rejected rather than deferred:
 the automatic version would apply one vendor's policy to another's hardware and
