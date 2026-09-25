@@ -128,9 +128,9 @@ struct CoverageView {
 ///
 /// Every distinct count is listed, because a class spanning sets of different
 /// sizes has no single count, and that is the disagreement the sets are
-/// recorded to surface: a pattern keyed to a class still matches a tray
-/// reporting seven roots of trust instead of eight. Empty until an exploration
-/// records a set, which `VARIANTS` reports as none.
+/// recorded to surface: a profile's prefix matches whatever a tray reports, so
+/// one reporting seven roots of trust instead of eight still attests cleanly.
+/// Empty until an exploration records a set, which `VARIANTS` reports as none.
 fn attester_counts(sets: &[AttesterSetView]) -> String {
     let mut counts: Vec<_> = sets.iter().map(|set| set.attesters).collect();
     counts.sort_unstable();

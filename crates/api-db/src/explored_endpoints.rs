@@ -386,14 +386,27 @@ pub async fn lookup_hardware_class_by_ip(
 ///
 /// The endpoints carrying no class come last, since `NULL` sorts last
 /// ascending, and they are the ones no profile can cover.
+///
+/// A class that only `hardware_class_attesters` still names arrives at zero
+/// rather than being left out. That table is append-only, so a class whose
+/// endpoints were re-keyed or removed keeps its sets with nothing reporting
+/// them, and counting endpoints alone would drop it from coverage entirely.
 pub async fn hardware_class_counts(
     db_reader: impl DbReader<'_>,
 ) -> Result<Vec<HardwareClassCount>, DatabaseError> {
+    // `IS NOT DISTINCT FROM` so the endpoints carrying no class join their own
+    // `NULL` group, which plain equality would drop.
     let query = r#"
-        SELECT hardware_class, COUNT(*) AS endpoints
-        FROM explored_endpoints
-        GROUP BY hardware_class
-        ORDER BY hardware_class
+        SELECT classes.hardware_class, COUNT(endpoints.address) AS endpoints
+        FROM (
+            SELECT hardware_class FROM explored_endpoints
+            UNION
+            SELECT hardware_class FROM hardware_class_attesters
+        ) classes
+        LEFT JOIN explored_endpoints endpoints
+            ON endpoints.hardware_class IS NOT DISTINCT FROM classes.hardware_class
+        GROUP BY classes.hardware_class
+        ORDER BY classes.hardware_class
     "#;
 
     sqlx::query_as(query)
@@ -1475,10 +1488,15 @@ mod tests {
     /// An operator reads this to decide what to profile, so every class the
     /// site has must arrive with an exact tally, and the endpoints carrying no
     /// class have to stay their own entry rather than joining one.
+    ///
+    /// A class only the append-only attester inventory still names has to
+    /// arrive too, at zero, rather than dropping out of coverage entirely.
     #[crate::sqlx_test]
     async fn hardware_class_counts_tally_each_class_and_the_endpoints_without_one(
         pool: sqlx::PgPool,
     ) {
+        const DEPARTED_HARDWARE_CLASS: &str = "lenovo_thinksystem-sr680a-v3";
+
         let mut txn = pool.begin().await.unwrap();
         for (address, class) in [
             ("10.0.3.1", Some(HARDWARE_CLASS)),
@@ -1497,6 +1515,22 @@ mod tests {
             .unwrap();
         }
 
+        // A set recorded for a class no endpoint reports any more, which is
+        // what an endpoint re-keyed by a firmware update leaves behind.
+        let departed_set = EndpointExplorationReport {
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "ERoT_BMC_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        }
+        .attester_set()
+        .expect("a reported collection yields a set");
+        crate::hardware_class_attesters::record(&mut txn, DEPARTED_HARDWARE_CLASS, &departed_set)
+            .await
+            .unwrap();
+
         let counts = hardware_class_counts(&mut *txn).await.unwrap();
 
         let tallied: Vec<_> = counts
@@ -1507,6 +1541,7 @@ mod tests {
             tallied,
             [
                 (Some(HARDWARE_CLASS), 2),
+                (Some(DEPARTED_HARDWARE_CLASS), 0),
                 (Some(OTHER_HARDWARE_CLASS), 1),
                 (None, 2),
             ]
