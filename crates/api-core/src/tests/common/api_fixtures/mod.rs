@@ -1346,19 +1346,27 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     // `NotSupported` when asked for firmware, so attestation would never
     // finish. Tests for the outcomes that schedule nothing change the class
     // instead of deleting this, since creating the host attests it first.
+    // Seeded only when absent: a test may build two environments on one pool,
+    // and creation rejects a duplicate class. Skipping also leaves a profile
+    // the test wrote for this class ahead of the environment untouched.
     if config.spdm.enabled {
         let mut conn = db_pool.acquire().await.expect("no available connections");
-        db::attestation_profile::create(
-            &mut conn,
-            MOCK_HOST_HARDWARE_CLASS,
-            &AttestationPolicyDocument::new(AttesterSelection {
-                mode: AttesterSelectionMode::Allowlist,
-                component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
-            }),
-            "test fixture",
-        )
-        .await
-        .expect("failed to seed the mock host's attestation profile");
+        let seeded = db::attestation_profile::find(&mut *conn, MOCK_HOST_HARDWARE_CLASS)
+            .await
+            .expect("failed to read the mock host's attestation profile");
+        if seeded.is_none() {
+            db::attestation_profile::create(
+                &mut conn,
+                MOCK_HOST_HARDWARE_CLASS,
+                &AttestationPolicyDocument::new(AttesterSelection {
+                    mode: AttesterSelectionMode::Allowlist,
+                    component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+                }),
+                "test fixture",
+            )
+            .await
+            .expect("failed to seed the mock host's attestation profile");
+        }
     }
 
     let config = Arc::new(config);

@@ -56,6 +56,19 @@ pub(in crate::tests) mod tests {
         config
     }
 
+    /// The fixture seeds a profile for the mock host's class, and creation
+    /// rejects a duplicate class, so seeding unconditionally would panic the
+    /// moment a test built a second environment on one pool. Nothing else
+    /// holds the fixture to seeding only when the profile is absent.
+    #[crate::sqlx_test]
+    async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
+        for _ in 0..2 {
+            let mut overrides = TestEnvOverrides::no_network_segments();
+            overrides.config = Some(spdm_enabled_config());
+            let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
+        }
+    }
+
     #[crate::sqlx_test]
     async fn test_spdm_controller_persistence_honors_supplied_versions(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
