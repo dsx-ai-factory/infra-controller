@@ -34,9 +34,10 @@ async fn explore_bluefield4_and_generate_machine_id_from_system_serial() {
         settings: DpuSettings::default(),
     })
     .await;
-    let mut report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let mut report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
@@ -110,9 +111,10 @@ async fn explore_b4240v_and_generate_machine_id() {
         settings: DpuSettings::default(),
     }))
     .await;
-    let mut report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .expect("B4240V exploration should succeed");
+    let mut report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .expect("B4240V exploration should succeed");
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
@@ -163,9 +165,10 @@ async fn explore_bluefield4_succeeds_when_irot_nic_has_invalid_uuid() {
         remaining: Some(100),
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .expect("exploration must succeed even when IRoT NIC reports a non-UUID STATIC value");
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .expect("exploration must succeed even when IRoT NIC reports a non-UUID STATIC value");
 
     let chassis_ids: Vec<&str> = report.chassis.iter().map(|c| c.id.as_str()).collect();
     assert!(

@@ -42,11 +42,41 @@ async fn explore_dgx_gb300() {
         Some(HwType::DgxGb300),
     );
 
-    let report = nv_generate_exploration_report(h.service_root, &config)
+    let report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
         .await
         .unwrap();
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
+    // The class is derived from what the BMC reports about the system, so it
+    // names this tray where the report vendor cannot.
+    assert_eq!(
+        report.hardware_class.as_deref(),
+        Some("nvidia_gb300-titania-bianca-compute-tray")
+    );
     assert!(!report.systems.is_empty(), "systems must be present");
     assert!(!report.chassis.is_empty(), "chassis must be present");
+    // The tray advertises a ComponentIntegrity collection, so the report
+    // carries every member the BMC listed, in the order it listed them.
+    assert_eq!(
+        report
+            .component_integrities
+            .as_deref()
+            .map(|entries| entries
+                .iter()
+                .map(|entry| (
+                    entry.id.as_str(),
+                    entry.component_integrity_type.as_str(),
+                    entry.component_integrity_enabled
+                ))
+                .collect::<Vec<_>>()),
+        Some(vec![
+            ("ERoT_BMC_0", "SPDM", true),
+            ("HGX_ERoT_CPU_0", "SPDM", true),
+            ("HGX_ERoT_CPU_1", "SPDM", true),
+            ("HGX_ERoT_GPU_0", "SPDM", true),
+            ("HGX_ERoT_GPU_1", "SPDM", true),
+            ("HGX_ERoT_GPU_2", "SPDM", true),
+            ("HGX_ERoT_GPU_3", "SPDM", true),
+        ]),
+    );
 }

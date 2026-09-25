@@ -24,9 +24,10 @@ use crate::common;
 #[test]
 async fn explore_bluefield3_baseline() {
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(DpuSettings::default()).await;
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
@@ -69,9 +70,10 @@ async fn explore_bluefield3_uses_dynamic_system_console_port_not_manager_ssh() {
         remaining: None,
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     assert_eq!(report.systems[0].serial_console_ssh_port, Some(3222));
 }
@@ -94,9 +96,10 @@ async fn explore_bluefield3_ignores_invalid_system_interface_mac() {
         remaining: None,
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
     let system = report.systems.first().expect("systems must be present");
     let eth0 = system
         .ethernet_interfaces
@@ -125,9 +128,10 @@ async fn explore_bluefield3_preserves_oem_mode_and_base_mac() {
         ..Default::default()
     };
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(settings).await;
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
     let system = report.systems.first().expect("systems must be present");
 
     assert!(system.base_mac.is_some());
@@ -144,9 +148,10 @@ async fn explore_bluefield3_without_system_eth_interfaces() {
         ..Default::default()
     };
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(settings).await;
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(
         report
@@ -173,9 +178,10 @@ async fn explore_bluefield3_recovers_oob_interface_from_boot_options() {
         remaining: None,
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
     let system = report.systems.first().expect("systems must be present");
 
     assert!(system.ethernet_interfaces.iter().any(|interface| {
@@ -188,10 +194,13 @@ async fn explore_bluefield3_retries_transient_404_on_system_eth_interfaces() {
     let settings = DpuSettings::default();
 
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(settings.clone()).await;
-    let baseline =
-        nv_generate_exploration_report(h.service_root.clone(), &common::explorer_config())
-            .await
-            .unwrap();
+    let baseline = nv_generate_exploration_report(
+        h.bmc.as_ref(),
+        h.service_root.clone(),
+        &common::explorer_config(),
+    )
+    .await
+    .unwrap();
 
     h.state.injection.put(vec![bmc_mock::injection::Rule {
         id: "transient_404".into(),
@@ -203,9 +212,10 @@ async fn explore_bluefield3_retries_transient_404_on_system_eth_interfaces() {
         remaining: Some(1),
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     let baseline_count = baseline.systems.first().unwrap().ethernet_interfaces.len();
     let actual_count = report.systems.first().unwrap().ethernet_interfaces.len();
@@ -228,7 +238,7 @@ async fn explore_bluefield3_permanent_404_on_system_eth_interfaces_fails_without
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        nv_generate_exploration_report(h.service_root, &common::explorer_config()),
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config()),
     )
     .await;
 
@@ -242,9 +252,10 @@ async fn explore_bluefield3_permanent_404_on_system_eth_interfaces_fails_without
 #[test]
 async fn explore_bluefield3_skips_erot_chassis() {
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(DpuSettings::default()).await;
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     let chassis_ids: Vec<&str> = report.chassis.iter().map(|c| c.id.as_str()).collect();
     assert!(
@@ -277,7 +288,7 @@ async fn explore_bluefield3_succeeds_when_erot_hangs() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        nv_generate_exploration_report(h.service_root, &common::explorer_config()),
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config()),
     )
     .await;
 
@@ -307,9 +318,10 @@ async fn explore_bluefield3_succeeds_when_erot_returns_error() {
         remaining: Some(100),
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .expect("exploration must succeed even when ERoT returns 500");
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .expect("exploration must succeed even when ERoT returns 500");
 
     let chassis_ids: Vec<&str> = report.chassis.iter().map(|c| c.id.as_str()).collect();
     assert!(
@@ -333,9 +345,10 @@ async fn explore_bluefield3_ignores_500_on_bios_fetch() {
         remaining: Some(100),
     }]);
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .expect("exploration must succeed when BlueField BIOS fetch returns 500");
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .expect("exploration must succeed when BlueField BIOS fetch returns 500");
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert!(

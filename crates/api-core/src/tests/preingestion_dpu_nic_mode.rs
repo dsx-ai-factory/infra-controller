@@ -52,6 +52,9 @@ fn dpu_report(nic_mode: BlueFieldOperatingMode) -> EndpointExplorationReport {
 /// we just need a row that `set_pause_remediation` can update.
 fn host_bmc_report() -> EndpointExplorationReport {
     EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,

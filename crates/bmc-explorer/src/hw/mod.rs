@@ -31,6 +31,9 @@ pub mod supermicro_gb300;
 pub mod vera_rubin;
 pub mod viking;
 
+/// Every kind of hardware this crate can recognise from a BMC's Redfish
+/// service root and chassis signatures. Which variant an endpoint is decides
+/// what else is worth fetching from it and how to read what comes back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HwType {
     Ami,
@@ -75,6 +78,9 @@ impl HwType {
         }
     }
 
+    /// The BIOS attribute, and the value it has to hold, for this hardware to
+    /// retry booting indefinitely. `None` where the platform has no such
+    /// attribute or its polarity is not yet characterized.
     pub const fn infinite_boot_enabled_attr(&self) -> Option<BiosAttr<'static>> {
         match self {
             Self::Ami => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),

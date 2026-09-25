@@ -15,14 +15,13 @@
  * limitations under the License.
  */
 
-use std::collections::BTreeMap;
-
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_uuid::machine::MachineId;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
+use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
 use model::attestation::spdm::{
     SpdmAttestationState, SpdmAttestationStatus, SpdmDeviceAttestation,
     SpdmDeviceAttestationDetails,
@@ -40,21 +39,192 @@ use state_controller::state_handler::{
 use crate::context::MachineStateHandlerContextObjects;
 use crate::handler::MachineStateHandlerServices;
 
-const PRODUCT_GB200: &str = "GB200 NVL";
-const PRODUCT_GB300: &str = "GB300 NVL";
+/// What scheduling decided for one machine.
+///
+/// A BMC that cannot be reached is not one of these: it stays an error so the
+/// controller retries it, where every value here is a settled answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
+pub enum SchedulingOutcome {
+    /// One work row was written per selected attester.
+    Scheduled,
+    /// Work rows were written, but an allowlist pattern matched no eligible
+    /// attester. Attesting is under way for less than the profile asked for.
+    PartiallySatisfied,
+    /// The profile's mode is `NONE`. The BMC is not contacted.
+    AttestationDisabled,
+    /// The BMC offered nothing eligible, under a policy that asserted nothing
+    /// about what must be there. Points at the hardware, not the profile.
+    NoAttestersFound,
+    /// An operator-authored requirement went unsatisfied, and nothing was left
+    /// to attest.
+    PolicyMatchedNothing,
+    /// No exploration has recorded a hardware class for this machine's BMC,
+    /// and no `any` profile covers it either.
+    ClassNotRecorded,
+    /// Neither the machine's class nor `any` has a profile.
+    NoProfile,
+}
 
+/// One scheduling attempt, in the terms the trigger response reports.
+#[derive(Debug)]
+pub struct SchedulingResult {
+    pub outcome: SchedulingOutcome,
+    /// The class recorded for the BMC, empty when none was.
+    pub hardware_class: String,
+    /// Whether the reserved `any` profile supplied the policy. The class alone
+    /// cannot say, and an operator reading a surprising outcome needs to know
+    /// whether a policy was written for this hardware or inherited.
+    pub used_any_fallback: bool,
+    /// Version of the profile that decided, absent when none applied. Pins the
+    /// revision behind a surprising outcome, which the class cannot: a profile
+    /// may have been edited between the operator's last read and this call.
+    pub profile_version: Option<String>,
+    /// The `started_at` written on every device row this call scheduled,
+    /// absent when it scheduled none. Identifies the scheduling run, so a
+    /// caller can tell its own from one that replaced it.
+    pub started_at: Option<DateTime<Utc>>,
+    pub devices_scheduled: u64,
+}
+
+impl SchedulingResult {
+    /// A settled answer reached before any profile applied.
+    fn unprofiled(outcome: SchedulingOutcome, hardware_class: Option<String>) -> Self {
+        Self {
+            outcome,
+            hardware_class: hardware_class.unwrap_or_default(),
+            used_any_fallback: false,
+            profile_version: None,
+            started_at: None,
+            devices_scheduled: 0,
+        }
+    }
+}
+
+/// Counted by outcome so a site accumulating unprofiled hardware, or a profile
+/// nothing satisfies, shows up on a graph rather than only in logs.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "attestation_scheduled",
+    metric_name = "carbide_attestation_scheduling_total",
+    component = "machine-controller",
+    log = info,
+    metric = counter,
+    message = "SPDM attestation scheduling finished",
+    describe = "Number of SPDM attestation scheduling attempts, by outcome"
+)]
+struct AttestationScheduled {
+    #[label]
+    outcome: SchedulingOutcome,
+    #[context]
+    machine_id: MachineId,
+    #[context]
+    hardware_class: String,
+    #[context]
+    used_any_fallback: bool,
+    /// The only durable record of which revision decided: nothing persists it
+    /// on the work rows, and a later trigger replaces them.
+    #[context]
+    profile_version: Option<String>,
+    #[context]
+    devices_scheduled: u64,
+}
+
+/// Schedules SPDM attestation for a machine according to the profile its
+/// hardware class resolves to, writing one work row per selected attester.
+///
+/// `connect` is called only once the profile turns out to need the BMC.
+/// Building a client authenticates against it, so taking a built one would
+/// contact every BMC whose profile answers without it.
 pub async fn trigger_attestation(
     db_pool: &PgPool,
-    redfish_client: Box<dyn libredfish::Redfish>,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
-) -> Result<u64, StateHandlerError> {
-    // retrieve bmc info for a machine and create redfish client
-    // get service root
-    // - absent -> return NotSupported
-    // get component integrities and create/insert device attestations
-    // - if none, return NotSupported
+) -> Result<SchedulingResult, StateHandlerError> {
+    let result = schedule(
+        db_pool,
+        connect,
+        bmc_info,
+        machine_id,
+        redfish_timeout_duration,
+    )
+    .await?;
+
+    carbide_instrument::emit(AttestationScheduled {
+        outcome: result.outcome,
+        machine_id: *machine_id,
+        hardware_class: result.hardware_class.clone(),
+        used_any_fallback: result.used_any_fallback,
+        profile_version: result.profile_version.clone(),
+        devices_scheduled: result.devices_scheduled,
+    });
+
+    Ok(result)
+}
+
+async fn schedule(
+    db_pool: &PgPool,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    bmc_info: &BmcInfo,
+    machine_id: &MachineId,
+    redfish_timeout_duration: std::time::Duration,
+) -> Result<SchedulingResult, StateHandlerError> {
+    let bmc_address = bmc_info
+        .ip_addr()
+        .map_err(StateHandlerError::GenericError)?;
+    let mut conn = db_pool.acquire().await?;
+
+    let recorded_class =
+        db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, &mut *conn)
+            .await?
+            .flatten();
+
+    let resolution =
+        db::attestation_profile::resolve(&mut *conn, recorded_class.as_deref()).await?;
+    // The BMC round trip below can take as long as the caller's timeout
+    // allows, which is no reason to hold a pool connection.
+    drop(conn);
+
+    let (profile, used_any_fallback) = match resolution {
+        ProfileResolution::Resolved {
+            profile,
+            used_any_fallback,
+        } => (profile, used_any_fallback),
+        ProfileResolution::ClassNotRecorded => {
+            return Ok(SchedulingResult::unprofiled(
+                SchedulingOutcome::ClassNotRecorded,
+                recorded_class,
+            ));
+        }
+        ProfileResolution::NoProfile => {
+            return Ok(SchedulingResult::unprofiled(
+                SchedulingOutcome::NoProfile,
+                recorded_class,
+            ));
+        }
+    };
+
+    let hardware_class = recorded_class.unwrap_or_default();
+    let profile_version = profile.version.to_string();
+    let settled = |outcome| SchedulingResult {
+        outcome,
+        hardware_class: hardware_class.clone(),
+        used_any_fallback,
+        profile_version: Some(profile_version.clone()),
+        started_at: None,
+        devices_scheduled: 0,
+    };
+    let selection = &profile.policy_document.selection;
+
+    // NONE is answered from the profile alone, so the BMC is never contacted.
+    if selection.mode == AttesterSelectionMode::None {
+        return Ok(settled(SchedulingOutcome::AttestationDisabled));
+    }
+
+    // Past every outcome the profile settles on its own, so this is the first
+    // point the BMC has to answer for.
+    let redfish_client = connect().await?;
 
     let service_root_future = redfish_client.get_service_root();
 
@@ -70,31 +240,10 @@ pub async fn trigger_attestation(
         }
     };
 
+    // A BMC without the collection has nothing to list, and asking anyway only
+    // buys a 404.
     if service_root.component_integrity.is_none() {
-        // let's treat 0 devices under attestation as NotSupported
-        return Ok(0);
-    }
-
-    // do we support attestation for a given machine type?
-    // check the ServiceRoot.Product
-    let product = match service_root.product {
-        Some(product_name) => product_name,
-        None => {
-            tracing::info!(
-                %machine_id,
-                "ServiceRoot.Product is None; not scheduling SPDM attestation"
-            );
-            return Ok(0);
-        }
-    };
-
-    if !is_supported_product(&product) {
-        tracing::info!(
-            %machine_id,
-            %product,
-            "ServiceRoot.Product is not supported; not scheduling SPDM attestation"
-        );
-        return Ok(0);
+        return Ok(settled(SchedulingOutcome::NoAttestersFound));
     }
 
     let component_integrities_future = redfish_client.get_component_integrities();
@@ -112,22 +261,51 @@ pub async fn trigger_attestation(
             }
         };
 
-    let components = get_supported_components(&product, &component_integrities);
+    let eligible = eligible_attesters(&component_integrities);
+    let eligible_ids = eligible.iter().map(|c| c.id.as_str()).collect_vec();
 
-    if components.is_empty() {
-        // let's treat 0 devices under attestation as NotSupported
-        return Ok(0);
-    }
+    let (selected, outcome) = match selection.evaluate(&eligible_ids) {
+        SelectionOutcome::Scheduled(selected) => (selected, SchedulingOutcome::Scheduled),
+        SelectionOutcome::PartiallySatisfied {
+            selected,
+            unsatisfied,
+        } => {
+            tracing::warn!(
+                %machine_id,
+                %hardware_class,
+                ?unsatisfied,
+                reported = ?eligible_ids,
+                "allowlist patterns matched no eligible attester; attesting what matched"
+            );
+            (selected, SchedulingOutcome::PartiallySatisfied)
+        }
+        SelectionOutcome::AttestationDisabled => {
+            return Ok(settled(SchedulingOutcome::AttestationDisabled));
+        }
+        SelectionOutcome::NoAttestersFound => {
+            return Ok(settled(SchedulingOutcome::NoAttestersFound));
+        }
+        SelectionOutcome::PolicyMatchedNothing(requirement) => {
+            tracing::warn!(
+                %machine_id,
+                %hardware_class,
+                ?requirement,
+                reported = ?eligible_ids,
+                "attestation profile matched no eligible attester"
+            );
+            return Ok(settled(SchedulingOutcome::PolicyMatchedNothing));
+        }
+    };
 
-    // The validation that list is not changed is done by SKU validation. SKU
-    // validation checks that the device profile is not changed over time. If any
-    // device list is changed and SKU validation is passed, means SRE has approved the
-    // change request.
-    // Validating again is not needed.
-    // Remove existing device list and over-write with this list.
-    let time_now = Utc::now();
-    let device_attestations = components
+    // The rows this writes replace the machine's existing ones: the profile
+    // decides what to attest, so this selection supersedes whatever an earlier
+    // trigger left behind.
+    // Truncated to what `timestamptz` stores, so the value reported back is
+    // the one a caller finds on the rows rather than a sub-microsecond miss.
+    let time_now = Utc::now().trunc_subsecs(6);
+    let device_attestations = eligible
         .into_iter()
+        .filter(|component| selected.contains(&component.id))
         .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info))
         .collect_vec();
 
@@ -142,64 +320,76 @@ pub async fn trigger_attestation(
 
     txn.commit().await?;
 
-    tracing::info!(
-        %machine_id,
-        inserted_record_count = records_inserted,
-        "SPDM attestation commenced; scheduled SPDM device attestations"
-    );
-
-    Ok(records_inserted)
+    Ok(SchedulingResult {
+        outcome,
+        hardware_class,
+        used_any_fallback,
+        profile_version: Some(profile_version),
+        started_at: Some(time_now),
+        devices_scheduled: records_inserted,
+    })
 }
 
-// Rules:
-// ComponentIntegrityTypeVersion should be >= 1.1.0.
-// ComponentIntegrityType should be SPDM.
-// ComponentIntegrityEnabled should be true.
-// A device must be of supported type.
-// Once these all conditions are true, a device can be proceed with attestation.
-fn get_supported_components<'a>(
-    product: &str,
-    integrities: &'a ComponentIntegrities,
-) -> Vec<&'a ComponentIntegrity> {
-    let supported_devices = BTreeMap::from([(PRODUCT_GB200, ["HGX_IRoT_GPU"])]);
+/// The lowest SPDM version this build attests, below which the responder is
+/// not required to carry the measurement blocks scheduling asks for.
+const MINIMUM_SPDM_VERSION: [u32; 3] = [1, 1, 0];
 
-    let supported_versions = ["1.1.0"]; // This can be configurable value.
-    let mut supported_components = vec![];
-
-    for component in &integrities.members {
-        if !component.component_integrity_enabled {
-            // Component Integrity is not enabled
-            continue;
-        }
-
-        if component.component_integrity_type != "SPDM" {
-            // Not SPDM, may be TPM.
-            continue;
-        }
-
-        if !supported_versions.contains(&component.component_integrity_type_version.as_str()) {
-            continue;
-        }
-
-        let is_supported = match supported_devices.get(product) {
-            Some(device_id_stems) => device_id_stems
-                .iter()
-                .any(|device_id_stem| component.id.contains(device_id_stem)),
-            None => false,
-        };
-
-        if !is_supported {
-            continue;
-        }
-
-        supported_components.push(component);
+/// Reads a dotted numeric version, treating absent components as zero so
+/// `1.1` compares equal to `1.1.0`.
+///
+/// `None` for anything else, which is not an error: BMCs report `unknown` and
+/// `N/A` here, and a version nobody can read is no evidence that the responder
+/// is too old.
+fn parse_spdm_version(version: &str) -> Option<[u32; 3]> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() > 3 {
+        return None;
     }
-
-    supported_components
+    let mut parsed = [0_u32; 3];
+    for (slot, part) in parsed.iter_mut().zip(parts) {
+        *slot = part.parse().ok()?;
+    }
+    Some(parsed)
 }
 
-fn is_supported_product(product: &str) -> bool {
-    matches!(product, PRODUCT_GB200 | PRODUCT_GB300)
+/// The attesters a profile's patterns may select: those the BMC reports as
+/// enabled, as speaking SPDM, and as speaking a version this build attests.
+///
+/// The version is compared rather than matched exactly, so a BMC reporting a
+/// newer version than this build knew about still attests while one reporting
+/// an older version does not. A version that does not parse is admitted, since
+/// real BMCs report `unknown` here and dropping those would stop attesting
+/// hardware that works. The version is not persisted.
+fn eligible_attesters(integrities: &ComponentIntegrities) -> Vec<&ComponentIntegrity> {
+    integrities
+        .members
+        .iter()
+        .filter(|component| {
+            component.component_integrity_enabled && component.component_integrity_type == "SPDM"
+        })
+        .filter(|component| {
+            let version = &component.component_integrity_type_version;
+            match parse_spdm_version(version) {
+                Some(reported) if reported < MINIMUM_SPDM_VERSION => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an SPDM version below the minimum; not attesting it"
+                    );
+                    false
+                }
+                Some(_) => true,
+                None => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an unreadable SPDM version; attesting it anyway"
+                    );
+                    true
+                }
+            }
+        })
+        .collect()
 }
 
 fn from_component_integrity(
@@ -299,30 +489,30 @@ pub(crate) async fn handle_spdm_trigger_state(
     next_spdm_state: ManagedHostState,
     next_skip_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // create redfish client
-    let redfish_client = services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-
-    let devices_scheduled = trigger_attestation(
+    let result = trigger_attestation(
         &services.db_pool,
-        redfish_client,
+        async || {
+            services
+                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                .await
+        },
         &mh_snapshot.host_snapshot.status.bmc_info,
         host_machine_id,
         std::time::Duration::MAX,
     )
     .await?;
 
-    // if 0 devices scheduled - this means it is unsupported
-    // so we just proceed to the next state
-    if devices_scheduled == 0 {
-        tracing::info!(
-            machine_id = %host_machine_id,
-            "No devices scheduled for SPDM attestation"
-        );
-        Ok(StateHandlerOutcome::transition(next_skip_state))
-    } else {
+    // The remaining outcomes left no work to poll for, whether because the
+    // operator asked for none or because none could be selected.
+    // `trigger_attestation` has already reported which, so the machine
+    // proceeds rather than waiting on results that will never arrive.
+    if matches!(
+        result.outcome,
+        SchedulingOutcome::Scheduled | SchedulingOutcome::PartiallySatisfied
+    ) {
         Ok(StateHandlerOutcome::transition(next_spdm_state))
+    } else {
+        Ok(StateHandlerOutcome::transition(next_skip_state))
     }
 }
 
@@ -374,5 +564,71 @@ pub(crate) async fn handle_spdm_poll_state(
             .with_txn(txn))
         }
         SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use carbide_test_support::value_scenarios;
+    use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
+
+    use super::*;
+
+    fn attester(id: &str, version: &str) -> ComponentIntegrity {
+        ComponentIntegrity {
+            component_integrity_enabled: true,
+            component_integrity_type: "SPDM".to_string(),
+            component_integrity_type_version: version.to_string(),
+            id: id.to_string(),
+            name: id.to_string(),
+            target_component_uri: None,
+            spdm: None,
+            actions: None,
+            links: None,
+        }
+    }
+
+    /// The version gate decides whether a root of trust is attested at all, so
+    /// it has to reject responders this build cannot measure without rejecting
+    /// the ones whose BMC simply does not report a number. Real BMCs answer
+    /// `unknown` and `N/A` here, and dropping those would stop attesting
+    /// working hardware.
+    #[test]
+    fn the_version_gate_rejects_older_spdm_but_admits_an_unreadable_version() {
+        value_scenarios!(
+            run = |version: &str| {
+                let integrities = ComponentIntegrities {
+                    members: vec![attester("HGX_ERoT_GPU_0", version)],
+                    name: "ComponentIntegrityCollection".to_string(),
+                    count: 1,
+                };
+                !eligible_attesters(&integrities).is_empty()
+            };
+
+            "the minimum this build attests is admitted" {
+                "1.1.0" => true,
+            }
+
+            "a version above the minimum is admitted, so a newer BMC still attests" {
+                "1.2.0" => true,
+            }
+
+            // The pre-existing exact match on "1.1.0" admitted neither of
+            // these, and removing it outright admitted both.
+            "a shorter form of the minimum is admitted, since the absent patch reads as zero" {
+                "1.1" => true,
+            }
+
+            "an older version is rejected, whether or not it carries a patch component" {
+                "1.0.0" => false,
+                "1.0" => false,
+            }
+
+            "a version no one can read is admitted rather than silently dropped" {
+                "unknown" => true,
+                "N/A" => true,
+                "" => true,
+            }
+        );
     }
 }

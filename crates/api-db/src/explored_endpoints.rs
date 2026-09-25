@@ -23,8 +23,8 @@ use mac_address::MacAddress;
 use model::firmware::FirmwareComponentType;
 use model::machine_boot_interface::MachineBootInterface;
 use model::site_explorer::{
-    EndpointExplorationReport, ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase,
-    PowerDrainState, PreingestionState, TimeSyncResetPhase,
+    EndpointExplorationReport, ExploredEndpoint, HardwareClassCount, InitialBmcResetPhase,
+    InitialResetPhase, PowerDrainState, PreingestionState, TimeSyncResetPhase,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
@@ -361,6 +361,92 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
+/// Reads the hardware class recorded for an endpoint, distinguishing a class
+/// that was recorded from one that never was.
+///
+/// The outer `Option` is absence of the endpoint row, the inner one a row whose
+/// column is still `NULL`. Both mean no exploration has recorded a class, so
+/// callers treat them alike; keeping them apart here costs nothing and leaves
+/// the query honest about what it read.
+pub async fn lookup_hardware_class_by_ip(
+    address: IpAddr,
+    db_reader: impl DbReader<'_>,
+) -> Result<Option<Option<String>>, DatabaseError> {
+    let query = "SELECT hardware_class FROM explored_endpoints WHERE address = $1";
+
+    sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints lookup_hardware_class_by_ip", e))
+}
+
+/// Counts the explored endpoints under each hardware class, so a caller can
+/// see which classes a site actually has before deciding what to profile.
+///
+/// The endpoints carrying no class come last, since `NULL` sorts last
+/// ascending, and they are the ones no profile can cover.
+///
+/// A class that only `hardware_class_attesters` still names arrives at zero
+/// rather than being left out. That table is append-only, so a class whose
+/// endpoints were re-keyed or removed keeps its sets with nothing reporting
+/// them, and counting endpoints alone would drop it from coverage entirely.
+pub async fn hardware_class_counts(
+    db_reader: impl DbReader<'_>,
+) -> Result<Vec<HardwareClassCount>, DatabaseError> {
+    // `IS NOT DISTINCT FROM` so the endpoints carrying no class join their own
+    // `NULL` group, which plain equality would drop.
+    let query = r#"
+        SELECT classes.hardware_class, COUNT(endpoints.address) AS endpoints
+        FROM (
+            SELECT hardware_class FROM explored_endpoints
+            UNION
+            SELECT hardware_class FROM hardware_class_attesters
+        ) classes
+        LEFT JOIN explored_endpoints endpoints
+            ON endpoints.hardware_class IS NOT DISTINCT FROM classes.hardware_class
+        GROUP BY classes.hardware_class
+        ORDER BY classes.hardware_class
+    "#;
+
+    sqlx::query_as(query)
+        .fetch_all(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_counts", e))
+}
+
+/// Whether any explored endpoint reports this hardware class.
+///
+/// Creating a profile is gated on this, because resolution reads the class off
+/// an explored endpoint, so a profile keyed to a class nothing reports would sit
+/// there looking applied while never being read.
+pub async fn hardware_class_recorded(
+    db_reader: impl DbReader<'_>,
+    hardware_class: &str,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (SELECT 1 FROM explored_endpoints WHERE hardware_class = $1)";
+
+    sqlx::query_scalar(query)
+        .bind(hardware_class)
+        .fetch_one(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_recorded", e))
+}
+
+/// The digest of the attester set a report carries, which is what the
+/// endpoint's own column holds.
+///
+/// A report recording no `ComponentIntegrity` collection clears the column,
+/// since the row mirrors the last exploration and a kept digest would count
+/// the endpoint under a set its BMC no longer reports. A collection the BMC
+/// advertised but could not serve is not that: the caller keeps the previous
+/// digest, so a transient failure does not read as hardware losing its
+/// attesters. An exploration that failed outright keeps its previous report,
+/// and with it its digest, through [`try_update_last_exploration_error`].
+fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
+    report.attester_set().map(|set| set.digest)
+}
+
 /// Replaces an endpoint's report if its version still matches.
 ///
 /// An applied write advances the report version, stores the supplied
@@ -375,13 +461,18 @@ pub async fn try_update(
     txn: &mut PgConnection,
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
+    let attester_digest = attester_digest(exploration_report);
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
-WHERE address=$4 AND version=$5";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4,
+    attester_digest = CASE WHEN $5 THEN attester_digest ELSE $6 END
+WHERE address=$7 AND version=$8";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
+        .bind(exploration_report.hardware_class.as_deref())
+        .bind(exploration_report.component_integrity_unavailable)
+        .bind(attester_digest)
         .bind(address)
         .bind(old_version)
         .execute(txn)
@@ -820,14 +911,16 @@ pub async fn insert(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "
-        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron)
-        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4)
+        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class, attester_digest)
+        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5, $6)
         ON CONFLICT DO NOTHING";
     sqlx::query(query)
         .bind(address)
         .bind(sqlx::types::Json(&exploration_report))
         .bind(ConfigVersion::initial())
         .bind(pause_ingestion_and_poweron)
+        .bind(exploration_report.hardware_class.as_deref())
+        .bind(attester_digest(exploration_report))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1201,6 +1294,300 @@ mod tests {
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
         assert_eq!(count, rows.len() as i64);
+    }
+
+    async fn read_hardware_class(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hardware_class FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read hardware_class")
+    }
+
+    async fn read_version(txn: &mut PgConnection, address: IpAddr) -> ConfigVersion {
+        sqlx::query_scalar::<_, ConfigVersion>(
+            "SELECT version FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read version")
+    }
+
+    /// Two classes in the shape exploration derives, so the tests key on what
+    /// the column actually holds.
+    const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750";
+    const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200";
+
+    fn report_with_class(hardware_class: Option<&str>) -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            hardware_class: hardware_class.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The column has to carry the class from the report on both write paths,
+    /// and hold no class where exploration determined none — absent is what
+    /// tells an unclassified endpoint apart from one classified as
+    /// unrecognised.
+    #[crate::sqlx_test]
+    async fn hardware_class_is_written_from_the_report(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let classified: IpAddr = "10.0.2.1".parse().unwrap();
+        let unclassified: IpAddr = "10.0.2.2".parse().unwrap();
+
+        insert(
+            classified,
+            &report_with_class(Some(HARDWARE_CLASS)),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some(HARDWARE_CLASS),
+        );
+
+        // Re-exploring the endpoint as different hardware replaces the class.
+        let version = read_version(&mut txn, classified).await;
+        assert_eq!(
+            try_update(
+                classified,
+                version,
+                &report_with_class(Some(OTHER_HARDWARE_CLASS)),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some(OTHER_HARDWARE_CLASS),
+        );
+
+        insert(unclassified, &report_with_class(None), false, &mut txn)
+            .await
+            .unwrap();
+        assert_eq!(read_hardware_class(&mut txn, unclassified).await, None);
+    }
+
+    /// The column counts endpoints per variant of a class, so it has to follow
+    /// the report on both write paths. A BMC that stops reporting a collection
+    /// clears it: keeping the old digest would count the endpoint under a set
+    /// it no longer reports.
+    #[crate::sqlx_test]
+    async fn the_attester_digest_follows_the_report(pool: sqlx::PgPool) {
+        fn report_with_attesters(ids: Option<&[&str]>) -> EndpointExplorationReport {
+            EndpointExplorationReport {
+                component_integrities: ids.map(|ids| {
+                    ids.iter()
+                        .map(|id| model::site_explorer::ComponentIntegrityEntry {
+                            id: (*id).to_string(),
+                            component_integrity_type: "SPDM".to_string(),
+                            component_integrity_enabled: true,
+                        })
+                        .collect()
+                }),
+                ..Default::default()
+            }
+        }
+
+        async fn read_attester_digest(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read attester_digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.1".parse().unwrap();
+        let eight_gpus = report_with_attesters(Some(&[
+            "HGX_ERoT_GPU_0",
+            "HGX_ERoT_GPU_1",
+            "HGX_ERoT_GPU_2",
+            "HGX_ERoT_GPU_3",
+        ]));
+
+        insert(address, &eight_gpus, false, &mut txn).await.unwrap();
+        assert_eq!(
+            read_attester_digest(&mut txn, address).await,
+            eight_gpus.attester_set().map(|set| set.digest),
+        );
+
+        let version = read_version(&mut txn, address).await;
+        assert_eq!(
+            try_update(
+                address,
+                version,
+                &report_with_attesters(None),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+        assert_eq!(read_attester_digest(&mut txn, address).await, None);
+    }
+
+    /// A BMC that advertises the collection and then fails to serve it has
+    /// reported nothing about its attesters, so the endpoint has to keep the
+    /// digest it last observed. Clearing it would drop the endpoint out of its
+    /// set's count and read as hardware losing its roots of trust.
+    ///
+    /// The same report re-keys the class, which is a change in how the BMC
+    /// spells its manufacturer (§5.2) and not a statement about attesters.
+    /// Retention therefore does not depend on the class holding still: the
+    /// re-keyed class is the case where the endpoint most needs to stay
+    /// counted under the set it still carries.
+    #[crate::sqlx_test]
+    async fn an_unavailable_collection_keeps_the_last_observed_digest(pool: sqlx::PgPool) {
+        async fn read_class_and_digest(
+            txn: &mut PgConnection,
+            address: IpAddr,
+        ) -> (Option<String>, Option<String>) {
+            sqlx::query_as(
+                "SELECT hardware_class, attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read the class and digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.2".parse().unwrap();
+        let observed = EndpointExplorationReport {
+            hardware_class: Some(HARDWARE_CLASS.to_string()),
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "HGX_ERoT_GPU_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        insert(address, &observed, false, &mut txn).await.unwrap();
+        let (class, recorded) = read_class_and_digest(&mut txn, address).await;
+        assert_eq!(class.as_deref(), Some(HARDWARE_CLASS));
+        assert_eq!(recorded, observed.attester_set().map(|set| set.digest));
+
+        let version = read_version(&mut txn, address).await;
+        let unavailable = EndpointExplorationReport {
+            hardware_class: Some(OTHER_HARDWARE_CLASS.to_string()),
+            component_integrities: None,
+            component_integrity_unavailable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            try_update(address, version, &unavailable, false, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+
+        assert_eq!(
+            read_class_and_digest(&mut txn, address).await,
+            (Some(OTHER_HARDWARE_CLASS.to_string()), recorded),
+            "the re-keyed class moves and the digest it last observed survives"
+        );
+    }
+
+    /// An operator reads this to decide what to profile, so every class the
+    /// site has must arrive with an exact tally, and the endpoints carrying no
+    /// class have to stay their own entry rather than joining one.
+    ///
+    /// A class only the append-only attester inventory still names has to
+    /// arrive too, at zero, rather than dropping out of coverage entirely.
+    #[crate::sqlx_test]
+    async fn hardware_class_counts_tally_each_class_and_the_endpoints_without_one(
+        pool: sqlx::PgPool,
+    ) {
+        const DEPARTED_HARDWARE_CLASS: &str = "lenovo_thinksystem-sr680a-v3";
+
+        let mut txn = pool.begin().await.unwrap();
+        for (address, class) in [
+            ("10.0.3.1", Some(HARDWARE_CLASS)),
+            ("10.0.3.2", Some(HARDWARE_CLASS)),
+            ("10.0.3.3", Some(OTHER_HARDWARE_CLASS)),
+            ("10.0.3.4", None),
+            ("10.0.3.5", None),
+        ] {
+            insert(
+                address.parse().unwrap(),
+                &report_with_class(class),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap();
+        }
+
+        // A set recorded for a class no endpoint reports any more, which is
+        // what an endpoint re-keyed by a firmware update leaves behind.
+        let departed_set = EndpointExplorationReport {
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "ERoT_BMC_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        }
+        .attester_set()
+        .expect("a reported collection yields a set");
+        crate::hardware_class_attesters::record(&mut txn, DEPARTED_HARDWARE_CLASS, &departed_set)
+            .await
+            .unwrap();
+
+        let counts = hardware_class_counts(&mut *txn).await.unwrap();
+
+        let tallied: Vec<_> = counts
+            .iter()
+            .map(|count| (count.hardware_class.as_deref(), count.endpoints))
+            .collect();
+        assert_eq!(
+            tallied,
+            [
+                (Some(HARDWARE_CLASS), 2),
+                (Some(DEPARTED_HARDWARE_CLASS), 0),
+                (Some(OTHER_HARDWARE_CLASS), 1),
+                (None, 2),
+            ]
+        );
+    }
+
+    /// Creating a profile is gated on this, so it has to answer for the exact
+    /// class an endpoint recorded and for nothing else.
+    #[crate::sqlx_test]
+    async fn hardware_class_recorded_answers_for_the_classes_endpoints_carry(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        insert(
+            "10.0.4.1".parse().unwrap(),
+            &report_with_class(Some(HARDWARE_CLASS)),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            hardware_class_recorded(&mut *txn, HARDWARE_CLASS)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !hardware_class_recorded(&mut *txn, OTHER_HARDWARE_CLASS)
+                .await
+                .unwrap()
+        );
     }
 
     #[crate::sqlx_test]
