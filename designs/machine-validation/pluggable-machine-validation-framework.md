@@ -168,6 +168,11 @@ the image pull and never exposes it to the plugin, logs, or catalog. The legacy
 
 ## **3.2 Plugin Contract**
 
+NICo provides a small basic Machine Validation plugin as an official reference
+starting point. It covers only baseline checks.
+Sites can build and configure dedicated plugins for more detailed,
+long-running, hardware-specific, or workflow-specific tests.
+
 Every plugin receives a versioned, non-secret JSON input at
 `/opt/forge/mv/input/input.json` by default and writes one versioned JSON result
 to `/opt/forge/mv/output/result.json` by default. A Scout deployment can set its
