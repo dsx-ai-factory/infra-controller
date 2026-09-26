@@ -127,89 +127,104 @@ impl GnmiSampleProcessor {
         iface_name: &str,
         val: &proto::TypedValue,
     ) {
-        if leaf_matches(elems, &["state", "oper-status"]) {
-            let current = oper_status_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+        // Prefix and update paths can split at different points. Classify the
+        // complete path after `interface` for both broad and selected streams.
+        let Some(interface_index) = elems.iter().position(|elem| elem.name == "interface") else {
+            return;
+        };
+
+        let Some(leaf) = elems.get(interface_index + 1..) else {
+            return;
+        };
+
+        match classify_interface_leaf(leaf) {
+            Some(InterfaceLeaf::OperStatus) => self.emit_state_set(
                 "interface_oper_status",
                 "interface_name",
                 iface_name,
-                current,
+                oper_status_to_state(typed_value_to_string(val).as_deref()),
                 OPER_STATUS_STATES,
-            );
-        } else if let Some(metric_type) = numeric_interface_leaf(elems) {
-            match typed_value_to_f64(val) {
-                Some(v) => self.emit_iface(metric_type.name, iface_name, v, metric_type.unit),
+            ),
+            Some(InterfaceLeaf::Numeric(metric_type)) => match typed_value_to_f64(val) {
+                Some(value) => {
+                    self.emit_iface(metric_type.name, iface_name, value, metric_type.unit)
+                }
                 None => {
                     debug_unmapped_value(elems, val, metric_type.name, self.event_context.rack_id())
                 }
-            }
-        } else if leaf_matches(elems, &["infiniband", "state", "physical-port-state"]) {
-            let current = physical_port_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+            },
+            Some(InterfaceLeaf::PhysicalPortState) => self.emit_state_set(
                 "interface_physical_port_state",
                 "interface_name",
                 iface_name,
-                current,
+                physical_port_to_state(typed_value_to_string(val).as_deref()),
                 PHYSICAL_PORT_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "logical-port-state"]) {
-            let current = logical_port_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+            ),
+            Some(InterfaceLeaf::LogicalPortState) => self.emit_state_set(
                 "interface_logical_port_state",
                 "interface_name",
                 iface_name,
-                current,
+                logical_port_to_state(typed_value_to_string(val).as_deref()),
                 LOGICAL_PORT_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "speed"]) {
-            match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_link_speed_active", iface_name, v, "gbps"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_link_speed_active",
-                    self.event_context.rack_id(),
-                ),
+            ),
+            Some(InterfaceLeaf::Speed) => {
+                match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
+                    Some(value) => {
+                        self.emit_iface("interface_link_speed_active", iface_name, value, "gbps")
+                    }
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_link_speed_active",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["infiniband", "state", "width"]) {
-            match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_link_width_active", iface_name, v, "lanes"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_link_width_active",
-                    self.event_context.rack_id(),
-                ),
+            Some(InterfaceLeaf::Width) => {
+                match link_width_to_f64(typed_value_to_string(val).as_deref()) {
+                    Some(value) => {
+                        self.emit_iface("interface_link_width_active", iface_name, value, "lanes")
+                    }
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_link_width_active",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["infiniband", "state", "supported-widths"]) {
-            match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_supported_width", iface_name, v, "lanes"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_supported_width",
-                    self.event_context.rack_id(),
-                ),
+            Some(InterfaceLeaf::SupportedWidths) => {
+                match link_width_to_f64(typed_value_to_string(val).as_deref()) {
+                    Some(value) => {
+                        self.emit_iface("interface_supported_width", iface_name, value, "lanes")
+                    }
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_supported_width",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["phy-diag", "state", "phy-manager-state"]) {
-            let current = phy_manager_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+            Some(InterfaceLeaf::PhyManagerState) => self.emit_state_set(
                 "interface_phy_manager_state",
                 "interface_name",
                 iface_name,
-                current,
+                phy_manager_to_state(typed_value_to_string(val).as_deref()),
                 PHY_MANAGER_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "vl-capabilities"])
-            && let Some(caps) = typed_value_to_string(val).none_if_empty()
-        {
-            self.emit_entity_info(
-                "interface_vl_capabilities_info",
-                iface_name,
-                "interface_name",
-                "vl_capabilities",
-                &caps,
-            );
+            ),
+            Some(InterfaceLeaf::VlCapabilities) => {
+                if let Some(caps) = typed_value_to_string(val).none_if_empty() {
+                    self.emit_entity_info(
+                        "interface_vl_capabilities_info",
+                        iface_name,
+                        "interface_name",
+                        "vl_capabilities",
+                        &caps,
+                    );
+                }
+            }
+            None => {}
         }
     }
 
@@ -568,6 +583,62 @@ struct NumericLeaf {
     unit: &'static str,
 }
 
+enum InterfaceLeaf {
+    OperStatus,
+    Numeric(NumericLeaf),
+    PhysicalPortState,
+    LogicalPortState,
+    Speed,
+    Width,
+    SupportedWidths,
+    PhyManagerState,
+    VlCapabilities,
+}
+
+/// Uses the same leaf classification for configured paths and incoming updates.
+/// Configured paths are exact leaves so an unknown or broad path cannot silently
+/// receive telemetry that the built-in processor does not export.
+pub(super) fn supports_interface_path(path: &[String]) -> bool {
+    let elements = path
+        .iter()
+        .map(|name| PathElem {
+            name: name.clone(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    let leaf = elements.iter().collect::<Vec<_>>();
+
+    classify_interface_leaf(&leaf).is_some()
+}
+
+fn classify_interface_leaf(elems: &[&PathElem]) -> Option<InterfaceLeaf> {
+    let matches =
+        |expected: &[&str]| elems.len() == expected.len() && leaf_matches(elems, expected);
+
+    if matches(&["state", "oper-status"]) {
+        Some(InterfaceLeaf::OperStatus)
+    } else if let Some(metric_type) = numeric_interface_leaf(elems) {
+        Some(InterfaceLeaf::Numeric(metric_type))
+    } else if matches(&["infiniband", "state", "physical-port-state"]) {
+        Some(InterfaceLeaf::PhysicalPortState)
+    } else if matches(&["infiniband", "state", "logical-port-state"]) {
+        Some(InterfaceLeaf::LogicalPortState)
+    } else if matches(&["infiniband", "state", "speed"]) {
+        Some(InterfaceLeaf::Speed)
+    } else if matches(&["infiniband", "state", "width"]) {
+        Some(InterfaceLeaf::Width)
+    } else if matches(&["infiniband", "state", "supported-widths"]) {
+        Some(InterfaceLeaf::SupportedWidths)
+    } else if matches(&["phy-diag", "state", "phy-manager-state"]) {
+        Some(InterfaceLeaf::PhyManagerState)
+    } else if matches(&["infiniband", "state", "vl-capabilities"]) {
+        Some(InterfaceLeaf::VlCapabilities)
+    } else {
+        None
+    }
+}
+
 /// Table-driven dispatch for numeric `/interfaces/interface` leaves. The
 /// expected leaf path tail is matched against the live gNMI tree.
 fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
@@ -882,6 +953,7 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
         && let Some(bin) = leaf.strip_prefix("rs-num-corr-err-bin")
         && let Ok(n) = bin.parse::<usize>()
         && n <= 15
+        && elems.len() == 3
         && leaf_matches(elems, &["phy-diag", "state", leaf])
     {
         return Some(NumericLeaf {
@@ -891,7 +963,7 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
     }
 
     TABLE.iter().find_map(|m| {
-        leaf_matches(elems, m.tail).then_some(NumericLeaf {
+        (elems.len() == m.tail.len() && leaf_matches(elems, m.tail)).then_some(NumericLeaf {
             name: m.name,
             unit: m.unit,
         })
@@ -1125,6 +1197,31 @@ mod tests {
         assert!(leaf_matches(&refs, &["oper-status"]));
         assert!(!leaf_matches(&refs, &["counters", "oper-status"]));
         assert!(!leaf_matches(&refs, &["a", "b", "c", "d", "e"]));
+    }
+
+    #[test]
+    fn selective_paths_accept_only_exported_interface_leaves() {
+        for path in [
+            vec!["state", "oper-status"],
+            vec!["infiniband", "state", "physical-port-state"],
+            vec!["phy-diag", "state", "raw-ber"],
+            vec!["phy-diag", "state", "rs-num-corr-err-bin15"],
+        ] {
+            assert!(supports_interface_path(
+                &path.into_iter().map(str::to_string).collect::<Vec<_>>()
+            ));
+        }
+
+        for path in [
+            vec!["state", "counters"],
+            vec!["phy-diag", "state", "unknown-leaf"],
+            vec!["unexpected", "state", "oper-status"],
+            vec!["phy-diag", "state", "rs-num-corr-err-bin16"],
+        ] {
+            assert!(!supports_interface_path(
+                &path.into_iter().map(str::to_string).collect::<Vec<_>>()
+            ));
+        }
     }
 
     #[test]
