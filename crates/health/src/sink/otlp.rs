@@ -1148,7 +1148,13 @@ mod tests {
                 .resource_metrics
                 .iter()
                 .flat_map(|rm| &rm.scope_metrics)
-                .map(|sm| sm.metrics.len())
+                .flat_map(|sm| &sm.metrics)
+                .map(|metric| match metric.data.as_ref() {
+                    Some(crate::otlp::metrics::metric::Data::Gauge(gauge)) => {
+                        gauge.data_points.len()
+                    }
+                    _ => panic!("test collector expects gauge datapoints"),
+                })
                 .sum();
             self.exported_points.lock().unwrap().push(points);
             Ok(tonic::Response::new(ExportMetricsServiceResponse::default()))

@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
 use carbide_health::metrics::MetricsManager;
+use carbide_health::otlp::convert::build_metrics_export_request;
 use carbide_health::sink::{
     Classification, CollectorEvent, CompositeDataSink, DataSink, EventContext, HealthReport,
     HealthReportSink, LogRecord, LogSeverity, MetricSample, PrometheusSink, ReportSource,
@@ -30,6 +31,7 @@ use carbide_health::sink::{
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use health_report::HealthReport as CarbideHealthReport;
 use mac_address::MacAddress;
+use prost::Message;
 
 const MACHINE_ID: &str = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
 const MACHINE_IDS: [&str; 3] = [
@@ -418,6 +420,65 @@ fn bench_otlp_sink(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measures conversion and encoding with repeated and distinct descriptors.
+fn bench_otlp_metric_conversion(c: &mut Criterion) {
+    let context = event_context();
+    let prefix = "carbide_hardware_health";
+    let observed_nanos = 1_700_000_000_000_000_000;
+
+    let mut group = c.benchmark_group("health_performance/metric_conversion");
+    group.throughput(Throughput::Elements(2_048));
+
+    for descriptor_count in [8usize, 2_048] {
+        let batch: Vec<_> = (0..2_048)
+            .map(|index| {
+                let sample = MetricSample {
+                    key: format!("interface-{index}"),
+                    name: "nvue_gnmi_extended".into(),
+                    metric_type: format!("reading_{:04}", index % descriptor_count),
+                    unit: "count".into(),
+                    value: (index % 100) as f64,
+                    labels: vec![(Cow::Borrowed("interface"), format!("swp{index}"))],
+                    context: None,
+                };
+
+                (context.clone(), sample)
+            })
+            .collect();
+
+        let request = build_metrics_export_request(&batch, observed_nanos, prefix);
+
+        let envelopes: usize = request
+            .resource_metrics
+            .iter()
+            .flat_map(|resource| &resource.scope_metrics)
+            .map(|scope| scope.metrics.len())
+            .sum();
+
+        eprintln!(
+            "metric fixture: points={}, descriptors={descriptor_count}, envelopes={envelopes}, encoded_bytes={}",
+            batch.len(),
+            request.encoded_len(),
+        );
+
+        group.bench_function(BenchmarkId::new("build", descriptor_count), |b| {
+            b.iter(|| {
+                black_box(build_metrics_export_request(
+                    black_box(&batch),
+                    observed_nanos,
+                    prefix,
+                ))
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("encode", descriptor_count), |b| {
+            b.iter(|| black_box(black_box(&request).encode_to_vec()));
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_queue_key_construction(c: &mut Criterion) {
     use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 
@@ -508,6 +569,7 @@ criterion_group!(
     bench_composite_sink,
     bench_health_report_sink,
     bench_otlp_sink,
+    bench_otlp_metric_conversion,
     bench_queue_key_construction,
     bench_content_hash,
 );

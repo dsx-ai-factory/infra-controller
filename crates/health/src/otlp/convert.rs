@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::SystemTime;
 
 use opentelemetry::logs::AnyValue;
@@ -457,17 +458,25 @@ pub fn build_export_request(
     ExportLogsServiceRequest { resource_logs }
 }
 
-/// Builds an OTLP metric export request grouped by endpoint.
+/// Builds an OTLP metric export request grouped by endpoint and metric descriptor.
 ///
 /// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
-/// the batch's export time; Sum and Histogram mapping can be added when the
-/// health metric model exposes those temporality choices.
+/// the batch's export time. Samples with the same name, type, and unit share
+/// one metric envelope within their endpoint, preserving their input order as
+/// datapoints. Sum and Histogram mapping can be added when the health metric
+/// model exposes those temporality choices.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
     observed_nanos: u64,
     metric_name_prefix: &str,
 ) -> ExportMetricsServiceRequest {
-    let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpMetric>)> = HashMap::new();
+    type EndpointMetrics<'a> = (
+        Vec<KeyValue>,
+        Vec<OtlpMetric>,
+        HashMap<(&'a str, &'a str, &'a str), usize>,
+    );
+
+    let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
         // Switch identity rides once on the resource attributes (switch.id,
@@ -486,31 +495,50 @@ pub fn build_metrics_export_request(
             ..Default::default()
         };
 
-        let otlp_metric = OtlpMetric {
-            // match the Prometheus sink's full series name exactly so Grafana queries
-            // resolve identically across both export paths.
-            name: format!(
-                "{}_{}_{}_{}",
-                metric_name_prefix, sample.name, sample.metric_type, sample.unit
-            ),
-            description: String::new(),
-            unit: sample.unit.clone(),
-            data: Some(metric::Data::Gauge(OtlpGauge {
-                data_points: vec![data_point],
-            })),
-            ..Default::default()
+        let (_, metrics, descriptor_indices) = by_endpoint
+            .entry((&context.endpoint_key, context.collector_type))
+            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+
+        let metric_index =
+            match descriptor_indices.entry((&sample.name, &sample.metric_type, &sample.unit)) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    entry.insert(metrics.len());
+
+                    metrics.push(OtlpMetric {
+                        // Match the Prometheus sink's full series name exactly so
+                        // Grafana queries resolve identically across both export paths.
+                        name: format!(
+                            "{}_{}_{}_{}",
+                            metric_name_prefix, sample.name, sample.metric_type, sample.unit
+                        ),
+                        description: String::new(),
+                        unit: sample.unit.clone(),
+                        data: Some(metric::Data::Gauge(OtlpGauge {
+                            data_points: vec![data_point],
+                        })),
+                        ..Default::default()
+                    });
+
+                    continue;
+                }
+            };
+
+        // Entries are created as Gauges above; adding a point must not replace
+        // earlier points that share this descriptor.
+        let Some(metric::Data::Gauge(gauge)) = metrics
+            .get_mut(metric_index)
+            .and_then(|metric| metric.data.as_mut())
+        else {
+            unreachable!("metric descriptor map contains only gauges");
         };
 
-        by_endpoint
-            .entry(resource_group_key(context))
-            .or_insert_with(|| (resource_attributes(context), Vec::new()))
-            .1
-            .push(otlp_metric);
+        gauge.data_points.push(data_point);
     }
 
     let resource_metrics = by_endpoint
         .into_values()
-        .map(|(attrs, metrics)| ResourceMetrics {
+        .map(|(attrs, metrics, _)| ResourceMetrics {
             resource: Some(Resource {
                 attributes: otlp_attributes(attrs),
                 ..Default::default()
@@ -1649,6 +1677,113 @@ mod tests {
         assert_eq!(request.resource_metrics.len(), 2);
         assert!(collector_types.contains("nvue_rest"));
         assert!(collector_types.contains("nvue_gnmi"));
+    }
+
+    #[test]
+    fn metric_points_share_descriptors_only_within_their_resource() {
+        let first = test_context();
+
+        let second = EventContext {
+            endpoint_key: "other-endpoint".to_string(),
+            ..first.clone()
+        };
+
+        let sample = |metric_type: &str, unit: &str, interface: &str, value: f64| MetricSample {
+            key: interface.to_string(),
+            name: "nvue_gnmi".to_string(),
+            metric_type: metric_type.to_string(),
+            unit: unit.to_string(),
+            value,
+            labels: vec![(Cow::Borrowed("interface_name"), interface.to_string())],
+            context: None,
+        };
+
+        let batch = [
+            (first.clone(), sample("status", "state", "swp1", 1.0)),
+            (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (first.clone(), sample("status", "state", "swp2", 0.0)),
+            (second, sample("status", "state", "swp3", 3.0)),
+            (first, sample("status", "state", "swp4", -0.0)),
+        ];
+
+        let request = build_metrics_export_request(&batch, EXPORT_NANOS, "health");
+
+        assert_eq!(request.resource_metrics.len(), 2);
+
+        let first_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("42:9e:b1:bd:9d:dd")
+                })
+            })
+            .expect("first endpoint resource");
+
+        let metrics = &first_resource.scope_metrics[0].metrics;
+
+        assert_eq!(metrics.len(), 2);
+
+        let status = metrics
+            .iter()
+            .find(|metric| metric.name == "health_nvue_gnmi_status_state")
+            .expect("status metric");
+
+        let metric::Data::Gauge(gauge) = status.data.as_ref().expect("gauge data") else {
+            panic!("status metric must be a gauge");
+        };
+
+        let points: Vec<_> = gauge
+            .data_points
+            .iter()
+            .map(|point| {
+                let value = match point.value.as_ref().expect("point value") {
+                    number_data_point::Value::AsDouble(value) => value.to_bits(),
+                    _ => panic!("point must contain a double"),
+                };
+
+                (
+                    attr_value(&point.attributes, "interface_name"),
+                    value,
+                    point.time_unix_nano,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            points,
+            [
+                (Some("swp1"), 1.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp2"), 0.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp4"), (-0.0f64).to_bits(), EXPORT_NANOS),
+            ]
+        );
+
+        let second_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("other-endpoint")
+                })
+            })
+            .expect("second endpoint resource");
+
+        let second_metrics = &second_resource.scope_metrics[0].metrics;
+
+        assert_eq!(second_metrics.len(), 1);
+
+        let metric::Data::Gauge(gauge) = second_metrics[0].data.as_ref().expect("gauge data")
+        else {
+            panic!("second resource metric must be a gauge");
+        };
+
+        assert_eq!(gauge.data_points.len(), 1);
+
+        assert_eq!(
+            attr_value(&gauge.data_points[0].attributes, "interface_name"),
+            Some("swp3")
+        );
     }
 
     #[test]
