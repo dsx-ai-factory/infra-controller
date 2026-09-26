@@ -33,7 +33,23 @@ use crate::otlp::metrics_drain::OtlpMetricsDrainTask;
 use crate::otlp::{ConfiguredOtlpTarget, OtlpQueueEntryDropped, OtlpSignal};
 
 pub(crate) type OtlpQueue = DedupQueue<String, (EventContext, CollectorEvent)>;
-pub(crate) type OtlpMetricsQueue = DedupQueue<OtlpMetricQueueKey, (EventContext, MetricSample)>;
+pub(crate) type OtlpMetricsQueue = DedupQueue<OtlpMetricQueueKey, QueuedMetric>;
+
+/// A target owns its entry directly unless another target shares the observation.
+#[allow(clippy::large_enum_variant)] // Inline owned entries avoid an allocation per single-target sample.
+pub(crate) enum QueuedMetric {
+    Owned((EventContext, MetricSample)),
+    Shared(Arc<(EventContext, MetricSample)>),
+}
+
+impl QueuedMetric {
+    pub(crate) fn pair(&self) -> (&EventContext, &MetricSample) {
+        match self {
+            Self::Owned((context, sample)) => (context, sample),
+            Self::Shared(shared) => (&shared.0, &shared.1),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OtlpMetricQueueKey {
@@ -248,13 +264,41 @@ impl OtlpSink {
     }
 
     pub fn pop_metric_for_bench(&self) -> Option<(EventContext, MetricSample)> {
-        self.metrics_queue.pop().map(|(_key, value)| value)
+        self.metrics_queue.pop().map(|(_key, value)| match value {
+            QueuedMetric::Owned(pair) => pair,
+            QueuedMetric::Shared(shared) => Arc::unwrap_or_clone(shared),
+        })
     }
 }
 
 impl DataSink for OtlpSink {
     fn sink_type(&self) -> &'static str {
         "otlp_sink"
+    }
+
+    fn accepts_shared_metric(&self) -> bool {
+        true
+    }
+
+    fn try_handle_shared_metric(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        shared: &Arc<(EventContext, MetricSample)>,
+    ) -> Result<(), HealthError> {
+        if !matches!(event, CollectorEvent::Metric(_)) {
+            return self.try_handle_event(context, event);
+        }
+
+        let key = metric_queue_key(&shared.0, &shared.1);
+
+        let outcome = self
+            .metrics_queue
+            .save_latest(key, QueuedMetric::Shared(Arc::clone(shared)));
+
+        self.record_save_outcome(outcome, OtlpSignal::Metrics);
+
+        Ok(())
     }
 
     fn try_handle_event(
@@ -265,9 +309,10 @@ impl DataSink for OtlpSink {
         if let CollectorEvent::Metric(sample) = event {
             let key = metric_queue_key(context, sample);
 
-            let outcome = self
-                .metrics_queue
-                .save_latest(key, (context.clone(), (**sample).clone()));
+            let outcome = self.metrics_queue.save_latest(
+                key,
+                QueuedMetric::Owned((context.clone(), (**sample).clone())),
+            );
 
             self.record_save_outcome(outcome, OtlpSignal::Metrics);
 
@@ -369,6 +414,7 @@ mod tests {
     use crate::otlp::collector_metrics::{
         ExportMetricsServiceRequest, ExportMetricsServiceResponse,
     };
+    use crate::otlp::convert::{build_metrics_export_request, build_queued_metrics_export_request};
     use crate::sink::event_mapper::OpenBmcEventMapper;
     use crate::sink::{
         CompositeDataSink, DiagnosticLogRecord, LogRecord, LogSeverity, MetricSample,
@@ -730,6 +776,114 @@ mod tests {
 
         assert!(first.queue.pop().is_some());
         assert!(second.queue.pop().is_some());
+    }
+
+    #[test]
+    fn composite_shares_metric_payload_and_preserves_export() {
+        let first = Arc::new(test_sink());
+        let second = Arc::new(test_sink());
+        let sinks: Vec<Arc<dyn DataSink>> = vec![first.clone(), second.clone()];
+        let metrics_manager = Arc::new(MetricsManager::new("otlp_shared_payload_test").unwrap());
+        let composite = CompositeDataSink::new(sinks, metrics_manager);
+        let context = test_context();
+        let event = metric_event();
+
+        composite.handle_event(&context, &event);
+
+        let (_, QueuedMetric::Shared(first_value)) = first.metrics_queue.pop().unwrap() else {
+            panic!("first target must retain a shared metric");
+        };
+
+        let (_, QueuedMetric::Shared(second_value)) = second.metrics_queue.pop().unwrap() else {
+            panic!("second target must retain a shared metric");
+        };
+
+        assert!(Arc::ptr_eq(&first_value, &second_value));
+
+        let CollectorEvent::Metric(sample) = event else {
+            panic!("fixture must contain a metric");
+        };
+
+        let expected = build_metrics_export_request(&[(context, *sample)], 123, "health");
+
+        let actual = build_queued_metrics_export_request(
+            &[QueuedMetric::Shared(first_value)],
+            123,
+            "health",
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn shared_metric_targets_replace_and_evict_independently() {
+        let mut first = bounded_test_sink(1);
+        first.target = ConfiguredOtlpTarget("http://independent-first.example:4317".into());
+        let mut second = bounded_test_sink(2);
+        second.target = ConfiguredOtlpTarget("http://independent-second.example:4317".into());
+        let first = Arc::new(first);
+        let second = Arc::new(second);
+        let sinks: Vec<Arc<dyn DataSink>> = vec![first.clone(), second.clone()];
+
+        let metrics_manager =
+            Arc::new(MetricsManager::new("otlp_independent_queues_test").unwrap());
+
+        let composite = CompositeDataSink::new(sinks, metrics_manager);
+        let context = test_context();
+        let mut refreshed_context = test_context();
+
+        refreshed_context.labels.insert("rack".into(), "new".into());
+
+        let initial = metric_event_with("a", "temperature", "celsius");
+        let mut replacement = metric_event_with("a", "temperature", "celsius");
+
+        let CollectorEvent::Metric(sample) = &mut replacement else {
+            panic!("fixture must contain a metric");
+        };
+
+        sample.value = 7.0;
+        sample.labels[0].1 = "updated".into();
+        let other = metric_event_with("b", "temperature", "celsius");
+
+        composite.handle_event(&context, &initial);
+        composite.handle_event(&refreshed_context, &replacement);
+        composite.handle_event(&context, &other);
+
+        assert_eq!(first.metrics_replaced_total.get() as u64, 1);
+        assert_eq!(second.metrics_replaced_total.get() as u64, 1);
+
+        let (_, first_value) = first.metrics_queue.pop().unwrap();
+        let (_, second_replacement) = second.metrics_queue.pop().unwrap();
+        let (_, second_other) = second.metrics_queue.pop().unwrap();
+
+        assert_eq!(first_value.pair().1.key, "b");
+        assert_eq!(second_replacement.pair().1.key, "a");
+        assert_eq!(second_replacement.pair().1.value, 7.0);
+        assert_eq!(second_replacement.pair().1.labels[0].1, "updated");
+
+        assert_eq!(
+            second_replacement.pair().0.labels.get("rack").unwrap(),
+            "new"
+        );
+
+        assert_eq!(second_other.pair().1.key, "b");
+        assert!(first.metrics_queue.pop().is_none());
+        assert!(second.metrics_queue.pop().is_none());
+    }
+
+    #[test]
+    fn composite_single_otlp_target_retains_owned_metric() {
+        let sink = Arc::new(test_sink());
+        let sinks: Vec<Arc<dyn DataSink>> = vec![sink.clone()];
+        let metrics_manager = Arc::new(MetricsManager::new("otlp_owned_payload_test").unwrap());
+        let composite = CompositeDataSink::new(sinks, metrics_manager);
+
+        composite.handle_event(&test_context(), &metric_event());
+
+        assert!(matches!(
+            sink.metrics_queue.pop(),
+            Some((_, QueuedMetric::Owned(_)))
+        ));
     }
 
     #[tokio::test]

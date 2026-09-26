@@ -25,13 +25,21 @@ use crate::metrics::{ComponentKind, ComponentMetrics, MetricsManager};
 pub struct CompositeDataSink {
     sinks: Vec<Arc<dyn DataSink>>,
     component_metrics: Arc<ComponentMetrics>,
+    share_metrics: bool,
 }
 
 impl CompositeDataSink {
     pub fn new(sinks: Vec<Arc<dyn DataSink>>, metrics_manager: Arc<MetricsManager>) -> Self {
+        let share_metrics = sinks
+            .iter()
+            .filter(|sink| sink.accepts_shared_metric())
+            .nth(1)
+            .is_some();
+
         Self {
             sinks,
             component_metrics: metrics_manager.component_metrics(),
+            share_metrics,
         }
     }
 
@@ -64,9 +72,27 @@ impl DataSink for CompositeDataSink {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        let sample = match event {
+            CollectorEvent::Metric(sample) if self.share_metrics => Some(sample.as_ref()),
+            _ => None,
+        };
+
+        let mut shared_metric = None;
+
         for sink in &self.sinks {
             let start = Instant::now();
-            let result = sink.try_handle_event(context, event);
+
+            let result = if let Some(sample) = sample.filter(|_| sink.accepts_shared_metric()) {
+                // Charge the first copy to the first target's timed dispatch.
+                // Later targets retain the same immutable observation.
+                let shared_metric = shared_metric
+                    .get_or_insert_with(|| Arc::new((context.clone(), (*sample).clone())));
+
+                sink.try_handle_shared_metric(context, event, shared_metric)
+            } else {
+                sink.try_handle_event(context, event)
+            };
+
             self.record_sink_operation(sink.as_ref(), start.elapsed(), result.is_ok());
         }
         Ok(())

@@ -20,12 +20,13 @@ use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
 use carbide_health::metrics::MetricsManager;
 use carbide_health::sink::{
     Classification, CollectorEvent, CompositeDataSink, DataSink, EventContext, HealthReport,
-    HealthReportSink, LogRecord, LogSeverity, MetricSample, PrometheusSink, ReportSource,
+    HealthReportSink, LogRecord, LogSeverity, MetricSample, OtlpSink, PrometheusSink, ReportSource,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use health_report::HealthReport as CarbideHealthReport;
@@ -39,6 +40,23 @@ const MACHINE_IDS: [&str; 3] = [
 ];
 
 struct CountingSink;
+
+/// Exercises the owned queue path as a control for shared fanout.
+struct UnsharedOtlpSink(OtlpSink);
+
+impl DataSink for UnsharedOtlpSink {
+    fn sink_type(&self) -> &'static str {
+        self.0.sink_type()
+    }
+
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), carbide_health::HealthError> {
+        self.0.try_handle_event(context, event)
+    }
+}
 
 impl DataSink for CountingSink {
     fn sink_type(&self) -> &'static str {
@@ -362,7 +380,6 @@ fn log_events_with_attrs(count: usize, unique_sensors: usize) -> Vec<CollectorEv
 }
 
 fn bench_otlp_sink(c: &mut Criterion) {
-    use carbide_health::sink::OtlpSink;
     use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 
     let mut group = c.benchmark_group("sink_otlp");
@@ -457,6 +474,84 @@ fn bench_queue_key_construction(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compares owned and shared metric fanout across queue and label workloads.
+fn bench_otlp_metric_fanout(c: &mut Criterion) {
+    use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
+
+    let metrics_manager = Arc::new(MetricsManager::new("otlp_fanout_bench").unwrap());
+    let mapper: Arc<dyn RedfishEventMapper> = Arc::new(OpenBmcEventMapper);
+
+    let mut group = c.benchmark_group("health_performance/metric_fanout");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_secs(1));
+
+    for (scenario, batch_size, unique_keys, endpoint_labels, sample_labels, targets) in [
+        ("light", 4_096, 4_096, 0, 1, 2),
+        ("standard", 32_768, 32_768, 8, 4, 2),
+        ("four_targets", 32_768, 32_768, 8, 4, 4),
+        ("replacements", 131_072, 32_768, 8, 4, 2),
+        ("large_labels", 32_768, 32_768, 32, 16, 2),
+    ] {
+        let mut context = event_context();
+        context.labels = (0..endpoint_labels)
+            .map(|index| (format!("endpoint_label_{index}"), format!("value_{index}")))
+            .collect();
+
+        let mut events = metric_events(batch_size, unique_keys);
+
+        for event in &mut events {
+            if let CollectorEvent::Metric(sample) = event {
+                sample.labels.extend((1..sample_labels).map(|index| {
+                    (
+                        Cow::Owned(format!("label_{index}")),
+                        format!("value_{index}"),
+                    )
+                }));
+            }
+        }
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+
+        for (label, share) in [("owned", false), ("shared", true)] {
+            group.bench_function(BenchmarkId::new(scenario, label), |b| {
+                b.iter_custom(|iterations| {
+                    let mut elapsed = Duration::ZERO;
+
+                    for _ in 0..iterations {
+                        let sinks: Vec<Arc<dyn DataSink>> = (0..targets)
+                            .map(|_| {
+                                let sink = OtlpSink::new_for_bench(mapper.clone());
+
+                                if share {
+                                    Arc::new(sink) as Arc<dyn DataSink>
+                                } else {
+                                    Arc::new(UnsharedOtlpSink(sink)) as Arc<dyn DataSink>
+                                }
+                            })
+                            .collect();
+
+                        let composite = CompositeDataSink::new(sinks, metrics_manager.clone());
+                        let start = Instant::now();
+
+                        for event in &events {
+                            black_box(&composite)
+                                .handle_event(black_box(&context), black_box(event));
+                        }
+
+                        elapsed += start.elapsed();
+                        black_box(composite);
+                    }
+
+                    elapsed
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 fn make_sink_report(alert_count: usize, success_count: usize) -> HealthReport {
     use carbide_health::sink::{HealthReportAlert, HealthReportSuccess};
     HealthReport {
@@ -508,6 +603,7 @@ criterion_group!(
     bench_composite_sink,
     bench_health_report_sink,
     bench_otlp_sink,
+    bench_otlp_metric_fanout,
     bench_queue_key_construction,
     bench_content_hash,
 );
