@@ -1,4 +1,7 @@
-use std::{path::Path, process::Command};
+use std::{
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,15 +34,19 @@ fn run_dcgm_diagnostic(parameters: &Value) -> Result<Option<Finding>, String> {
     struct Parameters {
         #[serde(default = "default_level")]
         run_level: u8,
+        #[serde(default = "default_dcgmi_path")]
+        dcgmi_path: String,
     }
-    let level = serde_json::from_value::<Parameters>(parameters.clone())
-        .map_err(|error| format!("parse dcgm-diagnostic parameters: {error}"))?
-        .run_level;
+    let parameters = serde_json::from_value::<Parameters>(parameters.clone())
+        .map_err(|error| format!("parse dcgm-diagnostic parameters: {error}"))?;
+    let level = parameters.run_level;
     if !matches!(level, 1 | 3) {
         return Err("dcgm-diagnostic runLevel must be 1 or 3".to_owned());
     }
-    validate_host_dcgm(Path::new("/host"))?;
-    let command = dcgm_command(Path::new("/host"), level)
+    let host_root = Path::new("/host");
+    let dcgmi_path = host_binary_path(host_root, &parameters.dcgmi_path)?;
+    validate_host_dcgm(&dcgmi_path)?;
+    let command = dcgm_command(host_root, &parameters.dcgmi_path, level)
         .output()
         .map_err(|error| format!("run host dcgmi: {error}"))?;
     let output = bounded_output(&command.stdout, &command.stderr);
@@ -53,8 +60,7 @@ fn run_dcgm_diagnostic(parameters: &Value) -> Result<Option<Finding>, String> {
     }))
 }
 
-fn validate_host_dcgm(host_root: &Path) -> Result<(), String> {
-    let path = host_root.join("usr/bin/dcgmi");
+fn validate_host_dcgm(path: &Path) -> Result<(), String> {
     if path.is_file() {
         Ok(())
     } else {
@@ -62,17 +68,38 @@ fn validate_host_dcgm(host_root: &Path) -> Result<(), String> {
     }
 }
 
-fn dcgm_command(host_root: &Path, level: u8) -> Command {
+fn host_binary_path(host_root: &Path, binary_path: &str) -> Result<PathBuf, String> {
+    let binary_path = Path::new(binary_path);
+    if !binary_path.is_absolute()
+        || binary_path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(
+            "dcgm-diagnostic dcgmiPath must be an absolute host path without traversal".to_owned(),
+        );
+    }
+    let relative = binary_path
+        .strip_prefix("/")
+        .map_err(|_| "dcgm-diagnostic dcgmiPath must be an absolute host path".to_owned())?;
+    Ok(host_root.join(relative))
+}
+
+fn dcgm_command(host_root: &Path, binary_path: &str, level: u8) -> Command {
     let mut command = Command::new("chroot");
     command
         .arg(host_root)
-        .args(["/usr/bin/dcgmi", "diag", "-r"])
+        .args([binary_path, "diag", "-r"])
         .arg(level.to_string());
     command
 }
 
 fn default_level() -> u8 {
     3
+}
+
+fn default_dcgmi_path() -> String {
+    "/usr/bin/dcgmi".to_owned()
 }
 
 fn bounded_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -123,14 +150,32 @@ mod tests {
 
     #[test]
     fn rejects_missing_host_dcgm() {
-        let root = std::env::temp_dir().join(format!("nico-basic-plugin-{}", std::process::id()));
-        assert!(validate_host_dcgm(&root).unwrap_err().contains("host DCGM"));
+        let path = std::env::temp_dir().join(format!("nico-basic-plugin-{}", std::process::id()));
+        assert!(validate_host_dcgm(&path).unwrap_err().contains("host DCGM"));
     }
 
     #[test]
     fn constructs_host_dcgm_command() {
-        let command = dcgm_command(Path::new("/host"), 3);
+        let command = dcgm_command(Path::new("/host"), "/usr/bin/dcgmi", 3);
         assert_eq!(command.get_program(), "chroot");
-        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["/host", "/usr/bin/dcgmi", "diag", "-r", "3"]);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec!["/host", "/usr/bin/dcgmi", "diag", "-r", "3"]
+        );
+    }
+
+    #[test]
+    fn supports_a_configured_host_dcgmi_path() {
+        assert_eq!(
+            host_binary_path(Path::new("/host"), "/opt/dcgm/bin/dcgmi").unwrap(),
+            Path::new("/host/opt/dcgm/bin/dcgmi")
+        );
+    }
+
+    #[test]
+    fn rejects_non_host_or_traversing_dcgmi_paths() {
+        for path in ["dcgmi", "/usr/bin/../dcgmi"] {
+            assert!(host_binary_path(Path::new("/host"), path).is_err());
+        }
     }
 }

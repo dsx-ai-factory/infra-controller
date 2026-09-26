@@ -168,8 +168,8 @@ the image pull and never exposes it to the plugin, logs, or catalog. The legacy
 
 ## **3.2 Plugin Contract**
 
-NICo provides a small basic Machine Validation plugin as a reference and
-release-tested starting point. It covers only baseline checks.
+NICo provides a small basic Machine Validation plugin as an official reference
+starting point. It covers only baseline checks.
 Sites can build and configure dedicated plugins for more detailed,
 long-running, hardware-specific, or workflow-specific tests.
 

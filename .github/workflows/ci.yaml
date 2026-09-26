@@ -1517,8 +1517,9 @@ jobs:
   build-release-machine-validation-basic-plugin-x86:
     needs:
       - prepare
+      - build-artifacts-container-x86_64
       - build-runtime-container-x86_64
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-x86_64.result) }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-x86_64.result) && contains('success,skipped', needs.build-runtime-container-x86_64.result) }}
     uses: ./.github/workflows/docker-build.yml
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
@@ -1538,8 +1539,9 @@ jobs:
   build-release-machine-validation-basic-plugin-arm:
     needs:
       - prepare
+      - build-artifacts-container-aarch64
       - build-runtime-container-aarch64
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-aarch64.result) && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
     uses: ./.github/workflows/docker-build.yml
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}

@@ -1,7 +1,7 @@
 # Basic Machine Validation plugin
 
 This is NICo's small, official baseline container plugin. It consumes the
-public Machine Validation input/output contract and provides a release-tested
+public Machine Validation input/output contract and provides an official
 starting point for basic validation checks. Additional basic checks can be
 added to this plugin over time without changing the plugin contract.
 
@@ -15,14 +15,18 @@ configured, the plugin runs it with DCGM level 3. A site can select level 1:
   "checks": [
     {
       "name": "dcgm-diagnostic",
-      "parameters": { "runLevel": 1 }
+      "parameters": {
+        "runLevel": 1,
+        "dcgmiPath": "/usr/bin/dcgmi"
+      }
     }
   ]
 }
 ```
 
-Only DCGM levels 1 and 3 are supported. Future basic checks use another entry
-in `checks`; they do not require a new plugin contract.
+Only DCGM levels 1 and 3 are supported. `dcgmiPath` is an optional absolute
+path on the target host and defaults to `/usr/bin/dcgmi`. Future basic checks
+use another entry in `checks`; they do not require a new plugin contract.
 
 The plugin uses the host-installed DCGM through
 `chroot /host /usr/bin/dcgmi`. It requires the privileged full-host plugin
@@ -41,7 +45,9 @@ is a plugin execution error.
 After the release pipeline publishes the digest-pinned image, a site admin
 creates its catalog revision with `--privileged --host-access-full`, verifies
 that exact revision, approves full-host access, and then enables it. The plugin
-requires `/host/usr/bin/dcgmi` on the target host.
+requires DCGM on the target host. By default it uses `/usr/bin/dcgmi`; set the
+`dcgmiPath` check parameter for a different absolute host path. The full-host
+mount makes the selected host path available under `/host` in the container.
 
 ```sh
 nico-admin-cli machine-validation plugins create \

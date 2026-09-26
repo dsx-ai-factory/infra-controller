@@ -106,7 +106,7 @@ fn write_result(path: &str, result: &ResultFile<'_>) -> Result<(), String> {
     let path = Path::new(path);
     let directory = path.parent().ok_or("result path has no parent")?;
     fs::create_dir_all(directory).map_err(|e| format!("create output directory: {e}"))?;
-    let temporary = directory.join(".result.json.tmp");
+    let temporary = directory.join(format!(".result.json.{}.tmp", std::process::id()));
     fs::write(
         &temporary,
         serde_json::to_vec(result).map_err(|e| format!("serialize result: {e}"))?,
