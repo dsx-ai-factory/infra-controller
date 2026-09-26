@@ -1,0 +1,10 @@
+ARG CONTAINER_BUILD_AARCH64
+FROM $CONTAINER_BUILD_AARCH64 AS builder
+WORKDIR /carbide
+COPY . .
+RUN cargo build --release -p nico-machine-validation-default-plugin
+
+ARG CONTAINER_RUNTIME_AARCH64
+FROM $CONTAINER_RUNTIME_AARCH64
+COPY --from=builder /carbide/target/release/nico-machine-validation-default-plugin /nico-machine-validation-default-plugin
+ENTRYPOINT ["/nico-machine-validation-default-plugin"]

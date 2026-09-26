@@ -1,0 +1,11 @@
+ARG CONTAINER_BUILD
+FROM $CONTAINER_BUILD AS builder
+WORKDIR /carbide
+COPY . .
+RUN cargo build --release -p nico-machine-validation-default-plugin
+
+# The plugin runs the host-installed dcgmi through chroot /host.
+ARG CONTAINER_RUNTIME_X86_64
+FROM $CONTAINER_RUNTIME_X86_64
+COPY --from=builder /carbide/target/release/nico-machine-validation-default-plugin /nico-machine-validation-default-plugin
+ENTRYPOINT ["/nico-machine-validation-default-plugin"]
