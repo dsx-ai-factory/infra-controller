@@ -35,3 +35,22 @@ long-running, hardware-specific, or workflow-specific tests.
 Each check reports a validation failure when it completes unsuccessfully. A
 missing dependency or another condition that prevents the plugin from running
 is a plugin execution error.
+
+## Registering the official plugin
+
+After the release pipeline publishes the digest-pinned image, a site admin
+creates its catalog revision with `--privileged --host-access-full`, verifies
+that exact revision, approves full-host access, and then enables it. The plugin
+requires `/host/usr/bin/dcgmi` on the target host.
+
+```sh
+nico-admin-cli machine-validation plugins create \
+  --name basic-machine-validation \
+  --image 'nvcr.io/<registry-path>/machine-validation-basic-plugin@sha256:<digest>' \
+  --entrypoint /nico-machine-validation-default-plugin \
+  --context Discovery \
+  --platform <platform> \
+  --parameters '{}' \
+  --privileged \
+  --host-access-full
+```

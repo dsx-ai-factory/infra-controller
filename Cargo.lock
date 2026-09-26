@@ -7613,6 +7613,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nico-machine-validation-default-plugin"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
