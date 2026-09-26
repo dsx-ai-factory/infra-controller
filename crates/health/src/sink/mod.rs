@@ -32,6 +32,8 @@ mod rack_health_report;
 mod switch_health_report;
 mod tracing;
 
+use std::sync::Arc;
+
 pub use composite::CompositeDataSink;
 pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
@@ -67,6 +69,24 @@ pub trait DataSink: Send + Sync {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError>;
+
+    /// Whether this sink can retain a metric payload shared within one fanout.
+    fn accepts_shared_metric(&self) -> bool {
+        false
+    }
+
+    /// Handles a metric using one immutable payload across capable sinks.
+    ///
+    /// Other sinks receive the original event so their dispatch behavior stays
+    /// independent of how OTLP targets retain queue entries.
+    fn try_handle_shared_metric(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        _shared: &Arc<(EventContext, MetricSample)>,
+    ) -> Result<(), HealthError> {
+        self.try_handle_event(context, event)
+    }
 
     /// Fire-and-forget entry point for callers that do not track outcomes.
     ///

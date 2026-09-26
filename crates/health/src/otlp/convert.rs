@@ -467,6 +467,31 @@ pub fn build_metrics_export_request(
     observed_nanos: u64,
     metric_name_prefix: &str,
 ) -> ExportMetricsServiceRequest {
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(|(context, sample)| (context, sample)),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
+
+/// Builds the same wire format from owned or shared queue entries.
+pub(crate) fn build_queued_metrics_export_request(
+    batch: &[crate::sink::otlp::QueuedMetric],
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(crate::sink::otlp::QueuedMetric::pair),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
+
+fn build_metrics_export_request_from_pairs<'a>(
+    batch: impl IntoIterator<Item = (&'a EventContext, &'a MetricSample)>,
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
     let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpMetric>)> = HashMap::new();
 
     for (context, sample) in batch {

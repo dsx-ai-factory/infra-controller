@@ -21,11 +21,10 @@ use tonic::transport::Channel;
 
 use super::collector_metrics::ExportMetricsServiceRequest;
 use super::collector_metrics::metrics_service_client::MetricsServiceClient;
-use super::convert::build_metrics_export_request;
+use super::convert::build_queued_metrics_export_request;
 use super::{OtlpExport, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
-use crate::sink::otlp::OtlpMetricsQueue;
-use crate::sink::{EventContext, MetricSample};
+use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
 pub(crate) struct OtlpMetricsDrainTask {
     queue: Arc<OtlpMetricsQueue>,
@@ -69,11 +68,11 @@ struct MetricsExport {
 }
 
 impl OtlpExport for MetricsExport {
-    type Item = (EventContext, MetricSample);
+    type Item = QueuedMetric;
     type Request = ExportMetricsServiceRequest;
 
     fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
-        build_metrics_export_request(items, observed_nanos, &self.metric_name_prefix)
+        build_queued_metrics_export_request(items, observed_nanos, &self.metric_name_prefix)
     }
 
     fn record_count(request: &Self::Request) -> usize {
