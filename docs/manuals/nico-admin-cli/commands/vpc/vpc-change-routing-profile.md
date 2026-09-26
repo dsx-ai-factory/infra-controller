@@ -18,10 +18,10 @@ nico-admin-cli vpc change-routing-profile [--if-version-match]
 ## DESCRIPTION
 
 Change a supported FNN VPC between configured profiles with opposite
-internal settings. Core validates the destination against the tenants
-access tier and retains the previous VNI until an explicit release. A
-Core commit does not prove DPU/fabric convergence or guarantee that a
-later change back will be accepted.
+internal settings. Core validates the destination against the access
+tier of the tenant and retains the previous VNI until an explicit
+release. A Core commit does not prove DPU/fabric convergence or
+guarantee that a later change back will be accepted.
 
 Requires --cloud-unsafe-op USERNAME before vpc. Hold attachment,
 peering, deletion, and routing/profile-definition changes until the
@@ -74,13 +74,8 @@ field: older Core may ignore it and choose another VNI
 
 Extended result output.
 
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
-`--sort-by <SORT_BY> [default: primary-id]`
-
-Sort output by specified field
+**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
+Sort output by specified field\
 
 *Possible values:*
 
@@ -96,9 +91,9 @@ Print help (see a summary with -h)
 
 VPC ID whose routing profile will change
 
-`<ROUTING_PROFILE_TYPE>`
-
-Nonempty destination profile name from the sites Core configuration
+\<*ROUTING_PROFILE_TYPE*\>  
+Nonempty destination profile name from the Core configuration of the
+site
 
 ## Examples
 
