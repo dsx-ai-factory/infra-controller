@@ -20,8 +20,10 @@ it before that external service has a chance to run.
 
 This design lets NICo make a machine `Ready` while keeping it unavailable for
 normal allocation until an authorized external validation workflow finishes.
-The external workflow owns its test logic. NICo owns the allocation gate, the
-machine lifecycle, and the audit trail.
+External validation is not a NICo-managed machine state: NICo manages the
+allocation hold, normal lifecycle, and audit trail, while the authorized
+external-validation tenant claims the `Ready` machine and performs its own
+detailed validation or repair work.
 
 ## **1.1 Purpose**
 
@@ -53,6 +55,15 @@ This SDD does not cover:
 3. Allowing ordinary tenants to bypass health or allocation checks.
 4. Changing the Machine Validation plugin input/output contract.
 
+## **1.3 Assumption: External Tenant Allocation**
+
+The external-validation team continues to use the existing targeted-instance
+allocation feature to allocate a held machine into its site-controlled tenant.
+NICo keeps the machine in `Ready` so this allocation can use the current
+workflow; the team then performs its external validation or repair work inside
+that tenant's instance. The team must use `allowUnhealthyMachine: true` because
+NICo's `PreventAllocations` hold remains active until the workflow completes.
+
 # **2. Current State**
 
 NICo already has the building blocks needed for this workflow:
@@ -61,14 +72,22 @@ NICo already has the building blocks needed for this workflow:
 | :--- | :--- | :--- |
 | Health `Merge` override | Independent sources can add health alerts. | NICo creates one workflow-owned hold. |
 | `PreventAllocations` | Blocks normal instance allocation. | Keeps the machine out of normal tenant allocation. |
-| Targeted instance creation | A provider-authorized tenant can request one machine. | Lets the validation service claim the held machine. |
-| `allowUnhealthyMachine` | A targeted request can proceed despite health allocation alerts when the machine is otherwise provisionable. | Allows the validation service to claim its held machine. |
+| Targeted instance creation | A provider-authorized tenant can request one machine, but the machine must be in the controller's `Ready` state. | Lets the validation service claim the held machine without introducing a new lifecycle state. |
+| `allowUnhealthyMachine` | A targeted request can proceed despite health allocation alerts when the machine is otherwise provisionable; it does not allow allocation from another managed state. | Allows the validation service to claim its held machine while the health hold remains in place. |
 | Instance release and cleanup | Releasing an instance returns the machine through normal cleanup and validation. | Ensures the validation instance is gone before normal allocation resumes. |
 | Pluggable Machine Validation | Scout can run site-provided single-machine tests. | Provides local checks that can optionally trigger external validation. |
 
 Today there is no workflow-specific state connecting these capabilities. An
 external service can race with normal tenant allocation, and a passing external
 result has no fenced, auditable way to release that allocation gate.
+
+In particular, `allowUnhealthyMachine` relaxes health eligibility only. It does
+not relax the managed-state requirement: targeted instance creation still starts
+from `Ready`, not from `Failed`, `Validation`, or a proposed
+`ExternalValidation` state. Keeping the machine `Ready` is intentional: it lets
+the authorized external-validation tenant claim the machine through the existing
+targeted-instance flow and then perform its detailed validation or repair work.
+The `PreventAllocations` health hold blocks normal tenants during that work.
 
 # **3. Design**
 
