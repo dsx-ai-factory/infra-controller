@@ -2574,6 +2574,9 @@ jobs:
 
       # Machine validation images
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-release-machine-validation-artifacts-arm-host
       - merge-manifests-machine-validation
