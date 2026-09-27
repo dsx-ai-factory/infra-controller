@@ -1,7 +1,5 @@
-use std::{
-    path::{Component, Path, PathBuf},
-    process::Command,
-};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 use serde_json::Value;

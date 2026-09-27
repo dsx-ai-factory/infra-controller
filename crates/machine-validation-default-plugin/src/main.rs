@@ -1,11 +1,11 @@
 mod checks;
 
-use std::{fs, path::Path};
-
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::fs;
+use std::path::Path;
 
 use checks::{default_checks, run_check};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const INPUT: &str = "/opt/forge/mv/input/input.json";
 const OUTPUT: &str = "/opt/forge/mv/output/result.json";
