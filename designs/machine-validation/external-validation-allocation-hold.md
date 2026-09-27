@@ -7,6 +7,7 @@
 | Version | Date | Modified By | Description |
 | :---: | :---: | :---- | :---- |
 | 0.1 | 2026-09-18 | Sunil Kumar | Initial draft |
+| 0.2 | 2026-09-27 | Sunil Kumar | Add explicit-state alternative reference |
 |  |  |  |  |
 
 # **1. Introduction**
@@ -269,3 +270,63 @@ new generation, so older results cannot affect it.
 - Existing Machine Validation tests and the repair workflow keep their current
   behavior unless a site explicitly enables this policy. The design does not
   change the Machine Validation plugin contract or normal tenant allocation.
+
+# **5. Design Reference: Explicit `ExternalValidation` State**
+
+A dedicated `ExternalValidation` state was considered as an alternative to
+returning a host to `Ready` with a `PreventAllocations` allocation hold. It is
+a valid future lifecycle model:
+
+```text
+Validation / ExternalValidation / WaitingForClaim
+  → Assigned / ExternalValidationInstanceRunning
+  → Validation / ExternalValidation / AwaitingResult
+  → Ready
+```
+
+This model has a clear ownership boundary: NICo keeps the host in validation
+until the external workflow has completed, so normal tenant allocation is never
+admitted merely because the host is lifecycle-ready.
+
+It cannot, however, remain in `ExternalValidation` for the whole workflow. The
+external validator runs through targeted instance creation using a
+site-controlled tenant. That is still a normal NICo-managed instance
+allocation; while that instance exists, the host must use the existing
+`Assigned` lifecycle for network configuration, boot, instance cleanup, and
+release.
+
+Using this alternative would therefore require a separate, cross-cutting
+allocation and lifecycle implementation:
+
+1. **Allocation from validation.** Current targeted allocation, including
+   `allowUnhealthyMachine`, admits a host only when its managed state is
+   `Ready`. The alternative needs a narrowly authorized allocation route from
+   `Validation / ExternalValidation / WaitingForClaim`; ordinary tenants must
+   remain rejected.
+
+2. **Atomic claim and assignment.** That route must atomically verify the
+   validation tenant, site, machine, and active external-validation request,
+   create exactly one instance, record its claim, and move the host into
+   `Assigned / ExternalValidationInstanceRunning`.
+
+3. **Context across `Assigned`.** The request identity and external-validation
+   context must survive the existing `Assigned` lifecycle so that instance
+   deletion can resume the correct validation operation.
+
+4. **Non-standard release.** Normal instance release converges toward
+   `Ready`. The alternative must instead return the host to
+   `Validation / ExternalValidation / AwaitingResult`, where NICo accepts a
+   matching result and chooses `Ready`, retry, or `Failed`.
+
+5. **Recovery and policy changes.** Controller restart recovery,
+   instance-delete recovery, timeouts, RBAC, audit, and observability must all
+   understand this validation-to-assignment path.
+
+The explicit-state model is therefore architecturally sound, but it is broader
+than required for the initial use case. The selected allocation-hold design
+reuses the existing targeted-instance and `Assigned` lifecycle. NICo creates
+the hold before normal allocation can proceed, keeps ordinary tenants blocked,
+and permits only the configured validation tenant to claim the machine with the
+existing targeted allocation capability. A future implementation can adopt the
+explicit-state model if external validation becomes a first-class lifecycle
+capability.
