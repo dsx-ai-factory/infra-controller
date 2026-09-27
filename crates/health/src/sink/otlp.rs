@@ -33,7 +33,10 @@ use crate::otlp::metrics_drain::OtlpMetricsDrainTask;
 use crate::otlp::{ConfiguredOtlpTarget, OtlpQueueEntryDropped, OtlpSignal};
 
 pub(crate) type OtlpQueue = DedupQueue<String, (EventContext, CollectorEvent)>;
-pub(crate) type OtlpMetricsQueue = DedupQueue<OtlpMetricQueueKey, (EventContext, MetricSample)>;
+// Queue backing arrays survive a drain. Keep their slots small even after a
+// large metric burst by storing keys and observations behind pointers.
+pub(crate) type OtlpMetricsQueue =
+    DedupQueue<Arc<OtlpMetricQueueKey>, Box<(EventContext, MetricSample)>>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OtlpMetricQueueKey {
@@ -248,7 +251,7 @@ impl OtlpSink {
     }
 
     pub fn pop_metric_for_bench(&self) -> Option<(EventContext, MetricSample)> {
-        self.metrics_queue.pop().map(|(_key, value)| value)
+        self.metrics_queue.pop().map(|(_key, value)| *value)
     }
 }
 
@@ -263,11 +266,11 @@ impl DataSink for OtlpSink {
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
         if let CollectorEvent::Metric(sample) = event {
-            let key = metric_queue_key(context, sample);
+            let key = Arc::new(metric_queue_key(context, sample));
 
             let outcome = self
                 .metrics_queue
-                .save_latest(key, (context.clone(), (**sample).clone()));
+                .save_latest(key, Box::new((context.clone(), (**sample).clone())));
 
             self.record_save_outcome(outcome, OtlpSignal::Metrics);
 

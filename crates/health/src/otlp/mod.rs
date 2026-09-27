@@ -350,14 +350,16 @@ pub(crate) async fn export_items<E: OtlpExport>(
 /// own task, so building and encoding requests uses several worker threads. A
 /// partial batch is sent when `flush_interval` elapses without a full one.
 /// Exports share one connection, which is replaced when the target's TLS
-/// material is reloaded.
-pub(crate) async fn run_drain<K, E>(
-    queue: Arc<DedupQueue<K, E::Item>>,
+/// material is reloaded. Queue storage is converted to export items after
+/// removal, so compact metric entries do not change batching or retries.
+async fn run_drain<K, Q, E>(
+    queue: Arc<DedupQueue<K, Q>>,
     target: OtlpTargetConfig,
     signal: OtlpSignal,
     make_export: impl Fn(Channel) -> E,
 ) where
     K: Eq + Hash + Clone,
+    Q: IntoExportItem<E::Item>,
     E: OtlpExport + Clone + Send + 'static,
     E::Item: Send + Sync + 'static,
 {
@@ -442,16 +444,33 @@ async fn export_batch<E: OtlpExport>(
 }
 
 /// Tops `batch` up to `batch_size` from the queue.
-fn drain_batch<K: Eq + Hash + Clone, V>(
-    queue: &DedupQueue<K, V>,
+fn drain_batch<K: Eq + Hash + Clone, Q: IntoExportItem<V>, V>(
+    queue: &DedupQueue<K, Q>,
     batch: &mut Vec<V>,
     batch_size: usize,
 ) {
     while batch.len() < batch_size {
         match queue.pop() {
-            Some((_key, value)) => batch.push(value),
+            Some((_key, value)) => batch.push(value.into_export_item()),
             None => break,
         }
+    }
+}
+
+/// Converts a queue's retained representation into an export batch item.
+trait IntoExportItem<T> {
+    fn into_export_item(self) -> T;
+}
+
+impl<T> IntoExportItem<T> for T {
+    fn into_export_item(self) -> T {
+        self
+    }
+}
+
+impl<T> IntoExportItem<T> for Box<T> {
+    fn into_export_item(self) -> T {
+        *self
     }
 }
 
