@@ -64,6 +64,7 @@ pub mod ib_partition;
 pub mod instance;
 pub mod instance_address;
 pub mod instance_type;
+pub mod lldp;
 pub mod machine;
 pub mod machine_boot_interface;
 pub mod machine_boot_override;

@@ -39,6 +39,7 @@ pub mod health;
 pub mod ib_partition;
 pub mod instance;
 pub mod instance_type;
+pub mod lldp;
 pub mod machine;
 pub mod machine_boot_interface;
 pub mod machine_boot_override;

@@ -57,8 +57,8 @@ use tonic::{Request, Response, Status};
 use crate::api::{Api, log_machine_id, log_request_data};
 use crate::cfg::file::VpcIsolationBehaviorType;
 use crate::handlers::astra::{get_astra_config, process_astra_config_status};
-use crate::handlers::extension_service;
 use crate::handlers::utils::{StateHandlerWakeupFailed, WakeupTrigger, convert_and_log_machine_id};
+use crate::handlers::{extension_service, lldp};
 use crate::{CarbideError, cfg, ethernet_virtualization};
 
 /// vxlan48 is special HBN single vxlan device. It handles networking between machines on the
@@ -1199,7 +1199,13 @@ pub(crate) async fn record_dpu_network_status(
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
     }
 
-    // TODO Handle the LLDP report in the next PR.
+    // The network status is already committed, and the agent re-sends a rejected LLDP report
+    // until the RPC succeeds, so an LLDP failure must not fail the status report.
+    if let Some(lldp) = request.lldp
+        && let Err(err) = lldp::handle_lldp_report(api, &dpu_machine_id, lldp).await
+    {
+        tracing::warn!(%dpu_machine_id, error = %err, "Failed to store DPU LLDP report");
+    }
 
     // If this all worked and the DPU is healthy, we shouldn't emit a log line
     // If there is any error the report, the logging of the follow-up report is

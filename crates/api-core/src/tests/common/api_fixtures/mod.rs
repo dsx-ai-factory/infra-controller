@@ -2196,13 +2196,39 @@ pub(in crate::tests) async fn network_configured_with_health(
 
 /// Fake an iteration of forge-dpu-agent requesting network config, applying it, and reporting back.
 /// When reporting back, the health and extension services statuses reported by the DPU can be overrridden
-// This fixture reports the compatibility fields populated for older agents.
-#[allow(deprecated)]
 pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
     dpu_health: Option<rpc::health::HealthReport>,
     extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
+) {
+    report_network_status(
+        env,
+        dpu_machine_id,
+        dpu_health,
+        extension_services_state,
+        None,
+    )
+    .await
+}
+
+/// Fake an iteration of forge-dpu-agent that attaches `lldp` to its network status report.
+pub(in crate::tests) async fn network_configured_with_lldp(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+) {
+    report_network_status(env, dpu_machine_id, None, None, Some(lldp)).await
+}
+
+// This fixture reports the compatibility fields populated for older agents.
+#[allow(deprecated)]
+async fn report_network_status(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    dpu_health: Option<rpc::health::HealthReport>,
+    extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
+    lldp: Option<rpc::forge::LldpReport>,
 ) {
     let network_config = env
         .api
@@ -2338,7 +2364,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
             .map(|instance| instance.dpu_extension_service_version),
         dpu_extension_services,
         astra_config_status: None,
-        lldp: None,
+        lldp,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),
