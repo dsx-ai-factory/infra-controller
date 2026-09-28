@@ -21,7 +21,7 @@ Erase all expected switches
 
 `--confirm`
 
-Confirm that you want to erase all records.
+Required to erase all expected switch records.
 
 `--extended`
 

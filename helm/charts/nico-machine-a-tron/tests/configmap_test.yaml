@@ -112,6 +112,40 @@ tests:
           path: data["mat.toml"]
           pattern: '\[machines\.rack-machines\]'
 
+  - it: should render the machines table for a second pod with racks and a null machines group
+    set:
+      pods:
+        mat-1:
+          machines:
+            rack-machines: null
+          racks:
+            gb200:
+              type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
+              ids:
+                - rack-002
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
+    asserts:
+      - hasDocuments:
+          count: 2
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: nico-machine-a-tron-mat-1-config-files
+      - documentIndex: 1
+        matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[racks\.gb200\]'
+      - documentIndex: 1
+        matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\]'
+      - documentIndex: 1
+        notMatchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.rack-machines\]'
+
   - it: should render racks and machines together
     set:
       pods:

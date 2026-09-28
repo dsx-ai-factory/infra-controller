@@ -103,6 +103,104 @@ fn provisioning_mock_with_dpu_count(
     mock
 }
 
+/// Missing DPF BMC credentials are an admission condition, not a persisted
+/// provisioning failure. Both registration entry points must keep their
+/// current state and make progress on a later controller iteration.
+#[crate::sqlx_test]
+async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
+    let credential_available = Arc::new(AtomicBool::new(true));
+    let resources_present = Arc::new(AtomicBool::new(true));
+    let mut mock = MockDpfOperations::new();
+
+    let credential_available_for_mock = credential_available.clone();
+    mock.expect_register_dpu_device().returning(move |_, _| {
+        if credential_available_for_mock.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(DpfError::BmcPasswordSourceUnavailable(
+                "credential has not been published".to_string(),
+            ))
+        }
+    });
+    mock.expect_register_dpu_node().returning(|_| Ok(()));
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(&mut mock);
+    let resources_present_for_mock = resources_present.clone();
+    mock.expect_snapshot_host().returning(move |_| {
+        Ok(if resources_present_for_mock.load(Ordering::SeqCst) {
+            snapshot_with_crs_present(1)
+        } else {
+            HostDpfSnapshot {
+                dpu_node: None,
+                dpu_devices: vec![],
+                dpus: vec![],
+            }
+        })
+    });
+    mock.expect_get_dpu_phase()
+        .returning(|_, _| Ok(DpuPhase::Ready));
+
+    let mut config = get_config();
+    config.dpf = dpf_config();
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config).with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let mh = timeout(TEST_TIMEOUT, create_managed_host_with_dpf(&env))
+        .await
+        .expect("timed out during initial provisioning");
+
+    for dpf_state in [DpfState::Provisioning, DpfState::Reprovisioning] {
+        resources_present.store(
+            !matches!(dpf_state, DpfState::Reprovisioning),
+            Ordering::SeqCst,
+        );
+        credential_available.store(false, Ordering::SeqCst);
+        set_reprovision_dpf_state(&pool, &mh.id, &mh.dpu_ids, dpf_state.clone()).await;
+
+        timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+            .await
+            .expect("timed out while waiting for the DPF credential");
+
+        assert!(
+            matches!(
+                get_host_state(&env, &mh).await,
+                ManagedHostState::DPUReprovision { ref dpu_states }
+                    if dpu_states.states.values().all(|state| {
+                        matches!(state, ReprovisionState::DpfStates { substate } if substate == &dpf_state)
+                    })
+            ),
+            "missing credentials must preserve {dpf_state:?} for retry"
+        );
+
+        credential_available.store(true, Ordering::SeqCst);
+        timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+            .await
+            .expect("timed out while retrying DPF registration");
+
+        assert!(
+            matches!(
+                get_host_state(&env, &mh).await,
+                ManagedHostState::DPUReprovision { ref dpu_states }
+                    if dpu_states.states.values().all(|state| {
+                        matches!(
+                            state,
+                            ReprovisionState::DpfStates {
+                                substate: DpfState::WaitingForReady { .. }
+                            }
+                        )
+                    })
+            ),
+            "registration must resume after the credential becomes available"
+        );
+    }
+}
+
 /// Builds a DPF mock whose existing DPUNode still belongs to the generic BF3
 /// deployment while inventory now selects the GB200 deployment.
 fn source_deployment_mock(dpu_count: usize) -> MockDpfOperations {

@@ -28,9 +28,8 @@ use crate::errors::CarbideCliResult;
 /// update; unset flags keep existing values).
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        if let Err(e) = self.validate() {
-            eprintln!("{e}");
-            return Ok(());
+        if let Err(error) = self.validate() {
+            error.exit();
         }
         ctx.api_client
             .patch_expected_machine(

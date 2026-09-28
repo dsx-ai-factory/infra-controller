@@ -42,7 +42,7 @@ pub(crate) async fn logger(
     let span = tracing::info_span!(
         "request",
         span_id,
-        remote_ip = %socket_addr.ip(),
+        remote_ip = %socket_addr.ip().to_canonical(),
         remote_port = socket_addr.port(),
         request_method = %request.method(),
         request_path = request.uri().path(),

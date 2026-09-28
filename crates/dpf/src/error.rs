@@ -37,6 +37,18 @@ pub enum DpfError {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
+    /// The current site-wide BMC credential is absent from its authoritative
+    /// source. DPF leaves any derived Secret unchanged until the source
+    /// supplies a value or coordinated per-device fencing can remove it.
+    #[error("BMC password source unavailable: {0}")]
+    BmcPasswordSourceUnavailable(String),
+
+    /// Local sources own version 0 of the site-wide BMC root but do not supply
+    /// it. The SDK rejects startup so source-policy activation is safe across
+    /// rolling deployments.
+    #[error("local BMC password source unavailable: {0}")]
+    LocalBmcPasswordSourceUnavailable(String),
+
     #[error("configuration error: {0}")]
     ConfigError(String),
 
@@ -52,6 +64,19 @@ impl DpfError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
             || matches!(self, Self::KubeError(kube::Error::Api(status)) if status.is_not_found())
+    }
+
+    /// Returns whether the configured source cannot supply the BMC password.
+    pub fn is_bmc_password_source_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::BmcPasswordSourceUnavailable(_) | Self::LocalBmcPasswordSourceUnavailable(_)
+        )
+    }
+
+    /// Returns whether local ownership made BMC root version 0 unavailable.
+    pub(crate) fn is_local_bmc_password_source_unavailable(&self) -> bool {
+        matches!(self, Self::LocalBmcPasswordSourceUnavailable(_))
     }
 
     pub fn not_found(kind: &'static str, name: impl Into<String>) -> Self {

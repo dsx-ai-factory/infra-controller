@@ -625,7 +625,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--vpc-id` | yes | Parent VPC |
 | `--machine-id` | no | Pin to a specific machine (requires [targeted instance creation](#granting-targeted-instance-creation) on the tenant's account for that site) |
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
-| `--operating-system-id` | no | OS for PXE provisioning |
+| `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
 | `--ipxe-script` | no | Custom iPXE script |
 | `--user-data` | no | cloud-init style user data |
@@ -1075,6 +1075,7 @@ Flag-first ordering -- always put flags before positional args.
 - [Authentication and Authorization](/rest-api-reference/authentication-and-authorization), Day 0 auth configuration: `issuers` and `keycloak` modes, claim mappings, validation rules
 - [Tenant Management with Keycloak](tenant-management-keycloak.md), realm-side steps for onboarding a tenant on Keycloak deployments
 - [Network Isolation](network-isolation.md), per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
+- [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md), reusable template-based boot definitions and Site synchronization
 - [Organization & Permissions](org-permissions.md), IdP-managed roles and user setup
 - [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior

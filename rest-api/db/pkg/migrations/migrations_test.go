@@ -1209,3 +1209,45 @@ func Test_tenantConfigUpMigration(t *testing.T) {
 		Exec(ctx)
 	assert.Error(t, err)
 }
+
+// TestDpuExtensionServiceDpuTargetMigration verifies that historical Helm services receive the
+// compatibility target while Pod services remain unchanged.
+func Test_dpuExtensionServiceDpuTargetMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	// Recreate the minimal historical table shape before dpu_target existed.
+	_, err := dbSession.DB.ExecContext(ctx, `
+		CREATE TABLE dpu_extension_service (
+			id TEXT PRIMARY KEY,
+			service_type TEXT NOT NULL
+		)
+	`)
+	require.NoError(t, err)
+
+	// Seed both historical service types to prove the migration backfills only Helm rows.
+	_, err = dbSession.DB.ExecContext(ctx, `
+		INSERT INTO dpu_extension_service (id, service_type)
+		VALUES ('historical-helm', 'DpfHelmChart'), ('historical-pod', 'KubernetesPod')
+	`)
+	require.NoError(t, err)
+
+	// Apply the migration directly so the test exercises its forward schema contract.
+	require.NoError(t, dpuExtensionServiceDpuTargetUpMigration(ctx, dbSession.DB))
+
+	// Historical Helm rows adopt AllActive while Kubernetes Pod rows keep no target.
+	var helmTarget string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT dpu_target FROM dpu_extension_service WHERE id = 'historical-helm'
+	`).Scan(&helmTarget)
+	require.NoError(t, err)
+	assert.Equal(t, "AllActive", helmTarget)
+
+	var podTarget *string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT dpu_target FROM dpu_extension_service WHERE id = 'historical-pod'
+	`).Scan(&podTarget)
+	require.NoError(t, err)
+	assert.Nil(t, podTarget)
+}

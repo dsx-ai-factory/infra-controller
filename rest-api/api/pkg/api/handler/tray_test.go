@@ -1564,7 +1564,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			trayID:         trayID,
-			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"tray-token"}}`, site.ID.String()),
+			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"tray-token"},"overrideVersionCheck":true}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedAuth:   "tray-token",
 			expectedStatus: http.StatusOK,
@@ -1610,6 +1610,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
 					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient

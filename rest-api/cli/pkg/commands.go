@@ -160,6 +160,8 @@ var commandPathAliases = map[string][]string{
 	"cancel-task":                                       {"task", "cancel"},
 	"create-or-update-host-firmware-config":             {"host-firmware-config", "update"},
 	"create-or-update-machine-health-report":            {"machine", "health-report", "update"},
+	"create-or-update-rack-health-report":               {"rack", "health-report", "update"},
+	"create-or-update-tray-health-report":               {"tray", "health-report", "update"},
 	"create-or-update-tenant-identity-config":           {"tenant-identity", "update"},
 	"create-or-update-tenant-identity-token-delegation": {"tenant-identity", "token-delegation", "update"},
 	"create-site-explorer-endpoint-action":              {"site-explorer", "create"},

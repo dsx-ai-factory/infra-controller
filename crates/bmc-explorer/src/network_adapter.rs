@@ -17,10 +17,10 @@
 
 use mac_address::MacAddress;
 use model::site_explorer::NetworkAdapter as ModelNetworkAdapter;
+use nv_redfish::Bmc;
 use nv_redfish::chassis::{Chassis, NetworkAdapter};
 use nv_redfish::network_device_function::NetworkDeviceFunction;
 use nv_redfish::port::Port;
-use nv_redfish::{Bmc, Resource};
 
 use crate::Error;
 
@@ -121,7 +121,7 @@ impl<B: Bmc> ExploredNetworkAdapter<B> {
             Ok(None) => return,
             Err(error) => {
                 tracing::warn!(
-                    adapter_id = %self.adapter.id(),
+                    adapter_id = %self.adapter.raw().id,
                     error = %error,
                     "Failed to fetch network adapter Ports"
                 );
@@ -134,7 +134,7 @@ impl<B: Bmc> ExploredNetworkAdapter<B> {
             match port_link.upgrade::<Port<B>>().await {
                 Ok(port) => self.ports.push(port),
                 Err(error) => tracing::warn!(
-                    adapter_id = %self.adapter.id(),
+                    adapter_id = %self.adapter.raw().id,
                     %port_id,
                     error = %error,
                     "Failed to fetch network adapter Port"
@@ -154,7 +154,7 @@ impl<B: Bmc> ExploredNetworkAdapter<B> {
     fn to_model(&self) -> ModelNetworkAdapter {
         let hw_id = self.adapter.hardware_id();
         ModelNetworkAdapter {
-            id: self.adapter.id().to_string(),
+            id: self.adapter.raw().id.clone(),
             manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
             model: hw_id.model.map(|v| v.to_string()),
             part_number: hw_id.part_number.map(|v| v.to_string()),
@@ -194,8 +194,8 @@ impl<B: Bmc> ExploredNetworkAdapter<B> {
                     Ok(None) => None,
                     Err(error) => {
                         tracing::warn!(
-                            adapter_id = %self.adapter.id(),
-                            port_id = %port.id(),
+                            adapter_id = %self.adapter.raw().id,
+                            port_id = %port.raw().id,
                             error = %error,
                             "Failed to parse Lenovo network adapter Port data"
                         );
@@ -223,8 +223,8 @@ impl<B: Bmc> ExploredNetworkAdapter<B> {
             Ok(mac_address) => Some(mac_address),
             Err(error) => {
                 tracing::warn!(
-                    adapter_id = %self.adapter.id(),
-                    port_id = %port.id(),
+                    adapter_id = %self.adapter.raw().id,
+                    port_id = %port.raw().id,
                     mac_address = %address,
                     error = %error,
                     "Failed to parse network adapter Port MAC address"

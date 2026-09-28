@@ -662,9 +662,7 @@ impl ApiClient {
     ) -> CarbideCliResult<rpc::NetworkSegmentList> {
         let request = rpc::NetworkSegmentsByIdsRequest {
             network_segments_ids: network_segments_ids.to_vec(),
-            // Request inline history for single-segment lookups so old servers (lacking the
-            // FindNetworkSegmentStateHistories RPC) still populate the deprecated history field.
-            include_history: network_segments_ids.len() == 1,
+            include_history: false,
             include_num_free_ips: true,
         };
         Ok(self.0.find_network_segments_by_ids(request).await?)
@@ -926,7 +924,13 @@ impl ApiClient {
     ) -> CarbideCliResult<::rpc::site_explorer::SiteExplorationReport> {
         let last_run = self.get_site_explorer_last_run().await?;
         // grab endpoints
-        let endpoint_ids = match self.0.find_explored_endpoint_ids().await {
+        let endpoint_ids = match self
+            .0
+            .find_explored_endpoint_ids(
+                ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
+            )
+            .await
+        {
             Ok(endpoint_ids) => endpoint_ids,
             Err(status) => {
                 return if maybe_unimplemented(&status) {

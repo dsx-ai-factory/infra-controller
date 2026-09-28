@@ -14,6 +14,7 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 	k8scorev1 "k8s.io/api/core/v1"
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
@@ -27,6 +28,12 @@ const (
 	DpuExtensionServiceTypeKubernetesPod = "KubernetesPod"
 	// DpuExtensionServiceTypeDpfHelmChart is the service type for a DPF-managed Helm chart
 	DpuExtensionServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets the host's every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
 	// DpuExtensionServiceMaxDataBytes is the max size of the deployment spec, matching the Core limit
 	DpuExtensionServiceMaxDataBytes = 131072
 	// DpuExtensionServiceMaxObservabilityConfigs is the max number of observability configs allowed per service version
@@ -65,18 +72,40 @@ func ValidatePodYaml(yamlData []byte) error {
 	return nil
 }
 
-// ValidateDpfHelmChartData checks that the given bytes are a DPF Helm chart definition.
-// The field rules mirror DpfHelmChartServiceData::validate in Core so an invalid
-// definition is rejected with a specific message before a workflow is dispatched.
-func ValidateDpfHelmChartData(jsonData []byte) error {
-	var chart struct {
-		RepoURL            string         `json:"repoURL"`
-		ChartName          string         `json:"chartName"`
-		ChartVersion       string         `json:"chartVersion"`
-		SecurityPrivileged *bool          `json:"security.privileged"`
-		Values             map[string]any `json:"values"`
-	}
+// dpfHelmChartData defines a DPF Helm extension service's Data field
+type dpfHelmChartData struct {
+	RepoURL            string                        `json:"repoURL"`
+	ChartName          string                        `json:"chartName"`
+	ChartVersion       string                        `json:"chartVersion"`
+	SecurityPrivileged *bool                         `json:"security.privileged"`
+	Values             map[string]any                `json:"values,omitempty"`
+	ServiceDaemonSet   *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
+}
 
+// dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
+// excluding placement fields such as nodeSelector, which NICo owns in Core.
+type dpfHelmChartServiceDaemonSet struct {
+	Labels         *map[string]string             `json:"labels,omitempty"`
+	Annotations    *map[string]string             `json:"annotations,omitempty"`
+	Resources      *map[string]intstr.IntOrString `json:"resources,omitempty"`
+	UpdateStrategy *dpfDaemonSetUpdateStrategy    `json:"updateStrategy,omitempty"`
+}
+
+type dpfDaemonSetUpdateStrategy struct {
+	Type          *string                    `json:"type,omitempty"`
+	RollingUpdate *dpfDaemonSetRollingUpdate `json:"rollingUpdate,omitempty"`
+}
+
+type dpfDaemonSetRollingUpdate struct {
+	MaxSurge       *intstr.IntOrString `json:"maxSurge,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// ValidateDpfHelmChartData checks the REST-facing shape of a DPF Helm chart
+// definition and rejects the known NICo-owned placement override. Kubernetes
+// and DPF semantic validation is canonical in Core before persistence.
+func ValidateDpfHelmChartData(jsonData []byte) error {
+	var chart dpfHelmChartData
 	if err := json.Unmarshal(jsonData, &chart); err != nil {
 		return fmt.Errorf("failed to parse json: %w", err)
 	}
@@ -118,6 +147,8 @@ type APIDpuExtensionServiceCreateRequest struct {
 	Description *string `json:"description"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// SiteID is the ID of the Site
 	SiteID string `json:"siteId"`
 	// Data is the deployment spec for the DPU Extension Service
@@ -150,6 +181,31 @@ func (descr *APIDpuExtensionServiceCreateRequest) Validate() error {
 	)
 	if err != nil {
 		return err
+	}
+
+	if descr.ServiceType == DpuExtensionServiceTypeDpfHelmChart {
+		if descr.DpuTarget == nil {
+			return validation.Errors{
+				"dpuTarget": errors.New("must be specified for `DpfHelmChart` services"),
+			}
+		}
+		if err = validation.Validate(
+			*descr.DpuTarget,
+			validation.Required.Error("must be specified for `DpfHelmChart` services"),
+			validation.In(
+				DpuExtensionServiceDpuTargetPrimary,
+				DpuExtensionServiceDpuTargetAllActive,
+				DpuExtensionServiceDpuTargetAll,
+			).Error("must be one of `Primary`, `AllActive`, or `All`"),
+		); err != nil {
+			return validation.Errors{
+				"dpuTarget": err,
+			}
+		}
+	} else if descr.DpuTarget != nil {
+		return validation.Errors{
+			"dpuTarget": errors.New("cannot be specified for `KubernetesPod` services"),
+		}
 	}
 
 	switch descr.ServiceType {
@@ -301,6 +357,14 @@ func (descr *APIDpuExtensionServiceCreateRequest) ToProto(serviceID, tenantOrg s
 		req.ServiceType = corev1.DpuExtensionServiceType_KUBERNETES_POD
 	} else {
 		req.ServiceType = corev1.DpuExtensionServiceType_DPF_HELM_CHART
+		if descr.DpuTarget != nil {
+			target := map[string]corev1.DpuExtensionServiceDpuTarget{
+				DpuExtensionServiceDpuTargetPrimary:   corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY,
+				DpuExtensionServiceDpuTargetAllActive: corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE,
+				DpuExtensionServiceDpuTargetAll:       corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL,
+			}[*descr.DpuTarget]
+			req.DpuTarget = &target
+		}
 	}
 	return req
 }
@@ -336,6 +400,8 @@ type APIDpuExtensionService struct {
 	Description *string `json:"description"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// SiteID is the ID of the Site
 	SiteID string `json:"siteId"`
 	// Site is the summary of the site
@@ -367,6 +433,7 @@ func NewAPIDpuExtensionService(dbdes *cdbm.DpuExtensionService, dbdesds []cdbm.S
 		Name:           dbdes.Name,
 		Description:    dbdes.Description,
 		ServiceType:    dbdes.ServiceType,
+		DpuTarget:      dbdes.DpuTarget,
 		SiteID:         dbdes.SiteID.String(),
 		TenantID:       dbdes.TenantID.String(),
 		Version:        dbdes.Version,
@@ -405,6 +472,8 @@ type APIDpuExtensionServiceSummary struct {
 	Name string `json:"name"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// LatestVersion is the latest version of the DPU Extension Service
 	LatestVersion *string `json:"latestVersion"`
 	// Status is the status of the DpuExtensionService
@@ -417,6 +486,7 @@ func NewAPIDpuExtensionServiceSummary(dbdes *cdbm.DpuExtensionService) *APIDpuEx
 		ID:            dbdes.ID.String(),
 		Name:          dbdes.Name,
 		ServiceType:   dbdes.ServiceType,
+		DpuTarget:     dbdes.DpuTarget,
 		LatestVersion: dbdes.Version,
 		Status:        dbdes.Status,
 	}

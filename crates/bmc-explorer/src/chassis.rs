@@ -29,8 +29,7 @@ use nv_redfish::chassis::{Chassis as NvChassis, PowerSupply as NvPowerSupply};
 use nv_redfish::core::ODataId;
 use nv_redfish::hardware_id::{Manufacturer, Model};
 use nv_redfish::pcie_device::PcieDevice;
-use nv_redfish::resource::ResourceIdRef;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::network_adapter::ExploredNetworkAdapterCollection;
 use crate::{Error, network_adapter};
@@ -39,7 +38,7 @@ type AssemblyModelFilterFn = fn(Option<AssemblyModel<&str>>) -> bool;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 pub(crate) struct Config {
     pub(crate) network_adapter: network_adapter::Config,
-    pub(crate) need_assembly_sn: fn(ResourceIdRef) -> Option<AssemblyModelFilterFn>,
+    pub(crate) need_assembly_sn: fn(&str) -> Option<AssemblyModelFilterFn>,
     pub(crate) lazy_fetch: Option<fn(&ODataId) -> bool>,
 }
 
@@ -102,7 +101,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
         for chassis in &mut self.members {
             if linked_chassis_ids
                 .iter()
-                .any(|chassis_id| chassis_id == chassis.chassis.odata_id())
+                .any(|chassis_id| chassis_id == &chassis.chassis.raw().odata_id)
             {
                 chassis.network_adapters.fetch_ports().await;
             }
@@ -111,8 +110,8 @@ impl<B: Bmc> ExploredChassisCollection<B> {
 
     pub(crate) fn is_liteon_powershelf(&self) -> bool {
         self.members.iter().any(|m| {
-            m.chassis.id().into_inner() == "powershelf"
-                || (m.chassis.id().into_inner() == "chassis"
+            m.chassis.raw().id == "powershelf"
+                || (m.chassis.raw().id == "chassis"
                     && m.chassis
                         .hardware_id()
                         .manufacturer
@@ -141,7 +140,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     fn delta_powershelf_chassis(&self) -> Option<&ExploredChassis<B>> {
         self.members.iter().find(|m| {
             is_delta_powershelf_chassis(
-                m.chassis.id().into_inner(),
+                &m.chassis.raw().id,
                 m.chassis
                     .hardware_id()
                     .manufacturer
@@ -188,7 +187,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
             .map(|m| {
                 let hw_id = m.chassis.hardware_id();
                 (
-                    m.chassis.id().to_string(),
+                    m.chassis.raw().id.clone(),
                     hw_id.manufacturer.map(|v| v.to_string()),
                     hw_id.model.map(|v| v.to_string()),
                     hw_id
@@ -235,7 +234,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     pub(crate) fn is_bluefield2(&self) -> bool {
         self.members
             .iter()
-            .find(|c| c.chassis.id().into_inner() == "Card1")
+            .find(|c| c.chassis.raw().id == "Card1")
             .is_some_and(|c| {
                 let hw_id = c.chassis.hardware_id();
                 hw_id.manufacturer == Some(Manufacturer::new("Nvidia"))
@@ -254,7 +253,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
         let maybe_sn = self
             .members
             .iter()
-            .find(|c| c.chassis.id().into_inner() == "Card1")
+            .find(|c| c.chassis.raw().id == "Card1")
             .ok_or_else(Error::bmc_not_provided("chassis with id Card1"))?
             .chassis
             .hardware_id()
@@ -278,18 +277,18 @@ impl<B: Bmc> ExploredChassisCollection<B> {
             let mac = self
                 .members
                 .iter()
-                .find(|c| c.chassis.id().into_inner() == chassis_id)
+                .find(|c| c.chassis.raw().id == chassis_id)
                 .and_then(|c| {
                     c.network_adapters
                         .members()
                         .iter()
-                        .find(|a| a.adapter.id().into_inner() == adapter_id)
+                        .find(|a| a.adapter.raw().id == adapter_id)
                 })
                 .and_then(|adapter| adapter.functions.as_ref())
                 .and_then(|functions| {
                     functions
                         .iter()
-                        .find(|f| f.id().into_inner() == function_id)
+                        .find(|f| f.raw().id == function_id)
                         .and_then(|f| f.ethernet_permanent_mac_address())
                 });
 
@@ -351,7 +350,8 @@ impl<B: Bmc> ExploredChassis<B> {
     async fn explore(chassis: NvChassis<B>, config: &Config) -> Result<Self, Error<B>> {
         let network_adapters =
             ExploredNetworkAdapterCollection::explore(&chassis, &config.network_adapter).await?;
-        let assembly_sn = if let Some(model_check_fn) = (config.need_assembly_sn)(chassis.id()) {
+        let chassis_raw = chassis.raw();
+        let assembly_sn = if let Some(model_check_fn) = (config.need_assembly_sn)(&chassis_raw.id) {
             match chassis.assembly().await {
                 Ok(Some(assembly)) => {
                     let assembly_data = assembly
@@ -390,7 +390,7 @@ impl<B: Bmc> ExploredChassis<B> {
                     .await
                     .map_err(Error::nv_redfish("LiteOn power supply"))?;
                 power_supplies.push(LiteOnPowerSupply {
-                    id: ps.base.id.clone(),
+                    id: ps.id.clone(),
                     serial_number: ps.serial_number.clone().and_then(std::convert::identity),
                     power_state: ps.power_state,
                 });
@@ -417,7 +417,7 @@ impl<B: Bmc> ExploredChassis<B> {
             let power_supplies = supplies
                 .iter()
                 .map(|ps| DeltaPowerSupply {
-                    id: ps.id().to_string(),
+                    id: ps.raw().id.clone(),
                     power_state: delta_psu_power_on(ps),
                 })
                 .collect();
@@ -437,7 +437,7 @@ impl<B: Bmc> ExploredChassis<B> {
 
     fn to_model(&self) -> Chassis {
         let network_adapters = self.network_adapters.to_model();
-        let chassis_id = self.chassis.id();
+        let chassis_id = self.chassis.raw().id.clone();
         let hw_id = self.chassis.hardware_id();
         let serial_number = self
             .assembly_sn
@@ -447,7 +447,7 @@ impl<B: Bmc> ExploredChassis<B> {
 
         let nvidia_oem = self.chassis.oem_nvidia_cbc().ok().and_then(identity);
         Chassis {
-            id: chassis_id.to_string(),
+            id: chassis_id,
             manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
             model: hw_id.model.map(|v| v.to_string()),
             part_number: hw_id.part_number.map(|v| v.to_string()),

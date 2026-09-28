@@ -21,8 +21,9 @@ metadata:
 spec:
   # NOTE: newer DPF releases make spec.deploymentMode a required field (with CEL
   # rules: zero-trust requires installViaRedfish; host-trusted forbids it). It
-  # does not exist in v26.4.0 (the NICO_DPF_VERSION default), so it is omitted
-  # here. When bumping NICO_DPF_VERSION to a release that requires it, add e.g.
+  # does not exist in v26.4.0 (the helm-prereqs/doca-platform submodule pin and
+  # NICO_DPF_IMAGE_TAG default), so it is omitted here. When bumping the pin to
+  # a release that requires it, add e.g.
   #   deploymentMode: zero-trust
   # or the apply will be rejected with "spec.deploymentMode: Required value".
   dpuDetector:

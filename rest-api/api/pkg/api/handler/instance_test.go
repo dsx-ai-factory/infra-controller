@@ -561,12 +561,14 @@ func testUpdateInterfaceWithIPs(t *testing.T, dbSession *cdb.Session, ifc *cdbm.
 }
 
 type ethernetReconciliationExpectation struct {
-	rowCount        int
-	readyIDs        []uuid.UUID
-	deletingIDs     []uuid.UUID
-	pendingCount    int
-	uniqueIPAddress *string
-	usagePrefix     *cdbm.VpcPrefix
+	rowCount               int
+	readyIDs               []uuid.UUID
+	deletingIDs            []uuid.UUID
+	pendingCount           int
+	uniqueIPAddress        *string
+	requestedIPAddress     *string
+	allowedAnycastPrefixes []string
+	usagePrefix            *cdbm.VpcPrefix
 }
 
 func testUpdateMachineToUnhealthy(t *testing.T, dbSession *cdb.Session, m *cdbm.Machine) *cdbm.Machine {
@@ -4529,6 +4531,42 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	issue4908RemoveVF := testInstanceBuildInterface(t, dbSession, issue4908RemoveInstance.ID, nil, &vpcPrefixSite3Secondary.ID, issue4908Device, issue4908DeviceInstance, issue4908VFID, false, cdbm.InterfaceStatusReady, tnu1)
 	testUpdateInterfaceWithIPs(t, dbSession, issue4908RemoveVF, []string{"192.174.0.1"})
 
+	ipv6IPBlock := common.TestBuildVpcPrefixIPBlock(t, dbSession, "test-ipblock-ipv6-interface-update", st3, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, tnu1)
+	ipv6Prefix := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-ipv6-interface-update", st3, tn1, vpcSelection.ID, &ipv6IPBlock.ID, cutil.GetPtr("2001:db8::/64"), cutil.GetPtr(64), cdbm.VpcPrefixStatusReady, tnu1)
+	ipv6Machine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
+	require.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, ipv6Machine, ist4))
+	ipv6Instance := testInstanceBuildInstance(t, dbSession, "test-instance-ipv6-address-spelling", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(ipv6Machine.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	ipv6Interface, ipv6InterfaceErr := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID:         ipv6Instance.ID,
+		VpcPrefixID:        &ipv6Prefix.ID,
+		RequestedIpAddress: cutil.GetPtr("2001:0DB8:0:0:0:0:0:1"),
+		Device:             issue4908Device,
+		DeviceInstance:     issue4908DeviceInstance,
+		IsPhysical:         true,
+		Status:             cdbm.InterfaceStatusReady,
+		CreatedBy:          tnu1.ID,
+	})
+	require.NoError(t, ipv6InterfaceErr)
+	testUpdateInterfaceWithIPs(t, dbSession, ipv6Interface, []string{"2001:db8::1"})
+
+	anycastMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
+	require.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, anycastMachine, ist4))
+	anycastInstance := testInstanceBuildInstance(t, dbSession, "test-instance-ipv6-anycast-prefix", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(anycastMachine.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	anycastInterface, anycastInterfaceErr := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID:     anycastInstance.ID,
+		VpcPrefixID:    &ipv6Prefix.ID,
+		Device:         issue4908Device,
+		DeviceInstance: issue4908DeviceInstance,
+		IsPhysical:     true,
+		InlineRoutingProfile: &cdbm.InterfaceInlineRoutingProfile{
+			AllowedAnycastPrefixes: []string{"2001:db8::/64"},
+		},
+		Status:    cdbm.InterfaceStatusReady,
+		CreatedBy: tnu1.ID,
+	})
+	require.NoError(t, anycastInterfaceErr)
+	testUpdateInterfaceWithIPs(t, dbSession, anycastInterface, []string{"2001:db8::3"})
+
 	inst13 := testInstanceBuildInstance(t, dbSession, "test-instance-nvlink-update", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 
 	// Add NVLink GPU capability to Machine
@@ -6494,6 +6532,72 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner:          true,
 		},
 		{
+			name: "test UpdateInstance preserves interface for equivalent IPv6 address",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{{
+						VpcPrefixID:    cutil.GetPtr(ipv6Prefix.ID.String()),
+						IPAddress:      cutil.GetPtr("2001:db8::1"),
+						Device:         issue4908Device,
+						DeviceInstance: issue4908DeviceInstance,
+						IsPhysical:     true,
+					}},
+				},
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				reqInstance: ipv6Instance.ID.String(),
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:           1,
+					readyIDs:           []uuid.UUID{ipv6Interface.ID},
+					uniqueIPAddress:    cutil.GetPtr("2001:db8::1"),
+					requestedIPAddress: cutil.GetPtr("2001:0DB8:0:0:0:0:0:1"),
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test UpdateInstance preserves interface for equivalent IPv6 anycast prefix",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{{
+						VpcPrefixID:    cutil.GetPtr(ipv6Prefix.ID.String()),
+						Device:         issue4908Device,
+						DeviceInstance: issue4908DeviceInstance,
+						IsPhysical:     true,
+						InlineRoutingProfile: &model.APIInterfaceInlineRoutingProfile{
+							AllowedAnycastPrefixes: []string{"2001:0DB8:0000:0000::/64"},
+						},
+					}},
+				},
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				reqInstance: anycastInstance.ID.String(),
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:               1,
+					readyIDs:               []uuid.UUID{anycastInterface.ID},
+					uniqueIPAddress:        cutil.GetPtr("2001:db8::3"),
+					allowedAnycastPrefixes: []string{"2001:db8::/64"},
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
 			name: "test UpdateInstance adding VF reuses unchanged PF issue 4908",
 			fields: fields{
 				dbSession: dbSession,
@@ -7732,10 +7836,24 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					assert.Equal(t, 1, rowsWithExpectedIP)
 				}
 
+				var readyResponseIDs []string
+				for _, ifc := range rst.Interfaces {
+					if ifc.Status == cdbm.InterfaceStatusReady {
+						readyResponseIDs = append(readyResponseIDs, ifc.ID)
+					}
+				}
 				for _, interfaceID := range expected.readyIDs {
 					ifc, getErr := ifcDAO.GetByID(ctx, nil, interfaceID, nil)
 					require.NoError(t, getErr)
 					assert.Equal(t, cdbm.InterfaceStatusReady, ifc.Status)
+					assert.Contains(t, readyResponseIDs, interfaceID.String())
+					if expected.requestedIPAddress != nil {
+						assert.Equal(t, expected.requestedIPAddress, ifc.RequestedIpAddress)
+					}
+					if expected.allowedAnycastPrefixes != nil {
+						require.NotNil(t, ifc.InlineRoutingProfile)
+						assert.Equal(t, expected.allowedAnycastPrefixes, ifc.InlineRoutingProfile.AllowedAnycastPrefixes)
+					}
 				}
 
 				for _, interfaceID := range expected.deletingIDs {
@@ -7950,8 +8068,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							assert.Equal(t, siteIfc.IpAddress, reqInsIfcs[i].RequestedIpAddress)
 						}
 
-						if tt.args.reqData.Interfaces != nil && i < len(tt.args.reqData.Interfaces) && tt.args.reqData.Interfaces[i].InlineRoutingProfile != nil {
-							assertInterfaceRoutingProfilePrefixes(t, siteIfc.RoutingProfile, tt.args.reqData.Interfaces[i].InlineRoutingProfile.AllowedAnycastPrefixes)
+						if reqInsIfcs[i].InlineRoutingProfile != nil {
+							assertInterfaceRoutingProfilePrefixes(t, siteIfc.RoutingProfile, reqInsIfcs[i].InlineRoutingProfile.AllowedAnycastPrefixes)
 						}
 					}
 

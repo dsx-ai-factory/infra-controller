@@ -29,7 +29,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource() -> redfish::Resource<'static> {
     redfish::Resource {
@@ -40,15 +40,15 @@ pub(crate) fn resource() -> redfish::Resource<'static> {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(&resource().odata_id, get(get_root).patch(patch_root))
         .route(
             &ACCOUNTS_COLLECTION_RESOURCE.odata_id,
-            get(get_accounts).post(create_account),
+            get(get_accounts::<C>).post(create_account),
         )
         .route(
             format!("{}/{{account_id}}", ACCOUNTS_COLLECTION_RESOURCE.odata_id).as_str(),
-            get(get_account).patch(patch_account),
+            get(get_account::<C>).patch(patch_account::<C>),
         )
 }
 
@@ -292,7 +292,7 @@ fn account_resource(id: impl Display) -> redfish::Resource<'static> {
     }
 }
 
-async fn get_accounts(State(state): State<BmcState>) -> Response {
+async fn get_accounts<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let members = state
         .account_service_state
         .accounts()
@@ -308,8 +308,8 @@ async fn create_account() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn patch_account(
-    State(state): State<BmcState>,
+async fn patch_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(account_id): Path<String>,
     Json(patch_account): Json<serde_json::Value>,
 ) -> Response {
@@ -335,7 +335,10 @@ async fn patch_account(
     }
 }
 
-async fn get_account(State(state): State<BmcState>, Path(account_id): Path<String>) -> Response {
+async fn get_account<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(account_id): Path<String>,
+) -> Response {
     state
         .account_service_state
         .find(&account_id)

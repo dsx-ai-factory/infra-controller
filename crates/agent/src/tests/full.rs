@@ -915,6 +915,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         tenant_host_asn: Some(65100),
         dhcp_servers: vec!["127.0.0.1".to_string()],
         ntp_servers: vec![],
+        dhcpv6_server_preference: Some(255),
         vni_device: "".to_string(),
 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {
@@ -937,6 +938,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         remote_id: "".to_string(),
         deny_prefixes: vec!["1.1.1.1/32".to_string()],
         site_fabric_prefixes: vec!["2.2.2.2/32".to_string()],
+        site_fabric_null_routes: None,
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::forge::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         deprecated_deny_prefixes: vec![],
         enable_dhcp: true,

@@ -121,15 +121,20 @@ impl From<DbExploredEndpoint> for ExploredEndpoint {
     }
 }
 
+/// Returns endpoint IPs whose exploration reports match `filter`.
 pub async fn find_ips(
     txn: impl DbReader<'_>,
-    // filter is currently is empty, so it is a placeholder for the future
-    _filter: model::site_explorer::ExploredEndpointSearchFilter,
+    filter: model::site_explorer::ExploredEndpointSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
     struct ExploredEndpointIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT address FROM explored_endpoints");
+    if let Some(machine_id) = filter.machine_id {
+        builder
+            .push(" WHERE exploration_report->>'MachineId' = ")
+            .push_bind(machine_id);
+    }
     let query = builder.build_query_as();
     let ids: Vec<ExploredEndpointIp> = query
         .fetch_all(txn)
@@ -828,6 +833,23 @@ pub async fn insert(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+/// `lock_by_address` locks an existing endpoint until the caller's transaction
+/// completes. The connection must be in a transaction. It returns whether the
+/// row was locked; `false` does not prevent a later insert. Query failures
+/// propagate to the caller.
+pub async fn lock_by_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT address FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let address: Option<IpAddr> = sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(address.is_some())
 }
 
 pub async fn delete(txn: &mut PgConnection, address: IpAddr) -> Result<(), DatabaseError> {

@@ -63,6 +63,31 @@ const NETWORK_SECURITY_GROUP_RULE_PRIORITY_START: u32 = 2000;
 
 const VPC_ISOLATION_RULE_INDEX_START: usize = 10;
 const SITE_FABRIC_RULE_INDEX_START: usize = 1000;
+// BGP imports default to administrative distances 20 (eBGP) and 200 (iBGP).
+// Keep isolation below those imports while leaving 251..=254 available for
+// lower-priority routes. Missing authorized routes remain unreachable.
+const FNN_VPC_ISOLATION_ROUTE_DISTANCE: u8 = 250;
+// NVUE's default maximum RA interval is 600 seconds. RFC 8106 recommends an
+// RDNSS lifetime of at least three maximum intervals so clients do not lose
+// DNS between otherwise healthy advertisements.
+const IPV6_ROUTER_LIFETIME_SECS: u32 = 1800;
+const IPV6_RDNSS_LIFETIME_SECS: u32 = 1800;
+
+/// Returns an assigned IPv6 host route only when it is the concrete `/128`
+/// belonging to `host_address`. SLAAC has no assigned host address, so its
+/// shared `/64` must never be treated as an L2 host route.
+fn assigned_ipv6_host_route<'a>(
+    host_address: Option<&str>,
+    host_route: Option<&'a str>,
+) -> Option<&'a str> {
+    let host_address = host_address?.parse::<Ipv6Addr>().ok()?;
+    let host_route = host_route?;
+    let IpNet::V6(prefix) = host_route.parse::<IpNet>().ok()? else {
+        return None;
+    };
+
+    (prefix.prefix_len() == 128 && prefix.network() == host_address).then_some(host_route)
+}
 
 /// Deduplicated ACL prefixes and the first index available after their rules.
 struct PreparedAclPrefixes {
@@ -74,13 +99,12 @@ struct PreparedAclPrefixes {
 fn deduplicate_acl_prefixes(
     prefixes: impl IntoIterator<Item = Prefix>,
 ) -> eyre::Result<PreparedAclPrefixes> {
-    let mut seen_prefixes = HashSet::new();
-
     // ACL rule order is observable, so preserve the first occurrence of each prefix.
-    let mut unique_prefixes = prefixes
+    let mut seen_prefixes = HashSet::new();
+    let mut unique_prefixes: Vec<_> = prefixes
         .into_iter()
         .filter(|prefix| seen_prefixes.insert(prefix.Prefix.clone()))
-        .collect::<Vec<_>>();
+        .collect();
     let mut next_index = unique_prefixes
         .iter()
         .map(|prefix| {
@@ -334,30 +358,37 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
 
     // For non-FNN (ETV), tenant-wide VPC peer prefixes and VNIs come from
     // the first port config that has them. Extract these before the loop.
-    let (vpc_peer_prefixes, vpc_peer_prefixes_ipv6) = conf
-        .ct_port_configs
-        .iter()
-        .find(|p| !p.vpc_peer_prefixes.is_empty())
-        .map(|p| split_prefixes_by_family(&p.vpc_peer_prefixes, None, 1))
-        .unwrap_or_default();
-    let vpc_peer_vnis: Vec<TmplVni> = conf
-        .ct_port_configs
-        .iter()
-        .find(|p| !p.vpc_peer_vnis.is_empty())
-        .map(|p| {
-            p.vpc_peer_vnis
-                .iter()
-                .map(|vni| TmplVni { Vni: *vni })
-                .collect()
-        })
-        .unwrap_or_default();
+    let (vpc_peer_prefixes, vpc_peer_prefixes_ipv6) = if is_etv {
+        conf.ct_port_configs
+            .iter()
+            .find(|p| !p.vpc_peer_prefixes.is_empty())
+            .map(|p| split_prefixes_by_family(&p.vpc_peer_prefixes, None, 1))
+            .unwrap_or_default()
+    } else {
+        (vec![], vec![])
+    };
+    let vpc_peer_vnis: Vec<TmplVni> = if is_etv {
+        conf.ct_port_configs
+            .iter()
+            .find(|p| !p.vpc_peer_vnis.is_empty())
+            .map(|p| {
+                p.vpc_peer_vnis
+                    .iter()
+                    .map(|vni| TmplVni { Vni: *vni })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
 
-    if conf
-        .ct_port_configs
-        .iter()
-        .filter(|p| !p.vpc_peer_prefixes.is_empty())
-        .count()
-        > 1
+    if is_etv
+        && conf
+            .ct_port_configs
+            .iter()
+            .filter(|p| !p.vpc_peer_prefixes.is_empty())
+            .count()
+            > 1
     {
         tracing::info!(
             "Found more than one tenant interface, so VPC peering details of only the first found will be used when FNN is not in use."
@@ -446,8 +477,21 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         };
         let svi_mac = vni_to_svi_mac(network.vni.unwrap_or(0))?.to_string();
 
-        let (vpc_ipv4, vpc_ipv6) =
+        let (vpc_ipv4, _) =
             split_prefixes_by_family(&network.vpc_prefixes, None, (base_i + 1) * 10);
+        let router_advertisement = network
+            .ipv6_port_config
+            .as_ref()
+            .and_then(|ipv6| ipv6.router_advertisement.as_ref());
+        // FRR accepts repeated RDNSS commands, so retain only the first
+        // occurrence of each resolver while preserving discovery order.
+        let mut rendered_rdnss_servers = HashSet::new();
+        let ipv6_rdnss_servers = router_advertisement
+            .into_iter()
+            .flat_map(|ra| ra.rdnss_servers.iter())
+            .filter(|server| rendered_rdnss_servers.insert(**server))
+            .map(ToString::to_string)
+            .collect();
 
         let port = TmplConfigPort {
             InterfaceName: network.interface_name.clone(),
@@ -472,8 +516,20 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 .ipv6_port_config
                 .as_ref()
                 .map(|v6| v6.gateway_cidr.clone())
+                .filter(|address| !address.is_empty())
                 .into_iter()
                 .collect(),
+            HasIpv6RouterAdvertisement: router_advertisement.is_some(),
+            Ipv6RouterAdvertisementPrefix: router_advertisement
+                .map(|ra| ra.prefix.clone())
+                .unwrap_or_default(),
+            Ipv6RouterAdvertisementManagedConfig: router_advertisement
+                .is_some_and(|ra| ra.mode == Ipv6RouterAdvertisementMode::Stateful),
+            Ipv6RouterAdvertisementAutoconfig: router_advertisement
+                .is_some_and(|ra| ra.mode == Ipv6RouterAdvertisementMode::Slaac),
+            Ipv6RouterLifetimeSecs: IPV6_ROUTER_LIFETIME_SECS,
+            Ipv6RdnssServers: ipv6_rdnss_servers,
+            Ipv6RdnssLifetimeSecs: IPV6_RDNSS_LIFETIME_SECS,
             SviIPs: network.svi_ip.iter().cloned().collect(),
             SviIPsIpv6: network
                 .ipv6_port_config
@@ -483,17 +539,8 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 .collect(),
             SviMAC: svi_mac,
             VrfName: format!("vpc_{l3_vni}"),
-            HasVpcPeerPrefixes: !network.vpc_peer_prefixes.is_empty(),
-            HasVpcPeerPrefixesIpv6: network
-                .vpc_peer_prefixes
-                .iter()
-                .any(|p| matches!(p.parse::<IpNet>(), Ok(IpNet::V6(_)))),
-            HasVpcPrefixes: !vpc_ipv4.is_empty(),
-            // Only used directly by ETV template now.
-            // FNN template uses PortPrefixes, which is built from this.
+            // Only ETV uses VPC prefixes for tenant-wide isolation ACL permits.
             VpcPrefixes: vpc_ipv4,
-            HasVpcPrefixesIpv6: !vpc_ipv6.is_empty(),
-            VpcPrefixesIpv6: vpc_ipv6,
             IsL2Segment: network.is_l2_segment,
             StorageTarget: false, // XXX (Classic, L3)
             HasNetworkSecurityGroup: network.network_security_group_id.is_some(),
@@ -518,9 +565,6 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         }
         let port_has_neighbor = !port.HostIP.is_empty() || port.HostIPv6.is_some();
 
-        let (vpc_peer_ipv4, vpc_peer_ipv6) =
-            split_prefixes_by_family(&network.vpc_peer_prefixes, None, 1);
-
         has_any_vpc_vrf_loopback =
             has_any_vpc_vrf_loopback || network.tenant_vrf_loopback_ip.is_some();
 
@@ -539,8 +583,6 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 if v.RoutingProfile.is_none() {
                     v.RoutingProfile = routing_profile.clone();
                 }
-                v.PortPrefixes.extend_from_slice(&port.VpcPrefixes);
-                v.PortPrefixesIpv6.extend_from_slice(&port.VpcPrefixesIpv6);
                 v.HasNeighbors |= port_has_neighbor;
                 v.PortConfigs.push(port.clone());
             })
@@ -551,21 +593,12 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 VrfLoopback: network.tenant_vrf_loopback_ip.unwrap_or_default(),
                 HasNeighbors: port_has_neighbor,
                 PortConfigs: vec![port.clone()],
-                HasVpcPeerPrefixes: !vpc_peer_ipv4.is_empty(),
-                VpcPeerPrefixes: vpc_peer_ipv4,
-                HasVpcPeerPrefixesIpv6: !vpc_peer_ipv6.is_empty(),
-                VpcPeerPrefixesIpv6: vpc_peer_ipv6,
-                HasVpcPeerVnis: !network.vpc_peer_vnis.is_empty(),
                 VpcPeerVnis: network
                     .vpc_peer_vnis
                     .iter()
                     .map(|vni| TmplVni { Vni: *vni })
                     .collect(),
                 RoutingProfile: routing_profile.clone(),
-                PortPrefixes: port.VpcPrefixes.clone(),
-                PortPrefixesIpv6: port.VpcPrefixesIpv6.clone(),
-                SiteFabricPrefixes: vec![],
-                SiteFabricPrefixesIpv6: vec![],
             });
 
         port_configs.push(port);
@@ -597,26 +630,6 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
 
     let mut vpcs = vpc_configs.into_values().collect::<Vec<TmplVpc>>();
     vpcs.sort_by_key(|a| a.L3VNI);
-    for vpc in &mut vpcs {
-        let PreparedAclPrefixes {
-            prefixes: ipv4_prefixes,
-            next_index: ipv4_next_index,
-        } = deduplicate_acl_prefixes(std::mem::take(&mut vpc.PortPrefixes))?;
-        let PreparedAclPrefixes {
-            prefixes: ipv6_prefixes,
-            next_index: ipv6_next_index,
-        } = deduplicate_acl_prefixes(std::mem::take(&mut vpc.PortPrefixesIpv6))?;
-        vpc.SiteFabricPrefixes = reindex_acl_prefixes(
-            &site_fabric_ipv4,
-            ipv4_next_index.max(SITE_FABRIC_RULE_INDEX_START),
-        )?;
-        vpc.SiteFabricPrefixesIpv6 = reindex_acl_prefixes(
-            &site_fabric_ipv6,
-            ipv6_next_index.max(SITE_FABRIC_RULE_INDEX_START),
-        )?;
-        vpc.PortPrefixes = ipv4_prefixes;
-        vpc.PortPrefixesIpv6 = ipv6_prefixes;
-    }
 
     let (vpc_isolation_prefixes, etv_isolation_next_index) = if is_etv {
         let PreparedAclPrefixes {
@@ -658,16 +671,21 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             .is_some_and(|profile| profile.LeakTenantHostRoutesToUnderlay)
     }) {
         for port in &vpc.PortConfigs {
-            // IPv4 already leaks the configured gateway CIDR from `IPs`; changing
-            // that would alter existing prefix-list matches. IPv6 deliberately
-            // uses `HostIPv6Route`, the interface prefix the underlay needs.
             tenant_host_routes_to_underlay.extend_from_slice(&port.IPs);
-            tenant_host_routes_to_underlay_ipv6.extend(
-                port.HostIPv6Route
-                    .iter()
-                    .filter(|route| !route.is_empty())
-                    .cloned(),
-            );
+            if port.IsL2Segment {
+                // A stretched segment installs its shared prefix on every SVI,
+                // but only this host's tenant /128 may be leaked to the underlay.
+                if let Some(host_route) = assigned_ipv6_host_route(
+                    port.HostIPv6.as_deref(),
+                    port.HostIPv6Route.as_deref(),
+                ) {
+                    tenant_host_routes_to_underlay_ipv6.push(host_route.to_owned());
+                }
+            } else {
+                // A routed interface leaks the CIDR installed on the DPU. For
+                // stateful IPv6 this is its authoritative /127 link prefix.
+                tenant_host_routes_to_underlay_ipv6.extend_from_slice(&port.IPsIpv6);
+            }
         }
     }
 
@@ -675,6 +693,24 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         split_prefixes_by_family(&conf.anycast_site_prefixes, None, 1000);
     let (deny_ipv4, deny_ipv6) =
         split_prefixes_by_family(&conf.deny_prefixes, None, deny_prefix_rule_index_start);
+    let has_global_interface_acls = !deny_ipv4.is_empty()
+        || !deny_ipv6.is_empty()
+        || !ingress_ipv4_override_rules.is_empty()
+        || !egress_ipv4_override_rules.is_empty()
+        || !ingress_ipv6_override_rules.is_empty()
+        || !egress_ipv6_override_rules.is_empty();
+
+    let (site_fabric_prefixes, site_fabric_null_routes, site_fabric_null_routes_ipv6) = if is_etv {
+        (site_fabric_ipv4, Vec::new(), Vec::new())
+    } else {
+        (Vec::new(), site_fabric_ipv4, site_fabric_ipv6)
+    };
+
+    // Tenant RA must never survive a transition back to the admin network.
+    let has_ipv6_router_advertisements = !conf.use_admin_network
+        && port_configs
+            .iter()
+            .any(|port| port.HasIpv6RouterAdvertisement && !port.IsL2Segment);
 
     let params = TmplNvue {
         HasBgpLeafSessionPassword: conf.bgp_leaf_session_password.is_some(),
@@ -717,15 +753,20 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         DHCPServers: conf.dhcp_servers.iter().map(|ip| ip.to_string()).collect(),
         AnycastSitePrefixes: anycast_ipv4,
         AnycastSitePrefixesIpv6: anycast_ipv6,
-        HasSiteFabricPrefixes: !site_fabric_ipv4.is_empty(),
-        SiteFabricPrefixes: site_fabric_ipv4,
-        HasSiteFabricPrefixesIpv6: !site_fabric_ipv6.is_empty(),
-        SiteFabricPrefixesIpv6: site_fabric_ipv6,
+        HasSiteFabricPrefixes: !site_fabric_prefixes.is_empty(),
+        SiteFabricPrefixes: site_fabric_prefixes,
+        HasSiteFabricNullRoutes: !site_fabric_null_routes.is_empty(),
+        SiteFabricNullRoutes: site_fabric_null_routes,
+        HasSiteFabricNullRoutesIpv6: !site_fabric_null_routes_ipv6.is_empty(),
+        SiteFabricNullRoutesIpv6: site_fabric_null_routes_ipv6,
         HasDenyPrefixes: !deny_ipv4.is_empty(),
         DenyPrefixes: deny_ipv4,
         HasDenyPrefixesIpv6: !deny_ipv6.is_empty(),
         DenyPrefixesIpv6: deny_ipv6,
+        HasGlobalInterfaceAcls: has_global_interface_acls,
+        VpcIsolationRouteDistance: FNN_VPC_ISOLATION_ROUTE_DISTANCE,
         StatefulAclsEnabled: conf.stateful_acls_enabled,
+        HasIpv6RouterAdvertisements: has_ipv6_router_advertisements,
         UseVpcIsolation: conf.use_vpc_isolation,
         HasIpv4IngressSecurityPolicyOverrideRules: !ingress_ipv4_override_rules.is_empty(),
         HasIpv4EgressSecurityPolicyOverrideRules: !egress_ipv4_override_rules.is_empty(),
@@ -1383,11 +1424,34 @@ pub struct L3Domain {
 pub struct Ipv6PortConfig {
     /// IPv6 value configured on the DPU in CIDR notation (for example,
     /// "2001:db8::0/127"). Stateful FNN uses the ::0 end of a /127 linknet
-    /// (RFC 6164). SLAAC carries the selected /64 without a concrete host
-    /// address.
+    /// (RFC 6164). Routed tenant configuration derives it from the segment
+    /// prefix. SLAAC carries the selected /64 without a concrete host address.
     pub gateway_cidr: String,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN.
     pub svi_ip: Option<String>,
+    /// Tenant router-advertisement behavior for an FNN routed interface.
+    #[serde(default)]
+    pub router_advertisement: Option<Ipv6RouterAdvertisementConfig>,
+}
+
+/// Address-assignment mode advertised to an IPv6 tenant.
+#[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
+pub enum Ipv6RouterAdvertisementMode {
+    /// DHCPv6 assigns the address (M=1, O=1, A=0).
+    Stateful,
+    /// SLAAC assigns the address while DHCPv6 remains options-only (M=0, O=1, A=1).
+    Slaac,
+}
+
+/// Router-advertisement inputs retained separately from the interface linknet.
+#[derive(Clone, Deserialize, Debug)]
+pub struct Ipv6RouterAdvertisementConfig {
+    /// Allocated host-facing prefix (`/127` for stateful or `/64` for SLAAC).
+    pub prefix: String,
+    /// Explicit address-assignment mode for this prefix.
+    pub mode: Ipv6RouterAdvertisementMode,
+    /// Startup-resolved IPv6 DNS servers advertised through RDNSS.
+    pub rdnss_servers: Vec<Ipv6Addr>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1404,7 +1468,9 @@ pub struct PortConfig {
     /// Optional IPv6 configuration for interfaces that include IPv6.
     pub ipv6_port_config: Option<Ipv6PortConfig>,
     pub vpc_prefixes: Vec<String>,
+    /// Peer prefixes consumed by ETV; FNN peering uses only `vpc_peer_vnis`.
     pub vpc_peer_prefixes: Vec<String>,
+    /// Peer VNIs imported as EVPN route targets by FNN.
     pub vpc_peer_vnis: Vec<u32>,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN (IPv4).
     pub svi_ip: Option<String>,
@@ -1463,15 +1529,20 @@ struct TmplNvue {
 
     HasDenyPrefixes: bool,
     HasDenyPrefixesIpv6: bool,
+    /// Whether every tenant interface has at least one global ACL policy to attach.
+    HasGlobalInterfaceAcls: bool,
+    /// Administrative distance for FNN site-fabric null routes.
+    VpcIsolationRouteDistance: u8,
 
-    /// Format: CIDR of the site prefixes for tenant use.  If VPC isolation is applied,
-    /// and there is no network security group applied overriding the behavior,
-    /// these will be blocked as well.
+    /// Site prefixes rendered as ETV isolation ACL entries.
     SiteFabricPrefixes: Vec<Prefix>,
-    SiteFabricPrefixesIpv6: Vec<Prefix>,
-
     HasSiteFabricPrefixes: bool,
-    HasSiteFabricPrefixesIpv6: bool,
+
+    /// Site-fabric null routes rendered in every FNN tenant VRF.
+    SiteFabricNullRoutes: Vec<Prefix>,
+    SiteFabricNullRoutesIpv6: Vec<Prefix>,
+    HasSiteFabricNullRoutes: bool,
+    HasSiteFabricNullRoutesIpv6: bool,
 
     /// Format: CIDR of the site prefixes that tenants are allowed to
     /// from the host to the DPU.
@@ -1487,6 +1558,9 @@ struct TmplNvue {
     /// should perform any extra config to prepare
     /// for them.
     StatefulAclsEnabled: bool,
+
+    /// Whether this desired configuration contains routed tenant RA.
+    HasIpv6RouterAdvertisements: bool,
 
     /// Whether there are global policies that should be evaluated
     /// after deny prefixes but before any tenant-defined rules.
@@ -1673,23 +1747,6 @@ struct TmplVpc {
     HasNeighbors: bool,
     PortConfigs: Vec<TmplConfigPort>,
 
-    HasVpcPeerPrefixes: bool,
-    VpcPeerPrefixes: Vec<Prefix>,
-    HasVpcPeerPrefixesIpv6: bool,
-    VpcPeerPrefixesIpv6: Vec<Prefix>,
-
-    // The relationship between interface:VPC is 1:1 but VPC:interface is 1:M.
-    // So, a single VPC could have multiple, per-port, VpcPrefixes.  We can
-    // accumulate these and pass them into the template for ease-of-use.
-    /// The list of prefixes for all ports/interfaces that belong to this VPC.
-    PortPrefixes: Vec<Prefix>,
-    PortPrefixesIpv6: Vec<Prefix>,
-    /// Site-fabric deny prefixes indexed within this FNN VPC's IPv4 isolation ACL.
-    SiteFabricPrefixes: Vec<Prefix>,
-    /// Site-fabric deny prefixes indexed within this FNN VPC's IPv6 isolation ACL.
-    SiteFabricPrefixesIpv6: Vec<Prefix>,
-
-    HasVpcPeerVnis: bool,
     VpcPeerVnis: Vec<TmplVni>,
 
     RoutingProfile: Option<TmplRoutingProfile>,
@@ -1731,6 +1788,13 @@ struct TmplConfigPort {
     IPs: Vec<String>,
     /// DPU-side IPv6 addresses with their prefix lengths.
     IPsIpv6: Vec<String>,
+    HasIpv6RouterAdvertisement: bool,
+    Ipv6RouterAdvertisementPrefix: String,
+    Ipv6RouterAdvertisementManagedConfig: bool,
+    Ipv6RouterAdvertisementAutoconfig: bool,
+    Ipv6RouterLifetimeSecs: u32,
+    Ipv6RdnssServers: Vec<String>,
+    Ipv6RdnssLifetimeSecs: u32,
 
     /// IPv4 SVI addresses for symmetrical EVPN. These are plain addresses
     /// without prefix lengths, typically the second usable address in the prefix.
@@ -1755,9 +1819,7 @@ struct TmplConfigPort {
     /// The name of the VRF this interface belongs to.
     VrfName: String,
 
-    HasVpcPrefixes: bool,
-
-    /// Tenant VPCs we should allow them to access
+    /// IPv4 VPC prefixes used by ETV's tenant-wide isolation ACL.
     VpcPrefixes: Vec<Prefix>,
 
     // XXX: all of these added so the L3 template can build, need
@@ -1768,11 +1830,6 @@ struct TmplConfigPort {
     IsL2Segment: bool,
 
     IsPhy: bool,
-
-    HasVpcPeerPrefixes: bool,
-    HasVpcPrefixesIpv6: bool,
-    VpcPrefixesIpv6: Vec<Prefix>,
-    HasVpcPeerPrefixesIpv6: bool,
 
     HasNetworkSecurityGroup: bool,
     NetworkSecurityGroupIndex: Option<u16>,
@@ -2089,8 +2146,9 @@ mod tests {
     /// diff-based comparison as the ethernet_virtualization tests.
     fn assert_build_matches_golden(conf: NvueConfig, golden_file: &str) {
         let output = build(conf).expect("build should succeed");
-        let expected = golden_file;
-        let r = crate::util::compare_lines(&output, expected, None);
+        let output = output.trim_end_matches('\n');
+        let expected = golden_file.trim_end_matches('\n');
+        let r = crate::util::compare_lines(output, expected, None);
         if !r.is_identical() {
             eprintln!("Golden file diff:\n{}", r.report());
             panic!("build output does not match golden file");
@@ -2146,8 +2204,10 @@ mod tests {
         );
     }
 
+    /// Verifies the FNN golden renders family-specific blackhole routes while ordinary deny
+    /// prefixes remain ACLs.
     #[test]
-    fn test_build_fnn_ipv6_acls() {
+    fn test_build_fnn_dual_stack_isolation_routes() {
         let mut conf = minimal_nvue_config();
         conf.is_fnn = true;
         conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
@@ -2193,7 +2253,9 @@ mod tests {
         }];
         assert_build_matches_golden(
             conf,
-            include_str!("../templates/tests/nvue_build_fnn_ipv6_acls.yaml.expected"),
+            include_str!(
+                "../templates/tests/nvue_build_fnn_dual_stack_isolation_routes.yaml.expected"
+            ),
         );
     }
 
@@ -2234,60 +2296,6 @@ mod tests {
         assert_build_matches_golden(
             conf,
             include_str!("../templates/tests/nvue_build_etv_ipv4_only.yaml.expected"),
-        );
-    }
-
-    #[test]
-    fn test_build_fnn_ipv6_only_vpc_prefixes() {
-        // When vpc_prefixes contains only IPv6 entries, HasVpcPrefixes (IPv4)
-        // should be false, and HasVpcPrefixesIpv6 should be true.
-        let mut conf = minimal_nvue_config();
-        conf.is_fnn = true;
-        conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
-        conf.use_vpc_isolation = true;
-        conf.deny_prefixes = vec!["192.0.2.0/24".into()];
-        conf.site_fabric_prefixes = vec!["10.0.0.0/16".into(), "fd00::/48".into()];
-        conf.ct_routing_profile = Some(RoutingProfile {
-            tenant_leak_communities_accepted: false,
-            leak_default_route_from_underlay: false,
-            leak_tenant_host_routes_to_underlay: false,
-
-            route_target_imports: vec![],
-            route_targets_on_exports: vec![],
-            accepted_leaks_from_underlay: vec![],
-            allowed_anycast_prefixes: vec![],
-        });
-        conf.ct_port_configs = vec![PortConfig {
-            interface_name: "pf0vf0_if".into(),
-            vlan: 100,
-            host_ip: "10.0.1.2".into(),
-            host_route: "10.0.1.0/24".into(),
-            host_ipv6: None,
-            host_ipv6_route: None,
-            vni: Some(1000),
-            l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
-            vpc_prefixes: vec!["2001:db8:1::/48".into(), "2001:db8:2::/48".into()],
-            vpc_peer_prefixes: vec![],
-            vpc_peer_vnis: vec![],
-            svi_ip: Some("10.0.1.254".into()),
-            tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
-            is_l2_segment: false,
-            is_phy: false,
-            network_security_group_id: None,
-            routing_profile: None,
-            interface_routing_profile: None,
-            ipv6_port_config: None,
-        }];
-        conf.ct_access_vlans = vec![VlanConfig {
-            vlan_id: 100,
-            network: "10.0.1.0/24".into(),
-            ip: "10.0.1.2".into(),
-            ipv6_vlan_config: None,
-        }];
-        assert_build_matches_golden(
-            conf,
-            include_str!("../templates/tests/nvue_build_fnn_ipv6_only_vpc.yaml.expected"),
         );
     }
 
@@ -2336,90 +2344,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_fnn_multi_port_ipv6_accumulation() {
-        // When multiple ports belong to the same VPC (same l3_vni),
-        // PortPrefixesIpv6 should accumulate from all ports.
-        let mut conf = minimal_nvue_config();
-        conf.is_fnn = true;
-        conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
-        conf.use_vpc_isolation = true;
-        conf.site_fabric_prefixes = vec!["10.0.0.0/16".into(), "fd00::/32".into()];
-        conf.ct_routing_profile = Some(RoutingProfile {
-            tenant_leak_communities_accepted: false,
-            leak_default_route_from_underlay: false,
-            leak_tenant_host_routes_to_underlay: false,
-            route_target_imports: vec![],
-            route_targets_on_exports: vec![],
-            accepted_leaks_from_underlay: vec![],
-            allowed_anycast_prefixes: vec![],
-        });
-        conf.ct_port_configs = vec![
-            PortConfig {
-                interface_name: "pf0vf0_if".into(),
-                vlan: 100,
-                host_ip: "10.0.1.2".into(),
-                host_route: "10.0.1.0/24".into(),
-                host_ipv6: None,
-                host_ipv6_route: None,
-                vni: Some(1000),
-                l3_vni: Some(200),
-                gateway_cidr: "10.0.1.1/24".into(),
-                vpc_prefixes: vec!["10.0.1.0/24".into(), "2001:db8:1::/48".into()],
-                vpc_peer_prefixes: vec![],
-                vpc_peer_vnis: vec![],
-                svi_ip: Some("10.0.1.254".into()),
-                tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
-                is_l2_segment: false,
-                is_phy: false,
-                network_security_group_id: None,
-                routing_profile: None,
-                interface_routing_profile: None,
-                ipv6_port_config: None,
-            },
-            PortConfig {
-                interface_name: "pf0hpf_if".into(),
-                vlan: 101,
-                host_ip: "10.0.2.2".into(),
-                host_route: "10.0.2.0/24".into(),
-                host_ipv6: None,
-                host_ipv6_route: None,
-                vni: Some(1001),
-                l3_vni: Some(200),
-                gateway_cidr: "10.0.2.1/24".into(),
-                vpc_prefixes: vec!["10.0.2.0/24".into(), "2001:db8:2::/48".into()],
-                vpc_peer_prefixes: vec![],
-                vpc_peer_vnis: vec![],
-                svi_ip: Some("10.0.2.254".into()),
-                tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
-                is_l2_segment: false,
-                is_phy: false,
-                network_security_group_id: None,
-                routing_profile: None,
-                interface_routing_profile: None,
-                ipv6_port_config: None,
-            },
-        ];
-        conf.ct_access_vlans = vec![
-            VlanConfig {
-                vlan_id: 100,
-                network: "10.0.1.0/24".into(),
-                ip: "10.0.1.2".into(),
-                ipv6_vlan_config: None,
-            },
-            VlanConfig {
-                vlan_id: 101,
-                network: "10.0.2.0/24".into(),
-                ip: "10.0.2.2".into(),
-                ipv6_vlan_config: None,
-            },
-        ];
-        assert_build_matches_golden(
-            conf,
-            include_str!("../templates/tests/nvue_build_fnn_multi_port_ipv6.yaml.expected"),
-        );
-    }
-
     /// Builds the dual-stack FNN fixture shared by the address and route-leak tests.
     fn dual_stack_fnn_config() -> NvueConfig {
         let mut conf = minimal_nvue_config();
@@ -2442,13 +2366,21 @@ mod tests {
             host_ip: "10.0.1.1".into(),
             host_route: "10.0.1.0/31".into(),
             host_ipv6: Some("2001:db8::1".into()),
-            host_ipv6_route: Some("2001:db8::0/127".into()),
+            host_ipv6_route: Some("2001:db8::1/128".into()),
             vni: Some(1000),
             l3_vni: Some(100),
             gateway_cidr: "10.0.1.0/31".into(),
             ipv6_port_config: Some(Ipv6PortConfig {
                 gateway_cidr: "2001:db8::0/127".into(),
                 svi_ip: None,
+                router_advertisement: Some(Ipv6RouterAdvertisementConfig {
+                    prefix: "2001:db8::/127".into(),
+                    mode: Ipv6RouterAdvertisementMode::Stateful,
+                    rdnss_servers: vec![
+                        "2001:db8::53".parse().unwrap(),
+                        "2001:db8::54".parse().unwrap(),
+                    ],
+                }),
             }),
             vpc_prefixes: vec!["10.0.1.0/24".into(), "2001:db8::/48".into()],
             vpc_peer_prefixes: vec![],
@@ -2473,109 +2405,38 @@ mod tests {
         conf
     }
 
-    /// Verifies repeated VPC-wide prefixes from multiple ports produce one permit rule per
-    /// CIDR, because duplicate YAML rule keys prevent NVUE from applying the entire config.
+    /// Verifies FNN isolates every VPC with site-prefix blackholes while peering remains
+    /// route-target imports, so ACL ordering cannot reopen tenant-to-tenant reachability.
     #[test]
-    fn test_build_deduplicates_shared_vpc_isolation_prefixes() {
-        // Model Core's repeated VPC-wide list at the old 10-rule collision boundary.
+    fn test_build_fnn_isolation_uses_routes_and_peering_uses_imports() {
+        // Core has already resolved this list. Keep the explicit child routes:
+        // each remains a stronger deny if an authorized parent route is imported.
+        // Legacy peer-prefix data still exercises the ACL-removal boundary.
         let mut conf = dual_stack_fnn_config();
-        conf.site_fabric_prefixes = vec!["192.0.2.0/24".into(), "fd00::/32".into()];
-        let shared_ipv4_prefixes = (0..11)
-            .map(|index| format!("10.{index}.0.0/16"))
-            .collect::<Vec<_>>();
-        let shared_ipv6_prefixes = (0..11)
-            .map(|index| format!("2001:db8:{index:x}::/48"))
-            .collect::<Vec<_>>();
-        let shared_prefixes = shared_ipv4_prefixes
-            .iter()
-            .chain(&shared_ipv6_prefixes)
-            .cloned()
-            .collect::<Vec<_>>();
-        conf.ct_port_configs[0].vpc_prefixes = shared_prefixes.clone();
+        conf.site_fabric_prefixes = vec![
+            "10.0.0.0/8".into(),
+            "10.2.0.0/24".into(),
+            "fd00::/32".into(),
+            "fd00:2::/48".into(),
+        ];
+        conf.ct_port_configs[0].vpc_peer_prefixes =
+            vec!["10.20.0.0/16".into(), "2001:db9::/48".into()];
+        conf.ct_port_configs[0].vpc_peer_vnis = vec![200];
         conf.ct_port_configs.push(PortConfig {
             interface_name: "pf0vf1_if".into(),
             vlan: 101,
-            host_ip: "172.16.0.1".into(),
-            host_route: "172.16.0.0/31".into(),
+            host_ip: "10.0.2.1".into(),
+            host_route: "10.0.2.0/31".into(),
             host_ipv6: None,
             host_ipv6_route: None,
-            vni: Some(1001),
-            l3_vni: Some(100),
-            gateway_cidr: "172.16.0.0/31".into(),
-            ipv6_port_config: None,
-            vpc_prefixes: shared_prefixes,
-            vpc_peer_prefixes: vec![],
-            vpc_peer_vnis: vec![],
-            svi_ip: None,
-            tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
-            is_l2_segment: false,
-            is_phy: false,
-            network_security_group_id: None,
-            routing_profile: None,
-            interface_routing_profile: None,
-        });
-
-        // Parsing exercises the duplicate-key rejection boundary from the report.
-        let output = build(conf).expect("build should succeed");
-        let documents: serde_yaml::Value =
-            serde_yaml::from_str(&output).expect("output should have unique YAML keys");
-        let acl = &documents.as_sequence().unwrap()[1]["set"]["acl"];
-
-        // Both families preserve established indices and render each unique permit once.
-        let assert_isolation_rules = |policy: &str, expected: &[String]| {
-            let rules = &acl[policy]["rule"];
-            assert_eq!(
-                rules["20"]["match"]["ip"]["dest-ip"].as_str(),
-                Some(expected[10].as_str())
-            );
-            let rules = rules
-                .as_mapping()
-                .expect("isolation rules should be a mapping");
-            let permit_prefixes = rules
-                .values()
-                .filter(|rule| !rule["action"]["permit"].is_null())
-                .map(|rule| {
-                    rule["match"]["ip"]["dest-ip"]
-                        .as_str()
-                        .expect("permit rule should have a destination prefix")
-                        .to_string()
-                })
-                .collect::<BTreeSet<_>>();
-            assert_eq!(
-                permit_prefixes,
-                expected.iter().cloned().collect::<BTreeSet<_>>()
-            );
-            assert_eq!(rules.len(), expected.len() + 1);
-        };
-        assert_isolation_rules("p0010_vpc_100_isolation_ipv4", &shared_ipv4_prefixes);
-        assert_isolation_rules("p0010_vpc_100_isolation_ipv6", &shared_ipv6_prefixes);
-    }
-
-    /// Verifies FNN site-fabric indices move only for an occupied rule key in the same VPC and
-    /// address family, because each per-VPC policy is a separate YAML mapping.
-    #[test]
-    fn test_build_scopes_fnn_site_fabric_indices_to_each_acl() {
-        // Fill one VPC's IPv6 permit range through index 1000 and keep a second VPC small.
-        let mut conf = dual_stack_fnn_config();
-        conf.site_fabric_prefixes = vec!["192.0.2.0/24".into(), "fd00::/32".into()];
-        conf.ct_port_configs[0].vpc_prefixes = (0..991)
-            .map(|index| format!("2001:db8:{index:x}::/64"))
-            .collect();
-        conf.ct_port_configs.push(PortConfig {
-            interface_name: "pf0vf1_if".into(),
-            vlan: 101,
-            host_ip: "172.16.0.1".into(),
-            host_route: "172.16.0.0/31".into(),
-            host_ipv6: None,
-            host_ipv6_route: None,
-            vni: Some(1001),
+            vni: Some(2000),
             l3_vni: Some(200),
-            gateway_cidr: "172.16.0.0/31".into(),
+            gateway_cidr: "10.0.2.0/31".into(),
             ipv6_port_config: None,
-            vpc_prefixes: vec!["10.20.0.0/16".into(), "2001:db9::/48".into()],
-            vpc_peer_prefixes: vec![],
-            vpc_peer_vnis: vec![],
-            svi_ip: None,
+            vpc_prefixes: vec!["10.0.2.0/24".into()],
+            vpc_peer_prefixes: vec!["10.0.1.0/24".into()],
+            vpc_peer_vnis: vec![100],
+            svi_ip: Some("10.0.2.254".into()),
             tenant_vrf_loopback_ip: Some("10.0.0.3".into()),
             is_l2_segment: false,
             is_phy: false,
@@ -2584,22 +2445,138 @@ mod tests {
             interface_routing_profile: None,
         });
 
-        // Render the independent VPC/family ACL mappings.
+        // Render both VPCs and inspect the routing and ACL surfaces independently.
         let output = build(conf).expect("build should succeed");
         let documents: serde_yaml::Value =
             serde_yaml::from_str(&output).expect("output should have unique YAML keys");
-        let acl = &documents.as_sequence().unwrap()[1]["set"]["acl"];
+        assert!(
+            !has_null_leaf(&documents),
+            "removed FNN ACLs must not leave null YAML mappings:\n\n{output}"
+        );
+        let set = &documents
+            .as_sequence()
+            .expect("output should be YAML documents")[1]["set"];
 
-        // Only the high-index VPC's IPv6 site rule moves beyond the occupied key.
-        let assert_site_rule = |policy: &str, index: &str, expected: &str| {
-            let rule = &acl[policy]["rule"][index];
-            assert!(!rule["action"]["deny"].is_null());
-            assert_eq!(rule["match"]["ip"]["dest-ip"].as_str(), Some(expected));
-        };
-        assert_site_rule("p0010_vpc_100_isolation_ipv4", "1000", "192.0.2.0/24");
-        assert_site_rule("p0010_vpc_100_isolation_ipv6", "1001", "fd00::/32");
-        assert_site_rule("p0010_vpc_200_isolation_ipv4", "1000", "192.0.2.0/24");
-        assert_site_rule("p0010_vpc_200_isolation_ipv6", "1000", "fd00::/32");
+        // Every VRF gets every prefix boundary supplied by Core. In particular,
+        // neither child route may disappear beneath its parent route.
+        let isolation_distance = FNN_VPC_ISOLATION_ROUTE_DISTANCE.to_string();
+        for (vrf, peer_route_target) in [("vpc_100", "11414:200"), ("vpc_200", "11414:100")] {
+            let static_routes = &set["vrf"][vrf]["router"]["static"];
+            assert_eq!(
+                static_routes
+                    .as_mapping()
+                    .expect("static routes should be a mapping")
+                    .len(),
+                4
+            );
+            assert_eq!(
+                static_routes["10.0.0.0/8"]["address-family"].as_str(),
+                Some("ipv4-unicast")
+            );
+            assert_eq!(
+                static_routes["fd00::/32"]["address-family"].as_str(),
+                Some("ipv6-unicast")
+            );
+            for prefix in ["10.0.0.0/8", "10.2.0.0/24", "fd00::/32", "fd00:2::/48"] {
+                assert_eq!(
+                    static_routes[prefix]["distance"][&isolation_distance]["via"]["blackhole"]
+                        ["type"]
+                        .as_str(),
+                    Some("blackhole")
+                );
+            }
+            assert!(
+                !set["vrf"][vrf]["router"]["bgp"]["route-import"]["from-evpn"]["route-target"]
+                    [peer_route_target]
+                    .is_null(),
+                "{vrf} should import its peer VPC route target"
+            );
+        }
+
+        // FNN no longer relies on either peer permits or site-fabric deny ACLs.
+        for acl_name in yaml_mapping_keys(&set["acl"]) {
+            assert!(!acl_name.starts_with("p0009_"));
+            assert!(!acl_name.starts_with("p0010_"));
+        }
+        for interface in ["pf0vf0_if", "pf0vf1_if"] {
+            for acl_name in yaml_mapping_keys(&set["interface"][interface]["acl"]) {
+                assert!(!acl_name.starts_with("p0009_"));
+                assert!(!acl_name.starts_with("p0010_"));
+            }
+        }
+
+        // Open isolation leaves the same site roots routable and emits no static map.
+        let mut open_conf = dual_stack_fnn_config();
+        open_conf.use_vpc_isolation = false;
+        let output = build(open_conf).expect("open FNN build should succeed");
+        let documents: serde_yaml::Value =
+            serde_yaml::from_str(&output).expect("open FNN output should be valid YAML");
+        assert!(
+            documents.as_sequence().expect("output should be YAML documents")[1]["set"]["vrf"]
+                ["vpc_100"]["router"]["static"]
+                .is_null()
+        );
+    }
+
+    /// Proves port-local policies keep the interface ACL mapping present even
+    /// when FNN has no global deny-prefix or override ACLs.
+    #[test]
+    fn test_build_fnn_interface_acl_gate_covers_port_local_policies() {
+        let cases: &[(&str, bool, bool, &[&str])] = &[
+            // An NSG is attached per interface, so it must create the mapping
+            // even when no site-wide ACL supplies one.
+            (
+                "network security group only",
+                true,
+                false,
+                &[
+                    "p0005_0_security_group_ipv4_host_egress",
+                    "p0005_0_security_group_ipv6_host_egress",
+                    "p0005_0_security_group_ipv4_host_ingress",
+                    "p0005_0_security_group_ipv6_host_ingress",
+                ],
+            ),
+            // L2 DHCP protection is also interface-local, but exercises a
+            // different disjunct and renders only its flood-prevention ACL.
+            ("L2 segment only", false, true, &["dhcp_flood_prevention"]),
+        ];
+
+        for (scenario, has_nsg, is_l2_segment, expected_acl_names) in cases {
+            // Remove every global ACL input so the selected port-local policy
+            // is the only reason the interface mapping can exist.
+            let mut conf = dual_stack_fnn_config();
+            let port = &mut conf.ct_port_configs[0];
+            port.is_l2_segment = *is_l2_segment;
+            if *has_nsg {
+                let nsg_id = "interface-only-nsg".to_string();
+                port.network_security_group_id = Some(nsg_id.clone());
+                conf.network_security_groups = vec![NetworkSecurityGroup {
+                    id: nsg_id,
+                    stateful_egress: false,
+                    rules: vec![],
+                }];
+            }
+
+            // Parse the real rendered YAML because a bare `acl:` key would
+            // otherwise look present while remaining unusable by NVUE.
+            let output = build(conf).expect(scenario);
+            let documents: serde_yaml::Value =
+                serde_yaml::from_str(&output).expect("output should be valid YAML");
+            assert!(
+                !has_null_leaf(&documents),
+                "{scenario} rendered a null config leaf:\n\n{output}"
+            );
+            let interface_acl =
+                &documents.as_sequence().unwrap()[1]["set"]["interface"]["pf0vf0_if"]["acl"];
+            let expected = expected_acl_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
+
+            // Exact keys distinguish a working local attachment from a map
+            // accidentally populated by another policy family.
+            assert_eq!(yaml_mapping_keys(interface_acl), expected, "{scenario}");
+        }
     }
 
     /// Verifies ETV advances site and deny rules only beyond permits in their respective
@@ -2647,6 +2624,47 @@ mod tests {
         );
     }
 
+    /// Verifies repeated discovered resolvers produce one stable FRR command,
+    /// because redundant RDNSS options add no guest-visible information.
+    #[test]
+    fn test_build_fnn_deduplicates_rdnss_commands() {
+        let mut conf = dual_stack_fnn_config();
+        let router_advertisement = conf.ct_port_configs[0]
+            .ipv6_port_config
+            .as_mut()
+            .expect("fixture should have an IPv6 port config")
+            .router_advertisement
+            .as_mut()
+            .expect("fixture should advertise an IPv6 prefix");
+        router_advertisement.rdnss_servers = vec![
+            "2001:db8::53".parse().unwrap(),
+            "2001:db8::54".parse().unwrap(),
+            "2001:db8::53".parse().unwrap(),
+        ];
+
+        // Render through the complete NVUE template so the snippet's YAML
+        // representation is covered along with the FRR command text.
+        let output = build(conf).expect("build should succeed");
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("valid YAML");
+        let snippet = docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]["config"]
+            ["snippet"]["frr.conf"]
+            .as_str()
+            .expect("FRR snippet should be a string");
+
+        // First-occurrence order keeps generated desired state deterministic.
+        let rdnss = snippet
+            .lines()
+            .filter(|line| line.contains("ipv6 nd rdnss"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rdnss,
+            [
+                " ipv6 nd rdnss 2001:db8::53 1800",
+                " ipv6 nd rdnss 2001:db8::54 1800",
+            ]
+        );
+    }
+
     #[test]
     fn test_build_fnn_ipv6_only_interface() {
         let mut conf = dual_stack_fnn_config();
@@ -2660,10 +2678,18 @@ mod tests {
         port.host_ipv6 = Some(String::new());
         port.host_ipv6_route = None;
         port.svi_ip = None;
-        port.ipv6_port_config
+        let ipv6 = port
+            .ipv6_port_config
             .as_mut()
-            .expect("fixture should have an IPv6 port config")
-            .gateway_cidr = "2001:db8::/64".into();
+            .expect("fixture should have an IPv6 port config");
+        ipv6.gateway_cidr = "2001:db8::/64".into();
+        let router_advertisement = ipv6
+            .router_advertisement
+            .as_mut()
+            .expect("fixture should advertise an IPv6 prefix");
+        router_advertisement.prefix = "2001:db8::/64".into();
+        router_advertisement.mode = Ipv6RouterAdvertisementMode::Slaac;
+        router_advertisement.rdnss_servers.clear();
         port.vpc_prefixes
             .retain(|prefix| matches!(prefix.parse::<IpNet>(), Ok(IpNet::V6(_))));
 
@@ -2687,6 +2713,18 @@ mod tests {
         assert_eq!(
             yaml_mapping_keys(&set["interface"]["pf0vf0_if"]["ip"]["address"]),
             address_set(&["2001:db8::/64"]),
+        );
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("SLAAC should render an FRR snippet");
+        assert!(snippet.contains("interface pf0vf0_if vrf vpc_100"));
+        assert!(snippet.contains(" ipv6 nd prefix 2001:db8::/64\n"));
+        assert!(snippet.contains(" ipv6 nd other-config-flag"));
+        assert!(snippet.contains(" ipv6 nd ra-lifetime 1800"));
+        assert!(snippet.contains(" no ipv6 nd managed-config-flag"));
+        assert!(
+            !snippet.contains("no-autoconfig") && !snippet.contains("ipv6 nd rdnss"),
+            "SLAAC must set A=1 and M=0 without advertising absent resolvers"
         );
         let bgp = &set["vrf"]["vpc_100"]["router"]["bgp"];
         assert!(
@@ -2725,10 +2763,69 @@ mod tests {
             yaml_mapping_keys(&vlan["ip"]["address"]),
             address_set(&["10.0.1.2", "2001:db8::2"]),
         );
+        assert!(docs.as_sequence().unwrap()[1]["set"]["system"]["config"]["snippet"].is_null());
         assert_eq!(
             yaml_mapping_keys(&vlan["ip"]["vrr"]["address"]),
             address_set(&["10.0.1.1/24", "2001:db8::1/64"]),
         );
+    }
+
+    /// Verifies an RA-capable tenant fixture cannot leak its stanza into admin
+    /// mode because this rendering contract covers tenant interfaces only.
+    #[test]
+    fn test_build_fnn_admin_mode_omits_tenant_ra() {
+        let mut conf = dual_stack_fnn_config();
+        conf.use_admin_network = true;
+
+        // Render the same port with the response switched to admin mode.
+        let output = build(conf).expect("build should succeed");
+        let docs: serde_yaml::Value =
+            serde_yaml::from_str(&output).expect("output should be valid YAML");
+
+        // The renderer is a final defense beyond production model construction.
+        assert!(docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]["config"]
+            ["snippet"]
+            .is_null());
+    }
+
+    /// Verifies complete desired-state rendering replaces an advertised prefix
+    /// and removes the FRR snippet when IPv6 is withdrawn.
+    #[test]
+    fn test_build_fnn_replaces_and_removes_tenant_ra() {
+        // A replacement must contain only the newly allocated prefix.
+        let mut replacement = dual_stack_fnn_config();
+        let port = &mut replacement.ct_port_configs[0];
+        port.host_ipv6 = Some("2001:db8:1::1".to_string());
+        port.host_ipv6_route = Some("2001:db8:1::1/128".to_string());
+        let ipv6 = port
+            .ipv6_port_config
+            .as_mut()
+            .expect("fixture should have IPv6 port config");
+        ipv6.gateway_cidr = "2001:db8:1::/127".to_string();
+        ipv6.router_advertisement
+            .as_mut()
+            .expect("fixture should have tenant RA")
+            .prefix = "2001:db8:1::/127".to_string();
+        let output = build(replacement).expect("replacement should render");
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("valid YAML");
+        let snippet = docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]["config"]
+            ["snippet"]["frr.conf"]
+            .as_str()
+            .expect("replacement should retain RA");
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:1::/127 no-autoconfig"));
+        assert!(!snippet.contains("2001:db8::/127"));
+
+        // Removing IPv6 input must omit the complete desired RA/RDNSS subtree.
+        let mut removal = dual_stack_fnn_config();
+        let port = &mut removal.ct_port_configs[0];
+        port.host_ipv6 = None;
+        port.host_ipv6_route = None;
+        port.ipv6_port_config = None;
+        let output = build(removal).expect("removal should render");
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("valid YAML");
+        assert!(docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]["config"]
+            ["snippet"]
+            .is_null());
     }
 
     #[test]
@@ -2753,6 +2850,7 @@ mod tests {
     struct FnnUnderlayLeakRow {
         leak_tenant_host_routes_to_underlay: bool,
         include_ipv6: bool,
+        is_l2_segment: bool,
     }
 
     #[derive(Debug, PartialEq)]
@@ -2773,11 +2871,18 @@ mod tests {
                 .expect("fixture should have a routing profile")
                 .leak_tenant_host_routes_to_underlay =
                 row.leak_tenant_host_routes_to_underlay;
+            let port = conf
+                .ct_port_configs
+                .first_mut()
+                .expect("fixture should have a port");
+            port.is_l2_segment = row.is_l2_segment;
+            if row.is_l2_segment {
+                port.ipv6_port_config
+                    .as_mut()
+                    .expect("fixture should have IPv6 port config")
+                    .gateway_cidr = "2001:db8::/64".into();
+            }
             if !row.include_ipv6 {
-                let port = conf
-                    .ct_port_configs
-                    .first_mut()
-                    .expect("fixture should have a port");
                 port.host_ipv6 = None;
                 port.host_ipv6_route = None;
                 port.ipv6_port_config = None;
@@ -2809,9 +2914,11 @@ mod tests {
             );
 
             FnnUnderlayLeakResult {
-                interface_addresses: yaml_mapping_keys(
-                    &set["interface"]["pf0vf0_if"]["ip"]["address"],
-                ),
+                interface_addresses: if row.is_l2_segment {
+                    yaml_mapping_keys(&set["interface"]["vlan100"]["ip"]["vrr"]["address"])
+                } else {
+                    yaml_mapping_keys(&set["interface"]["pf0vf0_if"]["ip"]["address"])
+                },
                 has_ipv4_leak_rule: !ipv4_leak_rule.is_null(),
                 ipv4_leak_prefixes: yaml_mapping_keys(&ipv4_leak_rule["match"]),
                 has_ipv6_leak_rule: !ipv6_leak_rule.is_null(),
@@ -2822,6 +2929,7 @@ mod tests {
                 FnnUnderlayLeakRow {
                     leak_tenant_host_routes_to_underlay: false,
                     include_ipv6: true,
+                    is_l2_segment: false,
                 } => FnnUnderlayLeakResult {
                     interface_addresses: address_set(&["10.0.1.0/31", "2001:db8::0/127"]),
                     has_ipv4_leak_rule: false,
@@ -2832,6 +2940,7 @@ mod tests {
                 FnnUnderlayLeakRow {
                     leak_tenant_host_routes_to_underlay: true,
                     include_ipv6: true,
+                    is_l2_segment: false,
                 } => FnnUnderlayLeakResult {
                     interface_addresses: address_set(&["10.0.1.0/31", "2001:db8::0/127"]),
                     has_ipv4_leak_rule: true,
@@ -2842,6 +2951,7 @@ mod tests {
                 FnnUnderlayLeakRow {
                     leak_tenant_host_routes_to_underlay: true,
                     include_ipv6: false,
+                    is_l2_segment: false,
                 } => FnnUnderlayLeakResult {
                     interface_addresses: address_set(&["10.0.1.0/31"]),
                     has_ipv4_leak_rule: true,
@@ -2849,7 +2959,52 @@ mod tests {
                     has_ipv6_leak_rule: false,
                     ipv6_leak_prefixes: address_set(&[]),
                 },
+                FnnUnderlayLeakRow {
+                    leak_tenant_host_routes_to_underlay: true,
+                    include_ipv6: true,
+                    is_l2_segment: true,
+                } => FnnUnderlayLeakResult {
+                    interface_addresses: address_set(&["10.0.1.0/31", "2001:db8::/64"]),
+                    has_ipv4_leak_rule: true,
+                    ipv4_leak_prefixes: address_set(&["10.0.1.0/31"]),
+                    has_ipv6_leak_rule: true,
+                    ipv6_leak_prefixes: address_set(&["2001:db8::1/128"]),
+                },
             }
+        );
+    }
+
+    #[test]
+    fn test_build_fnn_l2_slaac_does_not_leak_shared_ipv6_prefix() {
+        let mut conf = dual_stack_fnn_config();
+        conf.ct_routing_profile
+            .as_mut()
+            .expect("fixture should have a routing profile")
+            .leak_tenant_host_routes_to_underlay = true;
+        let port = conf
+            .ct_port_configs
+            .first_mut()
+            .expect("fixture should have a port");
+        port.is_l2_segment = true;
+        port.host_ipv6 = Some(String::new());
+        port.host_ipv6_route = Some("2001:db8::/64".into());
+        port.ipv6_port_config
+            .as_mut()
+            .expect("fixture should have IPv6 port config")
+            .gateway_cidr = "2001:db8::/64".into();
+
+        let output = build(conf).expect("build should succeed");
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("valid YAML");
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let prefix_lists = &set["router"]["policy"]["prefix-list"];
+
+        assert!(
+            !prefix_lists["ALLOW_TO_UNDERLAY_PREFIX_LIST"]["rule"]["65002"].is_null(),
+            "the enabled routing profile should still leak the IPv4 route"
+        );
+        assert!(
+            prefix_lists["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]["65002"].is_null(),
+            "SLAAC's shared L2 /64 is not an assigned host route"
         );
     }
 

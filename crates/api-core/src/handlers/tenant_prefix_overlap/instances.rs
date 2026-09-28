@@ -38,7 +38,7 @@ pub(in crate::handlers) async fn validate_affected_instances(
     receiver_ids: &[VpcId],
     candidate: Option<(VpcId, IpNetwork)>,
 ) -> CarbideResult<()> {
-    for host in load_policy_hosts(txn, receiver_ids, &[]).await? {
+    for host in load_policy_hosts(txn, receiver_ids).await? {
         if !needs_retained_policy_check(&host) {
             continue;
         }

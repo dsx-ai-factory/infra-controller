@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+use std::sync::Arc;
+
+use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialReader, Credentials,
     NicLockdownIkm,
@@ -23,6 +26,8 @@ use carbide_uuid::dpa_interface::DpaInterfaceId;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use sqlx::PgPool;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 // SEED_LOCKDOWN_IKM_VERSION is the version of the initial site-wide lockdown IKM
 // seeded from the BMC root at first boot (see `ensure_lockdown_ikm_seeded`), and
@@ -32,6 +37,7 @@ use sqlx::PgPool;
 // the card's own tracked version for an unlock -- and passed to
 // `build_supernic_lockdown_key`; this constant is no longer the live source.
 pub(crate) const SEED_LOCKDOWN_IKM_VERSION: u32 = 0;
+const SEED_LOCKDOWN_IKM_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // LOCKDOWN_KEY_LENGTH is the max length of the supported
 // key by a Mellanox device. As of now it's a 64-bit key,
@@ -177,13 +183,13 @@ async fn fetch_kdf_secret(
 // action; going forward the two credentials start identical but rotate
 // independently.
 //
-// Best-effort: if the BMC root is not yet configured (e.g. a brand-new site),
-// this is a no-op and the IKM is seeded on a later boot once the root exists.
-// Safe to run on every startup and concurrently across replicas (a lost
-// create race is treated as success).
+// If the BMC root is not yet configured (e.g. a brand-new site), this reports
+// that seeding was deferred so startup can schedule a retry. Safe to run on
+// every startup and concurrently across replicas (a lost create race is
+// treated as success).
 pub(crate) async fn ensure_lockdown_ikm_seeded(
     credential_manager: &dyn CredentialManager,
-) -> Result<(), eyre::Report> {
+) -> Result<bool, eyre::Report> {
     let ikm_key = lockdown_ikm_key(SEED_LOCKDOWN_IKM_VERSION);
     if credential_manager
         .get_credentials(&ikm_key)
@@ -194,18 +200,29 @@ pub(crate) async fn ensure_lockdown_ikm_seeded(
             version = SEED_LOCKDOWN_IKM_VERSION,
             "lockdown IKM already seeded"
         );
-        return Ok(());
+        return Ok(true);
     }
 
     let bmc_root_key = CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::SiteWideRoot,
     };
-    let Some(bmc_root) = credential_manager.get_credentials(&bmc_root_key).await? else {
-        tracing::warn!(
-            "site-wide BMC root not set; deferring lockdown IKM seed until it is configured"
-        );
-        return Ok(());
+    let bmc_root = match credential_manager.get_credentials(&bmc_root_key).await {
+        Ok(Some(credentials)) => credentials,
+        Ok(None) | Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+            tracing::warn!(
+                "site-wide BMC root not set; deferring lockdown IKM seed until it is configured"
+            );
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
     };
+    let Credentials::UsernamePassword { password, .. } = &bmc_root;
+    if password.is_empty() {
+        tracing::warn!(
+            "site-wide BMC root is empty; deferring lockdown IKM seed until it is configured"
+        );
+        return Ok(false);
+    }
 
     match credential_manager
         .create_credentials(&ikm_key, &bmc_root)
@@ -216,7 +233,7 @@ pub(crate) async fn ensure_lockdown_ikm_seeded(
                 version = SEED_LOCKDOWN_IKM_VERSION,
                 "seeded dedicated lockdown IKM from site-wide BMC root"
             );
-            Ok(())
+            Ok(true)
         }
         Err(e) => {
             // Another replica may have seeded concurrently between our read and
@@ -226,12 +243,47 @@ pub(crate) async fn ensure_lockdown_ikm_seeded(
                 .await?
                 .is_some()
             {
-                Ok(())
+                Ok(true)
             } else {
                 Err(eyre::eyre!("failed to seed lockdown IKM: {e}"))
             }
         }
     }
+}
+
+/// Retry a deferred initial lockdown IKM seed until the BMC root appears.
+///
+/// This covers both backend credentials created after startup and a watched
+/// local version 0 credential supplied after startup. The task exits as soon as
+/// the IKM exists and never overwrites an independently managed IKM.
+pub(crate) fn start_lockdown_ikm_seed_retry(
+    join_set: &mut JoinSet<()>,
+    credential_manager: Arc<dyn CredentialManager>,
+    cancel_token: CancellationToken,
+) -> std::io::Result<()> {
+    join_set
+        .build_task()
+        .name("lockdown_ikm_seed_retry")
+        .spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(SEED_LOCKDOWN_IKM_RETRY_INTERVAL) => {}
+                    _ = cancel_token.cancelled() => return,
+                }
+
+                match ensure_lockdown_ikm_seeded(&*credential_manager).await {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to retry initial lockdown IKM seed",
+                        );
+                    }
+                }
+            }
+        })?;
+    Ok(())
 }
 
 // build_supernic_lockdown_key builds a single 16-character hex lockdown key from
@@ -346,8 +398,72 @@ mod tests {
         assert_eq!(keys[0].len(), 16);
     }
 
-    use carbide_secrets::MemoryCredentialStore;
-    use carbide_secrets::credentials::CredentialWriter;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use carbide_secrets::chained_reader::BmcSiteWideRootV0BackendCredentialBlocker;
+    use carbide_secrets::credentials::{
+        CompositeCredentialManager, CredentialManager, CredentialWriter,
+    };
+    use carbide_secrets::{ChainedCredentialReader, MemoryCredentialStore};
+    use tokio::sync::Barrier;
+
+    struct CreateRaceStore {
+        inner: MemoryCredentialStore,
+        create_barrier: Barrier,
+    }
+
+    impl CreateRaceStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryCredentialStore::default(),
+                create_barrier: Barrier::new(2),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CredentialReader for CreateRaceStore {
+        async fn get_credentials(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            self.inner.get_credentials(key).await
+        }
+    }
+
+    #[async_trait]
+    impl CredentialWriter for CreateRaceStore {
+        async fn get_credentials_from_writer(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            self.inner.get_credentials_from_writer(key).await
+        }
+
+        async fn set_credentials(
+            &self,
+            key: &CredentialKey,
+            credentials: &Credentials,
+        ) -> Result<(), SecretsError> {
+            self.inner.set_credentials(key, credentials).await
+        }
+
+        async fn create_credentials(
+            &self,
+            key: &CredentialKey,
+            credentials: &Credentials,
+        ) -> Result<(), SecretsError> {
+            self.create_barrier.wait().await;
+            self.inner.create_credentials(key, credentials).await
+        }
+
+        async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+            self.inner.delete_credentials(key).await
+        }
+    }
+
+    impl CredentialManager for CreateRaceStore {}
 
     fn user_pass(password: &str) -> Credentials {
         Credentials::UsernamePassword {
@@ -400,6 +516,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_seeders_accept_the_single_persisted_ikm() {
+        let store = CreateRaceStore::new();
+        store
+            .set_credentials(&bmc_root_key(), &user_pass("root-pass"))
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            ensure_lockdown_ikm_seeded(&store),
+            ensure_lockdown_ikm_seeded(&store)
+        );
+        assert!(first.unwrap());
+        assert!(second.unwrap());
+        assert_eq!(
+            store
+                .get_credentials(&lockdown_ikm_key(SEED_LOCKDOWN_IKM_VERSION))
+                .await
+                .unwrap(),
+            Some(user_pass("root-pass"))
+        );
+    }
+
+    #[tokio::test]
     async fn seed_preserves_existing_lockdown_ikm() {
         let store = MemoryCredentialStore::default();
         // Both the BMC root and a (diverged) lockdown IKM already exist, e.g.
@@ -438,6 +577,83 @@ mod tests {
             .await
             .unwrap();
         assert!(seeded.is_none());
+    }
+
+    #[tokio::test]
+    async fn seed_defers_when_bmc_root_is_empty() {
+        let store = MemoryCredentialStore::default();
+        store
+            .set_credentials(&bmc_root_key(), &user_pass(""))
+            .await
+            .unwrap();
+
+        assert!(!ensure_lockdown_ikm_seeded(&store).await.unwrap());
+
+        let seeded = store
+            .get_credentials(&lockdown_ikm_key(SEED_LOCKDOWN_IKM_VERSION))
+            .await
+            .unwrap();
+        assert!(seeded.is_none());
+    }
+
+    #[tokio::test]
+    async fn seed_defers_when_local_bmc_root_is_missing() {
+        let reader: ChainedCredentialReader =
+            vec![Box::new(BmcSiteWideRootV0BackendCredentialBlocker) as Box<dyn CredentialReader>]
+                .into();
+        let backend = Arc::new(MemoryCredentialStore::default());
+        let manager = CompositeCredentialManager::new(reader, backend.clone());
+
+        assert!(!ensure_lockdown_ikm_seeded(&manager).await.unwrap());
+
+        let seeded = backend
+            .get_credentials(&lockdown_ikm_key(SEED_LOCKDOWN_IKM_VERSION))
+            .await
+            .unwrap();
+        assert!(seeded.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_seed_retries_after_bmc_root_appears() {
+        let store = Arc::new(MemoryCredentialStore::default());
+        assert!(!ensure_lockdown_ikm_seeded(&*store).await.unwrap());
+
+        let mut join_set = JoinSet::new();
+        let cancel_token = CancellationToken::new();
+        start_lockdown_ikm_seed_retry(&mut join_set, store.clone(), cancel_token).unwrap();
+        tokio::task::yield_now().await;
+
+        store
+            .set_credentials(&bmc_root_key(), &user_pass("late-root-pass"))
+            .await
+            .unwrap();
+        tokio::time::advance(SEED_LOCKDOWN_IKM_RETRY_INTERVAL).await;
+        join_set
+            .join_next()
+            .await
+            .expect("retry task completion")
+            .expect("retry task succeeds");
+
+        let seeded = store
+            .get_credentials(&lockdown_ikm_key(SEED_LOCKDOWN_IKM_VERSION))
+            .await
+            .unwrap();
+        assert_eq!(seeded, Some(user_pass("late-root-pass")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_seed_retry_stops_when_cancelled() {
+        let store = Arc::new(MemoryCredentialStore::default());
+        let mut join_set = JoinSet::new();
+        let cancel_token = CancellationToken::new();
+        start_lockdown_ikm_seed_retry(&mut join_set, store, cancel_token.clone()).unwrap();
+
+        cancel_token.cancel();
+        join_set
+            .join_next()
+            .await
+            .expect("retry task completion")
+            .expect("retry task stops cleanly");
     }
 
     #[tokio::test]

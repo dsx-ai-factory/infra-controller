@@ -19,8 +19,8 @@
 use std::fmt::Debug;
 use std::net::SocketAddr;
 
+use axum::Router;
 use axum::middleware::{map_request, map_response};
-use axum::{Router, ServiceExt};
 use axum_client_ip::ClientIpSource;
 use axum_template::engine::Engine;
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
@@ -41,6 +41,7 @@ mod metrics;
 mod middleware;
 mod routes;
 mod rpc_error;
+mod server;
 
 /// The URL prefix the static-file directory is served under. Anything building
 /// a URL into that directory composes it from this, so the path served and the
@@ -145,18 +146,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_normalizing_middleware = map_request(middleware::normalize_url);
     let final_app = request_normalizing_middleware.layer(app); // this one has to wrap all the others for the map_request to be able to affect routing
 
-    let listener = tokio::net::TcpListener::bind(socket_addr)
+    let listener = metrics_endpoint::bind_tcp_listener(socket_addr)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "unable to bind tcp listener");
             err
         })?;
 
-    axum::serve(
-        listener,
-        final_app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    tracing::info!(
+        listen_address = %socket_addr,
+        header_read_timeout_seconds = server::HEADER_READ_TIMEOUT.as_secs(),
+        "serving http"
+    );
+    server::serve(listener, final_app, server::HEADER_READ_TIMEOUT).await?;
 
     Ok(())
 }

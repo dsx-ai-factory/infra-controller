@@ -121,7 +121,7 @@ func (c *Config) Build(
 
 	subscriberClient, err := temporal.New(c.ClientConf)
 	if err != nil {
-		publisherClient.Client().Close()
+		publisherClient.Close()
 		return nil, err
 	}
 
@@ -131,8 +131,8 @@ func (c *Config) Build(
 	tracingInterceptor, err := opentelemetry.NewTracingInterceptor(
 		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
 	if err != nil {
-		publisherClient.Client().Close()
-		subscriberClient.Client().Close()
+		publisherClient.Close()
+		subscriberClient.Close()
 		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", err)
 	}
 
@@ -201,8 +201,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		log.Info().Msgf("Temporal worker stopped for queue %s", queue)
 	}
 
-	m.publisherClient.Client().Close()
-	m.subscriberClient.Client().Close()
+	m.publisherClient.Close()
+	m.subscriberClient.Close()
 
 	return nil
 }

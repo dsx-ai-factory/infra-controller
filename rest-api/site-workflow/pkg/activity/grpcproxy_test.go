@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
@@ -29,6 +31,12 @@ func TestInvokeGRPCProxyOnSite(t *testing.T) {
 			name:         "missing local descriptor remains typed across Temporal",
 			err:          fmt.Errorf("%w: FutureMethod", client.ErrUnknownProxyMethod),
 			errType:      swe.ErrTypeNICoUnimplemented,
+			nonRetryable: true,
+		},
+		{
+			name:         "gRPC failed precondition remains typed across Temporal",
+			err:          status.Error(codes.FailedPrecondition, "task cannot be cancelled"),
+			errType:      swe.ErrTypeNICoFailedPrecondition,
 			nonRetryable: true,
 		},
 		{name: "unrelated local error is not reported as unsupported", err: errors.New("invalid request JSON")},

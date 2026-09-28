@@ -114,6 +114,80 @@ class BootstrapAddressTest(unittest.TestCase):
                 )
                 self.assertEqual(result.stdout, f"{host}:1079")
 
+    def test_admin_cli_uses_an_ipv6_url(self):
+        # This wrapper reads the process environment, not envrc.
+        self.environment.update({
+            "API_SERVER_HOST": "2001:db8::10",
+            "API_SERVER_PORT": "1079",
+        })
+        self.write_command(
+            "docker",
+            'case "$1" in\n'
+            "  ps) printf 'container image carbide-api-test\\n' ;;\n"
+            '  exec) printf "%s\\n" "$@" > "$RPC_ARGS" ;;\n'
+            '  *) exit 1 ;;\n'
+            'esac\n',
+        )
+        result = self.run_script("admin-cli.sh", ["machine", "list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "exec", "-ti", "carbide-api-test",
+            "/opt/forge-admin-cli/debug/forge-admin-cli",
+            "-c", "https://[2001:db8::10]:1079",
+            "--client-cert-path=/opt/forge/server_identity.pem",
+            "--client-key-path=/opt/forge/server_identity.key",
+            "machine", "list",
+        ])
+        self.assertIn("-c https://[2001:db8::10]:1079", result.stdout)
+
+    def test_psql_preserves_database_settings_and_query(self):
+        database_call = self.fixture / "psql-call"
+        self.environment.update({
+            "FORGE_BOOTSTRAP_KIND": "kube",
+            "PSQL_CALL": str(database_call),
+            "DATASTORE_PORT": "6432",
+            "DATASTORE_USER": "bootstrap-user",
+            "DATASTORE_PASSWORD": "password with @:/?# and 'quotes'",
+            "DATASTORE_NAME": "bootstrap-db",
+            "PGSSLMODE": "disable",
+            "REMOTE_PGSSLMODE": "verify-full",
+        })
+        self.write_command(
+            "kubectl",
+            'set -e\n'
+            'while [ "$1" != "--" ]; do shift; done\n'
+            'shift\nPGSSLMODE="$REMOTE_PGSSLMODE" exec "$@"\n',
+        )
+        self.write_command(
+            "psql",
+            'printf "%s\\0" "$PGHOST" "$PGPORT" "$PGUSER" "$PGPASSWORD" '
+            '"$PGDATABASE" "$PGSSLMODE" "$@" > "$PSQL_CALL"\n',
+        )
+        query = "select 'literal $HOME and \"quotes\"';"
+        cases = [
+            ("2001:db8::10", "2001:db8::10"),
+            ("[2001:db8::10]", "2001:db8::10"),
+            ("192.0.2.10", "192.0.2.10"),
+            ("database.example.test", "database.example.test"),
+        ]
+        for host, expected_host in cases:
+            with self.subTest(host=host):
+                self.environment.update({
+                    "DATASTORE_HOST": host,
+                    "PGHOST": "local.example.test",
+                    "PGPORT": "5432",
+                    "PGUSER": "local-user",
+                    "PGPASSWORD": "local-password",
+                    "PGDATABASE": "local-db",
+                })
+                result = self.run_script("psql.sh", [query])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                received = database_call.read_bytes().decode().split("\0")[:-1]
+                expected = [expected_host, "6432", "bootstrap-user",
+                            self.environment["DATASTORE_PASSWORD"], "bootstrap-db",
+                            "verify-full", "-P", "pager=off", "-t", "-c", query]
+                self.assertEqual(received, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

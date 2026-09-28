@@ -62,6 +62,8 @@ The following tools must be installed on the machine that you will use to run `s
 | `jq` | 1.6 | `brew install jq` | `apt install jq` / `yum install jq` |
 | `ssh-keygen` | any | built-in | built-in |
 
+Core virtual IP address (VIP) preflight also requires Python 3 with PyYAML installed in the `python3` environment. It parses the selected Core values file as YAML and validates supplied VIP annotations for enabled external `LoadBalancer` Services. Existing `externalService` configurations can omit VIP annotations for automatic allocation. Explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs. The DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+
 The `helmfile` tool requires the `helm-diff` plugin. Install it as follows:
 
 ```bash
@@ -91,12 +93,10 @@ export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>         # e.g. v2.0.0
 # --skip-dpf to setup.sh (sites with no DPUs / still on iPXE):
 export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
-# Optional: if provided, setup.sh seeds the site-wide BMC root credential
-# automatically during phase 6b so DPU provisioning starts immediately.
-# If omitted, set it after deploy via nico-admin-cli (carbide-api picks it
-# up within 60 s). Prompt to keep it out of shell history:
-read -r -s -p "Site-wide BMC root password (leave blank to set later): " NICO_DPF_BMC_ROOT_PASSWORD; echo
-export NICO_DPF_BMC_ROOT_PASSWORD
+# Optional: setup creates and mounts a persistent watched version-0 Secret.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+# Otherwise configure it through the API after installation. DPU provisioning
+# waits for the credential; carbide-api startup does not in local_first mode.
 
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
@@ -117,7 +117,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
-| `NICO_DPF_BMC_ROOT_PASSWORD` | No | Site-wide BMC root password. When provided, setup.sh seeds the credential via nico-admin-cli in phase 6b so DPU provisioning starts immediately. When omitted, carbide-api starts without it (the startup read is best-effort) and the credential can be set at any time via `nico-admin-cli credential add-bmc --kind=site-wide-root`; carbide-api picks it up within 60 s. |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 
 ### 3b. Set your Site Name
@@ -164,7 +164,8 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `initial_domain_name` | Base DNS domain for the site (e.g. `mysite.example.com`) |
   | `dhcp_servers` | List of DHCP server IPs reachable from bare-metal hosts, or `[]` |
   | `ntp_servers` | List of enterprise NTP server IPs for BMC time setup and DHCP option 42, or `[]` to use the legacy DHCP/DNS fallback |
-  | `site_fabric_prefixes` | CIDRs that are part of the site fabric (instance-to-instance traffic) |
+  | `site_fabric_prefixes` | CIDRs that are part of the site fabric. Under mutual isolation, ETV uses these CIDRs for its isolation ACL and omitted `site_fabric_null_routes` inherits them for FNN blackholes |
+  | `site_fabric_null_routes` | Optional FNN isolation CIDRs. Omit to inherit `site_fabric_prefixes`. Set `[]` to install no null routes |
   | `deny_prefixes` | CIDRs instances must not reach (OOB, control plane, management) |
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
@@ -182,7 +183,7 @@ gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
 `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, and `site_fabric_prefixes`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
+The following fields are safe to leave as empty arrays: `dhcp_servers` and `ntp_servers`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
 </Tip>
 
 ### 3d. NICo REST source tree
@@ -344,6 +345,8 @@ MetalLB provides LoadBalancer IPs for NICo Core services (nico-api, DHCP, DNS, P
 NICo includes a built-in NTP service (`nico-ntp`). This is a 3-replica chrony StatefulSet where each replica gets its own MetalLB VIP.
 
 To use the service, set `nico-ntp.externalService.enabled: true`, assign three VIPs from your internal pool via `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of those same VIPs so DPUs receive them over DHCP. Enterprise NTP server IPs in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync independently of `nico-ntp`.
+
+For the DPU-local server to advertise NTP through DHCPv6 option 56, provide reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits IPv6 entries as AAAA records. Without an AAAA record, the IPv4 NTP path remains available but there is no service-discovered IPv6 NTP fallback.
 </Note>
 
 Edit `helm-prereqs/values/metallb-config.yaml`--this file ships pre-populated with example values. Replace all values labeled `# EXAMPLE` with your site-specific configuration before running `setup.sh`.
@@ -408,7 +411,7 @@ The `preflight.sh` script checks the following:
 | Category | Checks |
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
-| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH |
+| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |
@@ -443,7 +446,6 @@ You can combine common options as needed:
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
-| `--skip-flow` | Skip Phase 7h NICo Flow. Also set `flow.enabled=false` in `helm-prereqs/values.yaml` to omit Flow prerequisites. |
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
 | `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
 | `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
@@ -472,7 +474,7 @@ before continuing.
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
 | 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
-| 7h | **NICo Flow**, unless `--skip-flow` is used |
+| 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
 The following components are deployed:
@@ -486,7 +488,11 @@ cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
-                            maintenance-operator, dpf-operator — see docs/manuals/dpf.md)
+                            maintenance-operator, dpf-operator from the pinned
+                            doca-platform commit: the submodule in a git checkout
+                            or doca-platform.pin from the packaged chart; the
+                            NICO_DPF_SRC override installs an operator-managed
+                            checkout instead - see docs/manuals/dpf.md)
 rack-manager (RMS)         (default; --skip-rms to opt out - pinned nv-rms submodule, mTLS
                             via vault-nico-issuer, rms database on nico-pg-cluster)
 nico-prereqs               (this Helm chart - nico-system namespace)
@@ -497,7 +503,7 @@ NICo REST                  (../helm/rest/nico-rest)
   ├── keycloak              (dev OIDC IdP, nico-dev realm)
   ├── temporal              (temporal-helm/temporal, mTLS)
   └── nico-rest             (API, cert-manager, workflow, site-manager)
-NICo Flow                  (../helm/charts/nico-flow)
+NICo Flow                  (../helm/nico-flow)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 ```
 
@@ -709,6 +715,10 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
+If `nico-api.credentials.bmcSiteWideRootSource` is `local`, skip the first
+command: the local environment-then-file chain owns version 0 of the site-wide
+BMC root, and the API rejects attempts to write that credential to the backend.
+
 ```bash
 nico-admin-cli -a <api-url> credential add-bmc --kind=site-wide-root --password='<password>'
 nico-admin-cli -a <api-url> host generate-host-uefi-password
@@ -730,7 +740,8 @@ each iteration with `MissingCredentials` while any one is missing.
 When DPF is enabled, the site-wide BMC root credential is also mirrored into the
 DPF `bmc-shared-password` Secret; refer to
 [Set the site-wide BMC root credential](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
-for the DPF-specific details and for how to seed it ahead of time instead.
+for the DPF-specific details and for how to provide version 0 through a watched
+Kubernetes Secret before installation.
 
 ### Upload the Expected Machines Manifest
 

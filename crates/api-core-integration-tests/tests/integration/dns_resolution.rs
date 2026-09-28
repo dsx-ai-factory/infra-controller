@@ -17,6 +17,7 @@
 
 use std::net::IpAddr;
 
+use carbide_api_core::test_support::network_segment::create_static_assignments_segment;
 use carbide_test_harness::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_uuid::machine::MachineId;
@@ -70,6 +71,68 @@ async fn create_managed_host(
         .build()
         .await
         .0
+}
+
+#[sqlx_test]
+async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
+    use rpc::protos::dns::{CreateDomainRequest, DomainSearchQuery, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let original = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: DOMAIN_NAME.to_string(),
+        }))
+        .await
+        .expect("valid DNS test fixture")
+        .into_inner();
+
+    for name in [
+        "in-addr.arpa",
+        "ip6.arpa.",
+        "IN-ADDR.ARPA.",
+        "0.10.in-addr.arpa",
+        " ip6.arpa. ",
+    ] {
+        let error = api
+            .create_domain(Request::new(CreateDomainRequest {
+                name: name.to_string(),
+            }))
+            .await
+            .expect_err("reverse domain writes are rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "create {name}");
+        assert!(
+            error.message().contains("reverse DNS zone"),
+            "create {name}"
+        );
+
+        let error = api
+            .update_domain(Request::new(UpdateDomainRequest {
+                domain: Some(rpc::protos::dns::Domain {
+                    name: name.to_string(),
+                    ..original.clone()
+                }),
+            }))
+            .await
+            .expect_err("reverse domain writes are rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "update {name}");
+        assert!(
+            error.message().contains("reverse DNS zone"),
+            "update {name}"
+        );
+    }
+
+    let domains = api
+        .find_domain(Request::new(DomainSearchQuery::default()))
+        .await
+        .expect("valid DNS test fixture")
+        .into_inner()
+        .domains;
+    assert_eq!(
+        domains,
+        vec![original],
+        "rejected writes must leave no changes"
+    );
 }
 
 #[sqlx_test]
@@ -414,7 +477,18 @@ async fn test_dns_ptr(pool: PgPool) {
         .find(|addr| addr.is_ipv4())
         .expect("primary interface should have an IPv4 address");
 
-    // Add an IPv6 address so the IPv6 reverse path has something to resolve.
+    // Insert the IPv6 prefix and address directly, bypassing the network-creation
+    // code that maintains reverse-domain rows for rollback. The PTR must resolve
+    // even though no corresponding reverse-domain row exists.
+    let ipv6_prefix: ipnetwork::IpNetwork = "fd00::/64".parse().expect("valid DNS test fixture");
+    sqlx::query(
+        "INSERT INTO network_prefixes (segment_id, prefix, num_reserved) VALUES ($1, $2, 0)",
+    )
+    .bind(interface.segment_id)
+    .bind(ipv6_prefix)
+    .execute(&mut *txn)
+    .await
+    .expect("valid DNS test fixture");
     let ipv6_addr: IpAddr = "fd00::1".parse().unwrap();
     sqlx::query("INSERT INTO machine_interface_addresses (interface_id, address) VALUES ($1, $2)")
         .bind(interface.id)
@@ -482,6 +556,102 @@ async fn test_dns_ptr(pool: PgPool) {
     }
 }
 
+/// A configured static address outside managed prefixes still resolves to its
+/// hostname through PTR lookup. That assignment does not authorize reverse SOA
+/// answers or authoritative negative answers for neighbouring addresses or
+/// parent reverse names.
+#[sqlx_test]
+async fn test_static_address_outside_managed_prefixes_ptr(pool: PgPool) {
+    use rpc::protos::dns::DnsLookupOutcome;
+
+    let env = TestHarness::builder(pool).build().await;
+    let domain = env.create_test_domain(DOMAIN_NAME).await;
+    let segment_id = create_static_assignments_segment(env.api(), Some(domain.id)).await;
+    let address: IpAddr = "203.0.113.7".parse().expect("valid DNS test fixture");
+    let mac_address = "02:00:00:00:de:07".parse().expect("valid DNS test fixture");
+    let mut txn = env.db_txn().await;
+    db::machine_interface::preallocate_machine_interface(&mut txn, mac_address, address, None)
+        .await
+        .expect("valid DNS test fixture");
+    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
+        .await
+        .expect("valid DNS test fixture");
+    let [interface] = interfaces.as_slice() else {
+        panic!("static preallocation must create one interface");
+    };
+    assert_eq!(interface.segment_id, segment_id);
+    let fqdn = format!("{}.{}.", interface.hostname, domain.name);
+    txn.commit().await.expect("valid DNS test fixture");
+
+    let qname = ip_to_arpa(address);
+    let cases = [
+        (
+            "forward name remains published",
+            fqdn.clone(),
+            "A",
+            Some(address.to_string()),
+        ),
+        (
+            "static address outside managed prefixes has a PTR",
+            qname.clone(),
+            "PTR",
+            Some(fqdn),
+        ),
+        ("no synthetic host zone", qname, "SOA", None),
+        (
+            "unowned neighbour",
+            "8.113.0.203.in-addr.arpa.".to_string(),
+            "PTR",
+            None,
+        ),
+        (
+            "unheld parent",
+            "113.0.203.in-addr.arpa.".to_string(),
+            "PTR",
+            None,
+        ),
+    ];
+    for (description, qname, qtype, content) in cases {
+        let response = env
+            .api()
+            .lookup_record(Request::new(
+                rpc::protos::dns::DnsResourceRecordLookupRequest {
+                    qname: qname.clone(),
+                    qtype: qtype.to_string(),
+                    zone_id: "-1".to_string(),
+                    local: None,
+                    remote: None,
+                    real_remote: None,
+                },
+            ))
+            .await
+            .expect("valid DNS test fixture")
+            .into_inner();
+        let outcome = if content.is_some() {
+            DnsLookupOutcome::Records
+        } else {
+            DnsLookupOutcome::NotAuthoritative
+        };
+        assert_eq!(response.outcome, outcome as i32, "{description}");
+        assert_eq!(response.authoritative, content.is_some(), "{description}");
+        assert!(response.authority_soa.is_none(), "{description}");
+        match content {
+            Some(content) => {
+                let [record] = response.records.as_slice() else {
+                    panic!(
+                        "{description}: expected one record, got {:?}",
+                        response.records
+                    );
+                };
+                assert_eq!(record.qname, qname, "{description}");
+                assert_eq!(record.qtype, qtype, "{description}");
+                assert_eq!(record.content, content, "{description}");
+            }
+            None => assert!(response.records.is_empty(), "{description}"),
+        }
+    }
+}
+
 /// Issue a PTR `lookup_record` query and return the reply records.
 async fn lookup_ptr(api: &Api, qname: &str) -> Vec<rpc::protos::dns::DnsResourceRecord> {
     api.lookup_record(Request::new(
@@ -522,10 +692,9 @@ async fn lookup_ptr(api: &Api, qname: &str) -> Vec<rpc::protos::dns::DnsResource
 // for a forward name that has an A record must be NoData rather than
 // NoSuchName (a cached NXDOMAIN there would suppress the A lookup too).
 //
-// The PTR case runs inside the /24 reverse zone the admin segment creates. The
-// fallback for an address with no enclosing reverse zone
-// (`ptr_forward_authority`) needs a non-octet-aligned segment and is not
-// covered here.
+// Owning an address permits a positive PTR answer, not authority over its
+// enclosing reverse zone. Other record types and reverse names that do not
+// encode a complete IP address must return NotAuthoritative.
 #[sqlx_test]
 async fn test_dns_lookup_outcomes(pool: PgPool) {
     use rpc::protos::dns::DnsLookupOutcome;
@@ -565,6 +734,30 @@ async fn test_dns_lookup_outcomes(pool: PgPool) {
         has_soa: bool,
         record_count: usize,
     }
+
+    // Network creation maintains this address's reverse-domain row for rollback.
+    // Add the ARPA roots to simulate legacy stored domains. None of these rows
+    // may grant reverse-zone authority to the inventory-based lookup path.
+    let reverse_zone = ip_to_arpa(address)
+        .split_once('.')
+        .expect("a reverse address contains labels")
+        .1
+        .to_string();
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &reverse_zone)
+            .await
+            .expect("maintained reverse zone lookup succeeds")
+            .len(),
+        1,
+        "network creation maintains the rollback zone",
+    );
+    for name in ["in-addr.arpa", "ip6.arpa"] {
+        db::dns::domain::persist(model::dns::NewDomain::new(name), &mut txn)
+            .await
+            .expect("legacy reverse domain fixture persists");
+    }
+    txn.commit().await.expect("legacy reverse fixtures commit");
 
     let cases = [
         OutcomeCase {
@@ -658,13 +851,58 @@ async fn test_dns_lookup_outcomes(pool: PgPool) {
             record_count: 0,
         },
         OutcomeCase {
-            description: "PTR inside the held reverse zone is Records",
+            description: "a published PTR remains available with retained reverse rows",
             qname: ip_to_arpa(address),
             qtype: "PTR",
             outcome: DnsLookupOutcome::Records,
             authoritative: true,
             has_soa: false,
             record_count: 1,
+        },
+        OutcomeCase {
+            description: "an existing PTR name has no A record",
+            qname: ip_to_arpa(address),
+            qtype: "A",
+            outcome: DnsLookupOutcome::NotAuthoritative,
+            authoritative: false,
+            has_soa: false,
+            record_count: 0,
+        },
+        OutcomeCase {
+            description: "non-address reverse labels do not grant authority",
+            qname: format!("invalid.{}", ip_to_arpa(address)),
+            qtype: "PTR",
+            outcome: DnsLookupOutcome::NotAuthoritative,
+            authoritative: false,
+            has_soa: false,
+            record_count: 0,
+        },
+        OutcomeCase {
+            description: "retained reverse zone does not supply an apex SOA",
+            qname: reverse_zone,
+            qtype: "SOA",
+            outcome: DnsLookupOutcome::NotAuthoritative,
+            authoritative: false,
+            has_soa: false,
+            record_count: 0,
+        },
+        OutcomeCase {
+            description: "retained IPv4 root does not grant authority",
+            qname: "in-addr.arpa.".to_string(),
+            qtype: "SOA",
+            outcome: DnsLookupOutcome::NotAuthoritative,
+            authoritative: false,
+            has_soa: false,
+            record_count: 0,
+        },
+        OutcomeCase {
+            description: "retained IPv6 root does not deny missing addresses",
+            qname: ip_to_arpa("2001:db8::dead".parse().expect("valid IPv6 fixture")),
+            qtype: "PTR",
+            outcome: DnsLookupOutcome::NotAuthoritative,
+            authoritative: false,
+            has_soa: false,
+            record_count: 0,
         },
     ];
 

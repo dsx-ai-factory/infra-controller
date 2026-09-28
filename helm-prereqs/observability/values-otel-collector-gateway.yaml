@@ -139,7 +139,8 @@ config:
       default_labels_enabled:
         exporter: false
     prometheus/site:
-      endpoint: "[${env:MY_POD_IP}]:9999"
+      # Listen on both available address families and follow the chart's port override.
+      endpoint: ":{{ .Values.ports.prometheus.containerPort }}"
       resource_to_telemetry_conversion:
         enabled: false
   service:

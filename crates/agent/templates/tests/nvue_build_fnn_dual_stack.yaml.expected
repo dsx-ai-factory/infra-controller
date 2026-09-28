@@ -16,16 +16,11 @@
         type: swp
       pf0vf0_if:
         type: swp
-        acl: 
-          p0010_vpc_100_isolation_ipv4:
-            inbound: {}
-          p0010_vpc_100_isolation_ipv6:
-            inbound: {} 
         ip:
           address:
             10.0.1.0/31: {} 
             2001:db8::0/127: {} 
-          vrf: vpc_100 
+          vrf: vpc_100
     nve:
       vxlan:
         arp-nd-suppress: on
@@ -239,6 +234,18 @@
       api:
         listening-address:
           0.0.0.0: {}
+      config:
+        snippet:
+          frr.conf: |
+            interface pf0vf0_if vrf vpc_100
+             no ipv6 nd suppress-ra
+             ipv6 nd prefix 2001:db8::/127 no-autoconfig
+             ipv6 nd ra-lifetime 1800
+             ipv6 nd managed-config-flag
+             ipv6 nd other-config-flag
+             ipv6 nd rdnss 2001:db8::53 1800
+             ipv6 nd rdnss 2001:db8::54 1800
+            !
     vrf:
       default:
         router:
@@ -330,6 +337,21 @@
             address:
               10.0.0.2/32: {}
         router:
+          static:
+            10.0.0.0/16:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
+            fd00::/32:
+              address-family: ipv6-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -424,38 +446,3 @@
                 source-port:
                   '68': {}
         type: ipv4
-
-
-      p0010_vpc_100_isolation_ipv4:
-        type: ipv4
-        rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.0.1.0/24
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: 10.0.0.0/16
-      p0010_vpc_100_isolation_ipv6:
-        type: ipv6
-        rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 2001:db8::/48
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: fd00::/32
-
-
-

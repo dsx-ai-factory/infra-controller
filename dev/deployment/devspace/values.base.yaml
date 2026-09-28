@@ -123,7 +123,6 @@ nico-api:
       concurrency_limit = 100
 
 nico-bmc-proxy:
-  enabled: true
   replicas: 1 # save on local resources
   configFiles:
     enabled: true
@@ -184,17 +183,7 @@ nico-machine-a-tron:
           dpuPerHostCount: 2
           bmcDhcpRelayAddress: "192.168.192.1"
           underlayDhcpRelayAddress: "192.168.176.1"
-nico-dhcp:
-  enabled: false
-nico-dns:
-  enabled: false
 nico-dsx-exchange-consumer:
-  enabled: false
-nico-hardware-health:
-  enabled: false
-nico-pxe:
-  enabled: false
-nico-ssh-console-rs:
   enabled: false
 unbound:
   enabled: false

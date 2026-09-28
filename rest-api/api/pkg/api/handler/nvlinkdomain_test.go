@@ -437,7 +437,7 @@ func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 	}{
 		{
 			name:        "proxies domain target through shared Flow workflow",
-			body:        fmt.Sprintf(`{"siteId":%q,"version":%q,"ruleId":%q,"overrideReadinessCheck":true}`, fixture.site.ID.String(), version, ruleID),
+			body:        fmt.Sprintf(`{"siteId":%q,"version":%q,"ruleId":%q,"overrideReadinessCheck":true,"overrideVersionCheck":true}`, fixture.site.ID.String(), version, ruleID),
 			wantStatus:  http.StatusOK,
 			wantProxy:   true,
 			wantVersion: &version,
@@ -510,6 +510,7 @@ func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 			if test.wantVersion != nil {
 				assert.Equal(t, ruleID, request.GetRuleId().GetId())
 				assert.True(t, request.GetOverrideReadinessCheck())
+				assert.True(t, request.GetOverrideVersionCheck())
 			}
 		})
 	}
@@ -536,6 +537,7 @@ func TestBatchUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 		wantProxy        bool
 		wantVersion      string
 		wantVersionUnset bool
+		wantOverride     bool
 		wantBody         string
 	}{
 		{
@@ -565,14 +567,15 @@ func TestBatchUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 		{
 			name: "forwards the requested version",
 			body: fmt.Sprintf(
-				`{"siteId":%q,"domainIds":[%q,%q],"version":"1.2.3"}`,
+				`{"siteId":%q,"domainIds":[%q,%q],"version":"1.2.3","overrideVersionCheck":true}`,
 				fixture.site.ID.String(),
 				nvLinkDomainIDs[0],
 				nvLinkDomainIDs[1],
 			),
-			wantStatus:  http.StatusOK,
-			wantProxy:   true,
-			wantVersion: "1.2.3",
+			wantStatus:   http.StatusOK,
+			wantProxy:    true,
+			wantVersion:  "1.2.3",
+			wantOverride: true,
 		},
 		{
 			name:       "rejects malformed domain ID",
@@ -627,6 +630,7 @@ func TestBatchUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 				require.NotNil(t, request.TargetVersion)
 				assert.Equal(t, test.wantVersion, request.GetTargetVersion())
 			}
+			assert.Equal(t, test.wantOverride, request.GetOverrideVersionCheck())
 		})
 	}
 }

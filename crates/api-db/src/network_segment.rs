@@ -150,7 +150,7 @@ pub async fn persist(
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes).await?;
+    crate::network_prefix::create_for(txn, &segment_id, &value.prefixes, None).await?;
     crate::state_history::persist(
         txn,
         crate::state_history::StateHistoryTableId::NetworkSegment,

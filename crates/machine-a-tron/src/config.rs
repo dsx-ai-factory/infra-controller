@@ -571,6 +571,14 @@ pub struct MachineATronConfig {
     )]
     pub api_refresh_interval: Duration,
 
+    /// Delay before a simulated Scout reconnects after its stream closes or fails.
+    #[serde(
+        default = "default_scout_stream_reconnect_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub scout_stream_reconnect_interval: Duration,
+
     /// Pool to allocate regular MAC addresses for the machines.
     #[serde(default)]
     pub mac_address_pool: Option<MacAddressPoolConfig>,
@@ -995,6 +1003,10 @@ fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
 }
 
+fn default_scout_stream_reconnect_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
 fn default_false() -> bool {
     false
 }
@@ -1118,6 +1130,14 @@ scout_run_interval = "5s"
     #[test]
     fn machine_config_dpf_enabled_defaults_to_true() {
         assert!(rack_config().machines["config"].dpf_enabled);
+    }
+
+    #[test]
+    fn scout_stream_reconnect_interval_defaults_to_production_value() {
+        assert_eq!(
+            rack_config().scout_stream_reconnect_interval,
+            Duration::from_secs(10)
+        );
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {

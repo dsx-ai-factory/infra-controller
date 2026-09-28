@@ -85,8 +85,8 @@ use model::machine::{
     MachineLastRebootRequestedMode, MachineNextStateResolver, MachineState,
     MachineValidationContext, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
     NetworkConfigUpdateState, NextStateBFBSupport, PerformPowerOperation, PowerDrainState,
-    PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState, ReprovisionState, RetryInfo,
-    SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
+    PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState, ReprovisionState, ResetState,
+    RetryInfo, SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
     SetSecureBootState, SpdmMeasuringState, StateMachineArea, UefiSetupInfo, UefiSetupState,
     UnlockHostState, ValidationState, get_display_ids,
 };
@@ -140,6 +140,7 @@ mod machine_validation;
 mod maintenance;
 mod nic_lockdown_rotation;
 mod power;
+mod reset;
 mod rotation;
 mod sku;
 #[cfg(test)]
@@ -157,7 +158,7 @@ use host_boot_config::{
     initial_set_boot_order_info, inspect_host_boot_config, run_host_boot_config_stage,
     should_skip_boot_order_remediation,
 };
-use state_controller::db_write_batch::DbWriteBatch;
+use state_controller::db_write_batch::{DbWriteBatch, WriteOpFn};
 
 use crate::config::{BomValidationConfig, PowerManagerOptions};
 use crate::rpc::scout_firmware_upgrade::{FileArtifact, ScoutFirmwareUpgradeTask};
@@ -782,6 +783,28 @@ impl MachineStateHandler {
             return Ok(restart_transition);
         }
 
+        // A reset preempts the reprovision hinge below and the failure parking after it.
+        if managed_host_reset_needed(mh_snapshot) {
+            // Stamping `started_at` closes the reset to `clear` and stops the hinge re-firing.
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db::machine::update_managed_host_reset_start_time(
+                &mut txn,
+                &mh_snapshot.host_snapshot.id,
+            )
+            .await?;
+
+            tracing::info!(
+                host_machine_id = %mh_snapshot.host_snapshot.id,
+                from_state = %mh_state,
+                "Managed host reset requested; tearing down the host for re-ingestion",
+            );
+
+            return Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
+                reset_state: ResetState::DeletingInstance,
+            })
+            .with_txn(txn));
+        }
+
         if dpu_reprovisioning_needed(&mh_snapshot.dpu_snapshots) {
             // Reprovision is started and user requested for restart of reprovision.
             let restart_reprov = can_restart_reprovision(
@@ -799,8 +822,11 @@ impl MachineStateHandler {
 
         // Don't update failed state failure cause everytime. Record first failure cause only,
         // otherwise first failure cause will be overwritten.
-        if !matches!(mh_state, ManagedHostState::Failed { .. })
-            && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
+        // A reset is a deliberate teardown, so a failure record must not park it.
+        if !matches!(
+            mh_state,
+            ManagedHostState::Failed { .. } | ManagedHostState::Reset { .. }
+        ) && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
         {
             let already_relocking_machine_failure = matches!(
                 &mh_state,
@@ -1023,6 +1049,17 @@ impl MachineStateHandler {
                 self.dpu_handler
                     .handle_object_state(host_machine_id, mh_snapshot, &mh_state, ctx)
                     .await
+            }
+
+            ManagedHostState::Reset { reset_state } => {
+                reset::handle_reset(
+                    reset_state,
+                    mh_snapshot,
+                    ctx,
+                    self.instance_handler.common_pools.as_deref(),
+                    self.dpu_handler.dpf_sdk.as_deref(),
+                )
+                .await
             }
 
             ManagedHostState::HostInit { .. } => {
@@ -2670,6 +2707,21 @@ fn dpu_reprovisioning_needed(dpu_snapshots: &[DpuMachine]) -> bool {
     dpu_snapshots
         .iter()
         .any(|x| x.reprovision_requested.is_some())
+}
+
+/// This function checks if an operator-requested reset is waiting to start.
+fn managed_host_reset_needed(state: &ManagedHostStateSnapshot) -> bool {
+    // A force-deleting host must not be resurrected.
+    if matches!(state.managed_state, ManagedHostState::ForceDeletion) {
+        return false;
+    }
+
+    // The API refuses a `set` once `started_at` is stamped, so only a fresh request fires here.
+    state
+        .host_snapshot
+        .reset_requested
+        .as_ref()
+        .is_some_and(|request| request.started_at.is_none())
 }
 
 async fn handle_restart_verification(
@@ -5801,22 +5853,28 @@ fn trigger_reboot_if_needed_without_power_cycle(
 }
 
 /// Queues a fresh retry timestamp after earlier writes and disables generic restart verification.
-/// The verification write stores the supplied reboot record in full, so the next retry is
-/// calculated from the updated time.
+/// The next retry's cooldown starts at this time. Queue this after verification
+/// writes so they don't reject the new record created by the same pass.
 fn record_provisioning_retry_attempt(
     target: &HostMachine,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) {
-    let mut current_reboot = target.status.last_reboot_requested.unwrap_or_default();
-    current_reboot.time = Utc::now();
+    let machine_id = target.id.into();
+    let request = MachineLastRebootRequested {
+        time: Utc::now(),
+        mode: target.status.last_reboot_requested.unwrap_or_default().mode,
+        restart_verified: None,
+        verification_attempts: Some(0),
+    };
 
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRestartVerificationStatus {
-            machine_id: target.id.into(),
-            current_reboot,
-            verified: None,
-            attempts: 0,
-        });
+    let write: WriteOpFn = Box::new(move |txn| {
+        async move {
+            db::machine::record_reboot_request(&machine_id, txn, &request).await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    ctx.pending_db_writes.push(write);
 }
 
 async fn trigger_reboot_if_needed_with_policy(
@@ -9619,11 +9677,6 @@ async fn handle_instance_network_config_update_request(
         }
         NetworkConfigUpdateState::ReleaseOldResources => {
             let mut txn = ctx.services.db_pool.begin().await?;
-            // Identify all the resources which have to be released.
-            // Release Ips.
-            // Release segments.
-            // Release VpcDpuLoopbackIps.
-            // Free the update_network_config_request field.
             let Some(update_request) = &instance.update_network_config_request else {
                 return Err(StateHandlerError::GenericError(eyre::eyre!(
                     "network config update request is missing from db. instance: {}",
@@ -9644,13 +9697,6 @@ async fn handle_instance_network_config_update_request(
                 .collect_vec();
 
             if !resources_to_be_released.is_empty() {
-                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
-                let old_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
-                let new_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
-                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
-
                 let addresses = resources_to_be_released
                     .iter()
                     .flat_map(|interface| {
@@ -9683,6 +9729,21 @@ async fn handle_instance_network_config_update_request(
                     &addresses,
                 )
                 .await?;
+            }
+
+            // The cleanup transaction in `force_delete_instance` locks addresses,
+            // then the Instance, then its segments. Clearing the request here avoids
+            // a deadlock even when SLAAC has no stored addresses to lock.
+            db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
+
+            if !resources_to_be_released.is_empty() {
+                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
+                let old_vpc_ids =
+                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
+                let new_vpc_ids =
+                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
+                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
+
                 release_network_segments_with_vpc_prefix(&resources_to_be_released, &mut txn)
                     .await?;
                 release_vpc_dpu_loopback_for_vpcs(
@@ -9693,7 +9754,6 @@ async fn handle_instance_network_config_update_request(
                 )
                 .await?;
             }
-            db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
             let next_state = ManagedHostState::Assigned {
                 instance_state: InstanceState::Ready,
             };

@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-api.namespace" . }}
   labels:
     {{- include "nico-api.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-api.name" . }}
     app: {{ include "nico-api.name" . }}
     prometheus: nico-monitoring
 spec:

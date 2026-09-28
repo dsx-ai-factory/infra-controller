@@ -30,7 +30,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
-use rpc::admin_cli::OutputFormat;
 use rpc::forge;
 use rpc::forge_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ForgeApiClient};
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
@@ -48,6 +47,39 @@ const MAC: &str = "00:11:22:33:44:55";
 const CORE_ERROR: &str = "request rejected by Core";
 
 #[tokio::test]
+async fn confirmed_erases_call_their_delete_rpc_once() {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "confirmed machine erase",
+                input: "expected-machine",
+                expect: Yields(vec!["DeleteAllExpectedMachines".to_string()]),
+            },
+            Case {
+                scenario: "confirmed switch erase",
+                input: "expected-switch",
+                expect: Yields(vec!["DeleteAllExpectedSwitches".to_string()]),
+            },
+            Case {
+                scenario: "confirmed rack erase",
+                input: "expected-rack",
+                expect: Yields(vec!["DeleteAllExpectedRacks".to_string()]),
+            },
+        ],
+        |command| async move {
+            let (result, requests) = dispatch(&[command, "erase", "--confirm"], Code::Ok).await;
+            result
+                .map(|()| requests.into_iter().map(|request| request.method).collect())
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn machine_flags_select_only_supplied_fields() {
     struct Case {
         scenario: &'static str,
@@ -57,6 +89,74 @@ async fn machine_flags_select_only_supplied_fields() {
         expected: forge::ExpectedMachine,
     }
     for case in [
+        Case {
+            scenario: "username flag selects only bmc_username",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--bmc-username",
+                "new-bmc-user",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["bmc_username"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                bmc_username: "new-bmc-user".to_string(),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "password flag selects only bmc_password",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--bmc-password",
+                "new-bmc-password",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["bmc_password"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                bmc_password: "new-bmc-password".to_string(),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "labels alone select only the supplied collection",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--label",
+                "env:prod",
+                "--label",
+                "team:platform",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["metadata.labels"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                metadata: Some(forge::Metadata {
+                    labels: vec![
+                        forge::Label {
+                            key: "env".to_string(),
+                            value: Some("prod".to_string()),
+                        },
+                        forge::Label {
+                            key: "team".to_string(),
+                            value: Some("platform".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        },
         Case {
             scenario: "ID selection sends false and empty resets without reading the record",
             args: vec![
@@ -106,6 +206,26 @@ async fn machine_flags_select_only_supplied_fields() {
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
                 metadata: Some(forge::Metadata::default()),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "standalone lockdown false selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--disable-lockdown",
+                "false",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.disable_lockdown"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(false),
+                }),
                 ..Default::default()
             },
         },
@@ -274,23 +394,16 @@ async fn shelf_updates_select_supplied_values_without_replaying_lookup_fields() 
                 "update",
                 "--bmc-mac-address",
                 MAC,
-                "--shelf-serial-number",
-                "SHELF-002",
                 "--bmc-retain-credentials",
                 "false",
                 "--meta-name",
                 "",
             ],
             methods: &["GetExpectedPowerShelf", "PatchExpectedPowerShelf"],
-            paths: &[
-                "shelf_serial_number",
-                "bmc_retain_credentials",
-                "metadata.name",
-            ],
+            paths: &["bmc_retain_credentials", "metadata.name"],
             expected: forge::ExpectedPowerShelf {
                 expected_power_shelf_id: Some(rpc_id()),
                 bmc_mac_address: MAC.to_string(),
-                shelf_serial_number: "SHELF-002".to_string(),
                 bmc_retain_credentials: Some(false),
                 metadata: Some(forge::Metadata::default()),
                 ..Default::default()
@@ -309,6 +422,14 @@ async fn shelf_updates_select_supplied_values_without_replaying_lookup_fields() 
             case.scenario
         );
     }
+}
+
+#[tokio::test]
+async fn confirmed_shelf_erase_deletes_all_expected_power_shelves_once() {
+    let (result, requests) =
+        dispatch(&["expected-power-shelf", "erase", "--confirm"], Code::Ok).await;
+    result.expect("confirmed shelf erase succeeds");
+    assert_methods(&requests, &["DeleteAllExpectedPowerShelves"]);
 }
 
 #[tokio::test]
@@ -352,6 +473,41 @@ async fn switch_nvos_update_does_not_replay_bmc_credentials_or_select_empty_meta
 }
 
 #[tokio::test]
+async fn switch_nvos_mac_only_update_selects_only_the_supplied_addresses() {
+    let (result, requests) = dispatch(
+        &[
+            "expected-switch",
+            "update",
+            "--bmc-mac-address",
+            MAC,
+            "--nvos-mac-address",
+            "00:11:22:33:44:66",
+            "--nvos-mac-address",
+            "00:11:22:33:44:88",
+        ],
+        Code::Ok,
+    )
+    .await;
+    result.expect("NVOS MAC addresses can be updated without credentials or a serial number");
+    assert_methods(&requests, &["GetExpectedSwitch", "PatchExpectedSwitch"]);
+    let request: forge::PatchExpectedSwitchRequest = requests[1].decode();
+    assert_paths(request.update_mask.unwrap().paths, &["nvos_mac_addresses"]);
+    assert_eq!(
+        request.expected_switch,
+        Some(forge::ExpectedSwitch {
+            expected_switch_id: Some(rpc_id()),
+            bmc_mac_address: MAC.to_string(),
+            nvos_mac_addresses: vec![
+                "00:11:22:33:44:66".to_string(),
+                "00:11:22:33:44:88".to_string(),
+            ],
+            metadata: Some(forge::Metadata::default()),
+            ..Default::default()
+        })
+    );
+}
+
+#[tokio::test]
 async fn unsupported_machine_patches_use_the_original_read_merge_update() {
     struct Case {
         scenario: &'static str,
@@ -372,6 +528,8 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 ID,
                 "--sku-id",
                 "DGX-H100-640GB",
+                "--bmc-username",
+                "new-bmc-user",
                 "--meta-name",
                 "",
                 "--interfaces",
@@ -389,6 +547,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 ..Default::default()
             },
             expected: forge::ExpectedMachine {
+                bmc_username: "new-bmc-user".to_string(),
                 sku_id: Some("DGX-H100-640GB".to_string()),
                 metadata: Some(forge::Metadata {
                     name: String::new(),
@@ -445,6 +604,8 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 MAC,
                 "--sku-id",
                 "DGX-H100-640GB",
+                "--bmc-password",
+                "new-bmc-password",
             ],
             patch_reply: PatchReply::Grpc(Code::Ok),
             lookup_id: None,
@@ -459,6 +620,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
             expected: forge::ExpectedMachine {
                 id: None,
+                bmc_password: "new-bmc-password".to_string(),
                 sku_id: Some("DGX-H100-640GB".to_string()),
                 #[allow(deprecated)]
                 dpf_enabled: true,
@@ -487,6 +649,8 @@ async fn unsupported_shelf_patch_preserves_the_legacy_request_and_result() {
                 "update",
                 "--bmc-mac-address",
                 MAC,
+                "--bmc-username",
+                "new-bmc-user",
                 "--shelf-serial-number",
                 "SHELF-002",
                 "--bmc-retain-credentials",
@@ -516,17 +680,60 @@ async fn unsupported_shelf_patch_preserves_the_legacy_request_and_result() {
         assert_eq!(
             update,
             forge::ExpectedPowerShelf {
-                bmc_mac_address: MAC.to_string(),
+                bmc_username: "new-bmc-user".to_string(),
                 shelf_serial_number: "SHELF-002".to_string(),
                 bmc_retain_credentials: Some(false),
                 metadata: Some(forge::Metadata {
                     name: "replacement-name".to_string(),
-                    ..Default::default()
+                    ..stored_metadata()
                 }),
-                ..Default::default()
+                ..stored_shelf()
             }
         );
     }
+}
+
+#[tokio::test]
+async fn unsupported_shelf_patch_by_id_merges_credentials_and_stored_mac() {
+    let (result, requests) = dispatch_with_replies(
+        &[
+            "expected-power-shelf",
+            "update",
+            "--id",
+            ID,
+            "--bmc-password",
+            "new-bmc-password",
+        ],
+        PatchReply::HttpForbidden,
+        Code::Ok,
+        Some(ID),
+    )
+    .await;
+    result.unwrap();
+    assert_methods(
+        &requests,
+        &[
+            "PatchExpectedPowerShelf",
+            "GetExpectedPowerShelf",
+            "UpdateExpectedPowerShelf",
+        ],
+    );
+    let lookup: forge::ExpectedPowerShelfRequest = requests[1].decode();
+    assert_eq!(
+        lookup,
+        forge::ExpectedPowerShelfRequest {
+            expected_power_shelf_id: Some(rpc_id()),
+            ..Default::default()
+        }
+    );
+    let update: forge::ExpectedPowerShelf = requests[2].decode();
+    assert_eq!(
+        update,
+        forge::ExpectedPowerShelf {
+            bmc_password: "new-bmc-password".to_string(),
+            ..stored_shelf()
+        }
+    );
 }
 
 #[tokio::test]
@@ -561,7 +768,7 @@ async fn unsupported_switch_patch_keeps_the_legacy_typed_mask_header() {
     );
     assert_eq!(
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
-        "nvos_username,nvos_password"
+        "nvos_username"
     );
 }
 
@@ -588,6 +795,14 @@ async fn shelf_lookup_without_an_id_uses_the_original_mac_update() {
         &requests,
         &["GetExpectedPowerShelf", "UpdateExpectedPowerShelf"],
     );
+    let lookup: forge::ExpectedPowerShelfRequest = requests[0].decode();
+    assert_eq!(
+        lookup,
+        forge::ExpectedPowerShelfRequest {
+            bmc_mac_address: MAC.to_string(),
+            expected_power_shelf_id: None,
+        }
+    );
     let update: forge::ExpectedPowerShelf = requests[1].decode();
     assert_eq!(
         update,
@@ -595,8 +810,8 @@ async fn shelf_lookup_without_an_id_uses_the_original_mac_update() {
             bmc_mac_address: MAC.to_string(),
             shelf_serial_number: "SHELF-002".to_string(),
             bmc_retain_credentials: Some(false),
-            metadata: Some(forge::Metadata::default()),
-            ..Default::default()
+            expected_power_shelf_id: None,
+            ..stored_shelf()
         }
     );
 }
@@ -609,6 +824,8 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
             "update",
             "--bmc-mac-address",
             MAC,
+            "--bmc-password",
+            "new-bmc-password",
             "--nvos-username",
             "new-nvos-user",
             "--nvos-password",
@@ -626,6 +843,7 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
         update,
         forge::ExpectedSwitch {
             bmc_mac_address: MAC.to_string(),
+            bmc_password: "new-bmc-password".to_string(),
             nvos_username: Some("new-nvos-user".to_string()),
             nvos_password: Some("new-nvos-password".to_string()),
             metadata: Some(forge::Metadata::default()),
@@ -634,7 +852,7 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
     );
     assert_eq!(
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
-        "nvos_username,nvos_password"
+        "bmc_password,nvos_username,nvos_password"
     );
 }
 
@@ -689,6 +907,184 @@ async fn core_patch_errors_propagate_without_legacy_fallback() {
         assert_core_error(result, case.code);
         assert_methods(&requests, &[case.method]);
     }
+}
+
+#[tokio::test]
+async fn machine_and_switch_selectors_reach_their_delete_or_show_rpc() {
+    struct Case {
+        scenario: &'static str,
+        args: &'static [&'static str],
+        method: &'static str,
+        check: fn(&RecordedRequest),
+    }
+
+    for case in [
+        Case {
+            scenario: "machine delete by positional MAC",
+            args: &["expected-machine", "delete", MAC],
+            method: "DeleteExpectedMachine",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedMachineRequest>(),
+                    forge::ExpectedMachineRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        id: None,
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "machine show by ID",
+            args: &["expected-machine", "show", "--id", ID],
+            method: "GetExpectedMachine",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedMachineRequest>(),
+                    forge::ExpectedMachineRequest {
+                        bmc_mac_address: String::new(),
+                        id: Some(rpc_id()),
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "switch delete by ID",
+            args: &["expected-switch", "delete", "--id", ID],
+            method: "DeleteExpectedSwitch",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedSwitchRequest>(),
+                    forge::ExpectedSwitchRequest {
+                        bmc_mac_address: String::new(),
+                        expected_switch_id: Some(rpc_id()),
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "switch show by positional MAC",
+            args: &["expected-switch", "show", MAC],
+            method: "GetExpectedSwitch",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedSwitchRequest>(),
+                    forge::ExpectedSwitchRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        expected_switch_id: None,
+                    },
+                );
+            },
+        },
+    ] {
+        let (result, requests) = dispatch(case.args, Code::Ok).await;
+        result.unwrap_or_else(|error| panic!("{}: {error}", case.scenario));
+        assert_methods(&requests, &[case.method]);
+        (case.check)(&requests[0]);
+    }
+}
+
+#[tokio::test]
+async fn shelf_delete_and_show_select_by_mac_or_id() {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "delete by positional MAC",
+                input: vec!["expected-power-shelf", "delete", MAC],
+                expect: Yields(vec![(
+                    "DeleteExpectedPowerShelf".to_string(),
+                    forge::ExpectedPowerShelfRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        expected_power_shelf_id: None,
+                    },
+                )]),
+            },
+            Case {
+                scenario: "delete by ID",
+                input: vec!["expected-power-shelf", "delete", "--id", ID],
+                expect: Yields(vec![(
+                    "DeleteExpectedPowerShelf".to_string(),
+                    forge::ExpectedPowerShelfRequest {
+                        bmc_mac_address: String::new(),
+                        expected_power_shelf_id: Some(rpc_id()),
+                    },
+                )]),
+            },
+            Case {
+                scenario: "show by positional MAC",
+                input: vec!["expected-power-shelf", "show", MAC],
+                expect: Yields(vec![(
+                    "GetExpectedPowerShelf".to_string(),
+                    forge::ExpectedPowerShelfRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        expected_power_shelf_id: None,
+                    },
+                )]),
+            },
+            Case {
+                scenario: "show by ID",
+                input: vec!["expected-power-shelf", "show", "--id", ID],
+                expect: Yields(vec![(
+                    "GetExpectedPowerShelf".to_string(),
+                    forge::ExpectedPowerShelfRequest {
+                        bmc_mac_address: String::new(),
+                        expected_power_shelf_id: Some(rpc_id()),
+                    },
+                )]),
+            },
+        ],
+        |args| async move {
+            let (result, requests) = dispatch(&args, Code::Ok).await;
+            result.map_err(|error| error.to_string())?;
+            Ok::<_, String>(
+                requests
+                    .into_iter()
+                    .map(|request| {
+                        let selector: forge::ExpectedPowerShelfRequest = request.decode();
+                        (request.method, selector)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn show_without_a_selector_uses_the_list_rpc() {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
+    // JSON exercises listing without the ASCII table's inventory lookups.
+    check_cases_async(
+        [
+            Case {
+                scenario: "list machines",
+                input: "expected-machine",
+                expect: Yields(vec!["GetAllExpectedMachines".to_string()]),
+            },
+            Case {
+                scenario: "list switches",
+                input: "expected-switch",
+                expect: Yields(vec!["GetAllExpectedSwitches".to_string()]),
+            },
+            Case {
+                scenario: "list power shelves",
+                input: "expected-power-shelf",
+                expect: Yields(vec!["GetAllExpectedPowerShelves".to_string()]),
+            },
+        ],
+        |command| async move {
+            let (result, requests) =
+                dispatch(&["--format", "json", command, "show"], Code::Ok).await;
+            result
+                .map(|()| requests.into_iter().map(|request| request.method).collect())
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await;
 }
 
 fn assert_core_error(result: CarbideCliResult<()>, code: Code) {
@@ -772,7 +1168,7 @@ async fn dispatch_with_replies(
             &client_config,
         ))),
         config: RuntimeConfig {
-            format: OutputFormat::AsciiTable,
+            format: options.format,
             request_timeout: client_config.request_timeout,
             page_size: 25,
             extended: false,
@@ -806,6 +1202,7 @@ async fn dispatch_with_replies(
             CliCommand::ExpectedMachine(command) => command.dispatch(ctx).await,
             CliCommand::ExpectedPowerShelf(command) => command.dispatch(ctx).await,
             CliCommand::ExpectedSwitch(command) => command.dispatch(ctx).await,
+            CliCommand::ExpectedRack(command) => command.dispatch(ctx).await,
             _ => panic!("expected an expected-component command"),
         }
     }))
@@ -858,7 +1255,7 @@ async fn mock_request(
         payload: body.slice(5..),
     };
     // Lookup responses contain fields a read-modify-write client would replay.
-    // PATCH must copy only the ID; the legacy machine update must merge them.
+    // PATCH must copy only the ID; legacy machine and shelf updates must merge them.
     let response = match recorded.method.as_str() {
         "GetExpectedMachine" => {
             let request: forge::ExpectedMachineRequest = recorded.decode();
@@ -885,26 +1282,41 @@ async fn mock_request(
                 Code::Ok,
             )
         }
+        "DeleteExpectedMachine" | "DeleteExpectedSwitch" | "DeleteExpectedPowerShelf" => {
+            grpc_reply(Vec::new(), Code::Ok)
+        }
+        "GetAllExpectedMachines" => grpc_reply(
+            forge::ExpectedMachineList::default().encode_to_vec(),
+            Code::Ok,
+        ),
+        "GetAllExpectedSwitches" => grpc_reply(
+            forge::ExpectedSwitchList::default().encode_to_vec(),
+            Code::Ok,
+        ),
+        "GetAllExpectedPowerShelves" => grpc_reply(
+            forge::ExpectedPowerShelfList::default().encode_to_vec(),
+            Code::Ok,
+        ),
         "GetExpectedPowerShelf" => {
             let request: forge::ExpectedPowerShelfRequest = recorded.decode();
-            assert_eq!(
-                request,
+            let expected = if request.expected_power_shelf_id.is_some() {
+                forge::ExpectedPowerShelfRequest {
+                    bmc_mac_address: String::new(),
+                    expected_power_shelf_id: Some(rpc_id()),
+                }
+            } else {
                 forge::ExpectedPowerShelfRequest {
                     bmc_mac_address: MAC.to_string(),
                     expected_power_shelf_id: None,
                 }
-            );
+            };
+            assert_eq!(request, expected);
             grpc_reply(
                 forge::ExpectedPowerShelf {
                     expected_power_shelf_id: lookup_id.map(|id| rpc::common::Uuid {
                         value: id.to_string(),
                     }),
-                    bmc_mac_address: MAC.to_string(),
-                    bmc_username: "stored-bmc-user".to_string(),
-                    bmc_password: "stored-bmc-password".to_string(),
-                    shelf_serial_number: "STORED-002".to_string(),
-                    metadata: Some(stored_metadata()),
-                    ..Default::default()
+                    ..stored_shelf()
                 }
                 .encode_to_vec(),
                 Code::Ok,
@@ -947,9 +1359,13 @@ async fn mock_request(
                     .unwrap(),
             }
         }
+        "DeleteAllExpectedMachines" | "DeleteAllExpectedSwitches" | "DeleteAllExpectedRacks" => {
+            grpc_reply(Vec::new(), Code::Ok)
+        }
         "UpdateExpectedMachine" | "UpdateExpectedPowerShelf" | "UpdateExpectedSwitch" => {
             grpc_reply(Vec::new(), legacy_code)
         }
+        "DeleteAllExpectedPowerShelves" => grpc_reply(Vec::new(), Code::Ok),
         method => panic!("unexpected mock Forge method: {method}"),
     };
     requests.lock().unwrap().push(recorded);
@@ -972,6 +1388,20 @@ fn stored_machine() -> forge::ExpectedMachine {
             ..Default::default()
         }],
         ..Default::default()
+    }
+}
+
+fn stored_shelf() -> forge::ExpectedPowerShelf {
+    forge::ExpectedPowerShelf {
+        expected_power_shelf_id: Some(rpc_id()),
+        bmc_mac_address: MAC.to_string(),
+        bmc_username: "stored-bmc-user".to_string(),
+        bmc_password: "stored-bmc-password".to_string(),
+        shelf_serial_number: "STORED-002".to_string(),
+        metadata: Some(stored_metadata()),
+        rack_id: Some(ID.parse().unwrap()),
+        bmc_ip_address: "192.0.2.10".to_string(),
+        bmc_retain_credentials: Some(true),
     }
 }
 

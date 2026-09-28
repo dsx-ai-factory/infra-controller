@@ -143,6 +143,33 @@ tests = [
 | `stale_run_timeout` | Grace period before an active validation run is considered stale. The default is `24h`; configured values below `90s` are raised to `90s` so healthy runs are not failed between Scout heartbeats. |
 | `tests` | Optional per-test overrides. Use the test identifiers reported by `tests show` for the running site. |
 
+For container plugins, the site policy explicitly allows the supported plugin
+type and image registry. An empty `allowed_plugin_types` list disables plugin
+registration. Legacy tests are unaffected.
+
+```toml
+[machine_validation_config]
+allowed_plugin_types = ["container"]
+approved_plugin_registries = ["registry.example.com"]
+allow_privileged_plugins = false
+allow_full_host_plugins = false
+```
+
+Attempt logs default to enabled, with a 16 KiB chunk limit, a 1 MiB per-attempt
+limit, and 30-day retention. Setting `enabled = false` makes NICo discard log
+chunks. When enabled, both size limits must be greater than zero,
+`max_chunk_bytes` must not exceed `max_attempt_bytes`, and the largest allowed
+values are 16 KiB and 1 MiB respectively. `retention` accepts a non-negative
+duration and controls when terminal-attempt logs are removed.
+
+```toml
+[machine_validation_config.attempt_logs]
+enabled = true
+max_chunk_bytes = 16384
+max_attempt_bytes = 1048576
+retention = "30d"
+```
+
 ## External Configuration
 
 Some validation tests require external configuration, such as container registry

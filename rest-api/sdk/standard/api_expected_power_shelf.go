@@ -645,7 +645,7 @@ type ApiUpdateExpectedPowerShelfRequest struct {
 	expectedPowerShelfUpdateRequest *ExpectedPowerShelfUpdateRequest
 }
 
-// Expected Power Shelf update request
+// Expected Power Shelf update request.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
 func (r ApiUpdateExpectedPowerShelfRequest) ExpectedPowerShelfUpdateRequest(expectedPowerShelfUpdateRequest ExpectedPowerShelfUpdateRequest) ApiUpdateExpectedPowerShelfRequest {
 	r.expectedPowerShelfUpdateRequest = &expectedPowerShelfUpdateRequest
 	return r

@@ -143,22 +143,49 @@ func TestSession_fetchLabelKeys(t *testing.T) {
 
 func TestSession_fetchMachineChassis(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		machine   string
-		wantError string
+		name                 string
+		machine              string
+		endpointError        string
+		wantError            string
+		wantEndpointRequests int
 	}{
-		{name: "selected machine report", machine: `{"siteId":"machine-site"}`},
+		{name: "selected machine report", machine: `{"siteId":"machine-site"}`, wantEndpointRequests: 2},
+		{
+			name:                 "REST without machineId uses unfiltered pages",
+			machine:              `{"siteId":"machine-site"}`,
+			endpointError:        "Unknown query parameter specified in request: machineId",
+			wantEndpointRequests: 3,
+		},
+		{
+			name:                 "other bad request is returned",
+			machine:              `{"siteId":"machine-site"}`,
+			endpointError:        "Site is not in Registered state",
+			wantError:            "API error 400: Site is not in Registered state",
+			wantEndpointRequests: 1,
+		},
 		{name: "machine without site", machine: `{}`, wantError: "machine machine-1 has no siteId"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pages := 0
+			endpointRequests := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v2/org/acme/nico/machine/machine-1":
 					_, _ = io.WriteString(w, test.machine)
 				case "/v2/org/acme/nico/site-explorer/endpoint":
-					pages++
+					endpointRequests++
 					assert.Equal(t, "machine-site", r.URL.Query().Get("siteId"))
+					if test.endpointError != "" && endpointRequests > 1 {
+						assert.False(t, r.URL.Query().Has("machineId"))
+					} else {
+						assert.Equal(t, "machine-1", r.URL.Query().Get("machineId"))
+					}
+					if test.endpointError != "" && endpointRequests == 1 {
+						w.WriteHeader(http.StatusBadRequest)
+						assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"message": test.endpointError}))
+						return
+					}
+					pages++
 					assert.Equal(t, fmt.Sprint(pages), r.URL.Query().Get("pageNumber"))
 					if pages == 1 {
 						endpoints := make([]map[string]interface{}, 100)
@@ -177,6 +204,8 @@ func TestSession_fetchMachineChassis(t *testing.T) {
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Scope.SiteID = "different-active-site"
 			items, err := session.fetchMachineChassis("machine-1")
+			assert.Equal(t, test.wantEndpointRequests, endpointRequests)
+			assert.Equal(t, "different-active-site", session.Scope.SiteID)
 			if test.wantError != "" {
 				require.ErrorContains(t, err, test.wantError)
 				assert.Zero(t, pages)
@@ -187,7 +216,6 @@ func TestSession_fetchMachineChassis(t *testing.T) {
 			assert.Equal(t, "Chassis_0", items[0].ID)
 			assert.Equal(t, "Chassis_1", items[1].ID)
 			assert.Equal(t, 2, pages)
-			assert.Equal(t, "different-active-site", session.Scope.SiteID)
 		})
 	}
 }

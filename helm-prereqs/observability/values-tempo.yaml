@@ -18,15 +18,14 @@ tempo:
         path: /var/tempo/traces
       wal:
         path: /var/tempo/wal
-  # OTLP gRPC/HTTP ingest is on by default in the chart; overriding receivers here TRIMS the
-  # default jaeger listeners down to otlp-only (nothing on this site speaks jaeger).
+  # Accept either IP family on the OTLP ports used by the collector agent.
   receivers:
     otlp:
       protocols:
         grpc:
-          endpoint: 0.0.0.0:4317
+          endpoint: "[::]:4317"
         http:
-          endpoint: 0.0.0.0:4318
+          endpoint: "[::]:4318"
   resources:
     requests:
       cpu: 200m

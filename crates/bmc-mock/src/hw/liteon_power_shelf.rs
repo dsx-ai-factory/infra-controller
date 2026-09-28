@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::{hw, redfish};
+use crate::{Callbacks, hw, redfish};
 
 pub(crate) struct LiteOnPowerShelf<'a> {
     pub(crate) bmc_mac_address: MacAddress,
@@ -67,7 +67,7 @@ impl LiteOnPowerShelf<'_> {
         }
     }
 
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         let system_id = "system";
 
         redfish::computer_system::Config {

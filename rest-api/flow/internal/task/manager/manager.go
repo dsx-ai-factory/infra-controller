@@ -38,9 +38,15 @@ const (
 	schedulingPersistenceFailure = "Task scheduling metadata could not be persisted"
 )
 
-// ErrRackConflict marks a rejected task submission caused by an active
-// conflicting task on the target rack.
-var ErrRackConflict = errors.New("rack conflict")
+var (
+	// ErrRackConflict marks a rejected task submission caused by an active
+	// conflicting task on the target rack.
+	ErrRackConflict = errors.New("rack conflict")
+
+	// ErrTaskNotCancellable marks a cancellation rejected because the task has
+	// already reached a terminal state other than Terminated.
+	ErrTaskNotCancellable = errors.New("task cannot be cancelled")
+)
 
 // Config holds the configuration for the task manager.
 type Config struct {
@@ -429,6 +435,8 @@ func validateResolvedRackTargets(
 		(op.Type == taskcommon.TaskTypeBringUp &&
 			op.Code == taskcommon.OpCodeIngest &&
 			ruleUsesOnlyExpectedInventory(ruleDef))
+	macTargetSupported := op.Type == taskcommon.TaskTypePowerControl ||
+		op.Type == taskcommon.TaskTypeFirmwareControl
 
 	for rackID, resolvedRack := range rackMap {
 		if resolvedRack == nil || len(resolvedRack.Components) == 0 {
@@ -439,7 +447,8 @@ func validateResolvedRackTargets(
 			continue
 		}
 		for _, comp := range resolvedRack.Components {
-			if comp.ComponentID == "" {
+			if comp.ComponentID == "" &&
+				(!macTargetSupported || comp.ManagementMAC() == "") {
 				unlinkedComponents = append(
 					unlinkedComponents,
 					fmt.Sprintf(
@@ -993,7 +1002,10 @@ func (m *ManagerImpl) resolveOperationRule(
 	op operation.Wrapper,
 	rackID uuid.UUID,
 ) (*operationrules.OperationRule, error) {
-	ruleID := operations.ExtractRuleID(op.Info)
+	ruleID, err := operations.ExtractRuleID(op.Info)
+	if err != nil {
+		return nil, fmt.Errorf("extract operation rule ID: %w", err)
+	}
 	return m.ruleResolver.ResolveRule(ctx, op.Type, op.Code, rackID, ruleID)
 }
 
@@ -1014,7 +1026,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 
 	if task.Status.IsFinished() {
 		return fmt.Errorf(
-			"task %s cannot be cancelled (status: %s)", taskID, task.Status,
+			"%w: task %s has status %s", ErrTaskNotCancellable, taskID, task.Status,
 		)
 	}
 
@@ -1083,6 +1095,7 @@ func workflowComponentsFrom(
 		comps[i] = taskdef.WorkflowComponent{
 			Type:        c.Type,
 			ComponentID: c.ComponentID,
+			MACAddress:  c.ManagementMAC(),
 		}
 	}
 

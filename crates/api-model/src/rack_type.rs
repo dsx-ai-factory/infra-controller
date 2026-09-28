@@ -284,11 +284,20 @@ impl fmt::Display for RackHardwareClass {
 /* ********************************** */
 
 /// RackCapabilityType represents a category of rack component capability.
+/// String parsing uses the same case-sensitive names as Serde serialization.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum RackCapabilityType {
     Compute,
     Switch,
     PowerShelf,
+}
+
+impl FromStr for RackCapabilityType {
+    type Err = serde::de::value::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::deserialize(serde::de::value::StrDeserializer::<Self::Err>::new(value))
+    }
 }
 
 impl fmt::Display for RackCapabilityType {
@@ -1338,6 +1347,27 @@ count = 2
 
             "power shelf" {
                 RackCapabilityType::PowerShelf => "PowerShelf".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_rack_capability_type_from_str() {
+        scenarios!(
+            run = |input: &str| input.parse::<RackCapabilityType>().inspect(|value| {
+                assert_eq!(serde_json::to_value(value).unwrap(), input);
+            }).map_err(drop);
+            "canonical Serde names" {
+                "Compute" => Yields(RackCapabilityType::Compute),
+                "Switch" => Yields(RackCapabilityType::Switch),
+                "PowerShelf" => Yields(RackCapabilityType::PowerShelf),
+            }
+
+            "non-canonical names rejected" {
+                "switch" => Fails,
+                "NVSwitch" => Fails,
+                " Switch " => Fails,
+                "" => Fails,
             }
         );
     }

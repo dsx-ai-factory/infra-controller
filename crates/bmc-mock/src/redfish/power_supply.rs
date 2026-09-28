@@ -92,16 +92,34 @@ impl PowerSupplyBuilder {
     }
 
     /// Delta Energy Systems reports per-PSU power state under
-    /// `Oem.deltaenergysystems.Power` (not the standard `PowerState` field),
-    /// alongside a `FanSpeedTarget`. Mirrors the shape served by real Delta
-    /// power shelves.
+    /// `Oem.deltaenergysystems.Power` rather than the standard `PowerState`
+    /// field. Mirrors the shape served by real Delta power shelves.
     pub(crate) fn oem_delta_power_state(self, v: bool) -> Self {
         self.apply_patch(json!({
             "Oem": {
                 "deltaenergysystems": {
                     "@odata.type": "#DeltaEnergySystemsPowerSupply.v1_0_0.PowerSupply",
-                    "Power": v,
-                    "FanSpeedTarget": 0
+                    "Power": v
+                }
+            }
+        }))
+    }
+
+    /// Standard Redfish per-PSU capacity. Delta reports capacity this way
+    /// (unlike LiteOn's non-standard OEM string); any vendor can use it.
+    pub(crate) fn power_capacity_watts(self, v: f64) -> Self {
+        self.apply_patch(json!({"PowerCapacityWatts": v}))
+    }
+
+    /// Sets `Oem.deltaenergysystems.FanSpeedTarget`, the commanded fan speed
+    /// in percent, where `0` means the PSU controls its own fan. JSON-patch
+    /// merges this into the same `Oem.deltaenergysystems` object
+    /// `oem_delta_power_state` writes, so the two compose in either order.
+    pub(crate) fn oem_delta_fan_speed_target(self, v: i64) -> Self {
+        self.apply_patch(json!({
+            "Oem": {
+                "deltaenergysystems": {
+                    "FanSpeedTarget": v
                 }
             }
         }))

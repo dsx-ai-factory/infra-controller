@@ -845,11 +845,19 @@ docker_build(
 )
 docker_build(
     'mat-k8s-controller',
-    os.path.join(repo_root, 'dev/k8s/machine-a-tron-controller'),
+    repo_root,
     dockerfile=os.path.join(
         repo_root,
         'dev/k8s/machine-a-tron-controller/Dockerfile',
     ),
+    only=[
+        'Cargo.toml',
+        'Cargo.lock',
+        'rust-toolchain.toml',
+        '.cargo',
+        'crates',
+        'dev/k8s/machine-a-tron-controller',
+    ],
 )
 
 rest_image(

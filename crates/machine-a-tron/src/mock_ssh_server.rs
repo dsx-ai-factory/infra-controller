@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr};
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
@@ -27,14 +27,18 @@ use rand::rngs::SysRng;
 use russh::keys::PublicKeyBase64;
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
 use russh::{Channel, ChannelId, ChannelWriteHalf, MethodKind, MethodSet, Pty, server};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use crate::console_output::ConsoleOutputController;
 
 const INTERACTIVE_OUTPUT_CAPACITY: usize = 32;
 
+/// Owns a mock SSH listener and its accepted connections.
+///
+/// Dropping the handle initiates cancellation of the listener, sessions, and console writers.
 #[derive(Debug)]
 pub struct MockSshServerHandle {
     pub host_pubkey: String,
@@ -128,6 +132,7 @@ impl Server {
         socket: TcpListener,
         mut shutdown: oneshot::Receiver<()>,
     ) -> eyre::Result<()> {
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
                 accept_result = socket.accept() => {
@@ -136,33 +141,7 @@ impl Server {
                             let config = config.clone();
                             let handler = self.new_client(socket.peer_addr().ok());
 
-                            tokio::spawn(async move {
-                                if config.nodelay
-                                    && let Err(e) = socket.set_nodelay(true) {
-                                        tracing::warn!(
-                                            error = ?e,
-                                            "set_nodelay failed",
-                                        );
-                                    }
-
-                                let session = match run_stream(config, socket, handler).await {
-                                    Ok(s) => s,
-                                    Err(error) => {
-                                        if !matches!(error, russh::Error::Disconnect) {
-                                            tracing::warn!(?error, "Connection setup failed");
-                                        }
-                                        return
-                                    }
-                                };
-
-                                match session.await {
-                                    Ok(_) => tracing::debug!("Connection closed"),
-                                    Err(russh::Error::Disconnect) => {},
-                                    Err(error) => {
-                                        tracing::warn!(?error, "Connection closed with error");
-                                    }
-                                }
-                            });
+                            connections.spawn(serve_connection(config, socket, handler));
                         }
 
                         Err(error) => {
@@ -172,11 +151,57 @@ impl Server {
                     }
                 },
 
+                result = connections.join_next(), if !connections.is_empty() => {
+                    match result {
+                        Some(Ok(Ok(()))) => tracing::debug!("Connection closed"),
+                        Some(Ok(Err(russh::Error::Disconnect))) => {},
+                        Some(Ok(Err(error))) => {
+                            tracing::warn!(%error, "mock SSH connection failed");
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(%error, "mock SSH connection task failed");
+                        }
+                        None => {},
+                    }
+                }
                 _ = &mut shutdown => break,
             }
         }
 
         Ok(())
+    }
+}
+
+async fn serve_connection(
+    config: Arc<Config>,
+    socket: TcpStream,
+    handler: MockSshHandler,
+) -> Result<(), russh::Error> {
+    if config.nodelay
+        && let Err(error) = socket.set_nodelay(true)
+    {
+        tracing::warn!(%error, "set_nodelay failed");
+    }
+
+    // RunningSession detaches russh's internal task on drop. Shut down the shared socket when
+    // this owning task is cancelled so the internal session exits and drops its console writer.
+    let socket = socket.into_std()?;
+    let _disconnect = DisconnectOnDrop(socket.try_clone()?);
+    let socket = TcpStream::from_std(socket)?;
+    // A handler waiting for space in the interactive queue cannot observe socket EOF itself.
+    let _cancel_handler = handler.cancellation.clone().drop_guard();
+    run_stream(config, socket, handler).await?.await
+}
+
+struct DisconnectOnDrop(std::net::TcpStream);
+
+impl Drop for DisconnectOnDrop {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.shutdown(Shutdown::Both)
+            && error.kind() != std::io::ErrorKind::NotConnected
+        {
+            tracing::debug!(%error, "mock SSH socket shutdown failed");
+        }
     }
 }
 
@@ -202,6 +227,7 @@ struct MockSshHandler {
     console_state_tx: watch::Sender<ConsoleState>,
     interactive_output: Option<mpsc::Sender<Bytes>>,
     writer_task: Option<JoinHandle<()>>,
+    cancellation: CancellationToken,
 }
 
 impl MockSshHandler {
@@ -222,6 +248,7 @@ impl MockSshHandler {
             console_state_tx,
             interactive_output: None,
             writer_task: None,
+            cancellation: CancellationToken::new(),
         }
     }
 
@@ -256,9 +283,10 @@ impl MockSshHandler {
         let Some(output) = &self.interactive_output else {
             return Err(russh::Error::Disconnect);
         };
-        output
-            .send(data.into())
+        self.cancellation
+            .run_until_cancelled(output.send(data.into()))
             .await
+            .ok_or(russh::Error::Disconnect)?
             .map_err(|_| russh::Error::Disconnect)
     }
 }

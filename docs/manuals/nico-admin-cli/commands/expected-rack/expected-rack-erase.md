@@ -21,7 +21,7 @@ Erase all expected racks
 
 `--confirm`
 
-Confirm that you want to erase all records.
+Required to erase all expected rack records.
 
 `--extended`
 

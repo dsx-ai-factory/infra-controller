@@ -6,10 +6,14 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
 // GeneratedResourceDescriptor describes how an OpenAPI parameter can be
@@ -78,6 +82,8 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	case commandName == "machine health-report delete" && strings.EqualFold(parameter, "source"):
 		descriptor.ResourceType = "health-report-source"
 		descriptor.ParentParameter = "machineId"
+	case (commandName == "rack health-report delete" || commandName == "tray health-report delete") && strings.EqualFold(parameter, "source"):
+		descriptor.FreeFormReason = "health report source discovery requires siteId and, for Tray, type query values, which are collected after path parameters; enter the source returned by the corresponding health-report list command"
 	case commandName == "instance-type machine-association delete" && strings.EqualFold(parameter, "machineAssociationId"):
 		descriptor.ResourceType = "instance-type-machine"
 		descriptor.ParentParameter = "instanceTypeId"
@@ -96,7 +102,7 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	if descriptor.ResourceType == "task" {
 		descriptor.FreeFormReason = "task IDs come from prior lifecycle actions; no site-wide task list API exists"
 	}
-	if descriptor.ResourceType == "nvlink-domain" {
+	if descriptor.ResourceType == "domain" && strings.Contains(commandName, "nvlink-domain") {
 		descriptor.FreeFormReason = "NVLink domain IDs come from prior lifecycle actions; no list API exists"
 	}
 	if strings.HasPrefix(commandName, "measured-boot") && strings.EqualFold(parameter, "id") {
@@ -341,7 +347,14 @@ func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
 	if siteID == "" {
 		return nil, fmt.Errorf("machine %s has no siteId", machineID)
 	}
-	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID, "machineId": machineID})
+	// REST versions without `machineId` reject the query before listing.
+	// The report check below still selects the machine on those servers.
+	var apiErr *appcli.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		apiErr.Message == "Unknown query parameter specified in request: machineId" {
+		endpoints, err = s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -150,6 +150,12 @@ impl PreingestionManagerStatic {
             self.set_rack_firmware_state(db, &addresses, PreingestionState::Complete)
                 .await?;
 
+            tracing::info!(
+                rack_profile_id = %profile_id,
+                bmc_mac_address = %bmc_mac,
+                "Rack profile has no firmware object; rack firmware preingestion is complete"
+            );
+
             return Ok(true);
         };
 
@@ -199,6 +205,13 @@ impl PreingestionManagerStatic {
             config_json,
             access_token,
         } = preparation;
+
+        tracing::info!(
+            backend = compute_tray.name(),
+            bmc_ip_address = %endpoint.bmc_ip,
+            bmc_mac_address = %endpoint.bmc_mac,
+            "Submitting rack compute-tray firmware update during preingestion"
+        );
 
         let results = compute_tray
             .update_firmware(
@@ -275,6 +288,14 @@ impl PreingestionManagerStatic {
         }
 
         if let Some(backend_job_id) = result.backend_job_id {
+            tracing::info!(
+                backend = compute_tray.name(),
+                bmc_ip_address = %result.bmc_ip,
+                bmc_mac_address = %result.bmc_mac,
+                %backend_job_id,
+                "Rack firmware update was accepted"
+            );
+
             self.set_rack_firmware_state(
                 db,
                 addresses,
@@ -287,9 +308,17 @@ impl PreingestionManagerStatic {
             return Ok(());
         }
 
-        // RMS found no work to schedule, so ingestion can continue.
+        // RMS accepted the request without returning a durable job to poll, so
+        // ingestion can continue.
         self.set_rack_firmware_state(db, addresses, PreingestionState::Complete)
             .await?;
+
+        tracing::info!(
+            backend = compute_tray.name(),
+            bmc_ip_address = %result.bmc_ip,
+            bmc_mac_address = %result.bmc_mac,
+            "RMS returned success without a durable firmware job; preingestion is complete"
+        );
 
         Ok(())
     }
@@ -340,6 +369,8 @@ impl PreingestionManagerStatic {
                     Ok(Some(Credentials::UsernamePassword { password, .. })) => Some(password),
                     Ok(None) => {
                         tracing::warn!(
+                            bmc_ip_address = %explored.address,
+                            bmc_mac_address = %bmc_mac,
                             credential_name = %name,
                             "Firmware artifact access-token credential is unavailable; will retry"
                         );
@@ -348,6 +379,8 @@ impl PreingestionManagerStatic {
                     }
                     Err(error) => {
                         tracing::warn!(
+                            bmc_ip_address = %explored.address,
+                            bmc_mac_address = %bmc_mac,
                             credential_name = %name,
                             %error,
                             "Firmware artifact access-token credential is unavailable; will retry"
@@ -501,6 +534,14 @@ impl PreingestionManagerStatic {
                 Ok(())
             }
             FirmwareState::Completed => {
+                tracing::info!(
+                    backend = dependencies.compute_tray.name(),
+                    bmc_ip_address = %endpoint.address,
+                    bmc_mac_address = %bmc_mac,
+                    backend_job_id = %job_id,
+                    "Rack firmware update completed; marking preingestion complete"
+                );
+
                 self.set_rack_firmware_state(db, &addresses, PreingestionState::Complete)
                     .await
             }

@@ -134,8 +134,9 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 			return nil, err
 		}
 		var items []map[string]interface{}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return all, nil
+		err = json.Unmarshal(body, &items)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s page %d: %w", path, page, err)
 		}
 		all = append(all, items...)
 		if pag := hdrs.Get("X-Pagination"); pag != "" {
@@ -551,7 +552,12 @@ func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) 
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
-		result[i] = NamedItem{Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"), Raw: m}
+		result[i] = NamedItem{
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
+			Extra:  map[string]string{"type": str(m, "type")}, Raw: m,
+		}
 	}
 	return result, nil
 }
@@ -1064,9 +1070,13 @@ func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, err
 }
 
 func (s *Session) fetchIPXETemplates(_ context.Context) ([]NamedItem, error) {
+	return s.fetchIPXETemplatesForSite(s.Scope.SiteID)
+}
+
+func (s *Session) fetchIPXETemplatesForSite(siteID string) ([]NamedItem, error) {
 	q := map[string]string{}
-	if s.Scope.SiteID != "" {
-		q["siteId"] = s.Scope.SiteID
+	if siteID != "" {
+		q["siteId"] = siteID
 	}
 	items, err := s.fetchAll(apiPath(s, "ipxe-template"), q)
 	if err != nil {

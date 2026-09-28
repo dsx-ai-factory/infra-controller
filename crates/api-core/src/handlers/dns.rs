@@ -25,27 +25,22 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
-/// The zone this site holds that a queried name falls under, and what
-/// `lookup_answer` needs from it to answer.
+/// Authority and negative-cache data for a forward-zone question.
 ///
-/// `find_site_authority` produces one per question. `None` from that lookup
-/// means no held zone contains the name and the answer is
-/// `NotAuthoritative`. `Some` means the site is authoritative and the
-/// question is answered from inside this zone, whether or not records exist
-/// at the name. Every field is read on the way to a positive or negative
-/// answer, which is why the SOA is loaded here rather than fetched again when
-/// a negative turns out to need it.
+/// Loaded together so positive and negative answers use the same zone snapshot.
+/// Reverse questions bypass this lookup: a published PTR does not establish
+/// authority over its enclosing reverse zone.
 struct HeldAuthority {
-    /// The zone apex. Names the authority in every `Answer` variant given
-    /// from this zone.
+    /// The enclosing zone's apex.
     zone: Fqdn,
-    /// The zone's SOA. Returned as the record for an apex SOA question, and
-    /// placed in the authority section of NODATA and NXDOMAIN answers so
-    /// resolvers can cache the negative.
+    /// The forward zone's SOA: returned in the answer section when a query asks
+    /// for SOA at the zone's exact name (apex). Included in the authority section
+    /// when an existing name lacks the requested record type (NODATA) or the
+    /// name does not exist (NXDOMAIN), providing the lifetime for caching that
+    /// negative answer.
     soa: SoaRecord,
-    /// The queried name is the zone apex itself, not a name under it. An apex
-    /// always exists, so it can be NODATA but never NXDOMAIN, and an apex SOA
-    /// question is answered from `soa` instead of the record store.
+    /// Whether the queried name equals the zone apex. An apex can yield NODATA,
+    /// but never NXDOMAIN, even when it has no records of the requested type.
     is_apex: bool,
 }
 
@@ -106,11 +101,9 @@ async fn lookup_records_by_qname(
     Ok(result)
 }
 
-/// Resolve a reverse-DNS (PTR) query. The qname is an address in `in-addr.arpa` /
-/// `ip6.arpa` form, so we parse it back to an `IpAddr` and look the holding
-/// interface up by address (rather than matching a per-row arpa string in a view).
-/// A name that is not a complete reverse address, or one no interface holds,
-/// yields no records.
+/// Resolve a reverse name by address against machine and instance inventory,
+/// independently of stored reverse zones. Incomplete reverse names, addresses
+/// without a publishable name, and ambiguous ownership yield no records.
 async fn lookup_ptr_record(
     txn: impl DbReader<'_>,
     qname: &Fqdn,
@@ -137,23 +130,13 @@ async fn lookup_ptr_record(
     Ok(result)
 }
 
-/// Pick an authority for a PTR record when no reverse zone contains it.
+/// Identifies a published PTR by its owning forward domain without granting
+/// reverse-zone authority or supplying an SOA for negative answers.
 ///
-/// Reverse zones are only created for prefixes that end on an octet or nibble
-/// boundary (/8, /16, /24, /32 for IPv4). An address on a /25 has a PTR record
-/// but no `in-addr.arpa` row above it, so `find_site_authority` finds nothing.
-/// Rather than drop the record, use the forward domain that owns the hostname
-/// the PTR points at. Allocated prefixes cannot overlap across tenants
-/// (site-wide exclusion constraints on `network_prefixes` and
-/// `network_vpc_prefixes`), so every address has at most one owner and no
-/// tie-break is needed.
-///
-/// The record was just read from a live domain, so a missing or unparsable
-/// domain here is an inconsistency in our own data, not a missing name;
-/// both are reported as internal errors (ServFail downstream), never as
-/// NotFound (which the DNS server would turn into NXDOMAIN).
-// TODO: remove once reverse authority is derived from live network prefixes
-// instead of stored `domains` rows; every live address then has a held zone.
+/// PTR selection requires a live forward domain. Missing or invalid domain
+/// metadata here is an internal inconsistency, not evidence that the queried
+/// name does not exist. Report it as an internal error so the DNS server returns
+/// SERVFAIL rather than caching an NXDOMAIN from a NotFound response.
 async fn ptr_forward_authority(
     db: impl DbReader<'_>,
     record: &ResourceRecord,
@@ -171,33 +154,30 @@ async fn ptr_forward_authority(
         .ok_or_else(|| CarbideError::Internal {
             message: format!("PTR record refers to missing domain {domain_id}"),
         })?;
-    let zone = Fqdn::parse(&domain.name).map_err(|error| CarbideError::Internal {
-        message: format!(
-            "domain {domain_id} has an unparsable name {:?}: {error}",
-            domain.name
-        ),
-    })?;
-    Ok(zone)
+    Fqdn::parse(&domain.name).map_err(|error| {
+        CarbideError::Internal {
+            message: format!(
+                "domain {domain_id} has an unparsable name {:?}: {error}",
+                domain.name
+            ),
+        }
+        .into()
+    })
 }
 
-/// Does anything exist below `qname`?
+/// Does any forward record exist below `qname`?
 ///
 /// A name with records under it exists even if it has none of its own
 /// (RFC 8020 §2). If we answer NXDOMAIN for `rack1.example.com` while
 /// `gpu1.rack1.example.com` exists, a resolver may cache that and stop looking
 /// up anything under `rack1`.
-///
-/// Reverse names are checked by address range, since PTR records are keyed by
-/// address rather than stored under their arpa name.
 async fn name_has_descendants(db: impl DbReader<'_>, qname: &Fqdn) -> Result<bool, Status> {
-    let exists = match model::dns::arpa_qname_to_prefix(qname.as_str()) {
-        Some(prefix) => resource_record::any_ptr_published_within(db, prefix).await,
-        None => resource_record::any_record_below(db, qname.as_str()).await,
-    };
-    Ok(exists.map_err(CarbideError::from)?)
+    Ok(resource_record::any_record_below(db, qname.as_str())
+        .await
+        .map_err(CarbideError::from)?)
 }
 
-/// Answer one DNS question from the zones this site holds.
+/// Answer a forward-zone question or an inventory-derived reverse PTR query.
 ///
 /// The result is one of:
 ///
@@ -206,10 +186,13 @@ async fn name_has_descendants(db: impl DbReader<'_>, qname: &Fqdn) -> Result<boo
 ///   zone apex, and names that only have records below them.
 /// - `NxDomain`: the name is inside one of our zones and nothing exists at or
 ///   below it.
-/// - `NotAuthoritative`: the name is not inside any zone we hold. We never say
-///   NXDOMAIN for those, because the name may well exist somewhere else.
+/// - `NotAuthoritative`: a forward name is outside held zones, or a reverse
+///   question has no supported answer. Neither proves the name does not exist,
+///   so these queries must not produce NXDOMAIN.
 ///
 /// `NoData` and `NxDomain` carry the zone SOA for the authority section.
+/// Reverse DNS serves only published, unambiguous PTRs, identified by their
+/// owning forward domain. All other reverse questions are `NotAuthoritative`.
 async fn lookup_answer(
     db: impl DbReader<'_> + Copy,
     qname: &str,
@@ -217,29 +200,32 @@ async fn lookup_answer(
 ) -> Result<Answer, Status> {
     let qname =
         Fqdn::parse(qname).map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
-    let held = find_site_authority(db, &qname).await?;
 
-    // PTR data is keyed by address rather than by zone, and the address may
-    // sit under a prefix that has no reverse zone row (see
-    // `ptr_forward_authority`). Resolve it before the zone gate so those
-    // records keep being served.
-    if qtype == DnsResourceRecordType::PTR {
-        let records = lookup_ptr_record(db, &qname).await?;
-        if let Some(first) = records.first() {
-            let zone = match held {
-                Some(held) => held.zone,
-                None => ptr_forward_authority(db, first).await?,
-            };
-            return Ok(Answer::Records { zone, records });
+    // Address ownership supplies a PTR, not authority over the enclosing zone.
+    // Include both roots and non-address labels so rollback-compatible zone
+    // maintenance cannot enable reverse SOAs or authoritative negatives.
+    let is_reverse = qname
+        .suffixes()
+        .iter()
+        .any(|name| matches!(name.as_str(), "in-addr.arpa" | "ip6.arpa"));
+    if is_reverse {
+        if qtype == DnsResourceRecordType::PTR {
+            let records = lookup_ptr_record(db, &qname).await?;
+            if let Some(first) = records.first() {
+                let zone = ptr_forward_authority(db, first).await?;
+                return Ok(Answer::Records { zone, records });
+            }
         }
+        return Ok(Answer::NotAuthoritative);
     }
 
-    let Some(held) = held else {
+    let Some(held) = find_site_authority(db, &qname).await? else {
         return Ok(Answer::NotAuthoritative);
     };
 
-    // The apex SOA is the only record synthesised from the zone row rather than
-    // read from inventory. NS is not published, so it falls through to NODATA.
+    // The apex SOA is the only record synthesised from the held zone rather
+    // than read from inventory. NS is not published, so it falls through to
+    // NODATA.
     if held.is_apex && qtype == DnsResourceRecordType::SOA {
         let record = ResourceRecord::soa(&held.zone, &held.soa);
         return Ok(Answer::Records {
@@ -248,16 +234,9 @@ async fn lookup_answer(
         });
     }
 
-    // Everything published at the exact name, any type. Reverse names have
-    // no rows in `dns_records`; the PTR lookup above is the only data at them,
-    // and it already missed. A PTR question for a forward name still has to
-    // check the forward records, or an existing name would look like
-    // NXDOMAIN.
-    let published = if model::dns::arpa_qname_to_prefix(qname.as_str()).is_some() {
-        vec![]
-    } else {
-        lookup_records_by_qname(db, &qname).await?
-    };
+    // Check all forward record types even for a PTR question: an existing A
+    // record must yield NODATA, not an NXDOMAIN that would hide the A record.
+    let published = lookup_records_by_qname(db, &qname).await?;
     let name_exists =
         held.is_apex || !published.is_empty() || name_has_descendants(db, &qname).await?;
 

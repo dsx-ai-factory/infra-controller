@@ -84,12 +84,11 @@ impl WiwynnGB200Nvl<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
-        let callbacks = Some(callbacks);
         let serial_number = Some(self.system_serial_number.to_string().into());
         let boot_opt_builder = |id: &str, kind| {
             redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
@@ -121,7 +120,7 @@ impl WiwynnGB200Nvl<'_> {
                     eth_interfaces: None,
                     serial_number,
                     boot_order_mode: redfish::computer_system::BootOrderMode::ViaSettings,
-                    callbacks,
+                    callbacks: Some(callbacks),
                     chassis: vec!["BMC_0".into()],
                     boot_options: Some(boot_options),
                     bios_mode: redfish::computer_system::BiosMode::Generic,

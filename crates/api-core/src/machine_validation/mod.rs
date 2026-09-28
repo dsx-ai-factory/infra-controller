@@ -24,7 +24,7 @@ use std::sync::Arc;
 use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
-use db::machine_validation::StateColumn;
+use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
@@ -160,12 +160,10 @@ impl MachineValidationManager {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
-        if self.config.enabled {
-            join_set
-                .build_task()
-                .name("machine_validation_manager")
-                .spawn(async move { self.run(cancel_token).await })?;
-        }
+        join_set
+            .build_task()
+            .name("machine_validation_manager")
+            .spawn(async move { self.run(cancel_token).await })?;
         Ok(())
     }
 
@@ -173,7 +171,11 @@ impl MachineValidationManager {
         let timer = PeriodicTimer::new(self.config.run_interval);
         loop {
             let tick = timer.tick();
-            let result = self.run_single_iteration().await;
+            let result = if self.config.enabled {
+                self.run_single_iteration().await
+            } else {
+                self.cleanup_attempt_logs().await
+            };
             managed_loop::record_iteration(LoopManager::MachineValidationManager, &result);
 
             tokio::select! {
@@ -192,6 +194,8 @@ impl MachineValidationManager {
         let mut metrics = MachineValidationMetrics::new();
         let now = chrono::Utc::now();
         let heartbeat_stale_timeout = heartbeat_stale_timeout(self.config.stale_run_timeout);
+
+        self.cleanup_attempt_logs().await?;
 
         // Each reconciliation phase gets its own transaction. PostgreSQL
         // keeps row locks until commit, so sharing a transaction would let a
@@ -308,6 +312,27 @@ impl MachineValidationManager {
 
         Ok(())
     }
+
+    async fn cleanup_attempt_logs(&self) -> CarbideResult<()> {
+        // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
+        // retention never turns into an unbounded delete transaction.
+        const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
+            txn.as_pgconn(),
+            self.config.attempt_logs.retention,
+            ATTEMPT_LOG_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+        txn.commit().await?;
+        if removed > 0 {
+            tracing::info!(
+                removed_attempt_log_chunks = removed,
+                "Removed expired machine validation attempt log chunks"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn active_validation_age_seconds(
@@ -404,7 +429,10 @@ async fn reconcile_terminal_run_items(
         status,
     )
     .await?;
-    Ok(completed.then(|| MachineValidationCompleted {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
+        return Ok(None);
+    }
+    Ok(Some(MachineValidationCompleted {
         outcome: MachineValidationOutcome::Passed,
         cause: MachineValidationFailureCause::None,
         machine_id: validation.machine_id,
@@ -493,7 +521,7 @@ async fn complete_active_validation_as_failed(
     )
     .await?;
 
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         return Ok(None);
     }
 
@@ -707,7 +735,7 @@ mod tests {
         // The API can commit a heartbeat after selection but before the
         // monitor acquires the parent run lock. Reuse that snapshot below.
         let mut heartbeat_txn = pool.begin().await?;
-        assert!(
+        assert_eq!(
             db::machine_validation_execution::record_heartbeat(
                 heartbeat_txn.as_mut(),
                 &validation_id,
@@ -716,7 +744,8 @@ mod tests {
                 None,
                 now,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
         heartbeat_txn.commit().await?;
 

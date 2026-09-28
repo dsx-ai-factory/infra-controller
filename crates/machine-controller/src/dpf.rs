@@ -353,16 +353,19 @@ impl ResourceLabeler for CarbideDPFLabeler {
 pub struct CarbideBmcPasswordProvider {
     credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
     db_pool: sqlx::PgPool,
+    local_v0_authoritative: bool,
 }
 
 impl CarbideBmcPasswordProvider {
     pub fn new(
         credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
         db_pool: sqlx::PgPool,
+        local_v0_authoritative: bool,
     ) -> Self {
         Self {
             credential_reader,
             db_pool,
+            local_v0_authoritative,
         }
     }
 
@@ -405,19 +408,85 @@ impl CarbideBmcPasswordProvider {
     }
 }
 
+fn require_nonempty_bmc_password(
+    password: String,
+    local_v0_authoritative: bool,
+) -> Result<String, DpfError> {
+    if password.is_empty() {
+        let message = "site-wide BMC root credential is empty".to_string();
+        if local_v0_authoritative {
+            Err(DpfError::LocalBmcPasswordSourceUnavailable(message))
+        } else {
+            Err(DpfError::BmcPasswordSourceUnavailable(message))
+        }
+    } else {
+        Ok(password)
+    }
+}
+
+async fn classify_unresolved_rotation_target(
+    credential_reader: &dyn carbide_secrets::credentials::CredentialReader,
+    error: DpfError,
+    local_v0_authoritative: bool,
+) -> DpfError {
+    use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+
+    if !local_v0_authoritative {
+        return error;
+    }
+
+    let v0_key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    match credential_reader.get_credentials(&v0_key).await {
+        Ok(Some(Credentials::UsernamePassword { password, .. })) if !password.is_empty() => error,
+        Ok(_) | Err(carbide_secrets::SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+            DpfError::LocalBmcPasswordSourceUnavailable(format!(
+                "cannot resolve the current site-wide BMC root and authoritative local version 0 is unavailable: {error}"
+            ))
+        }
+        Err(source_error) => DpfError::LocalBmcPasswordSourceUnavailable(format!(
+            "cannot resolve the current site-wide BMC root or verify authoritative local version 0: rotation target error: {error}; local source error: {source_error}"
+        )),
+    }
+}
+
 #[async_trait]
 impl BmcPasswordProvider for CarbideBmcPasswordProvider {
     async fn get_bmc_password(&self) -> Result<String, DpfError> {
         use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-        let version = self.current_sitewide_bmc_version().await?;
+        let version = match self.current_sitewide_bmc_version().await {
+            Ok(version) => version,
+            Err(error) => {
+                return Err(classify_unresolved_rotation_target(
+                    self.credential_reader.as_ref(),
+                    error,
+                    self.local_v0_authoritative,
+                )
+                .await);
+            }
+        };
         let key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::site_wide_root(version),
         };
         match self.credential_reader.get_credentials(&key).await {
-            Ok(Some(Credentials::UsernamePassword { password, .. })) => Ok(password),
-            Ok(_) => Err(DpfError::InvalidState(
-                "Site wide BMC root credentials not set".into(),
+            Ok(Some(Credentials::UsernamePassword { password, .. })) => {
+                require_nonempty_bmc_password(password, version == 0 && self.local_v0_authoritative)
+            }
+            Ok(None) => Err(DpfError::BmcPasswordSourceUnavailable(
+                "site-wide BMC root credential is not available from the configured sources"
+                    .to_string(),
             )),
+            Err(carbide_secrets::SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+                Err(DpfError::LocalBmcPasswordSourceUnavailable(
+                    "local site-wide BMC root version 0 is not available".to_string(),
+                ))
+            }
+            Err(error) if version == 0 && self.local_v0_authoritative => {
+                Err(DpfError::LocalBmcPasswordSourceUnavailable(format!(
+                    "failed to read authoritative local site-wide BMC root version 0: {error}"
+                )))
+            }
             Err(e) => Err(DpfError::InvalidState(format!(
                 "Failed to read BMC credentials: {e}"
             ))),
@@ -878,5 +947,55 @@ impl DpfOperations for DpfSdkOps {
         dpu_device_name: &str,
     ) -> Result<BTreeMap<String, String>, DpfError> {
         self.sdk.get_dpu_device_node_labels(dpu_device_name).await
+    }
+}
+
+#[cfg(test)]
+mod bmc_password_tests {
+    use carbide_secrets::MemoryCredentialStore;
+    use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
+
+    use super::*;
+
+    #[test]
+    fn empty_password_preserves_local_v0_source_policy() {
+        assert!(matches!(
+            require_nonempty_bmc_password(String::new(), true),
+            Err(DpfError::LocalBmcPasswordSourceUnavailable(_))
+        ));
+        assert!(matches!(
+            require_nonempty_bmc_password(String::new(), false),
+            Err(DpfError::BmcPasswordSourceUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unresolved_target_fails_closed_only_when_local_v0_is_unavailable() {
+        let store = MemoryCredentialStore::default();
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&store, error, true).await,
+            DpfError::LocalBmcPasswordSourceUnavailable(_)
+        ));
+
+        let key = CredentialKey::BmcCredentials {
+            credential_type: carbide_secrets::credentials::BmcCredentialType::SiteWideRoot,
+        };
+        store
+            .set_credentials(&key, &Credentials::new("root", "local-password"))
+            .await
+            .expect("seed local v0");
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&store, error, true).await,
+            DpfError::InvalidState(_)
+        ));
+
+        let empty_store = MemoryCredentialStore::default();
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&empty_store, error, false).await,
+            DpfError::InvalidState(_)
+        ));
     }
 }

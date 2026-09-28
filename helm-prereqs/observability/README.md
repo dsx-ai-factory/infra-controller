@@ -120,6 +120,12 @@ helm upgrade nico <your-chart-ref> -n nico-system --reuse-values \
 checkout matches the deployed chart). If Core is not installed at all (infra-only cluster), the
 step defers with the same hint.
 
+### IPv6 NICo metrics
+
+The bundled monitoring stack keeps IPv4 discovery by default. For a collector that must scrape NICo over IPv6, use the [IPv6 scrape discovery recipe](../../docs/observability/metrics.md#opt-in-ipv6-scrape-discovery). Upgrade the NICo chart before applying its optional `values-nico-ipv6-scraping.yaml` overlay, so primary ServiceMonitors carry the label used to exclude overlapping jobs. Also upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Before switching, confirm that every selected pod's `/metrics` endpoint responds over its IPv6 address from the collector's network. The overlay works with the pinned stack and adds EndpointSlice read permissions. It covers primary metrics; optional telemetry and per-object monitors keep their existing discovery. Unbound requires its IPv6 enablement before this switch.
+
+If the DPU gateway is installed, follow the recipe's gateway upgrade and apply `otel-collector-gateway-metrics.yaml` before switching Prometheus. The bundled gateway values enable its wildcard metrics listener. Existing installations that bind only the primary pod address need the endpoint update. The separate dual-stack metrics Service enables IPv6 EndpointSlice discovery. The gateway pod still needs a reachable IPv6 address. Its OTLP receiver and LoadBalancer retain their settings. Reapply the Prometheus overlay after rerunning the installer.
+
 ## Enabling traces
 
 NICo's span export is **off by default** and ships in the binaries already — enabling it is
@@ -254,9 +260,11 @@ directories are only reclaimed when the PV is deleted through the provisioner.
 | `values-loki.yaml` | Loki single-binary + retention/compactor config |
 | `values-tempo.yaml` | Tempo monolithic + OTLP ingest |
 | `values-otel-collector-agent.yaml` | DaemonSet: pod logs → Loki, OTLP spans → Tempo |
-| `values-otel-collector-gateway.yaml` | optional DPU OTLP/mTLS gateway |
+| `values-otel-collector-gateway.yaml` | optional DPU OTLP/mTLS gateway with a wildcard metrics listener using its configured container port |
+| `otel-collector-gateway-metrics.yaml` | optional metrics-only gateway Service for IPv6 discovery |
 | `values-kube-prometheus-stack.yaml` | Prometheus + Grafana + datasources + sidecar |
 | `values-nico-servicemonitors.yaml` | Core overlay: turn on the NICo ServiceMonitors |
+| `values-nico-ipv6-scraping.yaml` | optional Prometheus overlay: IPv6 EndpointSlice discovery for primary NICo and gateway metrics |
 | `otel-receiver-certificate.yaml` | gateway server cert (WITH_DPU; issuer/SAN rewritten by the script) |
 | `dashboards/` | drop-in Grafana dashboards (auto-loaded); ships `nico-core-health.json` |
 

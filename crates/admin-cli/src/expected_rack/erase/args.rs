@@ -26,6 +26,6 @@ Erase all expected rack records (requires explicit confirmation):
 
 ")]
 pub(crate) struct Args {
-    #[clap(long, help = "Confirm that you want to erase all records.")]
+    #[clap(long, help = "Required to erase all expected rack records.")]
     pub(super) confirm: bool,
 }

@@ -1,0 +1,106 @@
+# These charts share the Service and monitor contract used by IPv6 scrape discovery.
+suite: IPv6 metrics exposure
+templates:
+  - charts/nico-api/templates/metrics-service.yaml
+  - charts/nico-bmc-proxy/templates/metrics-service.yaml
+  - charts/nico-dhcp/templates/metrics-service.yaml
+  - charts/nico-dsx-exchange-consumer/templates/service.yaml
+  - charts/nico-hardware-health/templates/service.yaml
+  - charts/nico-machine-a-tron/templates/metrics-service.yaml
+  - charts/nico-pxe/templates/metrics-service.yaml
+  - charts/nico-ssh-console-rs/templates/metrics-service.yaml
+  - charts/nico-api/templates/service-monitor.yaml
+  - charts/nico-bmc-proxy/templates/service-monitor.yaml
+  - charts/nico-dhcp/templates/service-monitor.yaml
+  - charts/nico-dsx-exchange-consumer/templates/service-monitor.yaml
+  - charts/nico-hardware-health/templates/service-monitor.yaml
+  - charts/nico-machine-a-tron/templates/service-monitor.yaml
+  - charts/nico-pxe/templates/service-monitor.yaml
+  - charts/nico-ssh-console-rs/templates/service-monitor.yaml
+  - charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+set:
+  nico-machine-a-tron.enabled: true
+  nico-machine-a-tron.ufmMock.enabled: true
+  nico-hardware-health.telemetryServiceMonitor.enabled: true
+  nico-api.serviceMonitor.enabled: true
+  nico-bmc-proxy.serviceMonitor.enabled: true
+  nico-dhcp.serviceMonitor.enabled: true
+  nico-dsx-exchange-consumer.serviceMonitor.enabled: true
+  nico-hardware-health.serviceMonitor.enabled: true
+  nico-machine-a-tron.serviceMonitor.enabled: true
+  nico-pxe.serviceMonitor.enabled: true
+  nico-ssh-console-rs.serviceMonitor.enabled: true
+tests:
+  # Each metrics Service must support both families without requiring a dual-stack cluster.
+  - it: prefers dual stack for every primary metrics Service
+    templates:
+      - charts/nico-api/templates/metrics-service.yaml
+      - charts/nico-bmc-proxy/templates/metrics-service.yaml
+      - charts/nico-dhcp/templates/metrics-service.yaml
+      - charts/nico-dsx-exchange-consumer/templates/service.yaml
+      - charts/nico-hardware-health/templates/service.yaml
+      - charts/nico-machine-a-tron/templates/metrics-service.yaml
+      - charts/nico-pxe/templates/metrics-service.yaml
+      - charts/nico-ssh-console-rs/templates/metrics-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+
+  # The IPv6 scrape recipe excludes these primary monitors by their metrics label.
+  - it: labels each primary monitor with its corresponding scrape target
+    templates:
+      - charts/nico-api/templates/service-monitor.yaml
+      - charts/nico-bmc-proxy/templates/service-monitor.yaml
+      - charts/nico-dhcp/templates/service-monitor.yaml
+      - charts/nico-dsx-exchange-consumer/templates/service-monitor.yaml
+      - charts/nico-hardware-health/templates/service-monitor.yaml
+      - charts/nico-machine-a-tron/templates/service-monitor.yaml
+      - charts/nico-pxe/templates/service-monitor.yaml
+      - charts/nico-ssh-console-rs/templates/service-monitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-api
+        template: charts/nico-api/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-bmc-proxy
+        template: charts/nico-bmc-proxy/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-dhcp
+        template: charts/nico-dhcp/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-dsx-exchange-consumer
+        template: charts/nico-dsx-exchange-consumer/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-hardware-health
+        template: charts/nico-hardware-health/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-machine-a-tron
+        template: charts/nico-machine-a-tron/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-pxe
+        template: charts/nico-pxe/templates/service-monitor.yaml
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-ssh-console-rs
+        template: charts/nico-ssh-console-rs/templates/service-monitor.yaml
+
+  # Telemetry uses a separate route and must remain selected alongside the replacement job.
+  - it: keeps hardware telemetry outside the primary monitor exclusion
+    template: charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - notExists:
+          path: metadata.labels["app.kubernetes.io/metrics"]

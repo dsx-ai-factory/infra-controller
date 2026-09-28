@@ -77,6 +77,10 @@ func operationRequest(
 	plan *eventrule.SubmitTaskPlan,
 	target operation.RackExecutionTarget,
 ) (*operation.Request, error) {
+	ruleID, err := operations.ExtractRuleID(plan.Operation.Info)
+	if err != nil {
+		return nil, fmt.Errorf("extract operation rule ID: %w", err)
+	}
 	componentIDs := target.ComponentsByType.AllComponentUUIDs()
 	componentTargets := make([]operation.ComponentTarget, len(componentIDs))
 	for i, id := range componentIDs {
@@ -88,7 +92,7 @@ func operationRequest(
 		TargetSpec:       operation.TargetSpec{Components: componentTargets},
 		Description:      plan.Description,
 		ConflictStrategy: plan.ConflictStrategy,
-		RuleID:           operations.ExtractRuleID(plan.Operation.Info),
+		RuleID:           ruleID,
 		RequiredRackID:   target.RackID,
 		TriggerType:      operation.TriggerTypeEventRuleExecution,
 		TriggerID:        &executionID,

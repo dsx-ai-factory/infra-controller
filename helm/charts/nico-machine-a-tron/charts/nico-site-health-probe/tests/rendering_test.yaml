@@ -6,6 +6,7 @@ templates:
   - templates/deployment.yaml
   - templates/certificate.yaml
   - templates/configmap.yaml
+  - templates/service.yaml
   - templates/service-monitor.yaml
 values:
   - ../values.yaml
@@ -179,6 +180,16 @@ tests:
           path: spec.template.spec.volumes
           count: 4
 
+  - it: requests both address families for the metrics Service
+    template: templates/service.yaml
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-site-health-probe
+
   - it: does not render a ServiceMonitor by default
     template: templates/service-monitor.yaml
     asserts:
@@ -196,6 +207,46 @@ tests:
       - equal:
           path: spec.endpoints[0].port
           value: metrics
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-site-health-probe
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/metrics: nico-site-health-probe
+            app.kubernetes.io/name: nico-site-health-probe
+
+  - it: keeps a renamed monitor scoped to its own metrics Service
+    templates:
+      - templates/service.yaml
+      - templates/service-monitor.yaml
+    set:
+      nameOverride: custom-probe
+      global:
+        namespaceOverride: custom-namespace
+      serviceMonitor:
+        enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: custom-probe-metrics
+        template: templates/service.yaml
+      - equal:
+          path: metadata.name
+          value: custom-probe
+        template: templates/service-monitor.yaml
+      - equal:
+          path: metadata.namespace
+          value: custom-namespace
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-site-health-probe
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/metrics: nico-site-health-probe
+            app.kubernetes.io/name: custom-probe
+        template: templates/service-monitor.yaml
 
   - it: REST-only deployment renders no Certificate and no SPIFFE volume
     templates:

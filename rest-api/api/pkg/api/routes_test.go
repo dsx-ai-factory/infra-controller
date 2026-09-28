@@ -57,6 +57,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-machine":          9,
 		"expected-power-shelf":      5,
 		"expected-rack":             7,
+		"expected-rack-group":       7,
 		"expected-switch":           5,
 		"instance-type":             5,
 		"machine":                   21,
@@ -78,11 +79,12 @@ func TestNewAPIRoutes(t *testing.T) {
 		"rule":                      5,
 		"run":                       8,
 		"domain":                    4,
-		"rack":                      13,
-		"tray":                      9,
+		"rack":                      16,
+		"tray":                      12,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
+		"identity-reencrypt":        1,
 		"firmware-config":           2,
 	}
 
@@ -116,12 +118,32 @@ func TestNewAPIRoutes(t *testing.T) {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
 			}
 
+			rackGroupPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-rack-group"
+			for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodPut} {
+				assertRouteExists(t, got, method, rackGroupPath)
+			}
+			for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+				assertRouteExists(t, got, method, rackGroupPath+"/:id")
+			}
+			assertRouteExists(t, got, http.MethodDelete, rackGroupPath+"/all")
+			assertRouteBefore(t, got, http.MethodDelete, rackGroupPath+"/all", http.MethodDelete, rackGroupPath+"/:id")
+
 			bmcCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/bmc"
 			assertRouteExists(t, got, http.MethodPut, bmcCredentialPath)
+			reencryptPath := "/org/:orgName/" + cfg.GetAPIName() + "/site/:siteID/tenant-identity/re-encrypt"
+			assertRouteExists(t, got, http.MethodPost, reencryptPath)
 			siteExplorerEndpointPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint"
 			assertRouteExists(t, got, http.MethodGet, siteExplorerEndpointPath)
 			siteExplorerActionPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint/action"
 			assertRouteExists(t, got, http.MethodPost, siteExplorerActionPath)
+			rackHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			trayHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, trayHealthReportPath+"/:source")
 			uefiCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/uefi"
 			assertRouteExists(t, got, http.MethodPost, uefiCredentialPath)
 			measuredBootPath := "/org/:orgName/" + cfg.GetAPIName() + "/measured-boot"

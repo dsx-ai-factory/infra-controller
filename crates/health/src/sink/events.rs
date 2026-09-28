@@ -750,7 +750,7 @@ mod tests {
         BmcAddr {
             ip: IpAddr::from_str("10.0.0.1").expect("valid IP"),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC")),
         }
     }
 

@@ -4,6 +4,8 @@
 package providerapi
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"sync"
 )
@@ -109,4 +111,21 @@ func (pr *ProviderRegistry) List() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// Close releases providers that own resources. Call after all consumers stop.
+func (pr *ProviderRegistry) Close() error {
+	if pr == nil {
+		return nil
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	var err error
+	for name, provider := range pr.providers {
+		if closer, ok := provider.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
+		}
+		delete(pr.providers, name)
+	}
+	return err
 }

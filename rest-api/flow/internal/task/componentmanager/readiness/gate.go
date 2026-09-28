@@ -7,10 +7,9 @@
 // ComponentOperationStatus that inventorysync writes, so callers no longer poll Core
 // directly for state-machine state.
 //
-// All component / rack identifiers are the Core (external) IDs that flow
-// through the Temporal task targets unchanged. The gate joins components
-// through component.external_id and resolves racks through rack.external_id;
-// Flow's rack UUID is an independent internal identifier.
+// ID-based checks join component.external_id and rack.external_id. MAC-based
+// checks resolve active management BMCs and use Flow's component/rack identity,
+// so they work before Core assigns IDs. No readiness identity is stored in Target.
 //
 // Semantics:
 //   - empty input → no-op success
@@ -31,6 +30,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
@@ -46,6 +46,9 @@ const (
 // StatusReader is the narrow data dependency of the gate. A DB-backed
 // implementation lives in this package; tests inject fakes.
 type StatusReader interface {
+	// GetStatusesByManagementMACs reads the compute target's status, or the
+	// rack's host statuses for a switch/power shelf, without requiring Core IDs.
+	GetStatusesByManagementMACs(ctx context.Context, componentType devicetypes.ComponentType, macs []string) (map[string][]*types.ComponentOperationStatus, error)
 	// GetStatusesByExternalIDs returns the persisted ComponentOperationStatus for
 	// each requested Core component ID (the external_id column).
 	// Components without a row or without a status are simply absent from
@@ -63,6 +66,7 @@ type StatusReader interface {
 
 // Gate is the abstraction call sites depend on.
 type Gate interface {
+	WaitForManagementMACsReady(ctx context.Context, componentType devicetypes.ComponentType, macs []string, op types.OperationType) error
 	// WaitForComponentsReady blocks until none of the listed components
 	// block op (per their persisted ComponentOperationStatus), or the gate's
 	// timeout elapses.
@@ -99,6 +103,33 @@ func NewDBGate(reader StatusReader, timeout, pollInterval time.Duration) *DBGate
 
 // WaitForComponentsReady implements Gate.
 func (g *DBGate) WaitForComponentsReady(ctx context.Context, externalIDs []string, op types.OperationType) error {
+	return g.waitReady(ctx, externalIDs, op, g.findBlocking)
+}
+
+// WaitForManagementMACsReady checks persisted inventory directly by management
+// MAC, including components without a Core ID. Each poll refreshes the lookup.
+func (g *DBGate) WaitForManagementMACsReady(ctx context.Context, componentType devicetypes.ComponentType, macs []string, op types.OperationType) error {
+	return g.waitReady(ctx, macs, op, func(ctx context.Context, ids []string, op types.OperationType) ([]string, error) {
+		statuses, err := g.reader.GetStatusesByManagementMACs(ctx, componentType, ids)
+		if err != nil {
+			return nil, err
+		}
+		var blocking []string
+		for _, id := range ids {
+			for _, status := range statuses[id] {
+				if status == nil {
+					log.Warn().Str("management_mac", id).Msg("Readiness check: no persisted status, treating component as permissive")
+				} else if status.Blocks(op) {
+					blocking = append(blocking, id)
+					break
+				}
+			}
+		}
+		return blocking, nil
+	})
+}
+
+func (g *DBGate) waitReady(ctx context.Context, externalIDs []string, op types.OperationType, findBlocking func(context.Context, []string, types.OperationType) ([]string, error)) error {
 	if g == nil || g.reader == nil || len(externalIDs) == 0 {
 		return nil
 	}
@@ -112,7 +143,7 @@ func (g *DBGate) WaitForComponentsReady(ctx context.Context, externalIDs []strin
 	attempt := 0
 	for {
 		attempt++
-		blocking, err := g.findBlocking(ctx, unique, op)
+		blocking, err := findBlocking(ctx, unique, op)
 		if err != nil {
 			return fmt.Errorf("readiness check failed: %w", err)
 		}

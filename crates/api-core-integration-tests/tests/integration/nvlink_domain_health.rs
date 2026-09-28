@@ -79,6 +79,19 @@ async fn test_insert_list_remove_nvlink_domain_health_report(
     assert_eq!(listed_report.source, "external-monitor");
     assert_eq!(listed_report.alerts.len(), 1);
 
+    let replacement_report = alert_report("operator-replacement")?;
+    env.api()
+        .insert_nv_link_domain_health_report(Request::new(
+            rpc_forge::InsertNvLinkDomainHealthReportRequest {
+                domain_id: Some(domain_id),
+                health_report_entry: Some(rpc_forge::HealthReportEntry {
+                    report: Some(replacement_report.into()),
+                    mode: rpc_forge::HealthReportApplyMode::Replace as i32,
+                }),
+            },
+        ))
+        .await?;
+
     env.api()
         .remove_nv_link_domain_health_report(Request::new(
             rpc_forge::RemoveNvLinkDomainHealthReportRequest {
@@ -98,7 +111,39 @@ async fn test_insert_list_remove_nvlink_domain_health_report(
         .await?
         .into_inner();
 
+    assert_eq!(list_resp.health_report_entries.len(), 1);
+    let listed_report: HealthReport = list_resp.health_report_entries[0]
+        .report
+        .clone()
+        .ok_or("missing report")?
+        .try_into()?;
+    assert_eq!(listed_report.source, "operator-replacement");
+
+    env.api()
+        .remove_nv_link_domain_health_report(Request::new(
+            rpc_forge::RemoveNvLinkDomainHealthReportRequest {
+                domain_id: Some(domain_id),
+                source: "operator-replacement".to_string(),
+            },
+        ))
+        .await?;
+
+    let list_resp = env
+        .api()
+        .list_nv_link_domain_health_reports(Request::new(
+            rpc_forge::ListNvLinkDomainHealthReportsRequest {
+                domain_id: Some(domain_id),
+            },
+        ))
+        .await?
+        .into_inner();
+
     assert_eq!(list_resp.health_report_entries.len(), 0);
+    assert!(
+        db::nvlink_domain_health_report::find(env.api().db_reader().as_mut(), &domain_id)
+            .await?
+            .is_none()
+    );
 
     Ok(())
 }

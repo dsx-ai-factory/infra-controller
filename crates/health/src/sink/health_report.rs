@@ -277,7 +277,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse::<IpAddr>().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("00:00:00:00:00:01").unwrap(),
+                mac: Some(MacAddress::from_str("00:00:00:00:00:01").unwrap()),
             },
             collector_type: "test",
             labels: Default::default(),

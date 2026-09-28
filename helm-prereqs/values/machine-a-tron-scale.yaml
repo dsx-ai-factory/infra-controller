@@ -2,22 +2,24 @@
 # machine-a-tron-scale.yaml — LARGE-SCALE site values (Controller Mode)
 #
 # For scale testing NICo ingestion with hundreds to thousands of simulated
-# hosts. The mat-k8s-controller dynamically creates ClusterIP Services for
-# each BMC.
+# hosts. The mat-k8s-controller dynamically creates a Service for each BMC.
 #
 # How this differs from Override Mode (values/machine-a-tron.yaml):
-#   - mat-k8s-controller.enabled: true — controller creates one Service per
-#     BMC with ClusterIP = BMC IP assigned by NICo DHCP.
-#   - site_explorer.bmc_proxy MUST BE UNSET in nico-core — site-explorer dials
-#     each BMC's ClusterIP directly.
+#   - mat-k8s-controller.enabled: true - controller creates one Service per
+#     BMC with the BMC IP assigned by NICo DHCP published as externalIP.
+#   - site_explorer.bmc_proxy MUST BE UNSET in nico-core - site-explorer dials
+#     each BMC IP directly.
 #   - Requires NICo siteConfig:
 #       allow_insecure_discovery = true
 #       [networks.MAT-BMC-SERVICES]
 #       type = "underlay"
-#       prefix = "10.96.64.0/18"
-#       gateway = "10.96.64.1"
+#       prefix = "10.200.0.0/18"
+#       gateway = "10.200.0.1"
 #       mtu = 1500
-#   - bmcDhcpRelayAddress must be within Kubernetes ServiceCIDR
+#   - The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#     node network, and networks that nodes or pods must otherwise reach
+#     (BMC IPs are Service externalIPs, for which kube-proxy programs
+#     forwarding rules on every node)
 # =============================================================================
 
 image:
@@ -47,7 +49,7 @@ hwMacAddressRanges:
   enabled: true
   basePrefix: "02:01"
 
-# Controller mode - dynamically creates Services with BMC IP as ClusterIP
+# Controller mode - dynamically creates Services with the BMC IP as externalIP
 mat-k8s-controller:
   enabled: true
   # The subchart defaults to a bare local image name with no registry or pull
@@ -71,14 +73,14 @@ mat-k8s-controller:
 # Larger resources for scale testing
 
 # MAT registers all expected machines before binding the redfish port (issue
-# #4298). The startupProbe gates liveness until the port is open, giving
-# enough time even for a 13,500-host pod. Once the port is bound the normal
-# liveness/readiness probes kick in with tight thresholds so real runtime
-# hangs are still caught quickly.
+# #4298). The startupProbe gates liveness until the port is open. Once the
+# port is bound the normal liveness/readiness probes kick in with tight
+# thresholds so real runtime hangs are still caught quickly.
 #
-# failureThreshold calculation: worst-case API round-trip ~2s per host.
-# 13500 hosts / pod × 2s = ~7.5h → round up to 10h to be safe.
-# 10h / 30s period = 1200 attempts.
+# Sizing rule: see the startupProbe comment in the chart values.yaml. Pods in
+# this file define hosts only (no racks, switches or power shelves) and DPUs
+# are not registered, so records = hosts per pod. Sized for HOST_COUNT=4500 in
+# one pod: 4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish
@@ -128,7 +130,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.96.64.1"  # Must be within K8s ServiceCIDR
+        bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (SCALE_OOB_GW), outside the ServiceCIDR
         underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
         dpusInNicMode: false
 
