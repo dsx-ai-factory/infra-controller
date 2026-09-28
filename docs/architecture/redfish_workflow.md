@@ -269,7 +269,7 @@ GET /redfish/v1/Chassis/{id}/Sensors/{sensor_id}
 
 Sensor types include: Temperature (Cel), Rotational/Fan (RPM), Power (W), and Current (A).
 
-All sensor data is exported as Prometheus metrics on the `/metrics` endpoint (port 9009) and fed into NICo Core via `RecordHardwareHealthReport` for health aggregation.
+Sensor measurements are exported as Prometheus metrics on `/telemetry` on port 9009. Health reports derived from collected hardware events are submitted separately to NICo Core through `InsertMachineHealthReport` for health aggregation.
 
 **Key files:**
 

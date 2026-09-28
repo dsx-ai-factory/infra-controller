@@ -8,7 +8,7 @@
 {{- if hasKey $bootstrapCaObject "key" -}}
 {{- $bootstrapCaObjectKey = get $bootstrapCaObject "key" -}}
 {{- end -}}
-{{- $certsDir := .Values.certsDir | default "/opt/nico" -}}
+{{- $certsDir := .Values.certsDir | default "/opt/forge" -}}
 {{- $supplementalNetworkConfig := default (dict) .Values.supplementalNetworkConfig -}}
 {{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
@@ -128,7 +128,7 @@ spec:
             - name: proc-mem-info
               mountPath: /host-mem-info
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: host-resolv-conf
               mountPath: /host-resolv.conf
               readOnly: true
@@ -214,7 +214,7 @@ spec:
               readOnly: true
             {{- end }}
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: hw-cache
               mountPath: /data
               readOnly: true
@@ -277,7 +277,7 @@ spec:
         {{- end }}
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/nico" }}
+            path: {{ .Values.certsDir | default "/opt/forge" }}
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}

@@ -41,7 +41,7 @@ func genericComponentStepWorkflow(
 ) error {
 	log.Info().
 		Str("component_type", devicetypes.ComponentTypeToString(step.ComponentType)).
-		Int("component_count", len(target.ComponentIDs)).
+		Int("component_count", target.Len()).
 		Int("max_parallel", step.MaxParallel).
 		Msg("Component step workflow started")
 

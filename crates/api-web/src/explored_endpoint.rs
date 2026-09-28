@@ -16,6 +16,7 @@
  */
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -529,11 +530,16 @@ async fn fetch_explored_endpoint(
         }
     };
 
-    let endpoint: ExploredEndpoint = match report
-        .endpoints
-        .into_iter()
-        .find(|ep| ep.address.trim() == endpoint_ip.trim())
-    {
+    let Ok(endpoint_address) = endpoint_ip.trim().parse::<IpAddr>() else {
+        return Err(super::not_found_response(endpoint_ip).into_response());
+    };
+
+    let endpoint: ExploredEndpoint = match report.endpoints.into_iter().find(|ep| {
+        ep.address
+            .trim()
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address == endpoint_address)
+    }) {
         Some(ep) => ep,
         None => {
             return Err(super::not_found_response(endpoint_ip).into_response());

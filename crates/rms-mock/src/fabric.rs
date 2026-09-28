@@ -128,6 +128,15 @@ impl FabricState {
             .map(String::as_str)
             == Some(node_id)
     }
+
+    /// Forget a switch's primary role, as a factory reset would; the rack
+    /// re-elects the next time its fabric is configured or read.
+    pub(crate) fn reset(&self, rack_id: &str, node_id: &str) {
+        let mut primaries = crate::lock(&self.primaries);
+        if primaries.get(rack_id).map(String::as_str) == Some(node_id) {
+            primaries.remove(rack_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -197,5 +206,22 @@ mod tests {
         assert!(fabric.is_primary("rack-b", "sw-9"));
         assert!(!fabric.is_primary("rack-b", "sw-3"));
         assert!(!fabric.is_primary("rack-c", "sw-1"));
+    }
+
+    #[test]
+    fn a_reset_switch_loses_its_primary_role_and_the_rack_re_elects() {
+        let fabric = FabricState::new();
+        fabric.elect_primary("rack-a", &[c("sw-1", None), c("sw-2", None)], Some("sw-2"));
+
+        // Resetting a non-primary changes nothing.
+        fabric.reset("rack-a", "sw-1");
+        assert!(fabric.is_primary("rack-a", "sw-2"));
+
+        // Resetting the primary leaves the rack to be re-elected on its next
+        // read, with the usual rule.
+        fabric.reset("rack-a", "sw-2");
+        assert!(!fabric.is_primary("rack-a", "sw-2"));
+        fabric.ensure_primaries([("rack-a", c("sw-2", None)), ("rack-a", c("sw-1", None))]);
+        assert!(fabric.is_primary("rack-a", "sw-1"));
     }
 }

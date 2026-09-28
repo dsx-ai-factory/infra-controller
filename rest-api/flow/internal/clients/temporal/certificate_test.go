@@ -72,9 +72,10 @@ func writePEM(t *testing.T, path, pemType string, der []byte) {
 func TestBuildTLSConfig(t *testing.T) {
 	t.Run("TLS disabled returns nil", func(t *testing.T) {
 		cfg := Config{EnableTLS: false}
-		tlsConfig, err := buildTLSConfig(cfg)
+		tlsConfig, dynamicConfig, err := buildTLSConfig(cfg)
 		require.NoError(t, err)
 		assert.Nil(t, tlsConfig)
+		assert.Nil(t, dynamicConfig)
 	})
 
 	t.Run("TLS enabled with valid cert dir", func(t *testing.T) {
@@ -86,8 +87,9 @@ func TestBuildTLSConfig(t *testing.T) {
 			ServerName: "temporal.example.com",
 			Endpoint:   endpoint.Config{CACertificatePath: dir},
 		}
-		tlsConfig, err := buildTLSConfig(cfg)
+		tlsConfig, dynamicConfig, err := buildTLSConfig(cfg)
 		require.NoError(t, err)
+		defer dynamicConfig.Close()
 		assert.NotNil(t, tlsConfig)
 		assert.NotNil(t, tlsConfig.RootCAs)
 		assert.NotNil(t, tlsConfig.GetClientCertificate)
@@ -103,8 +105,9 @@ func TestBuildTLSConfig(t *testing.T) {
 			ServerName: "temporal.example.com",
 			Endpoint:   endpoint.Config{CACertificatePath: dir + "/"},
 		}
-		tlsConfig, err := buildTLSConfig(cfg)
+		tlsConfig, dynamicConfig, err := buildTLSConfig(cfg)
 		require.NoError(t, err)
+		defer dynamicConfig.Close()
 		assert.NotNil(t, tlsConfig)
 		assert.Equal(t, "temporal.example.com", tlsConfig.ServerName)
 	})
@@ -118,7 +121,7 @@ func TestBuildTLSConfig(t *testing.T) {
 			ServerName: "temporal.example.com",
 			Endpoint:   endpoint.Config{CACertificatePath: dir},
 		}
-		_, err := buildTLSConfig(cfg)
+		_, _, err := buildTLSConfig(cfg)
 		require.Error(t, err)
 	})
 }

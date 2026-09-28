@@ -35,7 +35,7 @@ use nv_redfish::oem::nvidia::NvidiaComputerSystem;
 use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::resource::PowerState;
 use nv_redfish::schema::computer_system::SerialConsoleProtocol;
-use nv_redfish::{Bmc, Resource, ResourceProvidesStatus};
+use nv_redfish::{Bmc, ResourceProvidesStatus};
 use regex::Regex;
 
 use crate::{
@@ -235,7 +235,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             let is_bf4_shape = chassis
                 .members
                 .iter()
-                .any(|c| c.chassis.id().into_inner() == "BlueField_0");
+                .any(|c| c.chassis.raw().id == "BlueField_0");
             if base_mac.is_none() && is_bf4_shape {
                 // BF4 temporary patch: some BMC firmware misses ComputerSystem
                 // BaseMAC; patch from NDF0-derived base MAC (NDF0 - 0x10) if available.
@@ -256,7 +256,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                         .iter()
                         .find(|opt| opt.boot_reference() == *boot_ref)
                         .map(|opt| ModelBootOption {
-                            id: opt.id().to_string(),
+                            id: opt.raw().id.clone(),
                             display_name: opt
                                 .display_name()
                                 .map(|v| v.to_string())
@@ -315,7 +315,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             .transpose()
             .unwrap_or_else(|invalid_port| {
                 tracing::warn!(
-                    system_id = %self.system.id(),
+                    system_id = %self.system.raw().id,
                     serial_console_ssh_port = invalid_port,
                     "Ignoring invalid SSH serial-console port reported by Redfish",
                 );
@@ -325,7 +325,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
 
         Ok(ModelComputerSystem {
             ethernet_interfaces,
-            id: self.system.id().to_string(),
+            id: self.system.raw().id.clone(),
             manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
             model: hw_id.model.map(|v| v.to_string()),
             serial_number: serial_number.map(|v| v.to_string()),
@@ -456,7 +456,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                             // Some BlueField firmware and disabled interfaces can populate
                             // MACAddress with junk. Keep the interface but omit its invalid MAC.
                             tracing::debug!(
-                                interface_id = %iface.id(),
+                                interface_id = %iface.raw().id,
                                 link_status = ?iface.link_status(),
                                 error = %err,
                                 "ignoring invalid system interface MAC address"
@@ -475,8 +475,8 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                     .map_err(|err| Error::InvalidValue(format!("UefiDevicePath: {err}")))?;
 
                 Ok(ModelEthernetInterface {
-                    description: iface.description().map(|d| d.to_string()),
-                    id: Some(iface.id().to_string()),
+                    description: iface.raw().description.clone().flatten(),
+                    id: Some(iface.raw().id.clone()),
                     interface_enabled: iface.interface_enabled(),
                     mac_address,
                     link_status: iface.link_status().map(|s| format!("{s:?}")),
@@ -670,16 +670,16 @@ fn pcie_device_to_model<B: Bmc>(
     }
 
     Some(PCIeDevice {
-        description: dev.description().map(|v| v.to_string()),
+        description: dev.raw().description.clone().flatten(),
         firmware_version: dev.firmware_version().map(|v| v.to_string()),
-        id: Some(dev.id().to_string()),
+        id: Some(dev.raw().id.clone()),
         manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
         // TODO: In old model it is dev.gpu_vendor, but it is not
         // standard. It can be taken from
         // .Oem.Supermicro.GPUDevice.GPUVendor for Supermicro but it
         // was never implemented.
         gpu_vendor: None,
-        name: Some(dev.name().to_string()),
+        name: Some(dev.raw().name.clone()),
         part_number: hw_id.part_number.map(|v| v.to_string()),
         // Trim of serial_number is added because serial number of DPU
         // contains trailing spaces... Probably, it should be code

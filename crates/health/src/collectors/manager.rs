@@ -26,9 +26,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::{Bmc, ToSnakeCase};
 use nv_redfish::schema::manager::Manager as ManagerSchema;
-use nv_redfish::{Resource, ServiceRoot};
 
 use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
@@ -84,7 +84,7 @@ where
 
         self.emit_event(CollectorEvent::MetricCollectionStart);
         for manager in &managers {
-            for sample in manager_metrics(&manager.raw(), &manager.odata_id().to_string()) {
+            for sample in manager_metrics(&manager.raw(), &manager.raw().odata_id.to_string()) {
                 self.emit_event(CollectorEvent::Metric(Box::new(sample)));
             }
         }
@@ -121,7 +121,7 @@ impl<B: Bmc> ManagerCollector<B> {
 /// is the last reset time as seconds since the Unix epoch. Absent fields are
 /// omitted rather than defaulted.
 fn manager_metrics(manager: &ManagerSchema, key: &str) -> Vec<MetricSample> {
-    let mut labels: Vec<MetricLabel> = vec![(Cow::Borrowed("manager_id"), manager.base.id.clone())];
+    let mut labels: Vec<MetricLabel> = vec![(Cow::Borrowed("manager_id"), manager.id.clone())];
     if let Some(status) = &manager.status {
         if let Some(state) = status.state.flatten() {
             labels.push((
@@ -169,7 +169,7 @@ fn manager_metrics(manager: &ManagerSchema, key: &str) -> Vec<MetricSample> {
             metric_type: "manager_last_reset".to_string(),
             unit: "seconds".to_string(),
             value: unix_seconds.as_secs_f64(),
-            labels: vec![(Cow::Borrowed("manager_id"), manager.base.id.clone())],
+            labels: vec![(Cow::Borrowed("manager_id"), manager.id.clone())],
             context: None,
         });
     }

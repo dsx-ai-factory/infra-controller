@@ -89,6 +89,7 @@ async fn retain_prefix(
             id,
             site_prefix_id: Some(root.id),
             vpc_id: vpc.id.unwrap(),
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: prefix.parse().unwrap(),
             },

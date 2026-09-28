@@ -270,16 +270,21 @@ func (fgac *FlowGrpcAtomicClient) SwapClient(newClient *FlowGrpcClient) *FlowGrp
 	// Atomically replace the current client with the new one and return the old client.
 	oldClientInterface := fgac.value.Swap(newClient)
 
+	// Increment the version number. Every successful swap advances it, including the
+	// initial creation, where there is no previous client to hand back.
+	fgac.version.Add(1)
+
+	if oldClientInterface == nil {
+		return nil
+	}
+
 	// Type assert the returned value to *FlowGrpcClient.
-	// This should always succeed if the correct type was stored initially.
+	// This should always succeed once a client has been stored.
 	oldClient, ok := oldClientInterface.(*FlowGrpcClient)
 	if !ok {
 		log.Error().Msg("FlowGrpcAtomicClient: Type assertion failed for the old client")
 		return nil
 	}
-
-	// Increment the version number
-	fgac.version.Add(1)
 
 	return oldClient
 }

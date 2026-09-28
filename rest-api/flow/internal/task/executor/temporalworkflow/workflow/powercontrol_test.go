@@ -308,7 +308,7 @@ func TestPowerControlWorkflow(t *testing.T) {
 						expectedStatus = operations.PowerStatusOn
 					}
 
-					for _, componentID := range target.ComponentIDs {
+					for _, componentID := range target.Identifiers {
 						result[componentID] = expectedStatus
 					}
 					return result, nil

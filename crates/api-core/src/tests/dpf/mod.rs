@@ -46,7 +46,7 @@ fn dpf_config() -> crate::cfg::file::DpfConfig {
 }
 
 /// Models the successful DPF service lookup after the fixture registers a DPU CR.
-fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
+pub(super) fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
     mock.expect_get_service_versions_for_dpu().returning(|_| {
         Ok(vec![DpuServiceVersion {
             name: "test-service".to_string(),

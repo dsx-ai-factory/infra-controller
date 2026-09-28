@@ -23,6 +23,7 @@ prometheus:
             - nico-hardware-health
             - nico-machine-a-tron
             - nico-pxe
+            - nico-site-health-probe
             - nico-ssh-console-rs
             - nico-unbound
     additionalScrapeConfigs:
@@ -52,12 +53,13 @@ prometheus:
           # Exclude unrelated same-named Services across installation namespaces.
           - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_metrics]
             action: keep
-            regex: nico-(api|bmc-proxy|dhcp|dsx-exchange-consumer|hardware-health|machine-a-tron|pxe|ssh-console-rs|unbound)
-          # Restrict discovery to the built-in primary metrics Services. This
-          # excludes the API profiler and optional per-object metrics endpoint.
-          - source_labels: [__meta_kubernetes_service_name]
+            regex: nico-(api|bmc-proxy|dhcp|dsx-exchange-consumer|hardware-health|machine-a-tron|pxe|site-health-probe|ssh-console-rs|unbound)
+          # Prometheus joins component label and Service name with ';'. The probe
+          # allows nameOverride; other components keep their primary metrics
+          # Service names to exclude profiler and per-object endpoints.
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_metrics, __meta_kubernetes_service_name]
             action: keep
-            regex: nico-(api-metrics|bmc-proxy-metrics|dhcp6?-metrics|dsx-exchange-consumer|hardware-health|machine-a-tron-metrics|pxe-metrics|ssh-console-rs-metrics|unbound)
+            regex: nico-site-health-probe;.+-metrics|[^;]+;nico-(api-metrics|bmc-proxy-metrics|dhcp6?-metrics|dsx-exchange-consumer|hardware-health|machine-a-tron-metrics|pxe-metrics|ssh-console-rs-metrics|unbound)
           # Unbound shares its Service with DNS; select only exporter TCP 9167.
           - source_labels: [__meta_kubernetes_endpointslice_port_name]
             action: keep

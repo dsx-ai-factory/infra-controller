@@ -18,15 +18,19 @@
 use std::sync::Arc;
 
 use carbide_api_core::AuthContext;
-use carbide_api_core::cfg::file::{CarbideConfig, UfmCredentialSource};
+use carbide_api_core::cfg::file::{BmcSiteWideRootSource, CarbideConfig, UfmCredentialSource};
 use carbide_api_core::test_support::{
     MAX_BGP_PASSWORD_LENGTH, default_config, default_credential_key,
 };
-use carbide_secrets::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION;
+use carbide_secrets::ChainedCredentialReader;
+use carbide_secrets::chained_reader::{
+    BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION, BmcSiteWideRootV0BackendCredentialBlocker,
+    UFM_LOCAL_CREDENTIAL_REMEDIATION, UfmBackendCredentialBlocker,
+};
 use carbide_secrets::credentials::{
-    BgpCredentialType, BmcCredentialType, CompositeCredentialManager, CredentialKey,
-    CredentialManager, CredentialReader, CredentialType, CredentialWriter, Credentials,
-    UfmCredentialMutationBlocker,
+    BgpCredentialType, BmcCredentialType, BmcSiteWideRootV0CredentialMutationBlocker,
+    CompositeCredentialManager, CredentialKey, CredentialManager, CredentialReader, CredentialType,
+    CredentialWriter, Credentials, NicLockdownIkm, UfmCredentialMutationBlocker,
 };
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
@@ -46,19 +50,36 @@ async fn init_with_runtime_config(
     runtime_config: CarbideConfig,
 ) -> (TestHarness, Arc<TestCredentialManager>) {
     let credential_manager = Arc::new(TestCredentialManager::default());
-    let writer: Arc<dyn CredentialWriter> = if runtime_config
+    let mut writer: Arc<dyn CredentialWriter> = credential_manager.clone();
+    if runtime_config
         .credentials
         .uses_authoritative_local_ufm_credentials()
     {
-        Arc::new(UfmCredentialMutationBlocker::new(
-            credential_manager.clone(),
-        ))
-    } else {
-        credential_manager.clone()
-    };
-    let api_credential_manager: Arc<dyn CredentialManager> = Arc::new(
-        CompositeCredentialManager::new(credential_manager.clone(), writer),
-    );
+        writer = Arc::new(UfmCredentialMutationBlocker::new(writer));
+    }
+    if runtime_config
+        .credentials
+        .uses_authoritative_local_bmc_site_wide_root()
+    {
+        writer = Arc::new(BmcSiteWideRootV0CredentialMutationBlocker::new(writer));
+    }
+    let mut readers = Vec::<Box<dyn CredentialReader>>::new();
+    if runtime_config
+        .credentials
+        .uses_authoritative_local_ufm_credentials()
+    {
+        readers.push(Box::new(UfmBackendCredentialBlocker));
+    }
+    if runtime_config
+        .credentials
+        .uses_authoritative_local_bmc_site_wide_root()
+    {
+        readers.push(Box::new(BmcSiteWideRootV0BackendCredentialBlocker));
+    }
+    readers.push(Box::new(credential_manager.clone()));
+    let reader = ChainedCredentialReader::from(readers);
+    let api_credential_manager: Arc<dyn CredentialManager> =
+        Arc::new(CompositeCredentialManager::new(reader, writer));
     let env = TestHarness::builder(pool)
         .with_api_builder_fn(move |builder| {
             builder
@@ -73,6 +94,12 @@ async fn init_with_runtime_config(
 fn config_with_ufm_source(ufm_source: UfmCredentialSource) -> CarbideConfig {
     let mut config = default_config::get();
     config.credentials.ufm_source = ufm_source;
+    config
+}
+
+fn config_with_bmc_site_wide_root_source(source: BmcSiteWideRootSource) -> CarbideConfig {
+    let mut config = default_config::get();
+    config.credentials.bmc_site_wide_root_source = source;
     config
 }
 
@@ -91,6 +118,26 @@ fn ufm_delete_request() -> CredentialDeletionRequest {
     CredentialDeletionRequest {
         credential_type: RpcCredentialType::Ufm.into(),
         username: Some("https://ufm.example.com".to_string()),
+        mac_address: None,
+        credential_name: None,
+    }
+}
+
+fn bmc_site_wide_root_create_request() -> CredentialCreationRequest {
+    CredentialCreationRequest {
+        credential_type: RpcCredentialType::SiteWideBmcRoot.into(),
+        username: None,
+        password: "bmc-root-password".to_string(),
+        vendor: None,
+        mac_address: None,
+        credential_name: None,
+    }
+}
+
+fn bmc_site_wide_root_delete_request() -> CredentialDeletionRequest {
+    CredentialDeletionRequest {
+        credential_type: RpcCredentialType::SiteWideBmcRoot.into(),
+        username: None,
         mac_address: None,
         credential_name: None,
     }
@@ -280,6 +327,155 @@ async fn test_ufm_credential_mutations_allow_backend_ownership(pool: PgPool) {
             password: String::new(),
         })
     );
+}
+
+#[sqlx_test]
+async fn bmc_site_wide_root_v0_mutations_reject_local_ownership(pool: PgPool) {
+    let (env, credential_manager) = init_with_runtime_config(
+        pool,
+        config_with_bmc_site_wide_root_source(BmcSiteWideRootSource::Local),
+    )
+    .await;
+    let key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+
+    let create_error = env
+        .api()
+        .create_credential(tonic::Request::new(bmc_site_wide_root_create_request()))
+        .await
+        .expect_err("local BMC root ownership must reject backend create");
+    assert_eq!(create_error.code(), Code::FailedPrecondition);
+    assert!(create_error.message().contains("local sources own it"));
+    assert!(
+        create_error
+            .message()
+            .contains(BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION)
+    );
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after rejected create"),
+        None
+    );
+
+    let existing = Credentials::new("root", "existing-password");
+    credential_manager
+        .set_credentials(&key, &existing)
+        .await
+        .expect("seed persistent BMC root");
+    let delete_error = env
+        .api()
+        .delete_credential(tonic::Request::new(bmc_site_wide_root_delete_request()))
+        .await
+        .expect_err("local BMC root ownership must reject backend delete");
+    assert_eq!(delete_error.code(), Code::FailedPrecondition);
+    assert_eq!(delete_error.message(), create_error.message());
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read backend after rejected delete"),
+        Some(existing)
+    );
+}
+
+#[sqlx_test]
+async fn creating_bmc_site_wide_root_seeds_initial_lockdown_ikm(pool: PgPool) {
+    let (env, credential_manager) = init(pool).await;
+    let expected = Credentials::new("", "bmc-root-password");
+
+    env.api()
+        .create_credential(tonic::Request::new(bmc_site_wide_root_create_request()))
+        .await
+        .expect("create site-wide BMC root");
+
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        },
+        CredentialKey::NicLockdownIkm {
+            credential_type: NicLockdownIkm::SiteWide { version: 0 },
+        },
+    ] {
+        assert_eq!(
+            credential_manager
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read stored credential"),
+            Some(expected.clone()),
+            "unexpected stored value for {}",
+            key.to_key_str(),
+        );
+    }
+}
+
+#[sqlx_test]
+async fn creating_bmc_root_succeeds_when_initial_lockdown_ikm_seed_is_deferred(pool: PgPool) {
+    let (env, credential_manager) = init(pool).await;
+    credential_manager.set_create_credentials_failure(true);
+
+    env.api()
+        .create_credential(tonic::Request::new(bmc_site_wide_root_create_request()))
+        .await
+        .expect("the durable BMC root write succeeds independently of the compatibility seed");
+
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            })
+            .await
+            .expect("read stored BMC root"),
+        Some(Credentials::new("", "bmc-root-password")),
+    );
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&CredentialKey::NicLockdownIkm {
+                credential_type: NicLockdownIkm::SiteWide { version: 0 },
+            })
+            .await
+            .expect("read deferred lockdown IKM"),
+        None,
+    );
+}
+
+#[sqlx_test]
+async fn creating_empty_bmc_site_wide_root_is_rejected(pool: PgPool) {
+    let (env, credential_manager) = init(pool).await;
+    let mut request = bmc_site_wide_root_create_request();
+    request.password.clear();
+
+    let error = env
+        .api()
+        .create_credential(tonic::Request::new(request))
+        .await
+        .expect_err("empty site-wide BMC root must be rejected");
+
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "site-wide BMC root password must not be empty"
+    );
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        },
+        CredentialKey::NicLockdownIkm {
+            credential_type: NicLockdownIkm::SiteWide { version: 0 },
+        },
+    ] {
+        assert_eq!(
+            credential_manager
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read stored credential"),
+            None,
+            "unexpected stored value for {}",
+            key.to_key_str(),
+        );
+    }
 }
 
 #[sqlx_test]
@@ -656,5 +852,34 @@ async fn test_missing_default_credentials(pool: PgPool) {
     assert!(
         missing.is_empty(),
         "expected no missing defaults, got {missing:?}"
+    );
+}
+
+#[sqlx_test]
+async fn local_bmc_root_policy_reports_shadowed_backend_v0_as_missing(pool: PgPool) {
+    let (env, credential_manager) = init_with_runtime_config(
+        pool,
+        config_with_bmc_site_wide_root_source(BmcSiteWideRootSource::Local),
+    )
+    .await;
+    let bmc_root = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    credential_manager
+        .set_credentials(&bmc_root, &Credentials::new("root", "backend-password"))
+        .await
+        .expect("seed shadowed backend BMC root");
+
+    let keys: Vec<String> = env
+        .api()
+        .missing_default_credentials()
+        .await
+        .into_iter()
+        .map(|credential| default_credential_key(&credential).to_owned())
+        .collect();
+
+    assert!(
+        keys.contains(&bmc_root.to_key_str().into_owned()),
+        "authoritative local v0 is absent and must be reported missing: {keys:?}",
     );
 }

@@ -24,7 +24,8 @@ use ::rpc::forge::{
     DpuExtensionServiceObservabilityConfigLogging,
 };
 use carbide_dpf::{
-    DetachedDpuServiceDefinition, DpfError, DpuServiceHelmChartObservation, DpuServiceObservation,
+    DetachedDpuServiceDefinition, DpfError, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceObservation,
 };
 use carbide_extension_service_controller::dpu_service::{
     dpu_service_mutable_patch, project_dpu_service,
@@ -56,14 +57,27 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "1.2.3",
-  "security.privileged": false
+  "security.privileged": false,
+  "values": {"serviceDaemonSet": {"labels": {"chart-path": "preserved"}}},
+  "serviceDaemonSet": {
+    "labels": {"app.kubernetes.io/name": "tenant-service"},
+    "annotations": {"example.com/owner": "tenant"},
+    "resources": {"nvidia.com/bf_sf": 1},
+    "updateStrategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1}}
+  }
 }"#;
 const TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "2.0.0",
   "security.privileged": true,
-  "values": {"replicas": 2}
+  "values": {"replicas": 2, "serviceDaemonSet": {"labels": {"chart-path": "still-preserved"}}},
+  "serviceDaemonSet": {
+    "labels": {"app.kubernetes.io/name": "tenant-service-v2"},
+    "annotations": {},
+    "resources": {"nvidia.com/bf_sf": "2"},
+    "updateStrategy": {"type": "OnDelete"}
+  }
 }"#;
 const CREDENTIAL_CLEANUP_FAILURE_METRIC: &str =
     "carbide_extension_service_credential_cleanup_failures_total";
@@ -178,15 +192,47 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
         interfaces_present: false,
         paused: None,
         security_privileged: Some(service.security_privileged),
-        service_daemon_set_node_selector: Some(serde_json::json!({
-            "nodeSelectorTerms": [{
-                "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
-                    "key": key,
-                    "operator": "In",
-                    "values": [value],
-                })).collect::<Vec<_>>(),
-            }],
-        })),
+        service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+            DpuServiceDaemonSetObservation {
+                node_selector: daemon_set.node_selector_labels.as_ref().map(|labels| {
+                    serde_json::json!({
+                        "nodeSelectorTerms": [{
+                            "matchExpressions": labels.iter().map(|(key, value)| serde_json::json!({
+                                "key": key,
+                                "operator": "In",
+                                "values": [value],
+                            })).collect::<Vec<_>>(),
+                        }],
+                    })
+                }),
+                annotations: daemon_set.annotations.clone(),
+                labels: daemon_set.labels.clone(),
+                resources: daemon_set.resources.clone(),
+                update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
+                    let mut value = serde_json::Map::new();
+                    if let Some(strategy_type) = &strategy.strategy_type {
+                        value.insert("type".to_string(), serde_json::json!(strategy_type));
+                    }
+                    if let Some(rolling_update) = &strategy.rolling_update {
+                        let mut rolling = serde_json::Map::new();
+                        if let Some(max_surge) = &rolling_update.max_surge {
+                            rolling.insert("maxSurge".to_string(), serde_json::json!(max_surge));
+                        }
+                        if let Some(max_unavailable) = &rolling_update.max_unavailable {
+                            rolling.insert(
+                                "maxUnavailable".to_string(),
+                                serde_json::json!(max_unavailable),
+                            );
+                        }
+                        value.insert(
+                            "rollingUpdate".to_string(),
+                            serde_json::Value::Object(rolling),
+                        );
+                    }
+                    serde_json::Value::Object(value)
+                }),
+            }
+        }),
         service_id: None,
         config_ports_present: false,
         is_deleting: false,
@@ -446,7 +492,13 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
         "security.privileged": false,
         "chartVersion": "1.2.3",
         "repoURL": "oci://registry.example.com/charts",
-        "chartName": "tenant-service"
+        "chartName": "tenant-service",
+        "serviceDaemonSet": {
+            "updateStrategy": {"rollingUpdate": {"maxUnavailable": 1}, "type": "RollingUpdate"},
+            "resources": {"nvidia.com/bf_sf": 1},
+            "annotations": {},
+            "labels": {"app.kubernetes.io/name": "tenant-service"}
+        }
     }"#;
     let response = env
         .api
@@ -531,10 +583,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let updated_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &updated_data);
     let existing = dpu_service_observation(&initial_projection);
     let expected_name = updated_projection.name.clone();
-    let expected_patch = dpu_service_mutable_patch(
-        &updated_projection,
-        initial_projection.helm_chart.values.as_ref(),
-    );
+    let expected_patch = dpu_service_mutable_patch(&updated_projection, Some(&existing));
 
     let mut mock = MockDpfOperations::new();
     mock.expect_create_dpu_service()
@@ -1166,6 +1215,28 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "values":{"serviceDaemonSet":{"nodeSelector":{"tenant":"value"}}}
             }"#,
             "tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector",
+        ),
+        (
+            "dpf-explicit-node-selector",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "serviceDaemonSet":{"nodeSelector":{}}
+            }"#,
+            "unknown field `nodeSelector`",
+        ),
+        (
+            "dpf-misspelled-upgrade-strategy",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "serviceDaemonSet":{"upgradeStrategy":{"type":"RollingUpdate"}}
+            }"#,
+            "unknown field `upgradeStrategy`",
         ),
     ] {
         let service_id = ExtensionServiceId::new();
@@ -3776,6 +3847,173 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
     assert_eq!(instances[0].service_id, service2_id);
     assert_eq!(instances[0].version, service2_version);
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    use std::collections::BTreeMap;
+
+    use chrono::{Duration, Utc};
+    use model::extension_service::{DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity};
+    use model::instance::status::extension_service::{
+        ExtensionServiceDeploymentStatus, ExtensionServiceStatusObservation,
+        InstanceExtensionServiceStatusObservation,
+    };
+    use model::machine::{InstanceState, ManagedHostState};
+
+    use crate::tests::common::api_fixtures::create_managed_host_with_dpf;
+    use crate::tests::common::api_fixtures::instance::{
+        default_os_config, single_interface_network_config,
+    };
+
+    let service_id = ExtensionServiceId::new();
+    let placement_labels = BTreeMap::from([(
+        DpfHelmChartIdentity::from_service_id(service_id).placement_label_key,
+        DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_string(),
+    )]);
+    let label_reads = Arc::new(AtomicUsize::new(0));
+    let mut mock = MockDpfOperations::new();
+    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_node().returning(|_| Ok(()));
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_get_dpu_phase()
+        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_get_service_versions_for_dpu()
+        .returning(|_| Ok(vec![]));
+    mock.expect_create_dpu_service()
+        .returning(|service| Ok(dpu_service_observation(service)));
+    mock.expect_merge_dpu_device_node_labels()
+        .returning(|_, _| Ok(()));
+    let reads = label_reads.clone();
+    mock.expect_get_dpu_device_node_labels()
+        .returning(move |_| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok(placement_labels.clone())
+        });
+
+    let mut site_config = get_config();
+    site_config.dpf.enabled = true;
+    site_config.dpf.deployments.bf3.bfb_url = Some("http://example.com/test.bfb".into());
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(site_config).with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    create_test_tenants(&env).await?;
+    let mh = create_managed_host_with_dpf(&env).await;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            rpc::VpcCreationRequest::builder("best_org")
+                .metadata(rpc::Metadata {
+                    name: "rejected-placement".into(),
+                    ..Default::default()
+                })
+                .rpc(),
+        )
+        .await;
+    let service = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_id: Some(service_id.to_string()),
+            service_name: "rejected-placement".into(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart as i32,
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::Primary as i32),
+            tenant_organization_id: "best_org".into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.into(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    env.run_extension_service_controller_iteration().await;
+    env.api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            machine_id: Some(mh.host().id),
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(rpc::TenantConfig {
+                    tenant_organization_id: "best_org".into(),
+                    ..Default::default()
+                }),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: service_id.to_string(),
+                        version: service.latest_version_info.unwrap().version,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?;
+
+    let waiting_state = ManagedHostState::Assigned {
+        instance_state: InstanceState::WaitingForExtensionServicesConfig,
+    };
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(txn.as_mut(), &mh.id.into(), &waiting_state).await?;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let instance = snapshot.instance.as_ref().unwrap();
+    let config = &instance.config.extension_services.service_configs[0];
+    // A future timestamp forces rejection of this pass's `Running` candidate.
+    // This tests the rejection branch, not overlapping controller passes.
+    let accepted_observation = InstanceExtensionServiceStatusObservation {
+        config_version: instance.extension_services_config_version,
+        instance_config_version: None,
+        observed_at: Utc::now() + Duration::days(1),
+        extension_service_statuses: vec![ExtensionServiceStatusObservation {
+            service_id,
+            service_type: ExtensionServiceType::DpfHelmChart,
+            service_name: String::new(),
+            version: config.version,
+            dpu_target: config.dpu_target,
+            removed: None,
+            overall_state: ExtensionServiceDeploymentStatus::Error,
+            components: vec![],
+            message: "placement could not be verified".into(),
+        }],
+    };
+    assert_eq!(
+        db::machine::update_extension_service_status_observation(
+            txn.as_mut(),
+            &mh.dpu().id,
+            ExtensionServiceType::DpfHelmChart,
+            &accepted_observation,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    env.run_machine_state_controller_iteration().await;
+
+    assert_eq!(label_reads.load(Ordering::SeqCst), 1);
+    let mut txn = env.db_txn().await;
+    let persisted = mh.snapshot(&mut txn).await;
+    assert_eq!(persisted.host_snapshot.current_state(), &waiting_state);
+    assert_eq!(
+        persisted.host_snapshot.current_version(),
+        snapshot.host_snapshot.current_version()
+    );
+    assert_eq!(
+        persisted.host_snapshot.controller_state_outcome,
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    assert_eq!(
+        persisted.dpu_snapshots[0]
+            .status
+            .extension_service_status_observations
+            .for_service_type(ExtensionServiceType::DpfHelmChart),
+        Some(&accepted_observation)
+    );
+    txn.commit().await?;
     Ok(())
 }
 

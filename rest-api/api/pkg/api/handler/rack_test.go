@@ -1351,7 +1351,7 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			rackID:         rackID,
-			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"rack-token"}}`, site.ID.String()),
+			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"rack-token"},"overrideVersionCheck":true}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedAuth:   "rack-token",
 			expectedStatus: http.StatusOK,
@@ -1405,6 +1405,7 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
 					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient

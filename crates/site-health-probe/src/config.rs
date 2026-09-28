@@ -213,9 +213,10 @@ impl Config {
         }
     }
 
-    /// The metrics listen address as a socket address; empty defaults to
-    /// `":9009"`, and a bare `":9009"` binds all interfaces, matching
-    /// net/http-style listen strings.
+    /// `listen_addr` resolves `metrics_listen`, defaulting to `:9009`.
+    /// A bare `:port` selects the IPv6 wildcard so the shared metrics listener
+    /// accepts both address families, falling back to IPv4 if IPv6 setup fails.
+    /// Explicit addresses retain their configured address family.
     pub(crate) fn listen_addr(&self) -> eyre::Result<SocketAddr> {
         let configured = if self.metrics_listen.is_empty() {
             ":9009"
@@ -223,7 +224,7 @@ impl Config {
             self.metrics_listen.as_str()
         };
         let listen = if configured.starts_with(':') {
-            format!("0.0.0.0{configured}")
+            format!("[::]{configured}")
         } else {
             configured.to_string()
         };
@@ -435,7 +436,7 @@ probes:
         let cfg = load_str("probes:\n  grpc_machines:\n    enabled: false\n").expect("loads");
         assert_eq!(
             cfg.listen_addr().expect("defaults").to_string(),
-            "0.0.0.0:9009",
+            "[::]:9009",
             "listen address defaults"
         );
     }
@@ -551,13 +552,18 @@ probes:
             [
                 Check {
                     scenario: "bare port binds all interfaces",
-                    input: ":9009",
-                    expect: "0.0.0.0:9009".to_string(),
+                    input: ":9100",
+                    expect: "[::]:9100".to_string(),
                 },
                 Check {
                     scenario: "host:port passes through",
                     input: "127.0.0.1:8080",
                     expect: "127.0.0.1:8080".to_string(),
+                },
+                Check {
+                    scenario: "explicit IPv6 address passes through",
+                    input: "[::1]:8080",
+                    expect: "[::1]:8080".to_string(),
                 },
             ],
             |listen| {

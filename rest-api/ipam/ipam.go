@@ -30,10 +30,13 @@ type Ipamer interface {
 	// If the Prefix is not found an NotFoundError is returned.
 	// This operation is scoped to the root namespace unless a different namespace is provided in the context.
 	DeletePrefix(ctx context.Context, cidr string) (*Prefix, error)
-	// AcquireChildPrefix will return a Prefix with a smaller length from the given Prefix.
+	// AcquireChildPrefix reserves a subnet with the given prefix length
+	// within the existing `parentCidr` prefix.
 	// This operation is scoped to the root namespace unless a different namespace is provided in the context.
 	AcquireChildPrefix(ctx context.Context, parentCidr string, length uint8) (*Prefix, error)
-	// AcquireSpecificChildPrefix will return a Prefix with a smaller length from the given Prefix.
+	// AcquireSpecificChildPrefix reserves the subnet `childCidr` within
+	// the containing `parentCidr` prefix.
+	// Host bits in `childCidr` are accepted; the returned and reserved CIDR is the masked network prefix.
 	// This operation is scoped to the root namespace unless a different namespace is provided in the context.
 	AcquireSpecificChildPrefix(ctx context.Context, parentCidr, childCidr string) (*Prefix, error)
 	// ReleaseChildPrefix will mark this child Prefix as available again.

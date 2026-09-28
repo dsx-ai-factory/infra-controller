@@ -67,16 +67,9 @@ pub(crate) struct SiteFabricPrefixList {
 
 impl SiteFabricPrefixList {
     pub(crate) fn from_ipnetwork_vec(prefixes: Vec<IpNetwork>) -> Option<Self> {
-        // Under the current configuration semantics, an empty
-        // site_fabric_prefixes list in the site config means we are not using
-        // the VPC isolation feature built on top of it, and it is better not
-        // to construct one of these at all (and thus the Option-wrapped return
-        // type).
+        // Return `None` for an empty configured list so callers skip containment
+        // checks against operator ranges.
         prefixes.none_if_empty().map(|prefixes| Self { prefixes })
-    }
-
-    pub(crate) fn as_ip_slice(&self) -> &[IpNetwork] {
-        &self.prefixes
     }
 
     // Check whether the given network matches any of our site fabric prefixes.
@@ -307,7 +300,9 @@ fn tenant_vrf_loopback_for_legacy_ipv4_field(loopback_ip: Option<IpAddr>) -> Opt
 ///
 /// Values are emitted in V4/V6 order. The tenant VRF loopback is placed on the
 /// entry matching its address family, creating a loopback-only entry when that
-/// family has no interface address data.
+/// family has no interface address data. Routed tenant IPv6 keeps `gateway`
+/// absent: its segment `prefix` is the single source used to derive the DPU
+/// address and RA PIO, while `interface_prefix` remains the tenant allocation.
 #[allow(deprecated)]
 fn interface_address_configs(
     config: &rpc::FlatInterfaceConfig,
@@ -361,9 +356,10 @@ fn interface_address_configs(
 /// Builds the legacy IPv6 projection used by DPU agents.
 ///
 /// Existing non-SLAAC configurations still require a concrete host address.
-/// SLAAC instead sends the selected interface prefix with an intentionally
-/// empty host address so the agent can configure the IPv6 prefix in the DPU.
-/// Router advertisement (RA) support is tracked by
+/// Stateful FNN sends its tenant `/128`; the family-neutral segment prefix
+/// separately carries the containing `/127`. SLAAC instead sends the
+/// VPC-selected `/64` with an intentionally empty host address. Routed tenant
+/// interfaces use this distinction to render RA. Tenant IPv6 support is tracked by
 /// https://github.com/NVIDIA/infra-controller/issues/2398.
 fn build_ipv6_interface_config(
     address: Option<IpAddr>,
@@ -687,14 +683,12 @@ pub(crate) async fn tenant_network(
     if let Some(policy) = vpc_peering_policy_on_existing
         && let Some(vpc_id) = segment.config.vpc_id
     {
-        // The peer-ID universe depends on the site policy. Under
-        // `Exclusive`, the per-type capability layer dictates which
-        // peer types are compatible (e.g. an FNN VPC can have Flat
-        // peers via Flat's `peers_with` listing). Under `Mixed`, the
-        // operator opts out of capability enforcement and we accept
-        // any peering record. `None` disables peering entirely.
+        // The per-type capability layer dictates which peer types are
+        // compatible (e.g. an FNN VPC can have Flat peers via Flat's
+        // `peers_with` listing). Deprecated `Mixed` now has the same
+        // behavior as `Exclusive`; `None` disables all peer imports.
         let vpc_peer_ids: Vec<VpcId> = match policy {
-            VpcPeeringPolicy::Exclusive => {
+            VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
                 let allowed_peer_types = network_virtualization_type
                     .capabilities()
                     .peers_with
@@ -705,21 +699,22 @@ pub(crate) async fn tenant_network(
                     .map(|(id, _)| id)
                     .collect()
             }
-            VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, vpc_id).await?,
             VpcPeeringPolicy::None => vec![],
         };
 
         vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
 
-        // VNI-based peer route imports are independent of peering
-        // policy: they're a per-type question on both sides.
+        // VNI-based peer route imports are a per-type question on both sides
+        // when stored peerings are enabled.
         // - Self: does this VPC's DPU plumb peer VNIs into its VRF?
         //   (`imports_peer_vnis_into_overlay`, FNN-only today.)
         // - Peer: should this peer's VNI be exposed for the self-side
         //   to pick up? (`vni_advertised_to_peers`, FNN + Flat today --
         //   Flat advertises its VNI so pluggable SDN integrations on
         //   the network operator's fabric can use it.)
-        if network_virtualization_type.imports_peer_vnis_into_overlay() {
+        if policy != VpcPeeringPolicy::None
+            && network_virtualization_type.imports_peer_vnis_into_overlay()
+        {
             let vni_peer_types: Vec<_> = ALL_VPC_VIRTUALIZATION_TYPES
                 .iter()
                 .copied()
@@ -1000,7 +995,7 @@ mod test {
     fn ipv6_interface_config() -> rpc::FlatInterfaceIpv6Config {
         rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::2/64".to_string()),
         }
     }
@@ -1009,7 +1004,7 @@ mod test {
         rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V6.into(),
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             prefix: "2001:db8::/64".to_string(),
             gateway: None,
             svi_ip: Some("2001:db8::2/64".to_string()),

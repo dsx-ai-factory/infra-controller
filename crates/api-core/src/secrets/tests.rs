@@ -199,6 +199,93 @@ async fn create_fails_when_credential_exists(pool: sqlx::PgPool) {
     assert_eq!(current, Some(cred("admin", "original")));
 }
 
+#[crate::sqlx_test]
+async fn set_after_create_absence_check_remains_current(pool: sqlx::PgPool) {
+    let mgr = manager(&pool, catch_all_routing("k1"), kms_with_keys(&[("k1", 1)]));
+    let key = ufm_key("create-set-race");
+    let path = key.to_key_str().to_string();
+    let seed_credentials = cred("seed", "initial");
+    let operator_credentials = cred("operator", "explicit");
+    let seed_json =
+        Zeroizing::new(serde_json::to_vec(&seed_credentials).expect("serialize seed credentials"));
+    let envelope = mgr
+        .encrypt_envelope(&path, &seed_json)
+        .await
+        .expect("encrypt seed credentials");
+
+    // Run `insert_if_missing`'s steps separately so the setter can run
+    // after the absence check but before the insert.
+    let mut create_txn = pool.begin().await.expect("begin create transaction");
+    db::secrets::lock_path(&mut create_txn, &path)
+        .await
+        .expect("lock credential path for create");
+    assert!(
+        !db::secrets::exists(&mut *create_txn, &path)
+            .await
+            .expect("check credential absence"),
+        "test path must start empty"
+    );
+    let create_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *create_txn)
+        .await
+        .expect("read creator backend PID");
+
+    let setter = mgr.set_credentials(&key, &operator_credentials);
+    tokio::pin!(setter);
+    let set_completed = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            result = &mut setter => {
+                result.expect("set explicit credentials");
+                true
+            }
+            () = async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM pg_locks
+                            WHERE locktype = 'advisory'
+                              AND NOT granted
+                              AND $1 = ANY(pg_blocking_pids(pid))
+                        )",
+                    )
+                    .bind(create_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("check setter path-lock wait");
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } => false,
+        }
+    })
+    .await
+    .expect("setter neither committed nor waited on the creator's path lock");
+
+    db::secrets::insert(&mut create_txn, &envelope.as_new_entry(&path))
+        .await
+        .expect("insert seed credentials");
+    create_txn
+        .commit()
+        .await
+        .expect("commit create transaction");
+    if !set_completed {
+        tokio::time::timeout(Duration::from_secs(3), &mut setter)
+            .await
+            .expect("setter did not finish after create committed")
+            .expect("set explicit credentials");
+    }
+
+    assert_eq!(
+        mgr.get_credentials(&key)
+            .await
+            .expect("read current credentials"),
+        Some(operator_credentials.clone()),
+        "creation must not replace the explicit credential update"
+    );
+}
+
 // Verifies that delete removes the whole journal, not just the newest
 // entry -- the same semantics Vault's delete gave callers.
 #[crate::sqlx_test]

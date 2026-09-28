@@ -180,7 +180,13 @@ data:
     {{- end }}
 
     {{- $racks := $podConfig.racks | default dict }}
-    {{- $machines := $podConfig.machines | default dict }}
+    {{/* Skip null machine groups so the [machines] fallback below sees an empty table */}}
+    {{- $machines := dict }}
+    {{- range $sectionName, $section := $podConfig.machines | default dict }}
+    {{- if $section }}
+    {{- $_ := set $machines $sectionName $section }}
+    {{- end }}
+    {{- end }}
 
     {{- range $sectionName, $section := $racks }}
 
@@ -201,7 +207,6 @@ data:
     {{- end }}
 
     {{- range $sectionName, $section := $machines }}
-    {{- if $section }}
 
     [machines.{{ $sectionName }}]
     {{- if $section.hwType }}
@@ -236,9 +241,9 @@ data:
     {{- end }}
     {{- end }}
     {{- end }}
-    {{- end }}
 
-    {{- if and (gt (len $racks) 0) (eq (len $machines) 0) }}
+    {{/* machine-a-tron requires a [machines] table at startup */}}
+    {{- if eq (len $machines) 0 }}
     [machines]
     {{- end }}
     {{- end }}

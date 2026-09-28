@@ -14,6 +14,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // APIExpectedPowerShelfCreateRequest is the data structure to capture request to create a new ExpectedPowerShelf
@@ -96,7 +97,8 @@ func (epcr *APIExpectedPowerShelfCreateRequest) Validate() error {
 
 // APIExpectedPowerShelfUpdateRequest is the data structure to capture user request to update an ExpectedPowerShelf
 type APIExpectedPowerShelfUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// BmcMacAddress is the MAC address of the expected power shelf's BMC
 	BmcMacAddress *string `json:"bmcMacAddress"`
@@ -184,6 +186,30 @@ func (epur *APIExpectedPowerShelfUpdateRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (epur *APIExpectedPowerShelfUpdateRequest) ToProto(entity *cdbm.ExpectedPowerShelf) *corev1.PatchExpectedPowerShelfRequest {
+	resource := entity.ToProto(cdbm.ExpectedPowerShelfCredentials{
+		Username: epur.DefaultBmcUsername,
+		Password: epur.DefaultBmcPassword,
+	})
+	return &corev1.PatchExpectedPowerShelfRequest{
+		ExpectedPowerShelf: resource,
+		UpdateMask: util.ExpectedComponentUpdateMask(
+			util.ExpectedComponentUpdateField{Path: "bmc_username", Present: epur.DefaultBmcUsername != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_password", Present: epur.DefaultBmcPassword != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_address", Present: epur.BmcIpAddress != nil},
+			util.ExpectedComponentUpdateField{Path: "rack_id", Present: epur.RackID != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.name", Present: epur.Name != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: epur.Description != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: epur.Labels != nil || epur.Manufacturer != nil || epur.Model != nil || epur.SlotID != nil || epur.TrayIdx != nil || epur.HostID != nil},
+			util.ExpectedComponentUpdateField{Path: "shelf_serial_number", Present: epur.ShelfSerialNumber != nil},
+		),
+	}
 }
 
 // APIExpectedPowerShelf is the data structure to capture API representation of an ExpectedPowerShelf

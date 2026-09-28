@@ -814,7 +814,8 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use db::ObjectColumnFilter;
     use model::rack::{
-        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig, RackState,
+        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
+        RackErrorRecoveryPolicy, RackState,
     };
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1206,6 +1207,7 @@ mod tests {
         // explicitly opt into recovering a rack from Error.
         let error_state = RackState::Error {
             cause: "test".into(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         };
         let error_rack = create_rack_in_state(&pool, error_state.clone()).await;
         assert_eq!(

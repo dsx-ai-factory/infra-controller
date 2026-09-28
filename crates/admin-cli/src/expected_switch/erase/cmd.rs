@@ -15,14 +15,9 @@
  * limitations under the License.
  */
 
-use super::args::Args;
 use crate::rpc::ApiClient;
 
-pub(super) async fn erase(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
-    if !data.confirm {
-        eprintln!("Please set --confirm to confirm you want to erase all expected switches.");
-        return Ok(());
-    }
+pub(super) async fn erase(api_client: &ApiClient) -> color_eyre::Result<()> {
     api_client.0.delete_all_expected_switches().await?;
     Ok(())
 }

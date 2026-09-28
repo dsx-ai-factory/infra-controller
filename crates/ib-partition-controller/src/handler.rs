@@ -24,6 +24,7 @@ use carbide_instrument::{Event, LabelValue, emit};
 use carbide_uuid::infiniband::IBPartitionId;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBQosConf};
 use model::ib_partition::{IBPartition, IBPartitionControllerState, IBPartitionStatus};
+use state_controller::CheckApplied;
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -175,7 +176,6 @@ impl StateHandler for IBPartitionStateHandler {
                                         .with_txn(txn));
                                     }
 
-                                    // Release pkey after ib_partition deleted.
                                     let pkey_pool = ctx
                                         .services
                                         .ib_pools
@@ -188,10 +188,14 @@ impl StateHandler for IBPartitionStateHandler {
                                             ufm_error("release_pkey", error)
                                         })?;
 
-                                    db::ib_partition::final_delete(*partition_id, &mut txn).await?;
-
-                                    db::resource_pool::release(pkey_pool, &mut txn, pkey.into())
-                                        .await?;
+                                    db::ib_partition::delete_and_release_pkey(
+                                        *partition_id,
+                                        pkey,
+                                        pkey_pool,
+                                        &mut txn,
+                                    )
+                                    .await?
+                                    .check_applied()?;
                                     Ok(StateHandlerOutcome::deleted().with_txn(txn))
                                 }
                                 _ => Err(ufm_error("get_ib_network", e.into())),

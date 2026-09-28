@@ -60,10 +60,10 @@ impl HpeProliantDl380aGen11<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "1";
 
         let eth_interfaces = self

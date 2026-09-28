@@ -80,6 +80,7 @@ async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: DpuMachineI
             dpu_extension_service_version: None,
             dpu_extension_services: vec![],
             astra_config_status: None,
+            lldp: None,
         }))
         .await
         .unwrap();
@@ -237,6 +238,7 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
             dpu_extension_service_version: Some("V1-T1".to_string()),
             dpu_extension_services: vec![],
             astra_config_status: None,
+            lldp: None,
         }))
         .await
         .unwrap();
@@ -431,6 +433,7 @@ impl TestManagedHostDpuAgentExt for TestManagedHost {
                 dpu_extension_service_version: Some("V1-T1".to_string()),
                 dpu_extension_services: vec![],
                 astra_config_status: None,
+                lldp: None,
             }))
             .await
             .unwrap();

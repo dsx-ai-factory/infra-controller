@@ -124,6 +124,21 @@ func powerShelfIDsProto(ids []string) *corev1.PowerShelfIdList {
 //
 // Shelves not associated with a rack in Core are skipped with a warning
 // (see the equivalent NVSwitch helper for the reasoning).
+// ensureTargetOperable keeps readiness resolution separate from API targeting.
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+	if !target.UsesMACAddresses() {
+		return m.ensureRackOperable(ctx, target.Identifiers, op, override)
+	}
+	if m.readiness == nil {
+		return nil
+	}
+	if override {
+		log.Warn().Strs("management_macs", target.Identifiers).Str("operation", string(op)).Msg("Readiness check bypassed by override_readiness_check")
+		return nil
+	}
+	return m.readiness.WaitForManagementMACsReady(ctx, target.Type, target.Identifiers, op)
+}
+
 func (m *Manager) ensureRackOperable(
 	ctx context.Context,
 	shelfIDs []string,
@@ -213,7 +228,7 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -234,11 +249,17 @@ func (m *Manager) PowerControl(
 	}
 
 	req := &corev1.ComponentPowerControlRequest{
-		Target: &corev1.ComponentPowerControlRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
 		Action:                action,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.ComponentPowerControlRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.ComponentPowerControlRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
@@ -248,7 +269,7 @@ func (m *Manager) PowerControl(
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("power control failed for %s: %s", r.GetComponentId(), r.GetError())
+			return fmt.Errorf("power control failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -265,10 +286,15 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentInventoryRequest{
-		Target: &corev1.GetComponentInventoryRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentInventoryRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentInventoryRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentInventoryRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
@@ -276,16 +302,13 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}
 
-	result := make(map[string]operations.PowerStatus, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
-		result[id] = operations.PowerStatusUnknown
-	}
-
+	result := make(map[string]operations.PowerStatus, target.Len())
 	for _, entry := range resp.GetEntries() {
-		compID := entry.GetResult().GetComponentId()
-		if ps := nicoprovider.ExtractPowerState(entry.GetReport()); ps != operations.PowerStatusUnknown {
-			result[compID] = ps
+		if entry.GetResult() == nil || entry.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			continue
 		}
+		compID := nicoprovider.ResultIdentifier(entry.GetResult(), target.UsesMACAddresses())
+		result[compID] = nicoprovider.ExtractPowerState(entry.GetReport())
 	}
 
 	return result, nil
@@ -306,7 +329,7 @@ func (m *Manager) FirmwareControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureRackOperable(ctx, target.ComponentIDs, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -321,14 +344,18 @@ func (m *Manager) FirmwareControl(
 		subComponents = []corev1.PowerShelfComponent{corev1.PowerShelfComponent_POWER_SHELF_COMPONENT_PMC}
 	}
 
+	powerShelfTarget := &corev1.UpdatePowerShelfFirmwareTarget{Components: subComponents}
+	if target.UsesMACAddresses() {
+		powerShelfTarget.PmcMacs = &corev1.MacAddressList{MacAddresses: target.Identifiers}
+	} else {
+		powerShelfTarget.PowerShelfIds = powerShelfIDsProto(target.Identifiers)
+	}
 	req := &corev1.UpdateComponentFirmwareRequest{
 		Target: &corev1.UpdateComponentFirmwareRequest_PowerShelves{
-			PowerShelves: &corev1.UpdatePowerShelfFirmwareTarget{
-				PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-				Components:    subComponents,
-			},
+			PowerShelves: powerShelfTarget,
 		},
 		TargetVersion:         info.TargetVersion,
+		ForceUpdate:           info.OverrideVersionCheck,
 		BypassStateController: info.OverrideReadinessCheck,
 	}
 	if info.AccessToken != "" {
@@ -342,7 +369,7 @@ func (m *Manager) FirmwareControl(
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("firmware update failed for %s: %s", r.GetComponentId(), r.GetError())
+			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -365,10 +392,15 @@ func (m *Manager) GetFirmwareStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentFirmwareStatusRequest{
-		Target: &corev1.GetComponentFirmwareStatusRequest_PowerShelfIds{
-			PowerShelfIds: powerShelfIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentFirmwareStatusRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_PowerShelfPmcMacs{
+			PowerShelfPmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_PowerShelfIds{
+			PowerShelfIds: powerShelfIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
@@ -378,7 +410,7 @@ func (m *Manager) GetFirmwareStatus(
 
 	result := make(map[string]operations.FirmwareUpdateStatus, len(resp.GetStatuses()))
 	for _, s := range resp.GetStatuses() {
-		compID := s.GetResult().GetComponentId()
+		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		result[compID] = operations.FirmwareUpdateStatus{
 			ComponentID: compID,
 			State:       nicoprovider.MapFirmwareState(s.GetState()),
@@ -398,14 +430,14 @@ func (m *Manager) Decommission(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	for _, shelfID := range target.ComponentIDs {
+	for _, shelfID := range target.Identifiers {
 		if err := m.nicoClient.DecommissionPowerShelf(ctx, shelfID); err != nil {
 			return fmt.Errorf("DecommissionPowerShelf failed for %s: %w", shelfID, err)
 		}
 	}
 
 	log.Info().
-		Strs("shelf_ids", target.ComponentIDs).
+		Strs("shelf_ids", target.Identifiers).
 		Msg("Decommission initiated for PowerShelf components")
 	return nil
 }
@@ -420,14 +452,14 @@ func (m *Manager) GetDecommissionStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	states, err := m.nicoClient.FindPowerShelfControllerStates(ctx, target.ComponentIDs)
+	states, err := m.nicoClient.FindPowerShelfControllerStates(ctx, target.Identifiers)
 	if err != nil {
 		return nil, fmt.Errorf("FindPowerShelfControllerStates: %w", err)
 	}
 
 	// Ensure every requested component is present in the result.
-	result := make(map[string]string, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
+	result := make(map[string]string, len(target.Identifiers))
+	for _, id := range target.Identifiers {
 		if s, ok := states[id]; ok {
 			result[id] = normalizeDecommissionState(s)
 		} else {

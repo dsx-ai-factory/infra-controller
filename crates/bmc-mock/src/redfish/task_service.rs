@@ -21,11 +21,15 @@ use axum::response::Response;
 use axum::routing::get;
 use serde_json::json;
 
+use crate::Callbacks;
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
-    r.route("/redfish/v1/TaskService/Tasks/{task_id}", get(get_task))
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    r.route(
+        "/redfish/v1/TaskService/Tasks/{task_id}",
+        get(get_task::<C>),
+    )
 }
 
 /// Return a task by ID.
@@ -35,7 +39,10 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
 /// get pruned on PowerOn) return a synthetic completed task.  Treating unknown IDs
 /// as Completed is safe: carbide poll loops interpret Completed as "proceed" and
 /// only hard-fail on explicit error responses.
-async fn get_task(State(state): State<BmcState>, Path(task_id): Path<String>) -> Response {
+async fn get_task<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(task_id): Path<String>,
+) -> Response {
     if let Some(task_json) = state.update_service_state.find_task(&task_id) {
         return task_json.into_ok_response();
     }

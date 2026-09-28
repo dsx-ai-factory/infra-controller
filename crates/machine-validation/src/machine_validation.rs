@@ -1731,6 +1731,7 @@ mod tests {
             test_id: "gpu-health".to_owned(),
             version: "1.2.3".to_owned(),
             plugin: Some(rpc::forge::MachineValidationPlugin {
+                r#type: "container".to_owned(),
                 image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 entrypoint: vec!["/plugin/entrypoint".to_owned(), "--check".to_owned()],
                 parameters_json: r#"{"expectedGpuCount":8}"#.to_owned(),

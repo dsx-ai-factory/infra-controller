@@ -109,10 +109,24 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          # Keep gRPC on POD_IP, away from the tenant-facing metadata interface.
+          # Rust socket addresses require brackets only for IPv6.
+          command:
+            - /busybox/sh
+            - -ec
+            - |
+              listen_host="$POD_IP"
+              case "$listen_host" in
+                *:*) listen_host="[$listen_host]" ;;
+              esac
+              binary="$1"
+              shift
+              exec "$binary" "--grpc-address=${listen_host}:50052" "$@"
+            - --
           args:
             {{- $dir := .Values.certsDir | default "/opt/forge" }}
             {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" }}
-            - "--grpc-address=$(POD_IP):50052"
+            - /usr/bin/carbide-fmds
             {{- with .Values.restAddress }}
             - "--rest-address={{ . }}"
             {{- end }}

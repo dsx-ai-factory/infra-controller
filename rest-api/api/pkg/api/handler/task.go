@@ -148,13 +148,13 @@ func (gth GetTaskHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.GetTasksByIDsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetTasksByIDs_FullMethodName,
 		flowRequest, &flowResponse,
 		fmt.Sprintf("task-get-%s", taskID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	tasks := flowResponse.GetTasks()
@@ -306,13 +306,13 @@ func (cth CancelTaskHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("task-cancel-%s", taskID)
 	var flowResponse flowv1.CancelTaskResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_CancelTask_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	apiTask := model.NewAPITask(flowResponse.GetTask(), model.WithTaskReport())
@@ -453,13 +453,13 @@ func (h GetAllTaskHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListTasks_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()
@@ -619,13 +619,13 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("tasks-rack-get-%s-%s", rackID, common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListTasks_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()
@@ -785,13 +785,13 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("tasks-tray-get-%s-%s", trayID, common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListTasks_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()

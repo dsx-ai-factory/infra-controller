@@ -26,7 +26,7 @@ var _ MappedNullable = &FirmwareUpdateRequest{}
 type FirmwareUpdateRequest struct {
 	// ID of the Site
 	SiteId string `json:"siteId"`
-	// Target firmware version.
+	// Firmware input serialized as a string: either one shared value for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping receives an empty input, which does not guarantee a skipped update. Empty, null, or omitted input is handled by the selected backend and operation rule.
 	Version NullableString `json:"version,omitempty"`
 	// Optional subset of firmware targets to update within the targeted tray. Names are lowercase and select sub-parts of the tray (BMC, BIOS, etc.). The accepted set per tray type comes from the Flow service's NICo proto bindings (which mirror Core's per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`), so the supported values track Core as new sub-parts are added:   - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos   - powershelf trays (PowerShelfComponent): currently pmc, psu   - compute trays (ComputeTrayComponent): currently bmc, bios     (currently NOT honored end-to-end: the NICo compute-firmware     path goes through SetFirmwareUpdateTimeWindow + auto-update,     which has no per-target selection; the request is logged     and the whole bundle is applied. Will be honored once     compute moves to UpdateComponentFirmware.) Omitted or empty means \"update everything in the bundle\" (the historical default) for compute-tray-internal targets. Unknown names are rejected. Requires `version` to be set. The special target `dpu`, valid only on compute trays, requests DPU reprovisioning on the matched host. Unlike the other targets, `dpu` is NOT covered by the \"omitted/empty means everything\" default — it must be listed explicitly. `version` is ignored on the `dpu` branch; the target firmware version comes from site configuration.
 	Targets []string `json:"targets,omitempty"`
@@ -34,6 +34,8 @@ type FirmwareUpdateRequest struct {
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
 	// Optional Operation Rule UUID. When set, pins this firmware update to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
+	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
+	OverrideVersionCheck *bool `json:"overrideVersionCheck,omitempty"`
 	// When true, proceed even if one or more target components (or hosts on the owning rack for rack-scoped components) are reported as not ready by their persisted status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`
 }
@@ -47,6 +49,8 @@ type _FirmwareUpdateRequest FirmwareUpdateRequest
 func NewFirmwareUpdateRequest(siteId string) *FirmwareUpdateRequest {
 	this := FirmwareUpdateRequest{}
 	this.SiteId = siteId
+	var overrideVersionCheck bool = false
+	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
@@ -57,6 +61,8 @@ func NewFirmwareUpdateRequest(siteId string) *FirmwareUpdateRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewFirmwareUpdateRequestWithDefaults() *FirmwareUpdateRequest {
 	this := FirmwareUpdateRequest{}
+	var overrideVersionCheck bool = false
+	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
@@ -236,6 +242,38 @@ func (o *FirmwareUpdateRequest) SetRuleId(v string) {
 	o.RuleId = &v
 }
 
+// GetOverrideVersionCheck returns the OverrideVersionCheck field value if set, zero value otherwise.
+func (o *FirmwareUpdateRequest) GetOverrideVersionCheck() bool {
+	if o == nil || IsNil(o.OverrideVersionCheck) {
+		var ret bool
+		return ret
+	}
+	return *o.OverrideVersionCheck
+}
+
+// GetOverrideVersionCheckOk returns a tuple with the OverrideVersionCheck field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *FirmwareUpdateRequest) GetOverrideVersionCheckOk() (*bool, bool) {
+	if o == nil || IsNil(o.OverrideVersionCheck) {
+		return nil, false
+	}
+	return o.OverrideVersionCheck, true
+}
+
+// HasOverrideVersionCheck returns a boolean if a field has been set.
+func (o *FirmwareUpdateRequest) HasOverrideVersionCheck() bool {
+	if o != nil && !IsNil(o.OverrideVersionCheck) {
+		return true
+	}
+
+	return false
+}
+
+// SetOverrideVersionCheck gets a reference to the given bool and assigns it to the OverrideVersionCheck field.
+func (o *FirmwareUpdateRequest) SetOverrideVersionCheck(v bool) {
+	o.OverrideVersionCheck = &v
+}
+
 // GetOverrideReadinessCheck returns the OverrideReadinessCheck field value if set, zero value otherwise.
 func (o *FirmwareUpdateRequest) GetOverrideReadinessCheck() bool {
 	if o == nil || IsNil(o.OverrideReadinessCheck) {
@@ -290,6 +328,9 @@ func (o FirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId
+	}
+	if !IsNil(o.OverrideVersionCheck) {
+		toSerialize["overrideVersionCheck"] = o.OverrideVersionCheck
 	}
 	if !IsNil(o.OverrideReadinessCheck) {
 		toSerialize["overrideReadinessCheck"] = o.OverrideReadinessCheck

@@ -199,6 +199,7 @@ fn spawn_generic_redfish_collectors(
     metrics_prefix: &str,
 ) -> Result<(), HealthError> {
     let key = endpoint.key();
+    let registry_key = endpoint.addr.registry_key();
     let endpoint_arc = endpoint.clone();
     let bmc = endpoint.bmc().clone();
 
@@ -224,7 +225,7 @@ fn spawn_generic_redfish_collectors(
     {
         let shared = ctx.collectors.inventory_for(&key);
         let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
-            format!("entity_discovery_collector_{key}"),
+            format!("entity_discovery_collector_{registry_key}"),
             metrics_prefix,
         )?);
         match Collector::start::<EntityDiscoveryCollector<BmcClient>>(
@@ -268,10 +269,10 @@ fn spawn_generic_redfish_collectors(
         && !ctx.collectors.contains(CollectorKind::Sensor, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("sensor_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("sensor_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<SensorCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -313,10 +314,10 @@ fn spawn_generic_redfish_collectors(
         && !ctx.collectors.contains(CollectorKind::Metrics, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("metrics_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("metrics_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<MetricsCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -356,10 +357,10 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(telemetry_cfg) = &ctx.telemetry_config
         && !ctx.collectors.contains(CollectorKind::Telemetry, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("telemetry_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("telemetry_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<TelemetryCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -397,10 +398,11 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(logs_cfg) = &ctx.logs_config
         && !ctx.collectors.contains(CollectorKind::Logs, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("log_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("log_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
 
         // Resolved once here because both SSE spawn paths below share the
         // endpoint's inventory handle.
@@ -610,10 +612,10 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(firmware_cfg) = &ctx.firmware_config
         && !ctx.collectors.contains(CollectorKind::Firmware, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("firmware_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("firmware_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<FirmwareCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -656,10 +658,11 @@ fn spawn_generic_redfish_collectors(
         && matches!(endpoint.metadata, Some(EndpointMetadata::Machine(_)))
         && !ctx.collectors.contains(CollectorKind::GpuInventory, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("gpu_inventory_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("gpu_inventory_{registry_key}"),
+                metrics_prefix,
+            )?);
         // Reuse the entity-discovery collector's inventory for this endpoint so GPU
         // counting shares its Redfish enumeration instead of re-querying the BMC.
         let shared = ctx.collectors.inventory_for(&key);
@@ -697,10 +700,10 @@ fn spawn_generic_redfish_collectors(
         && power_shelf
         && !ctx.collectors.contains(CollectorKind::Manager, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("manager_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("manager_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<ManagerCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -738,11 +741,10 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(leak_detector_cfg) = &ctx.leak_detector_config
         && !ctx.collectors.contains(CollectorKind::LeakDetector, &key)
     {
-        let collector_registry =
-            Arc::new(ctx.metrics_manager.create_collector_registry(
-                format!("leak_detector_collector_{key}"),
-                metrics_prefix,
-            )?);
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("leak_detector_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<LeakDetectorCollector<BmcClient>>(
             endpoint_arc,
             bmc,
@@ -833,6 +835,7 @@ fn spawn_switch_host_collectors(
     metrics_prefix: &str,
 ) -> Result<(), HealthError> {
     let key = endpoint.key();
+    let registry_key = endpoint.addr.registry_key();
     let endpoint_arc = endpoint.clone();
     let bmc = endpoint.bmc().clone();
     let eligibility = collector_eligibility(ctx, endpoint, data_sink.is_some());
@@ -841,10 +844,11 @@ fn spawn_switch_host_collectors(
         && let Configurable::Enabled(nmxt_cfg) = &ctx.nmxt_config
         && !ctx.collectors.contains(CollectorKind::Nmxt, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nmxt_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("nmxt_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
         match Collector::start::<NmxtCollector>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -892,10 +896,10 @@ fn spawn_switch_host_collectors(
                 "NMX-C streaming collector requires an enabled log or NVLink domain health report sink, skipping"
             );
         } else if let Some(data_sink) = data_sink.clone() {
-            let collector_registry = Arc::new(
-                ctx.metrics_manager
-                    .create_collector_registry(format!("nmxc_collector_{key}"), metrics_prefix)?,
-            );
+            let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("nmxc_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
 
             match start_nmxc_collector(
                 ctx,
@@ -941,10 +945,10 @@ fn spawn_switch_host_collectors(
         && !ctx.collectors.contains(CollectorKind::NvueRest, &key)
     {
         let credential_provider = bmc.credential_provider();
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nvue_rest_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("nvue_rest_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<NvueRestCollector>(
             endpoint_arc,
             bmc.clone(),
@@ -988,10 +992,10 @@ fn spawn_switch_host_collectors(
         && let Configurable::Enabled(gnmi_cfg) = &nvue_cfg.gnmi
         && !ctx.collectors.contains(CollectorKind::NvueGnmi, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nvue_gnmi_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("nvue_gnmi_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         let credential_provider = bmc.credential_provider();
         match spawn_gnmi_collector(
             endpoint,
@@ -1082,7 +1086,7 @@ mod tests {
             BmcAddr {
                 ip: IpAddr::V4(ip),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac address"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac address")),
             },
             BmcCredentials::UsernamePassword {
                 username: "user".to_string(),
@@ -1215,6 +1219,37 @@ mod tests {
         );
 
         assert_eq!(endpoint.log_identity().as_ref(), "switch-serial-1");
+    }
+
+    #[tokio::test]
+    async fn ipv6_registry_identities_remain_distinct() {
+        let mut ctx = context_with_config(Config::default(), "test_ipv6_registry");
+
+        // These distinct addresses collide if ':' and '.' both become '_'.
+        for ip in ["::ffff:192.0.2.1", "::ffff:192:0:2:1"] {
+            let endpoint = Arc::new(endpoint_with_creds(
+                BmcAddr {
+                    ip: ip.parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                BmcCredentials::UsernamePassword {
+                    username: "user".to_string(),
+                    password: Some("pass".to_string()),
+                },
+                None,
+                None,
+            ));
+            spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test_ipv6_registry")
+                .expect("distinct IPv6 endpoints must both register collectors");
+            assert!(
+                ctx.collectors
+                    .contains(CollectorKind::Sensor, &endpoint.key())
+            );
+        }
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 2);
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 2);
     }
 
     #[tokio::test]
@@ -1691,7 +1726,7 @@ mod tests {
         let addr = BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
             port: Some(443),
-            mac: MacAddress::from_str("99:88:77:66:55:44").expect("valid mac"),
+            mac: Some(MacAddress::from_str("99:88:77:66:55:44").expect("valid mac")),
         };
         let bmc = Arc::new(
             BmcClient::new(

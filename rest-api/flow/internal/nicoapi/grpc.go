@@ -69,6 +69,14 @@ const (
 type grpcClient struct {
 	gclient     *batchingForgeClient
 	grpcTimeout time.Duration
+	conn        *grpc.ClientConn
+	closeTLS    func()
+}
+
+// Close releases the Core connection and its certificate watcher.
+func (c *grpcClient) Close() error {
+	defer c.closeTLS()
+	return c.conn.Close()
 }
 
 // batchingForgeClient keeps limit handling below the Flow client methods so
@@ -202,7 +210,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 		return nil, errors.New("NICO_CORE_API_URL not set, cannot make connections to NICo Core")
 	}
 
-	tlsConfig, _, err := certs.TLSConfig()
+	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
 			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
@@ -212,10 +220,13 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
+		dynamicConfig.Close()
 		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
+		conn:        conn,
+		closeTLS:    dynamicConfig.Close,
 		gclient:     newBatchingForgeClient(corev1.NewForgeClient(conn)),
 		grpcTimeout: grpcTimeout,
 	}, nil

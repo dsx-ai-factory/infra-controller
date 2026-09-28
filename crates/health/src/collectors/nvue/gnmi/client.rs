@@ -38,8 +38,9 @@ use crate::config::{
 const GNMI_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
 const GNMI_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Builds the paths for the primary NVUE gNMI SAMPLE stream.
 pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
-    let mut paths = Vec::with_capacity(5);
+    let mut paths = Vec::with_capacity(4);
 
     if paths_config.components_enabled {
         paths.push(Path {
@@ -105,35 +106,36 @@ pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
         });
     }
 
-    if paths_config.leak_sensors_enabled {
-        paths.push(Path {
-            elem: vec![
-                PathElem {
-                    name: "platform-general".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "leak-sensors".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "leak-sensor".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "state".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "state".into(),
-                    key: Default::default(),
-                },
-            ],
-            ..Default::default()
-        });
-    }
-
     paths
+}
+
+/// Builds the path for the independent leak-sensor SAMPLE stream.
+pub(super) fn nvue_leak_sensor_subscribe_path() -> Path {
+    Path {
+        elem: vec![
+            PathElem {
+                name: "platform-general".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensors".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensor".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 #[derive(Clone)]
@@ -879,74 +881,87 @@ mod tests {
     }
 
     #[test]
-    fn nvue_subscribe_path_cases() {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        enum Group {
-            Components,
-            Interfaces,
-            PlatformGeneral,
-            LeakSensors,
-        }
+    fn primary_subscribe_paths_exclude_leak_sensors() {
+        check_values(
+            [
+                Check {
+                    scenario: "no primary paths",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: String::new(),
+                },
+                Check {
+                    scenario: "components only",
+                    input: NvueGnmiPaths {
+                        components_enabled: true,
+                        interfaces_enabled: false,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "components/component".to_string(),
+                },
+                Check {
+                    scenario: "interfaces only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: true,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "interfaces/interface".to_string(),
+                },
+                Check {
+                    scenario: "platform general only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        platform_general_enabled: true,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "platform-general/state,platform-general/versions".to_string(),
+                },
+                Check {
+                    scenario: "all primary paths",
+                    input: NvueGnmiPaths {
+                        leak_sensors_enabled: true,
+                        ..Default::default()
+                    },
+                    expect: "components/component,interfaces/interface,platform-general/state,platform-general/versions".to_string(),
+                },
+            ],
+            |config| {
+                nvue_subscribe_paths(&config)
+                    .into_iter()
+                    .map(|path| {
+                        path.elem
+                            .into_iter()
+                            .map(|elem| elem.name)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+    }
 
-        use Group::{Components, Interfaces, LeakSensors, PlatformGeneral};
+    #[test]
+    fn leak_sensor_path_is_built_separately() {
+        let actual = nvue_leak_sensor_subscribe_path()
+            .elem
+            .into_iter()
+            .map(|elem| elem.name)
+            .collect::<Vec<_>>()
+            .join("/");
 
-        const COMPONENTS: &str = "components/component";
-        const INTERFACES: &str = "interfaces/interface";
-        const PLATFORM_STATE: &str = "platform-general/state";
-        const PLATFORM_VERSIONS: &str = "platform-general/versions";
-        const LEAKS: &str = "platform-general/leak-sensors/leak-sensor/state/state";
-
-        let cases = [
-            &[][..],
-            &[Components][..],
-            &[Interfaces][..],
-            &[Components, Interfaces][..],
-            &[PlatformGeneral][..],
-            &[Components, PlatformGeneral][..],
-            &[Interfaces, PlatformGeneral][..],
-            &[Components, Interfaces, PlatformGeneral][..],
-            &[LeakSensors][..],
-            &[Components, LeakSensors][..],
-            &[Interfaces, LeakSensors][..],
-            &[Components, Interfaces, LeakSensors][..],
-            &[PlatformGeneral, LeakSensors][..],
-            &[Components, PlatformGeneral, LeakSensors][..],
-            &[Interfaces, PlatformGeneral, LeakSensors][..],
-            &[Components, Interfaces, PlatformGeneral, LeakSensors][..],
-        ];
-
-        for groups in cases {
-            let config = NvueGnmiPaths {
-                components_enabled: groups.contains(&Components),
-                interfaces_enabled: groups.contains(&Interfaces),
-                platform_general_enabled: groups.contains(&PlatformGeneral),
-                leak_sensors_enabled: groups.contains(&LeakSensors),
-            };
-
-            let actual = nvue_subscribe_paths(&config)
-                .into_iter()
-                .map(|path| {
-                    path.elem
-                        .into_iter()
-                        .map(|elem| elem.name)
-                        .collect::<Vec<_>>()
-                        .join("/")
-                })
-                .collect::<Vec<_>>();
-
-            let expected = groups
-                .iter()
-                .flat_map(|group| match group {
-                    Components => &[COMPONENTS][..],
-                    Interfaces => &[INTERFACES][..],
-                    PlatformGeneral => &[PLATFORM_STATE, PLATFORM_VERSIONS][..],
-                    LeakSensors => &[LEAKS][..],
-                })
-                .copied()
-                .collect::<Vec<_>>();
-
-            assert_eq!(actual, expected, "enabled groups: {groups:?}");
-        }
+        assert_eq!(
+            actual,
+            "platform-general/leak-sensors/leak-sensor/state/state"
+        );
     }
 
     #[test]

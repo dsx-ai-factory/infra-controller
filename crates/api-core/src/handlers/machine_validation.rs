@@ -29,8 +29,9 @@ use model::machine::{
     ManagedHostState, ValidationState,
 };
 use model::machine_validation::{
-    MachineValidation, MachineValidationPlugin, MachineValidationResult, MachineValidationState,
-    MachineValidationStatus, MachineValidationTest as ModelMachineValidationTest,
+    MachineValidation, MachineValidationAttemptLogStream, MachineValidationPlugin,
+    MachineValidationResult, MachineValidationState, MachineValidationStatus,
+    MachineValidationTest as ModelMachineValidationTest,
     MachineValidationTestAddRequest as ModelTestAddRequest,
     MachineValidationTestUpdateRequest as ModelTestUpdateRequest,
     MachineValidationTestsGetRequest as ModelTestsGetRequest,
@@ -606,6 +607,205 @@ pub(crate) async fn get_machine_validation_attempt(
     )))
 }
 
+pub(crate) async fn append_machine_validation_attempt_log(
+    api: &Api,
+    request: tonic::Request<rpc::MachineValidationAttemptLogAppendRequest>,
+) -> Result<tonic::Response<rpc::MachineValidationAttemptLogAppendResponse>, Status> {
+    // Do not call log_request_data here: plugin output may contain sensitive values.
+    let caller_machine_id = request
+        .extensions()
+        .get::<crate::auth::AuthContext>()
+        .and_then(|context| context.get_spiffe_machine_id())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Status::unauthenticated("machine identity is required to append attempt logs")
+        })?;
+    let req = request.into_inner();
+    let attempt_id = req
+        .attempt_id
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("attempt id"))?;
+    let attempt_id = MachineValidationAttemptId::from(
+        uuid::Uuid::try_from(attempt_id).map_err(CarbideError::from)?,
+    );
+    let sequence = i32::try_from(req.sequence).map_err(|_| {
+        CarbideError::InvalidArgument(
+            "machine validation attempt log sequence is too large".to_string(),
+        )
+    })?;
+    let stream =
+        match rpc::MachineValidationAttemptLogStream::try_from(req.stream).map_err(|_| {
+            CarbideError::InvalidArgument(
+                "machine validation attempt log stream is invalid".to_string(),
+            )
+        })? {
+            rpc::MachineValidationAttemptLogStream::Stdout => {
+                MachineValidationAttemptLogStream::Stdout
+            }
+            rpc::MachineValidationAttemptLogStream::Stderr => {
+                MachineValidationAttemptLogStream::Stderr
+            }
+            rpc::MachineValidationAttemptLogStream::Unspecified => {
+                return Err(CarbideError::InvalidArgument(
+                    "machine validation attempt log stream must be stdout or stderr".to_string(),
+                )
+                .into());
+            }
+        };
+
+    let log_config = &api.runtime_config.machine_validation_config.attempt_logs;
+    if !log_config.enabled {
+        return Ok(tonic::Response::new(
+            rpc::MachineValidationAttemptLogAppendResponse {
+                accepted: false,
+                truncated: false,
+            },
+        ));
+    }
+    log_config
+        .validate()
+        .map_err(CarbideError::FailedPrecondition)?;
+
+    let attempt_machine_id = db::machine_validation_execution::find_attempt_machine_id(
+        &api.database_connection,
+        &attempt_id,
+    )
+    .await?
+    .ok_or_else(|| Status::not_found("machine validation attempt not found"))?;
+    if caller_machine_id != attempt_machine_id.to_string() {
+        return Err(Status::permission_denied(
+            "machine identity does not own this machine validation attempt",
+        ));
+    }
+
+    let mut txn = api.txn_begin().await?;
+    let result = db::machine_validation_execution::append_attempt_log_chunk(
+        &mut txn,
+        &attempt_id,
+        sequence,
+        &stream,
+        &req.content,
+        log_config.max_chunk_bytes,
+        log_config.max_attempt_bytes,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let response = match result {
+        db::machine_validation_execution::AppendMachineValidationAttemptLogResult::Accepted => {
+            rpc::MachineValidationAttemptLogAppendResponse {
+                accepted: true,
+                truncated: false,
+            }
+        }
+        db::machine_validation_execution::AppendMachineValidationAttemptLogResult::Inactive => {
+            rpc::MachineValidationAttemptLogAppendResponse {
+                accepted: false,
+                truncated: false,
+            }
+        }
+        db::machine_validation_execution::AppendMachineValidationAttemptLogResult::Truncated => {
+            rpc::MachineValidationAttemptLogAppendResponse {
+                accepted: false,
+                truncated: true,
+            }
+        }
+    };
+    Ok(tonic::Response::new(response))
+}
+
+pub(crate) async fn get_machine_validation_attempt_logs(
+    api: &Api,
+    request: tonic::Request<rpc::MachineValidationAttemptLogGetRequest>,
+) -> Result<tonic::Response<rpc::MachineValidationAttemptLogList>, Status> {
+    log_request_data(&request);
+    const DEFAULT_LOG_PAGE_SIZE: u32 = 100;
+    const MAX_LOG_PAGE_SIZE: u32 = 100;
+
+    let auth_context = request
+        .extensions()
+        .get::<crate::auth::AuthContext>()
+        .ok_or_else(|| {
+            Status::unauthenticated("authentication is required to read attempt logs")
+        })?;
+    let caller_machine_id = auth_context.get_spiffe_machine_id().map(str::to_owned);
+    let caller_is_site_admin = auth_context.principals.iter().any(|principal| {
+        matches!(
+            principal,
+            carbide_authn::middleware::Principal::ExternalUser(_)
+        )
+    });
+    if caller_machine_id.is_none() && !caller_is_site_admin {
+        return Err(Status::permission_denied(
+            "only a site admin or machine identity may read attempt logs",
+        ));
+    }
+
+    let req = request.into_inner();
+    let limit = if req.limit == 0 {
+        DEFAULT_LOG_PAGE_SIZE
+    } else {
+        req.limit
+    };
+    if limit > MAX_LOG_PAGE_SIZE {
+        return Err(CarbideError::InvalidArgument(format!(
+            "machine validation attempt log limit must not exceed {MAX_LOG_PAGE_SIZE}"
+        ))
+        .into());
+    }
+    if !api
+        .runtime_config
+        .machine_validation_config
+        .attempt_logs
+        .enabled
+    {
+        return Ok(tonic::Response::new(rpc::MachineValidationAttemptLogList {
+            chunks: Vec::new(),
+            has_more: false,
+        }));
+    }
+    let attempt_id = req
+        .attempt_id
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("attempt id"))?;
+    let attempt_id = MachineValidationAttemptId::from(
+        uuid::Uuid::try_from(attempt_id).map_err(CarbideError::from)?,
+    );
+    let after_sequence = i32::try_from(req.after_sequence).map_err(|_| {
+        CarbideError::InvalidArgument(
+            "machine validation attempt log after_sequence is too large".to_string(),
+        )
+    })?;
+    let database_limit = i32::try_from(limit + 1).expect("page size fits in i32");
+
+    let attempt_machine_id = db::machine_validation_execution::find_attempt_machine_id(
+        &api.database_connection,
+        &attempt_id,
+    )
+    .await?
+    .ok_or_else(|| Status::not_found("machine validation attempt not found"))?;
+    if caller_machine_id.is_some_and(|caller_id| caller_id != attempt_machine_id.to_string()) {
+        return Err(Status::permission_denied(
+            "machine identity does not own this machine validation attempt",
+        ));
+    }
+
+    let mut chunks = db::machine_validation_execution::find_attempt_log_chunks(
+        &api.database_connection,
+        &attempt_id,
+        after_sequence,
+        database_limit,
+    )
+    .await?;
+    let has_more = chunks.len() > limit as usize;
+    chunks.truncate(limit as usize);
+
+    Ok(tonic::Response::new(rpc::MachineValidationAttemptLogList {
+        chunks: chunks.into_iter().map(Into::into).collect(),
+        has_more,
+    }))
+}
+
 pub(crate) async fn heartbeat_machine_validation_run(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationHeartbeatRequest>,
@@ -870,6 +1070,25 @@ fn validate_machine_validation_plugin(
     plugin: &rpc::MachineValidationPlugin,
     config: &MachineValidationConfig,
 ) -> Result<(), CarbideError> {
+    let plugin_type = if plugin.r#type.is_empty() {
+        MachineValidationPlugin::CONTAINER_TYPE
+    } else {
+        &plugin.r#type
+    };
+    if plugin_type != MachineValidationPlugin::CONTAINER_TYPE {
+        return Err(CarbideError::InvalidArgument(
+            "machine validation plugin type must be container".into(),
+        ));
+    }
+    if !config
+        .allowed_plugin_types
+        .iter()
+        .any(|allowed| allowed == plugin_type)
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "plugin type {plugin_type:?} is not allowed by machine validation site policy"
+        )));
+    }
     validate_img_name(&plugin.image)?;
     let registry = plugin_registry(&plugin.image)?;
     if !config
@@ -1632,6 +1851,7 @@ mod img_name_validation_tests {
 
     fn plugin(host_access_full: bool) -> MachineValidationPlugin {
         MachineValidationPlugin {
+            plugin_type: MachineValidationPlugin::CONTAINER_TYPE.to_owned(),
             image: format!("registry.example.com/plugins/check@sha256:{VALID_HEX}"),
             entrypoint: vec!["/plugin/check".to_owned()],
             parameters_json: "{}".to_owned(),
@@ -1669,6 +1889,30 @@ mod img_name_validation_tests {
             ..MachineValidationConfig::default()
         };
         assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());
+    }
+
+    #[test]
+    fn plugin_admission_rejects_unsupported_type() {
+        let mut plugin = plugin(false);
+        plugin.plugin_type = "script".to_owned();
+        let config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            ..MachineValidationConfig::default()
+        };
+
+        assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_err());
+    }
+
+    #[test]
+    fn plugin_admission_requires_type_to_be_allowed_by_site_policy() {
+        let plugin = plugin(false);
+        let config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            allowed_plugin_types: Vec::new(),
+            ..MachineValidationConfig::default()
+        };
+
+        assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_err());
     }
 
     #[test]

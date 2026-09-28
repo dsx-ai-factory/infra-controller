@@ -33,6 +33,24 @@ async fn rejected_expected_component_arguments_exit_before_contacting_core() {
 
     for case in [
         Case {
+            scenario: "unconfirmed machine erase fails the command",
+            args: &["expected-machine", "erase"],
+            diagnostic: "--confirm is required to erase all expected machines",
+            usage: "Usage: nico-admin-cli expected-machine erase",
+        },
+        Case {
+            scenario: "unconfirmed switch erase fails the command",
+            args: &["expected-switch", "erase"],
+            diagnostic: "--confirm is required to erase all expected switches",
+            usage: "Usage: nico-admin-cli expected-switch erase",
+        },
+        Case {
+            scenario: "unconfirmed rack erase fails the command",
+            args: &["expected-rack", "erase"],
+            diagnostic: "--confirm is required to erase all expected racks",
+            usage: "Usage: nico-admin-cli expected-rack erase",
+        },
+        Case {
             scenario: "duplicate machine DPU serials fail the command",
             args: &[
                 "expected-machine",
@@ -48,6 +66,96 @@ async fn rejected_expected_component_arguments_exit_before_contacting_core() {
             usage: "Usage: nico-admin-cli expected-machine patch",
         },
         Case {
+            scenario: "machine delete requires a selector",
+            args: &["expected-machine", "delete"],
+            diagnostic: "must specify either a BMC MAC address or --id",
+            usage: "Usage: nico-admin-cli expected-machine delete",
+        },
+        Case {
+            scenario: "machine delete rejects conflicting selectors",
+            args: &[
+                "expected-machine",
+                "delete",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-machine delete",
+        },
+        Case {
+            scenario: "machine show rejects conflicting selectors",
+            args: &[
+                "expected-machine",
+                "show",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-machine show",
+        },
+        Case {
+            scenario: "switch delete requires a selector",
+            args: &["expected-switch", "delete"],
+            diagnostic: "must specify either a BMC MAC address or --id",
+            usage: "Usage: nico-admin-cli expected-switch delete",
+        },
+        Case {
+            scenario: "switch delete rejects conflicting selectors",
+            args: &[
+                "expected-switch",
+                "delete",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-switch delete",
+        },
+        Case {
+            scenario: "switch show rejects conflicting selectors",
+            args: &[
+                "expected-switch",
+                "show",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-switch show",
+        },
+        Case {
+            scenario: "shelf delete requires a selector",
+            args: &["expected-power-shelf", "delete"],
+            diagnostic: "must specify either a BMC MAC address or --id",
+            usage: "Usage: nico-admin-cli expected-power-shelf delete",
+        },
+        Case {
+            scenario: "shelf delete rejects conflicting selectors",
+            args: &[
+                "expected-power-shelf",
+                "delete",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-power-shelf delete",
+        },
+        Case {
+            scenario: "shelf show rejects conflicting selectors",
+            args: &[
+                "expected-power-shelf",
+                "show",
+                "00:11:22:33:44:55",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+            ],
+            diagnostic: "cannot specify both a BMC MAC address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-power-shelf show",
+        },
+        Case {
             scenario: "unsupported shelf hostname rejects the entire update",
             args: &[
                 "expected-power-shelf",
@@ -61,6 +169,64 @@ async fn rejected_expected_component_arguments_exit_before_contacting_core() {
             ],
             diagnostic: "--host_name is not supported for expected power shelf updates; remove it from the command",
             usage: "Usage: nico-admin-cli expected-power-shelf update",
+        },
+        Case {
+            scenario: "shelf erase requires explicit confirmation",
+            args: &["expected-power-shelf", "erase"],
+            diagnostic: "--confirm is required to erase all expected power shelves",
+            usage: "Usage: nico-admin-cli expected-power-shelf erase",
+        },
+        Case {
+            scenario: "shelf update requires a selector",
+            args: &[
+                "expected-power-shelf",
+                "update",
+                "--shelf-serial-number",
+                "SHELF-002",
+            ],
+            diagnostic: "must specify either --bmc-mac-address or --id",
+            usage: "Usage: nico-admin-cli expected-power-shelf update",
+        },
+        Case {
+            scenario: "shelf update rejects conflicting selectors",
+            args: &[
+                "expected-power-shelf",
+                "update",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+                "--bmc-mac-address",
+                "00:11:22:33:44:55",
+                "--shelf-serial-number",
+                "SHELF-002",
+            ],
+            diagnostic: "cannot specify both --bmc-mac-address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-power-shelf update",
+        },
+        Case {
+            scenario: "switch update requires a selector",
+            args: &[
+                "expected-switch",
+                "update",
+                "--switch-serial-number",
+                "SWITCH-003",
+            ],
+            diagnostic: "must specify either --bmc-mac-address or --id",
+            usage: "Usage: nico-admin-cli expected-switch update",
+        },
+        Case {
+            scenario: "switch update rejects conflicting selectors",
+            args: &[
+                "expected-switch",
+                "update",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+                "--bmc-mac-address",
+                "00:11:22:33:44:55",
+                "--switch-serial-number",
+                "SWITCH-003",
+            ],
+            diagnostic: "cannot specify both --bmc-mac-address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-switch update",
         },
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind private Core listener");

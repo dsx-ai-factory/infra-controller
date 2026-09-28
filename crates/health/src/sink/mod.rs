@@ -47,6 +47,7 @@ pub use rack_health_report::RackHealthReportSink;
 pub use switch_health_report::SwitchHealthReportSink;
 pub use tracing::TracingSink;
 
+pub(crate) use self::dedup_queue::DedupQueue;
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
@@ -213,7 +214,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -262,7 +263,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -364,7 +365,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -445,7 +446,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -505,7 +506,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),

@@ -515,6 +515,27 @@ pub enum PreingestionState {
     Complete,
 }
 
+impl PreingestionState {
+    /// Whether a `waiting_for_explorer_refresh` set in this state is a
+    /// preingestion park that only a fresh exploration report can end. These
+    /// are the states whose next step reads the report: the post-reset
+    /// inventory, the version check, and the two rechecks. Preingestion never
+    /// sets the flag in `Initial` or the other in-progress states; a flag there
+    /// came from a failed probe or an operator error clear, and the next
+    /// successful exploration lifts it. `Complete` and `Failed` waits have no
+    /// preingestion consumer.
+    pub fn parks_for_explorer_refresh(&self) -> bool {
+        matches!(
+            self,
+            Self::InitialBMCReset {
+                phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+            } | Self::RecheckVersions
+                | Self::NewFirmwareReportedWait { .. }
+                | Self::RecheckVersionsAfterFailure { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BfbPlatformPowercyclePhase {

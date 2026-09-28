@@ -224,7 +224,7 @@ impl StaticEndpointSource {
             let addr = BmcAddr {
                 ip: cfg.ip,
                 port: cfg.port,
-                mac,
+                mac: Some(mac),
             };
             let credentials = BmcCredentials::UsernamePassword {
                 username: cfg.username.clone(),
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(
             endpoints[0].addr.mac,
-            MacAddress::from_str("00:11:22:33:44:55").unwrap()
+            Some(MacAddress::from_str("00:11:22:33:44:55").unwrap())
         );
     }
 

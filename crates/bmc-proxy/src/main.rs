@@ -25,6 +25,7 @@ mod config;
 mod metrics;
 mod net;
 mod setup;
+mod span_isolation;
 
 use bmc_proxy::{BmcProxyError, BmcProxyParams};
 use clap::Parser;

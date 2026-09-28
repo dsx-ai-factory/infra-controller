@@ -219,14 +219,16 @@ impl FmdsGrpcClient {
 
 #[cfg(test)]
 mod test {
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::net::{Ipv4Addr, SocketAddr};
 
     use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
+    use tokio::net::{TcpListener, TcpSocket};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status};
 
     use super::*;
@@ -257,12 +259,18 @@ mod test {
         }
     }
 
-    /// Serves [`RecordingFmdsServer`] on `addr`. The caller owns the returned
-    /// handle and aborts it at the end of the test.
+    /// Serves [`RecordingFmdsServer`] on an already-bound listener. The caller
+    /// owns the returned handle and aborts it at the end of the test.
     fn serve_fmds(
-        addr: SocketAddr,
+        listener: TcpListener,
         reject_updates: bool,
-    ) -> (JoinHandle<()>, mpsc::UnboundedReceiver<FmdsConfigUpdate>) {
+    ) -> (
+        SocketAddr,
+        JoinHandle<()>,
+        mpsc::UnboundedReceiver<FmdsConfigUpdate>,
+    ) {
+        let addr = listener.local_addr().expect("FMDS test server address");
+
         let (updates, received) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
@@ -270,32 +278,12 @@ mod test {
                     updates,
                     reject_updates,
                 }))
-                .serve(addr)
+                .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
                 .expect("FMDS test server");
         });
-        (handle, received)
-    }
 
-    /// Picks a free port. The listener is dropped, so the port is unbound when
-    /// this returns and the caller can serve on it.
-    fn free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local_addr");
-        drop(listener);
-        addr
-    }
-
-    /// [`serve_fmds`] binds on a spawned task, so it is not necessarily
-    /// listening when it returns. Waits until it is.
-    async fn wait_until_listening(addr: SocketAddr) {
-        for _ in 0..100 {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("FMDS test server never started listening on {addr}");
+        (addr, handle, received)
     }
 
     fn test_instance_metadata() -> InstanceMetadata {
@@ -341,9 +329,10 @@ mod test {
     /// FMDS on every call and the update lands on the server.
     #[tokio::test]
     async fn external_updater_connects_and_pushes_every_update() {
-        let addr = free_addr();
-        let (server, mut received) = serve_fmds(addr, false);
-        wait_until_listening(addr).await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind FMDS test server");
+        let (addr, server, mut received) = serve_fmds(listener, false);
 
         let (mut updater, _) = test_external_updater(format!("http://{addr}"));
 
@@ -368,9 +357,10 @@ mod test {
 
     #[tokio::test]
     async fn external_updater_reports_connection_when_update_is_rejected() {
-        let addr = free_addr();
-        let (server, _) = serve_fmds(addr, true);
-        wait_until_listening(addr).await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind FMDS test server");
+        let (addr, server, _) = serve_fmds(listener, true);
 
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
         update_with_metrics_capture(&mut updater).await;
@@ -385,7 +375,11 @@ mod test {
     /// for its whole lifetime.
     #[tokio::test]
     async fn external_updater_recovers_once_fmds_comes_up() {
-        let addr = free_addr();
+        let socket = TcpSocket::new_v4().expect("create FMDS test socket");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind FMDS test socket");
+        let addr = socket.local_addr().expect("FMDS test server address");
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
         last_connect_succeeded.store(true, Ordering::Relaxed);
 
@@ -395,8 +389,8 @@ mod test {
         assert!(!last_connect_succeeded.load(Ordering::Relaxed));
 
         // FMDS shows up, and the next iteration reaches it.
-        let (server, mut received) = serve_fmds(addr, false);
-        wait_until_listening(addr).await;
+        let listener = socket.listen(1024).expect("listen on FMDS test socket");
+        let (_, server, mut received) = serve_fmds(listener, false);
         update_with_metrics_capture(&mut updater).await;
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 

@@ -1,7 +1,7 @@
 # 4,500 hosts (13,500 machines) in SHARED-PROXY mode.
 #
 # Why this exists (#4732): controller mode gives every simulated BMC its own
-# ClusterIP Service. At 4,500 hosts that is ~13,500 Services, which is more than
+# Service. At 4,500 hosts that is ~13,500 Services, which is more than
 # a Kubernetes control plane comfortably handles -- API list latency climbs into
 # tens of seconds, CNI and DNS components start restarting, and the API server
 # becomes the bottleneck rather than the system under test.
@@ -46,15 +46,16 @@ macAddressPool:
 hwMacAddressRanges:
   enabled: true
   basePrefix: "02:01"
-# The entire point of this file: no per-BMC ClusterIP Services.
+# The entire point of this file: no per-BMC Services.
 mat-k8s-controller:
   enabled: false
-# The chart ships a startupProbe with failureThreshold 20 (10 minutes). This
-# pod registers 13,500 machines before it binds the redfish port, which takes
-# far longer than that, and the startupProbe gates the generous liveness window
-# below -- so the chart default silently re-imposes a 10-minute bring-up limit
-# on a fleet sized for hours. The equivalent override exists in
-# machine-a-tron-scale.yaml, but THIS is the file the 4,500-host runs load.
+# The chart ships a startupProbe with failureThreshold 120 (60 minutes). This
+# file defines hosts only (no racks, switches or power shelves) and DPUs are
+# not registered, so the pod registers 4,500 records before it binds the
+# redfish port: about 2.5h at the ~2s per record from the chart values.yaml
+# sizing rule. The startupProbe gates the generous liveness window below, so
+# the chart default would re-impose a 60-minute bring-up limit. 1200 x 30s =
+# 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish
@@ -113,8 +114,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        # Simulated networks (Phase 5/6 constants), not Service CIDR carve-outs.
-        bmcDhcpRelayAddress: "10.96.64.1"
+        # Simulated networks (Phase 5/6 constants).
+        bmcDhcpRelayAddress: "10.200.0.1"
         underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
 extraEnv:

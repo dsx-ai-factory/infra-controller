@@ -21,6 +21,7 @@
 //! the host refuses, is a per-node failure: its result says why, it counts
 //! towards `failed_nodes`, and the batch fails.
 
+use crate::jobs::{BlankJobId, JobId, JobState, JobStatus};
 use crate::resolve::NodeRef;
 use crate::rms;
 
@@ -87,8 +88,12 @@ impl BatchOutcome {
     }
 }
 
-/// A batch with the given per-node results.
-pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeBatchResponse {
+/// A batch with the given per-node results and, when one was started for
+/// it, its job.
+pub(crate) fn node_batch(
+    results: &[NodeResult<'_>],
+    job_id: Option<JobId>,
+) -> rms::NodeBatchResponse {
     let node_results = results
         .iter()
         .map(|(node_id, outcome)| rms::NodeOperationResult {
@@ -106,7 +111,58 @@ pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeB
         status: outcome.status as i32,
         message: outcome.message,
         node_results,
-        job_id: job_id.to_owned(),
+        job_id: job_id.map(String::from).unwrap_or_default(),
         stats: Some(outcome.stats),
     }
+}
+
+/// The `job_states` of a `GetJobStatus` response: the polled job first, then
+/// its children when asked for.
+pub(crate) fn job_states(status: &JobStatus, include_children: bool) -> Vec<rms::JobStatus> {
+    let mut states = vec![job_status(status)];
+    if include_children {
+        states.extend(status.children.iter().map(job_status));
+    }
+    states
+}
+
+/// One job as `GetJobStatus` reports it. `execution_state` is never the
+/// proto3 default, and a parent is tied to no node.
+fn job_status(status: &JobStatus) -> rms::JobStatus {
+    let error_code = match status.state {
+        JobState::Failed => rms::JobError::Other,
+        JobState::Running | JobState::Completed => rms::JobError::Unspecified,
+    };
+    rms::JobStatus {
+        job_id: status.job_id.to_string(),
+        parent_job_id: status.parent_job_id.as_ref().map(JobId::to_string),
+        child_job_ids: status
+            .children
+            .iter()
+            .map(|c| c.job_id.to_string())
+            .collect(),
+        execution_state: status.state.as_execution_state(),
+        error_message: status.error_message.clone().unwrap_or_default(),
+        error_code: error_code as i32,
+        result_json: String::new(),
+        state_description: status.state.as_wire_str().to_owned(),
+        rack_id: status.rack_id.clone(),
+        node_id: status.node_id.clone(),
+        created_at: None,
+        updated_at: None,
+    }
+}
+
+/// The job a status poll names, or `INVALID_ARGUMENT` when it names none,
+/// which would otherwise read as a completed job.
+pub(crate) fn requested_job(job_id: &str) -> Result<JobId, tonic::Status> {
+    job_id
+        .parse()
+        .map_err(|BlankJobId| tonic::Status::invalid_argument("job_id is required"))
+}
+
+/// The `error_message` of a status RPC answering `RETURN_CODE_FAILURE` for a
+/// job this process never issued.
+pub(crate) fn job_not_found(job_id: &JobId) -> String {
+    format!("job {job_id} not found")
 }

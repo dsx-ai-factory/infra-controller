@@ -340,7 +340,7 @@ func verifyPowerStatus(
 
 	log.Debug().
 		Str("component_type", devicetypes.ComponentTypeToString(target.Type)).
-		Strs("component_ids", target.ComponentIDs).
+		Strs("component_identifiers", target.Identifiers).
 		Str("expected_status", expectedStatus).
 		Dur("timeout", timeout).
 		Dur("poll_interval", pollInterval).
@@ -348,6 +348,8 @@ func verifyPowerStatus(
 
 	deadline := workflow.Now(ctx).Add(timeout)
 	attempt := 0
+	// Existing histories retain their original completion decision on replay.
+	checkRequested := workflow.GetVersion(ctx, "power-status-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 
 	for {
 		attempt++
@@ -361,10 +363,19 @@ func verifyPowerStatus(
 		).Get(ctx, &statusMap)
 
 		if actErr == nil {
-			allMatch := true
+			identifiers := target.Identifiers
+			allMatch := target.Len() > 0
+			if !checkRequested {
+				identifiers = make([]string, 0, len(statusMap))
+				for id := range statusMap {
+					identifiers = append(identifiers, id)
+				}
+				allMatch = true
+			}
 			mismatched := make(map[string]string, len(statusMap))
-			for componentID, status := range statusMap {
-				if status != expected {
+			for _, componentID := range identifiers {
+				status, present := statusMap[componentID]
+				if !present || status != expected {
 					mismatched[componentID] = string(status)
 					allMatch = false
 				}
@@ -517,6 +528,7 @@ func verifyReachability(
 
 	deadline := workflow.Now(ctx).Add(timeout)
 	reachable := make(map[devicetypes.ComponentType]bool)
+	checkRequested := workflow.GetVersion(ctx, "reachability-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 
 	for {
 		for _, ct := range typesToCheck {
@@ -548,11 +560,22 @@ func verifyReachability(
 				continue
 			}
 
-			if requireAll && len(statusMap) < len(target.ComponentIDs) {
+			responding := 0
+			for _, identifier := range target.Identifiers {
+				if _, present := statusMap[identifier]; present {
+					responding++
+				}
+			}
+			notReady := responding == 0 || (requireAll && responding < target.Len())
+			if !checkRequested {
+				responding = len(statusMap)
+				notReady = requireAll && responding < target.Len()
+			}
+			if notReady {
 				log.Debug().
 					Str("component_type", devicetypes.ComponentTypeToString(ct)).
-					Int("responding", len(statusMap)).
-					Int("expected", len(target.ComponentIDs)).
+					Int("responding", responding).
+					Int("expected", target.Len()).
 					Msg("Not all components responding yet")
 				continue
 			}
@@ -607,7 +630,7 @@ func executeInjectExpectationAction(actx actionExecutionContext) error {
 
 	log.Debug().
 		Str("component_type", devicetypes.ComponentTypeToString(actx.target.Type)).
-		Int("component_count", len(actx.target.ComponentIDs)).
+		Int("component_count", actx.target.Len()).
 		Msg("Executing InjectExpectation action")
 
 	return workflow.ExecuteActivity(
@@ -897,10 +920,11 @@ var knownComponentTypeKeys = []string{"compute", "nvswitch", "powershelf"}
 // JSON for component managers that parse multi-field version payloads.
 // If the key is absent but the document contains another known
 // component-type key (i.e. it IS the layered format), an empty string
-// is returned so the component manager skips the firmware update. If the
+// is returned; the component backend decides how to handle an empty target.
+// This does not guarantee that the update is skipped. If the
 // document does not look like the layered format (no known keys), the
-// original string is returned as-is for backward compatibility with
-// single-component updates.
+// original string is returned as-is for each selected component type. This
+// supports both a shared rack firmware object and single-component updates.
 func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) string {
 	if rawVersion == "" {
 		return ""

@@ -244,6 +244,31 @@ pub struct UfmCredentialMutationBlocker {
     writer: Arc<dyn CredentialWriter>,
 }
 
+/// Blocks persistent mutations of version 0 of the site-wide BMC root while
+/// local sources own it, and delegates every other writer operation.
+pub struct BmcSiteWideRootV0CredentialMutationBlocker {
+    writer: Arc<dyn CredentialWriter>,
+}
+
+impl BmcSiteWideRootV0CredentialMutationBlocker {
+    /// Wraps a writer with the local-ownership policy for the unversioned root.
+    pub fn new(writer: Arc<dyn CredentialWriter>) -> Self {
+        Self { writer }
+    }
+
+    fn ensure_mutation_allowed(key: &CredentialKey) -> Result<(), SecretsError> {
+        if matches!(
+            key,
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            }
+        ) {
+            return Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked);
+        }
+        Ok(())
+    }
+}
+
 impl UfmCredentialMutationBlocker {
     /// Wraps a writer with the policy that rejects UFM mutations and delegates
     /// every other credential operation.
@@ -263,6 +288,39 @@ impl UfmCredentialMutationBlocker {
 
 #[async_trait]
 impl CredentialWriter for UfmCredentialMutationBlocker {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
+    async fn set_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.set_credentials(key, credentials).await
+    }
+
+    async fn create_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.create_credentials(key, credentials).await
+    }
+
+    async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.delete_credentials(key).await
+    }
+}
+
+#[async_trait]
+impl CredentialWriter for BmcSiteWideRootV0CredentialMutationBlocker {
     async fn get_credentials_from_writer(
         &self,
         key: &CredentialKey,
@@ -1154,6 +1212,42 @@ mod tests {
                 .get_credentials_from_writer(&key)
                 .await
                 .expect("read delegated credential"),
+            Some(credentials)
+        );
+    }
+
+    #[tokio::test]
+    async fn bmc_site_wide_root_v0_mutation_blocker_is_exact() {
+        let backend = Arc::new(TestCredentialManager::default());
+        let blocker = BmcSiteWideRootV0CredentialMutationBlocker::new(backend.clone());
+        let credentials = Credentials::new("root", "password");
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+
+        for result in [
+            blocker.set_credentials(&v0, &credentials).await,
+            blocker.create_credentials(&v0, &credentials).await,
+            blocker.delete_credentials(&v0).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked)
+            ));
+        }
+
+        blocker
+            .set_credentials(&v1, &credentials)
+            .await
+            .expect("versioned BMC root mutation must reach the backend");
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&v1)
+                .await
+                .expect("read versioned BMC root from backend"),
             Some(credentials)
         );
     }

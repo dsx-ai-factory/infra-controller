@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::SecondsFormat;
 
 use crate::injection::InjectionStore;
-use crate::redfish;
 use crate::redfish::account_service::AccountServiceState;
 use crate::redfish::chassis::ChassisState;
 use crate::redfish::computer_system::SystemState;
@@ -28,15 +27,16 @@ use crate::redfish::log_service::LogEntryDraft;
 use crate::redfish::manager::ManagerState;
 use crate::redfish::session_service::SessionServiceState;
 use crate::redfish::update_service::UpdateServiceState;
+use crate::{Callbacks, redfish};
 
-#[derive(Clone)]
-pub struct BmcState {
+/// BMC state and its concrete backend callbacks.
+pub struct BmcState<C: Callbacks> {
     pub(crate) bmc_vendor: redfish::oem::BmcVendor,
     pub(crate) bmc_product: Option<&'static str>,
     pub(crate) bmc_redfish_version: &'static str,
     pub(crate) oem_state: redfish::oem::State,
     pub manager: Arc<ManagerState>,
-    pub system_state: Arc<SystemState>,
+    pub system_state: Arc<SystemState<C>>,
     pub(crate) chassis_state: Arc<ChassisState>,
     pub update_service_state: Arc<UpdateServiceState>,
     pub account_service_state: Arc<AccountServiceState>,
@@ -48,12 +48,35 @@ pub struct BmcState {
     pub availability: Option<Arc<crate::availability::BmcAvailabilityState>>,
     /// Sequence of lifecycle Events this BMC has published.
     pub(crate) event_sequence: Arc<AtomicU64>,
-    pub(crate) callbacks: Option<Arc<dyn crate::Callbacks>>,
+    pub(crate) callbacks: Option<Arc<C>>,
     /// Whether this BMC advertises and serves the `/redfish/v1/Systems`
     /// collection. Delta power shelves expose no `ComputerSystem` collection,
     /// so the service root omits the `Systems` link and the collection endpoint
     /// returns 404.
     pub(crate) exposes_computer_systems: bool,
+}
+
+impl<C: Callbacks> Clone for BmcState<C> {
+    fn clone(&self) -> Self {
+        Self {
+            bmc_vendor: self.bmc_vendor,
+            bmc_product: self.bmc_product,
+            bmc_redfish_version: self.bmc_redfish_version,
+            oem_state: self.oem_state.clone(),
+            manager: self.manager.clone(),
+            system_state: self.system_state.clone(),
+            chassis_state: self.chassis_state.clone(),
+            update_service_state: self.update_service_state.clone(),
+            account_service_state: self.account_service_state.clone(),
+            session_service_state: self.session_service_state.clone(),
+            injection: self.injection.clone(),
+            event_service: self.event_service.clone(),
+            availability: self.availability.clone(),
+            event_sequence: self.event_sequence.clone(),
+            callbacks: self.callbacks.clone(),
+            exposes_computer_systems: self.exposes_computer_systems,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,7 +85,7 @@ pub enum BmcEvent {
     BootCompleted,
 }
 
-impl BmcState {
+impl<C: Callbacks> BmcState<C> {
     /// Simulate a BMC reset without changing host power: begin the outage
     /// window, if one is configured, then close event streams and clear replay
     /// history. Returns the outage duration, zero when downtime is disabled.

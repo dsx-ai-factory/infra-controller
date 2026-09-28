@@ -72,4 +72,18 @@ for role in agent gateway; do
     fi
 done
 
+role=tempo
+chart_version="$(sed -n 's/^TEMPO_CHART_VER=.*:-\([^}]*\).*/\1/p' "${OBSERVABILITY_DIR}/install-observability.sh")"
+if [[ -z "${chart_version}" ]]; then
+    echo "could not read the Tempo chart version from install-observability.sh" >&2
+    exit 1
+fi
+rendered="$(helm template tempo tempo \
+    --repo https://grafana-community.github.io/helm-charts \
+    --version "${chart_version}" --namespace tempo \
+    --values "${OBSERVABILITY_DIR}/values-tempo.yaml")"
+config="$(yq -r 'select(.kind == "ConfigMap") | .data."tempo.yaml"' <<< "${rendered}")"
+assert_config '.distributor.receivers.otlp.protocols.grpc.endpoint' '[::]:4317'
+assert_config '.distributor.receivers.otlp.protocols.http.endpoint' '[::]:4318'
+
 echo "observability collector address tests passed"

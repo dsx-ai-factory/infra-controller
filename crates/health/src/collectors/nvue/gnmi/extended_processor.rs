@@ -372,7 +372,9 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("test address should parse"),
                 port: None,
-                mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").expect("test MAC should parse"),
+                mac: Some(
+                    MacAddress::from_str("AA:BB:CC:DD:EE:FF").expect("test MAC should parse"),
+                ),
             },
             collector_type: EXTENDED_GNMI_STREAM_ID,
             metadata: None,

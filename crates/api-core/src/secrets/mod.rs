@@ -404,10 +404,23 @@ impl CredentialWriter for PostgresCredentialManager {
             Zeroizing::new(serde_json::to_vec(credentials).map_err(PgSecretsError::from)?);
         let envelope = self.encrypt_envelope(&path, &json_bytes).await?;
 
-        let mut conn = self.conn().await?;
-        db::secrets::insert(&mut conn, &envelope.as_new_entry(&path))
+        // Without the path lock, `create_credentials` could check for absence,
+        // let this write finish, then append an entry that replaces our value.
+        // We don't check for absence here, so `INSERT` can take the table lock.
+        let mut txn = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        db::secrets::lock_path_advisory(&mut txn, &path)
             .await
             .map_err(PgSecretsError::from)?;
+        db::secrets::insert(&mut txn, &envelope.as_new_entry(&path))
+            .await
+            .map_err(PgSecretsError::from)?;
+        txn.commit()
+            .await
+            .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit set", e)))?;
 
         timer.succeed();
         Ok(())

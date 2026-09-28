@@ -102,11 +102,11 @@ These are operational SLO targets, separate from alert thresholds:
 ### Metrics for SLO monitoring
 
 **API availability** uses `carbide_api_grpc_server_duration_milliseconds` histogram. Compute
-error rate from the `_count` series split by gRPC status:
+availability as one minus the error rate from the `_count` series split by gRPC status:
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status!="OK"}[5m]))
+  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )

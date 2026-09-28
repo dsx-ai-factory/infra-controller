@@ -22,7 +22,6 @@ use prettytable::{Table, row};
 use rpc::admin_cli::OutputFormat;
 use rpc::forge::{ExpectedSwitch, ExpectedSwitchList, ExpectedSwitchRequest, LinkedExpectedSwitch};
 
-use super::args::Args;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 use crate::{async_write, async_writeln};
@@ -68,14 +67,12 @@ async fn render_show_result(
 }
 
 pub(super) async fn show(
-    query: &Args,
+    request: Option<ExpectedSwitchRequest>,
     api_client: &ApiClient,
     output_format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> CarbideCliResult<()> {
-    let req: Option<ExpectedSwitchRequest> = query.try_into()?;
-
-    let result = if let Some(req) = req {
+    let result = if let Some(req) = request {
         ShowResult::Single(api_client.0.get_expected_switch(req).await?)
     } else {
         ShowResult::List(api_client.0.get_all_expected_switches().await?)

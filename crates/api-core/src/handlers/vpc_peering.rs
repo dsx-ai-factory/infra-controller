@@ -57,39 +57,39 @@ pub(crate) async fn create(
     ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let checks_required = super::tenant_prefix_overlap::checks_required(api, &mut txn).await?;
 
-    // Check this VPC peering is permitted under current site vpc_peering_policy
-    match api.runtime_config.vpc_peering_policy {
-        None | Some(VpcPeeringPolicy::None) => {
-            return Err(CarbideError::internal("VPC peering feature disabled".to_string()).into());
-        }
-        Some(VpcPeeringPolicy::Exclusive) => {
-            let vpcs1 =
-                vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id)).await?;
-            let vpc1 = vpcs1.first().ok_or_else(|| CarbideError::NotFoundError {
-                kind: "VPC",
-                id: vpc_id.to_string(),
-            })?;
-            let vpcs2 = vpc::find_by(
-                &mut txn,
-                ObjectColumnFilter::One(vpc::IdColumn, &peer_vpc_id),
-            )
-            .await?;
-            let vpc2 = vpcs2.first().ok_or_else(|| CarbideError::NotFoundError {
-                kind: "VPC",
-                id: peer_vpc_id.to_string(),
-            })?;
+    // Compatibility is an invariant, independent of whether peering is
+    // enabled at this site, so incompatible requests consistently report an
+    // invalid argument.
+    let vpc1 = vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+        .await?
+        .pop()
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "VPC",
+            id: vpc_id.to_string(),
+        })?;
+    let vpc2 = vpc::find_by(
+        &mut txn,
+        ObjectColumnFilter::One(vpc::IdColumn, &peer_vpc_id),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "VPC",
+        id: peer_vpc_id.to_string(),
+    })?;
+    vpc1.config
+        .network_virtualization_type
+        .ensure_can_peer_with(vpc2.config.network_virtualization_type)
+        .map_err(CarbideError::from)?;
 
-            // Make sure the VPCs are allowed to peer based on their
-            // virtualization types. Their capabilities will determine
-            // if they are allowed or not.
-            vpc1.config
-                .network_virtualization_type
-                .ensure_can_peer_with(vpc2.config.network_virtualization_type)
-                .map_err(CarbideError::from)?;
-        }
-        Some(VpcPeeringPolicy::Mixed) => {
-            // Any combination of network virtualization types allowed
-        }
+    if matches!(
+        api.runtime_config.vpc_peering_policy,
+        None | Some(VpcPeeringPolicy::None)
+    ) {
+        return Err(CarbideError::FailedPrecondition(
+            "VPC peering is disabled at this site".to_string(),
+        )
+        .into());
     }
 
     let previous_sources = if checks_required && !api.runtime_config.tenant_prefix_overlap_enabled {
@@ -223,14 +223,12 @@ pub(super) fn vpc_type_change_expands_receivers(
     else {
         return false;
     };
-    let imports = |receiver: VpcVirtualizationType, source: VpcVirtualizationType| {
-        let imports_prefixes = match policy {
-            VpcPeeringPolicy::Mixed => true,
-            VpcPeeringPolicy::Exclusive => receiver.capabilities().peers_with.contains(&source),
-            VpcPeeringPolicy::None => false,
-        };
-        imports_prefixes
-            || (receiver.imports_peer_vnis_into_overlay() && source.vni_advertised_to_peers())
+    let imports = |receiver: VpcVirtualizationType, source: VpcVirtualizationType| match policy {
+        VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
+            receiver.capabilities().peers_with.contains(&source)
+                || (receiver.imports_peer_vnis_into_overlay() && source.vni_advertised_to_peers())
+        }
+        VpcPeeringPolicy::None => false,
     };
     ALL_VPC_VIRTUALIZATION_TYPES.iter().copied().any(|peer| {
         (imports(new_type, peer) && !imports(old_type, peer))

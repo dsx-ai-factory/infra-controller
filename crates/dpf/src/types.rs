@@ -31,7 +31,13 @@ use crate::crds::dpus_generated::{
 
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
-/// a vault or credential manager).
+/// a vault or credential manager). Return
+/// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
+/// cannot supply the credential. Return
+/// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
+/// local version 0 miss so the SDK can reject source-policy activation before
+/// startup. After a value has been published, source-unavailable and ordinary
+/// transient lookup failures retain the last published value and are retried.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;
@@ -149,6 +155,8 @@ pub struct InitDpfResourcesConfig {
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
     /// DPUs.
     pub(crate) extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    pub(crate) enable_delay_host_init: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -182,6 +190,7 @@ impl Default for InitDpfResourcesConfig {
             interfaces: Vec::new(),
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -681,9 +690,33 @@ pub struct DetachedDpuServiceDefinition {
     pub helm_chart: DetachedHelmChart,
     pub deploy_in_cluster: bool,
     pub security_privileged: bool,
-    /// Exact-match node labels for the detached service's DaemonSet. The SDK
-    /// renders these as one NodeSelector term with `In` expressions.
-    pub node_selector_labels: BTreeMap<String, String>,
+    /// Optional DaemonSet settings supplied by the feature using the SDK.
+    /// Absence remains absence; the SDK does not impose placement policy.
+    pub service_daemon_set: Option<DetachedServiceDaemonSet>,
+}
+
+/// Caller-configurable fields on a detached DPUService's generated DaemonSet.
+#[derive(Debug, Clone, Default)]
+pub struct DetachedServiceDaemonSet {
+    /// Exact-match node labels rendered as one NodeSelector term with `In`
+    /// expressions when the caller explicitly requests placement.
+    pub node_selector_labels: Option<BTreeMap<String, String>>,
+    pub annotations: Option<BTreeMap<String, String>>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    pub update_strategy: Option<DetachedServiceDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetUpdateStrategy {
+    pub strategy_type: Option<String>,
+    pub rolling_update: Option<DetachedServiceDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetRollingUpdate {
+    pub max_surge: Option<IntOrString>,
+    pub max_unavailable: Option<IntOrString>,
 }
 
 /// Helm-chart fields required by a [`DetachedDpuServiceDefinition`].
@@ -712,14 +745,28 @@ pub struct DpuServiceObservation {
     pub interfaces_present: bool,
     pub paused: Option<bool>,
     pub security_privileged: Option<bool>,
-    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
-    /// validation.
-    pub service_daemon_set_node_selector: Option<serde_json::Value>,
+    pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+/// SDK-owned view of the DaemonSet settings observed on a DPUService.
+#[derive(Debug, Clone)]
+pub struct DpuServiceDaemonSetObservation {
+    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
+    /// validation.
+    pub node_selector: Option<serde_json::Value>,
+    /// DaemonSet annotations observed on the DPUService
+    pub annotations: Option<BTreeMap<String, String>>,
+    /// DaemonSet labels observed on the DPUService
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Resource quantities observed on the DPUService's DaemonSet settings
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    /// Serialized update strategy observed on the DPUService
+    pub update_strategy: Option<serde_json::Value>,
 }
 
 /// Helm-chart fields as observed on a live DPUService.
@@ -1432,6 +1479,12 @@ mod tests {
             run = |()| InitDpfResourcesConfig::default().proxy.is_none();
             "proxy is none" {
                 () => true,
+            }
+        );
+        value_scenarios!(
+            run = |()| InitDpfResourcesConfig::default().enable_delay_host_init;
+            "host initialization delay is disabled" {
+                () => false,
             }
         );
     }

@@ -332,6 +332,8 @@ impl InternalRBACRules {
         x.perm("TriggerDpuReprovisioning", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("TriggerHostReprovisioning", vec![ForgeAdminCLI, Flow]);
         x.perm("ListDpuWaitingForReprovisioning", vec![ForgeAdminCLI]);
+        x.perm("TriggerManagedHostReset", vec![ForgeAdminCLI]);
+        x.perm("ListManagedHostsWaitingForReset", vec![ForgeAdminCLI]);
         x.perm("MarkManualFirmwareUpgradeComplete", vec![ForgeAdminCLI]);
         x.perm(
             "ListHostsWaitingForReprovisioning",
@@ -356,6 +358,7 @@ impl InternalRBACRules {
         x.perm("RemoveRouteServers", vec![ForgeAdminCLI]);
         x.perm("ReplaceRouteServers", vec![]);
         x.perm("UpdateAgentReportedInventory", vec![Agent]);
+        x.perm("ReportLldpNeighbors", vec![Scout]);
         x.perm("UpdateInstancePhoneHomeLastContact", vec![Agent]);
         x.perm("SetHostUefiPassword", vec![ForgeAdminCLI]);
         x.perm("ClearHostUefiPassword", vec![ForgeAdminCLI]);
@@ -402,7 +405,10 @@ impl InternalRBACRules {
         x.perm("GetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("SetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("ReencryptTenantIdentitySecrets", vec![ForgeAdminCLI]);
+        x.perm(
+            "ReencryptTenantIdentitySecrets",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("GetJWKS", vec![Anonymous, Agent, ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetOpenIDConfiguration",
@@ -548,8 +554,13 @@ impl InternalRBACRules {
             "GetMachineValidationAttempt",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("AppendMachineValidationAttemptLog", vec![Scout]);
+        x.perm(
+            "GetMachineValidationAttemptLogs",
+            vec![ForgeAdminCLI, Scout],
+        );
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
-        x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
+        x.perm("AdminBmcReset", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("AdminChassisReset", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
@@ -879,6 +890,42 @@ impl InternalRBACRules {
         );
         x.perm(
             "DeleteAllExpectedRacks",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "AddExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "UpdateExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "FindExpectedRackGroupIds",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "FindExpectedRackGroupsByIds",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "ReplaceAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteAllExpectedRackGroups",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
@@ -1311,6 +1358,7 @@ mod rbac_rule_tests {
 
         // REST admin operations proxy to Core as the site agent (issue #4597).
         for method in [
+            "AdminBmcReset",
             "AdminPowerControl",
             "TriggerDpuReprovisioning",
             "AdminChassisReset",

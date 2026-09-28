@@ -44,7 +44,6 @@ global:
 ## nico-api — Core API server
 ## ---------------------------------------------------------------------------
 nico-api:
-  enabled: true
   replicas: 1
 
   resources:
@@ -178,7 +177,6 @@ nico-api:
 ## nico-dhcp — DHCP server
 ## ---------------------------------------------------------------------------
 nico-dhcp:
-  enabled: true
   replicas: 1
 
   ## kea-dhcp4 configuration — structured shape (chart assembles JSON).
@@ -242,7 +240,6 @@ nico-dhcp:
 ## nico-dns — Authoritative DNS
 ## ---------------------------------------------------------------------------
 nico-dns:
-  enabled: true
   replicas: 2
 
   externalService:
@@ -268,7 +265,6 @@ nico-dsx-exchange-consumer:
 ## nico-hardware-health — Hardware health metrics
 ## ---------------------------------------------------------------------------
 nico-hardware-health:
-  enabled: true
   replicas: 1
 
   serviceMonitor:
@@ -286,7 +282,6 @@ nico-hardware-health:
 ## nico-pxe — PXE boot server
 ## ---------------------------------------------------------------------------
 nico-pxe:
-  enabled: true
   replicas: 1
 
   bootArtifacts:
@@ -317,7 +312,6 @@ nico-pxe:
 ## nico-ssh-console-rs — SSH console proxy
 ## ---------------------------------------------------------------------------
 nico-ssh-console-rs:
-  enabled: true
   replicas: 1
 
   ## OpenTelemetry Collector Contrib sidecar for shipping console logs to Loki.
@@ -364,7 +358,6 @@ unbound:
 ## nico-bmc-proxy: Authenticating BMC redfish proxy
 ## ---------------------------------------------------------------------------
 nico-bmc-proxy:
-  enabled: true
   replicas: 2
   configFiles:
     enabled: true

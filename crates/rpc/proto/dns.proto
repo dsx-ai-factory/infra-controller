@@ -115,10 +115,15 @@ message Domain {
 }
 
 message CreateDomainRequest {
+  // Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
+  // in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
+  // surrounding whitespace, and trailing dots.
   string name = 1;
 }
 
 message UpdateDomainRequest {
+  // The replacement name must not be at or below in-addr.arpa or ip6.arpa;
+  // the same reverse-name validation as CreateDomainRequest applies.
   Domain domain = 1;
 }
 
@@ -133,5 +138,3 @@ message DomainDeletionRequest {
 
 message DomainDeletionResult{
 }
-
-

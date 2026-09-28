@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -60,7 +62,11 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	// The target_spec serves as the initial scope for the schedule.
 	opInfo, targetSpec, pbQueueOpts, pbRuleID, err := protobuf.ScheduledOperationFrom(req.GetOperation())
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	ruleID, err := protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
 	}
 	firmwareInfo, isFirmware := opInfo.(*operations.FirmwareControlTaskInfo)
 	if isFirmware {
@@ -102,8 +108,8 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 		ConflictStrategy: int(conflictStrategy),
 		QueueTimeoutSecs: int64(queueTimeout.Seconds()),
 	}
-	if ruleUUID := protobuf.UUIDFrom(pbRuleID); ruleUUID != uuid.Nil {
-		templateOpts.RuleID = ruleUUID.String()
+	if ruleID != nil {
+		templateOpts.RuleID = ruleID.String()
 	}
 
 	// Build operation_template JSON (target comes from scope rows at fire time).
@@ -208,8 +214,12 @@ func (rs *FlowServerImpl) ListTaskSchedules(
 		EnabledOnly: req.GetEnabledOnly(),
 		Pagination:  pg,
 	}
-	if rackID := protobuf.UUIDFrom(req.GetRackId()); rackID != uuid.Nil {
-		opts.RackIDs = []uuid.UUID{rackID}
+	rackID, err := protobuf.OptionalUUIDFrom(req.GetRackId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
+	}
+	if rackID != nil {
+		opts.RackIDs = []uuid.UUID{*rackID}
 	}
 
 	rows, total, err := rs.taskScheduleStore.List(ctx, opts)
@@ -623,11 +633,19 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 	ctx context.Context,
 	req *pb.CheckScheduleConflictsRequest,
 ) (*pb.CheckScheduleConflictsResponse, error) {
-	opInfo, targetSpec, _, _, err := protobuf.ScheduledOperationFrom(
+	opInfo, targetSpec, _, pbRuleID, err := protobuf.ScheduledOperationFrom(
 		req.GetOperation(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	_, err = protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
+	excludeID, err := protobuf.OptionalUUIDFrom(req.GetExcludeScheduleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "exclude_schedule_id %v", err)
 	}
 
 	scopes, err := rs.resolveScope(ctx, targetSpec)
@@ -639,7 +657,6 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 		return nil, errors.New("target_spec resolved to no rack scopes; at least one rack target is required")
 	}
 
-	excludeID := protobuf.UUIDFrom(req.GetExcludeScheduleId())
 	proposedOp := operation.Wrapper{
 		Type: opInfo.Type(),
 		Code: opInfo.CodeString(),
@@ -666,8 +683,8 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 	// Pre-seed excludeID so the dedup check below doubles as the exclude check,
 	// avoiding a separate branch per iteration.
 	seenScheduleIDs := make(map[uuid.UUID]struct{})
-	if excludeID != uuid.Nil {
-		seenScheduleIDs[excludeID] = struct{}{}
+	if excludeID != nil {
+		seenScheduleIDs[*excludeID] = struct{}{}
 	}
 	var conflicts []*pb.TaskSchedule
 

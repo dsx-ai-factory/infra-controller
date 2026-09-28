@@ -21,9 +21,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::{Bmc, FilterQuery, ODataId};
 use nv_redfish::log_service::LogService;
-use nv_redfish::{Resource, ServiceRoot};
 use serde::{Deserialize, Serialize};
 
 use super::diagnostic::{
@@ -179,7 +179,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                         services: &mut Vec<LogService<B>>,
                         seen_ids: &mut HashSet<String>,
                         excluded_count: &mut usize| {
-            let service_id = service.odata_id().to_string();
+            let service_id = service.raw().odata_id.to_string();
 
             if self.is_excluded(&service_id) {
                 *excluded_count += 1;
@@ -303,8 +303,9 @@ impl<B: Bmc + 'static> LogsCollector<B> {
         let mut fetch_failures = 0;
 
         for service in &state.discovered_services {
-            let service_id = service.odata_id().to_string();
-            let last_seen_id = state.last_seen_ids.get(service.odata_id()).copied();
+            let service_id = service.raw().odata_id.to_string();
+            let service_odata_id = service.raw().odata_id.clone();
+            let last_seen_id = state.last_seen_ids.get(&service_odata_id).copied();
 
             let entries = match last_seen_id {
                 Some(last_id) => {
@@ -345,7 +346,6 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                         .into_iter()
                         .filter(|entry| {
                             entry
-                                .base
                                 .id
                                 .parse::<i32>()
                                 .ok()
@@ -383,10 +383,10 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                         // discard it. -1 is safe: real Redfish IDs are ≥ 0, so
                         // the next poll's `id > anchor` filter passes everything.
                         let anchor_id =
-                            initial_anchor_id(all_entries.iter().map(|e| e.base.id.as_str()));
+                            initial_anchor_id(all_entries.iter().map(|e| e.id.as_str()));
                         state
                             .last_seen_ids
-                            .insert(service.odata_id().clone(), anchor_id);
+                            .insert(service_odata_id.clone(), anchor_id);
                         tracing::info!(
                             %service_id,
                             anchor_id,
@@ -424,15 +424,13 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                     data_sink.handle_event(&self.event_context, &log_event);
                 }
 
-                if let Ok(entry_id) = entry.base.id.parse::<i32>() {
+                if let Ok(entry_id) = entry.id.parse::<i32>() {
                     max_id = max_id.max(entry_id);
                 }
             }
 
             if max_id > last_seen_id.unwrap_or(0) {
-                state
-                    .last_seen_ids
-                    .insert(service.odata_id().clone(), max_id);
+                state.last_seen_ids.insert(service_odata_id, max_id);
             }
             total_log_count += entries.len();
         }
@@ -476,7 +474,7 @@ fn entry_to_log(
                     .copied(),
                 message_id: entry.message_id.as_deref(),
                 event_id: entry.event_id.as_deref(),
-                log_entry_id: Some(entry.base.id.as_str()),
+                log_entry_id: Some(entry.id.as_str()),
             })
         })
         .flatten();
@@ -485,9 +483,9 @@ fn entry_to_log(
     if let Some(machine_id) = machine_id {
         attributes.push((Cow::Borrowed("machine_id"), machine_id.to_string()));
     }
-    attributes.push((Cow::Borrowed("entry_id"), entry.base.id.clone()));
+    attributes.push((Cow::Borrowed("entry_id"), entry.id.clone()));
     attributes.push((Cow::Borrowed("service_id"), service_id.to_string()));
-    if let Some(oem) = &entry.base.base.oem {
+    if let Some(oem) = &entry.oem {
         attributes.push((
             Cow::Borrowed("redfish.oem"),
             oem.additional_properties.to_string(),
@@ -497,7 +495,7 @@ fn entry_to_log(
         &mut attributes,
         log_type,
         redfish_severity.unwrap_or(RedfishSeverity::Unknown),
-        nvidia_error_id(entry.base.base.oem.as_ref()),
+        nvidia_error_id(entry.oem.as_ref()),
     );
     push_message_identity(
         &mut attributes,
@@ -516,7 +514,8 @@ fn entry_to_log(
     if let Some(event_id) = &entry.event_id {
         attributes.push((Cow::Borrowed("event_id"), event_id.clone()));
     }
-    if let Some(timestamp) = &entry.event_timestamp {
+    // Some events omit EventTimestamp and expose Created.
+    if let Some(timestamp) = entry.event_timestamp.as_ref().or(entry.created.as_ref()) {
         attributes.push((Cow::Borrowed("event_timestamp"), timestamp.to_string()));
     }
     if let Some(group_id) = nullable_ref(&entry.event_group_id) {
@@ -737,6 +736,45 @@ mod tests {
                 },
             ],
             observe_message_identity,
+        );
+    }
+
+    fn observe_event_timestamp((event_timestamp, created): (Option<&str>, &str)) -> Option<String> {
+        let mut value = json!({
+            "@odata.id": "/redfish/v1/Chassis/powershelf/LogServices/EventLog/Entries/1",
+            "Id": "1",
+            "Name": "Power shelf event",
+            "EntryType": "Event",
+            "Message": "PSU fault",
+            "Created": created
+        });
+        if let Some(event_timestamp) = event_timestamp {
+            value["EventTimestamp"] = json!(event_timestamp);
+        }
+        let entry: nv_redfish::schema::log_entry::LogEntry =
+            serde_json::from_value(value).expect("valid Redfish log entry");
+        let CollectorEvent::Log(record) = entry_to_log(&entry, None, EVENTLOG, false) else {
+            panic!("expected log event");
+        };
+        attribute(&record, "event_timestamp")
+    }
+
+    #[test]
+    fn event_timestamp_falls_back_to_created() {
+        check_values(
+            [
+                Check {
+                    scenario: "Created stands in for an absent EventTimestamp",
+                    input: (None, "2026-05-14T10:00:00Z"),
+                    expect: Some("2026-05-14T10:00:00Z".to_string()),
+                },
+                Check {
+                    scenario: "EventTimestamp wins over Created",
+                    input: (Some("2026-09-01T12:00:00Z"), "2026-05-14T10:00:00Z"),
+                    expect: Some("2026-09-01T12:00:00Z".to_string()),
+                },
+            ],
+            observe_event_timestamp,
         );
     }
 
