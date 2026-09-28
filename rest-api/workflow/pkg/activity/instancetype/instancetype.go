@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -123,7 +124,7 @@ func (mv ManageInstanceType) UpdateInstanceTypesInDB(ctx context.Context, siteID
 
 	// TODO: We should not delete Instance Type just because they are missing from Site
 	// We will introduce a isMissingOnSite flag for Instance Type DB model
-	if instanceTypeInventory.InventoryPage == nil || instanceTypeInventory.InventoryPage.TotalPages == 0 || (instanceTypeInventory.InventoryPage.CurrentPage == instanceTypeInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(instanceTypeInventory.GetInventoryPage()) {
 		// Clear out any that don't exist on site.
 		for _, instanceType := range existingInstanceTypeIDMap {
 			slogger := logger.With().Str("InstanceType ID", instanceType.ID.String()).Logger()

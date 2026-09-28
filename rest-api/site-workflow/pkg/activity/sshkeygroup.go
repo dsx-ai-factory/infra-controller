@@ -31,6 +31,10 @@ func (mmi *ManageSSHKeyGroupInventory) DiscoverSSHKeyGroupInventory(ctx context.
 		internalFindIDs:        sshKeyGroupFindIDs,
 		internalFindByIDs:      sshKeyGroupFindByIDs,
 		internalPagedInventory: sshKeyGroupPagedInventory,
+		// A Cloud worker that predates the populated-list requirement reads this list on
+		// every page, so withholding it there would read an absent SSH Key Group as removed
+		// from the Site. Retire this once that requirement has rolled everywhere.
+		itemIDsOnEveryPage: true,
 	}
 	return inventoryImpl.CollectAndPublishInventory(ctx, &logger)
 }

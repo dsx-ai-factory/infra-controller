@@ -1000,8 +1000,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 		missingKeyset   *cdbm.SSHKeyGroupSiteAssociation
 		restoredKeyset  *cdbm.SSHKeyGroupSiteAssociation
 		deletedKeyset   *cdbm.SSHKeyGroupSiteAssociation
-		// unreportedKeyset is an association the Site never reports, so whether it is flagged
-		// missing is decided purely by whether the page was entitled to run the sweep.
+		// unreportedKeyset is an association the Site never reports, so whether it ends up
+		// flagged missing is decided purely by whether the page could run the sweep.
 		unreportedKeyset      *cdbm.SSHKeyGroupSiteAssociation
 		wantUnreportedMissing bool
 		wantErr               bool
@@ -1092,8 +1092,8 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			expectedAssocChange: 3,
 		},
 		{
-			// The Site sends the reported ID list on the last page only, so an earlier page
-			// says nothing about what the Site holds and must not flag anything missing.
+			// An earlier page says nothing about what the Site is missing, even when it
+			// carries the full ID list, so nothing may be marked missing from it.
 			name: "test paged SSHKeyGroup inventory processing, earlier page",
 			fields: fields{
 				dbSession:      dbSession,
@@ -1111,6 +1111,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 						TotalPages:  4,
 						PageSize:    10,
 						TotalItems:  34,
+						ItemIds:     pagedInvSSHKeyGroupIDs[0:34],
 					},
 				},
 			},
@@ -1143,6 +1144,31 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			unreportedKeyset:      pagedUnreportedSkgsa,
 			wantUnreportedMissing: true,
 			expectedAssocChange:   4,
+		},
+		{
+			// A final page with no list is a Site Agent that sends it elsewhere, which is
+			// not evidence that anything was removed from the Site.
+			name: "test paged SSHKeyGroup inventory processing, last page without item IDs",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st2.ID,
+				sshKeyGroupInventory: &corev1.SSHKeyGroupInventory{
+					TenantKeysets: pagedCtrlSSHKeyGroups[30:34],
+					Timestamp:     timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 4,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+					},
+				},
+			},
+			expectedAssocChange: 0,
 		},
 	}
 	for _, tt := range tests {

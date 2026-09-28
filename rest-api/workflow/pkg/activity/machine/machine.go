@@ -758,7 +758,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if machineInventory.InventoryPage == nil || machineInventory.InventoryPage.TotalPages == 0 || (machineInventory.InventoryPage.CurrentPage == machineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
 		for _, existingMachine := range existingMachines {
 			if existingMachine.Deleted != nil {
 				continue

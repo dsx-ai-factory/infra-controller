@@ -40,3 +40,21 @@ func assertItemIDsOnFinalPageOnly(t *testing.T, calls []mock.Call, wantTotalItem
 		assert.Empty(t, page.GetItemIds(), "page %d of %d", page.GetCurrentPage(), page.GetTotalPages())
 	}
 }
+
+// assertItemIDsOnEveryPage is the contract for a resource that still carries the list
+// everywhere, which SSH Key Group does until every Cloud worker requires a populated list
+// before it sweeps.
+func assertItemIDsOnEveryPage(t *testing.T, calls []mock.Call, wantTotalItems int) {
+	t.Helper()
+	for index, call := range calls {
+		inventory, ok := call.Arguments[4].(pagedInventory)
+		if !assert.True(t, ok, "publish call %d carries no inventory", index+1) {
+			continue
+		}
+		page := inventory.GetInventoryPage()
+		if page == nil {
+			continue
+		}
+		assert.Len(t, page.GetItemIds(), wantTotalItems, "page %d", index+1)
+	}
+}

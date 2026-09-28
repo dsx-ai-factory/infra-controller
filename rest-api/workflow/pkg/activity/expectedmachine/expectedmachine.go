@@ -256,7 +256,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// Delete any Expected Machine present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedIDs.
-	if expectedMachineInventory.InventoryPage == nil || expectedMachineInventory.InventoryPage.TotalPages == 0 || (expectedMachineInventory.InventoryPage.CurrentPage == expectedMachineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
 		for _, em := range existingExpectedMachines {
 			if _, keep := reportedIDs[em.ID]; keep {
 				continue
