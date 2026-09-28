@@ -132,8 +132,9 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
     <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a VPC Prefix">
-    Add a VPC Prefix to the Ready `FNN` VPC created above. The source IP Block determines the VPC Prefix's address family. REST support for creating IPv6 FNN VPC Prefixes is tracked by [#5407](https://github.com/NVIDIA/infra-controller/issues/5407).
-    <Code src="snippets/input/create_vpc_prefix.sh" title="Example Call" />
+    Add a VPC Prefix to the Ready `FNN` VPC created above. The source IP Block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
+    <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
+    <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
     <Code src="snippets/output/create_vpc_prefix.json" title="Example Response" />
   </Accordion>
 </AccordionGroup>

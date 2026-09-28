@@ -137,6 +137,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		assert.NotContains(t, prefixPickerTranscript, "provider-ready")
 		assert.NotContains(t, prefixPickerTranscript, "tenant-pending")
 		terminal.send(t, "tenant-ready-v6\r")
+		terminal.waitFor(t, "Allocation mode:")
+		terminal.send(t, "\r")
 		terminal.waitFor(t, "IPv6 prefix length (8-63)")
 		terminal.send(t, "63\r")
 		terminal.waitFor(t, "VPC prefix created: tenant-ipv6-prefix")

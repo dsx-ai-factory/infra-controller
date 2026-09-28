@@ -3922,6 +3922,8 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
         The VPC must be Ready and use FNN, and its Site must be Registered. `ipBlockId` must identify a Ready tenant IP Block at the VPC's Site. The selected IP Block determines whether the VPC Prefix uses IPv4 or IPv6.
+
+        Specify exactly one allocation selector. `prefixLength` lets IPAM choose an available CIDR. `prefix` requests an exact, network-aligned CIDR contained by the selected IP Block. Both modes share the same allocation state; an unavailable explicit CIDR is rejected rather than replaced. A prefix equal to its IP Block reserves the whole block.
       requestBody:
         content:
           application/json:
@@ -21705,7 +21707,11 @@ components:
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
           prefixLength: 20
-      description: Request data for creating VPC Prefix
+        - name: application-network
+          vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+          ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
+          prefix: 10.20.30.0/24
+      description: Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
       properties:
         name:
           type: string
@@ -21720,22 +21726,79 @@ components:
           type: string
           format: uuid
           description: ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
+        prefix:
+          type: [string, 'null']
+          minLength: 1
+          description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. It must be contained by the selected IP Block, match its address family, satisfy the VPC's prefix-length limits, and not overlap an existing reservation. An IPv4-mapped IPv6 CIDR is not accepted. Mutually exclusive with `prefixLength`.
         prefixLength:
-          type: integer
+          type: [integer, 'null']
           minimum: 8
           maximum: 126
-          description: Prefix length for the VPC Prefix. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length.
+          description: Prefix length for automatic allocation. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length. Mutually exclusive with `prefix`.
+      oneOf:
+        - title: VpcPrefixAutomaticCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefixLength
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefixLength:
+              type: integer
+              minimum: 8
+              maximum: 126
+          not:
+            required:
+              - prefix
+            properties:
+              prefix:
+                type: string
+        - title: VpcPrefixExplicitCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefix
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefix:
+              type: string
+              minLength: 1
+          not:
+            required:
+              - prefixLength
+            properties:
+              prefixLength:
+                type: integer
       required:
         - name
         - vpcId
         - ipBlockId
-        - prefixLength
     VpcPrefixUpdateRequest:
       title: VpcPrefixUpdateRequest
       type: object
       examples:
         - name: east-vpc-traffic-net
-      description: Request data for updating a VPC Prefix
+      description: Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
       properties:
         name:
           type: string

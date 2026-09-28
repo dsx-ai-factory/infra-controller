@@ -544,6 +544,32 @@ func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
 	}
 }
 
+func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	vpcPrefix := app.Command("vpc-prefix")
+	require.NotNil(t, vpcPrefix)
+	create := vpcPrefix.Command("create")
+	require.NotNil(t, create)
+	require.NotNil(t, create.Action)
+
+	flags := make(map[string]cli.Flag)
+	for _, flag := range create.Flags {
+		flags[flag.Names()[0]] = flag
+	}
+	require.Contains(t, flags, "prefix")
+	require.Contains(t, flags, "prefix-length")
+	assert.NotContains(t, flags["prefix"].(*cli.StringFlag).Usage, "(required)")
+	assert.NotContains(t, flags["prefix-length"].(*cli.StringFlag).Usage, "(required)")
+
+	var output bytes.Buffer
+	app.Writer = &output
+	app.ErrWriter = &output
+	require.NoError(t, app.Run([]string{"nicocli", "vpc-prefix", "create", "--help"}))
+	assert.Contains(t, output.String(), "--prefix value")
+	assert.Contains(t, output.String(), "--prefix-length value")
+}
+
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
 // for reserved names and scalar-compatible, single-item arrays.
 func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
@@ -720,6 +746,50 @@ func TestBuildRequestBody(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"resourceIds":["resource-1"]}`, string(body))
+}
+
+func TestBuildRequestBody_VpcPrefixSelectors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "automatic allocation",
+			args: []string{"test", "--prefix-length", "24"},
+			want: `{"prefixLength":24}`,
+		},
+		{
+			name: "explicit CIDR allocation",
+			args: []string{"test", "--prefix", "10.20.30.0/24"},
+			want: `{"prefix":"10.20.30.0/24"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "data"},
+					&cli.StringFlag{Name: "data-file"},
+					&cli.StringFlag{Name: "prefix"},
+					&cli.StringFlag{Name: "prefix-length"},
+				},
+				Action: func(c *cli.Context) error {
+					var err error
+					body, err = buildRequestBody(c, []bodyField{
+						{jsonName: "prefix", flagName: "prefix", schema: &Schema{Type: "string"}},
+						{jsonName: "prefixLength", flagName: "prefix-length", schema: &Schema{Type: "integer"}},
+					})
+					return err
+				},
+			}
+
+			require.NoError(t, app.Run(test.args))
+			assert.JSONEq(t, test.want, string(body))
+		})
+	}
 }
 
 // TestNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
