@@ -19,8 +19,7 @@ Site providers would get a safe version of this workflow later on that moves the
 
 To leave the host in a clean pre-ingestion state before you remove its
 control-plane records, [decommission the host](../decommissioning/hosts.md)
-first, then force-delete it with the flags that remove interfaces,
-suppressions, and retained boot entries.
+first, then use the appropriate flags to [force-delete it](../decommissioning/index.md#force-delete-after-decommissioning) afterward. The steps below do not apply to decommissioning.
 
 ## Force-Deletion Steps
 

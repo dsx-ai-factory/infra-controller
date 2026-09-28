@@ -106,9 +106,15 @@ stateDiagram-v2
 | ReProvisioning (any sub-state) | Ready | Parent rack entered `Error`; rack-level reprovision request cleared |
 | Error | Deleting | `deleted` set (marked for deletion) |
 | Error | Maintenance | `switch_maintenance_requested` is set |
-| Decommissioning (`SuppressingSiteExplorer`) | Decommissioning (`SuppressingNvosDhcp`) | Site Explorer acknowledges the BMC suppression |
-| Decommissioning (`SuppressingNvosDhcp`) | Decommissioning (`FactoryResetNvos`) | NVOS DHCP suppression is recorded |
-| Decommissioning (`FactoryResetNvos`) | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | RMS accepts the NVOS factory-reset request |
+| Decommissioning (`SuppressingSiteExplorer`) | Decommissioning (`FactoryResetNvos`) | Site Explorer acknowledges the BMC suppression |
+| Decommissioning (`FactoryResetNvos`) | Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | RMS returns a reset job ID; the controller persists it for polling |
+| Decommissioning (`FactoryResetNvos`) | Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Submission returns `OperationOutcomeUnknown`; operator recovery is required |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Same sub-state | RMS reports `Pending`, or a transient polling error occurs; poll the same job again |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Same sub-state | RMS reports `Failed`; handler reports `ManualInterventionRequired` |
+| Decommissioning (`WaitingForNvosFactoryReset { job_id }`) | Decommissioning (`SuppressingNvosDhcp`) | RMS reports `Completed` |
+| Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Same sub-state | Handler reports `ManualInterventionRequired`; no automatic reset resubmission |
+| Decommissioning (`SuppressingNvosDhcp`) | Decommissioning (`RebootingSwitch`) | NVOS DHCP suppression is recorded |
+| Decommissioning (`RebootingSwitch`) | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Redfish accepts `ForceRestart` |
 | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | DHCP acknowledges the NVOS suppression |
 | Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
 | Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
@@ -138,8 +144,19 @@ The `Maintenance` state is entered when `switch_maintenance_requested` is posted
 ## Decommissioning
 
 Managed-switch decommissioning requires the RMS switch backend and starts only
-from `Ready`. The workflow does not poll the RMS factory-reset job to
-completion; it continues after DHCP acknowledges the NVOS suppression. Refer to
+from `Ready`. After Site Explorer acknowledges suppression, the controller
+submits the NVOS factory reset, persists the returned job ID, and polls that
+job until RMS reports `Completed`. It then suppresses NVOS DHCP, requests a
+switch reboot through Redfish, and waits for DHCP suppression acknowledgement
+before resetting the BMC and deleting managed credentials.
+
+Transient handler errors leave the switch in its current sub-state for a
+later retry. A failed RMS reset job reports `ManualInterventionRequired`
+while retaining the job ID in `WaitingForNvosFactoryReset`. An ambiguous
+submission outcome enters `NvosFactoryResetOutcomeUnknown`, which requires
+operator recovery and does not automatically resubmit the reset.
+
+Refer to
 [Decommission Managed Switches](../../decommissioning/switches.md) for the
 operator procedure and intended post-reset state.
 

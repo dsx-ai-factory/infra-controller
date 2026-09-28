@@ -204,10 +204,6 @@ navigation:
               path: decommissioning/switches.md
             - page: Decommission Managed Power Shelves
               path: decommissioning/power-shelves.md
-            - page: Rack-Scale Decommissioning
-              path: decommissioning/racks.md
-        - page: DHCP Suppression
-          path: operations/dhcp-suppression.md
         - page: Network Isolation
           path: manuals/network_isolation.md
         - page: Network Security Groups

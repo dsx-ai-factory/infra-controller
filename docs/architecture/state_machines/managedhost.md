@@ -449,6 +449,7 @@ stateDiagram-v2
     state "DeconfiguringDpus" as DeconfiguringDpus
     state "SuppressingOobDhcp" as SuppressingOobDhcp
     state "PowerCyclingHost" as PowerCyclingHost
+    state "PoweringOnHost" as PoweringOnHost
     state "WaitingForOobDhcpAcknowledgement" as WaitingForOobDhcpAcknowledgement
     state "SuppressingBmcDhcp" as SuppressingBmcDhcp
     state "FactoryResettingBmcs" as FactoryResettingBmcs
@@ -461,7 +462,8 @@ stateDiagram-v2
     DeconfiguringHost --> DeconfiguringDpus : Host firmware configuration reset
     DeconfiguringDpus --> SuppressingOobDhcp : DPUs run preingestion BFB
     SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
-    PowerCyclingHost --> WaitingForOobDhcpAcknowledgement : AC power cycle accepted
+    PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
+    PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
     WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : DHCP acknowledges OOB suppressions
     SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
     FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
