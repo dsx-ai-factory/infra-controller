@@ -1576,7 +1576,7 @@ func TestPrintTaskIDs_HandlesEmptyTaskIDs(t *testing.T) {
 }
 
 func TestPowerStateChoices_MatchOpenAPI(t *testing.T) {
-	expected := []string{"on", "off", "cycle", "forceoff", "forcecycle"}
+	expected := []string{"on", "off", "cycle", "forceoff", "forcecycle", "acpowercycle"}
 	assert.Equal(t, expected, powerStateChoices,
 		"powerStateChoices must match UpdatePowerStateRequest.state enum from openapi/spec.yaml")
 }

@@ -48,17 +48,8 @@ const MIXED_DEVICES_XML: &str = r#"
           <Status>No matching image found</Status>
           <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
         </Device>
-        <Device pciName="0000:9d:00.0" type="BlueField3" psid="" partNumber="--">
-          <Versions>
-            <FW current="--" available=""/>
-            <PXE current="--" available=""/>
-            <UEFI current="--" available=""/>
-            <UEFI_Virtio_blk current="--" available=""/>
-            <UEFI_Virtio_net current="--" available=""/>
-          </Versions>
-          <MACs Base_Mac="N/A" />
+        <Device pciName="0000:9d:00.0" type="BlueField3">
           <Status>Failed to open device</Status>
-          <Description></Description>
         </Device>
         <Device pciName="0000:9c:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
           <Versions>
@@ -87,6 +78,79 @@ const MISSING_OPTIONALS_XML: &str = r#"
 
 const EMPTY_DEVICES_XML: &str = "<Devices></Devices>";
 const MALFORMED_XML: &str = "<Devices><Device";
+
+// The child command's PATH is private to each case; no test changes the
+// process-wide environment or invokes a hardware management tool.
+#[cfg(unix)]
+#[test]
+fn report_collection_preserves_the_command_exit_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    use libmlx::device::report::MlxDeviceReport;
+
+    struct Case {
+        scenario: &'static str,
+        exit_code: Option<u8>,
+        error: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            scenario: "successful query",
+            exit_code: Some(0),
+            error: None,
+        },
+        Case {
+            scenario: "partial query",
+            exit_code: Some(1),
+            error: None,
+        },
+        Case {
+            scenario: "unexpected tool failure despite valid XML",
+            exit_code: Some(2),
+            error: Some("mlxfwmanager failed with unexpected exit code"),
+        },
+        Case {
+            scenario: "missing tool",
+            exit_code: None,
+            error: Some("failed to build cmd"),
+        },
+    ];
+    for case in cases {
+        let directory = tempfile::tempdir().unwrap();
+        if let Some(exit_code) = case.exit_code {
+            let tool = directory.path().join("mlxfwmanager");
+            std::fs::write(
+                &tool,
+                format!("#!/bin/sh\nprintf '%s' \"$MLX_TEST_XML\"\nexit {exit_code}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mlxconfig-device"))
+            .args(["device", "report", "--format", "json"])
+            .env("PATH", directory.path())
+            .env("MLX_TEST_XML", MIXED_DEVICES_XML)
+            .output()
+            .unwrap();
+        match case.error {
+            Some(error) => {
+                assert!(!output.status.success(), "{}", case.scenario);
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(error),
+                    "{}: {:?}",
+                    case.scenario,
+                    output,
+                );
+            }
+            None => {
+                assert!(output.status.success(), "{}: {:?}", case.scenario, output);
+                let report: MlxDeviceReport = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report.devices.len(), 3, "{}", case.scenario);
+            }
+        }
+    }
+}
 
 fn device_with_missing_optionals(
     pci_name: &str,
@@ -151,10 +215,27 @@ fn parse_mlxfwmanager_xml_cases() {
             ]),
         }
 
-        "missing sections and placeholders become absent values" {
+        "placeholder fields become absent values" {
             MISSING_OPTIONALS_XML => Yields(vec![
                 device_with_missing_optionals("01:00.0", "ConnectX-6", None),
             ]),
+        }
+
+        "omitted fields and empty sections become absent values" {
+            r#"<Devices><Device pciName="0000:01:00.0" type="ConnectX-8"/></Devices>"#
+                => Yields(vec![device_with_missing_optionals("01:00.0", "ConnectX-8", None)]),
+            r#"<Devices><Device pciName="0000:01:00.0" type="ConnectX-8">
+                <Versions><FW available="N/A"/><PXE current="3.7.0500"/></Versions>
+                <MACs/>
+            </Device></Devices>"# => Yields(vec![MlxDeviceInfo {
+                pxe_version_current: Some("3.7.0500".to_string()),
+                ..device_with_missing_optionals("01:00.0", "ConnectX-8", None)
+            }]),
+        }
+
+        "structural device identity is required" {
+            r#"<Devices><Device type="ConnectX-8"/></Devices>"# => Fails,
+            r#"<Devices><Device pciName="0000:01:00.0"/></Devices>"# => Fails,
         }
 
         "empty device lists are rejected" {

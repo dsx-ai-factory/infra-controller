@@ -911,6 +911,10 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
+            "GetAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
             "FindExpectedRackGroupIds",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );

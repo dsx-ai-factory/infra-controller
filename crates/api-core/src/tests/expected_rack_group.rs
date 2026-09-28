@@ -11,6 +11,45 @@ use tonic::{Code, Request};
 use crate::tests::common::api_fixtures::create_test_env;
 
 #[crate::sqlx_test()]
+async fn get_all_expected_rack_groups(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    for ids in [vec![], vec!["group-b", "group-a"]] {
+        let mut expected = Vec::new();
+        for id in ids {
+            let group = ExpectedRackGroup {
+                rack_group_id: Some(RackGroupId::new(id)),
+                topology: "gb200_nvl72r1_c2g4".into(),
+                racks: vec![rpc::forge::ExpectedRackGroupRack {
+                    rack_id: Some("rack-01".parse().unwrap()),
+                    members: vec![rpc::forge::ExpectedRackGroupMember {
+                        r#type: "Switch".into(),
+                        manufacturer: "NVIDIA".into(),
+                        id: "switch-01".into(),
+                    }],
+                }],
+                metadata: Some(Metadata {
+                    name: id.into(),
+                    ..Default::default()
+                }),
+            };
+            env.api
+                .add_expected_rack_group(Request::new(group.clone()))
+                .await
+                .unwrap();
+            expected.push(group);
+        }
+        expected.reverse();
+        let result = env
+            .api
+            .get_all_expected_rack_groups(Request::new(()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(result.expected_rack_groups, expected);
+    }
+}
+
+#[crate::sqlx_test()]
 async fn expected_rack_group_duplicate_create(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let group = ExpectedRackGroup {

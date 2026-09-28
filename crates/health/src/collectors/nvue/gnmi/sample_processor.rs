@@ -83,6 +83,74 @@ impl GnmiSampleProcessor {
 
         let mut entities: HashSet<(&str, &str)> = HashSet::new();
 
+        // SAMPLE renames gNMI leaves and sometimes expands one leaf into several
+        // series. Retained samples have no source path, so leaf deletes need the
+        // inverse path mapping below. Apply deletes before replacement updates.
+        for path in &notification.delete {
+            let combined = prefix_elems.iter().chain(&path.elem).collect::<Vec<_>>();
+
+            let Some(sink) = &self.data_sink else {
+                continue;
+            };
+
+            let prune = |metric_type, labels: &[crate::metrics::MetricLabel]| {
+                sink.prune_metrics(&self.event_context, metric_type, labels, None, None);
+            };
+
+            let entity = [
+                ("interface", "name", "interface_name"),
+                ("component", "name", "component_name"),
+                ("leak-sensor", "id", "sensor"),
+            ]
+            .into_iter()
+            .find_map(|(element, key, label)| {
+                find_elem_key_ref(&combined, element, key)
+                    .map(|value| (element, (Cow::Borrowed(label), value.to_string())))
+            });
+
+            let labels = entity
+                .as_ref()
+                .map(|(_, label)| std::slice::from_ref(label))
+                .unwrap_or(&[]);
+
+            if entity.as_ref().is_some_and(|(element, _)| {
+                combined.last().is_some_and(|last| last.name == *element)
+            }) {
+                prune(None, labels);
+                continue;
+            }
+
+            for mapping in numeric_interface_leaves() {
+                if delete_covers_metric(
+                    &combined,
+                    ["interfaces", "interface"]
+                        .into_iter()
+                        .chain(mapping.tail.iter().copied()),
+                ) {
+                    prune(Some(mapping.name), labels);
+                }
+            }
+
+            for (index, name) in FEC_HIST_NAMES.iter().enumerate() {
+                let leaf = format!("rs-num-corr-err-bin{index}");
+
+                if delete_covers_metric(
+                    &combined,
+                    ["interfaces", "interface", "phy-diag", "state", &leaf],
+                ) {
+                    prune(Some(name), labels);
+                }
+            }
+
+            for (metric_path, metric_type) in OTHER_SAMPLE_METRIC_PATHS {
+                if !delete_covers_metric(&combined, metric_path.split('/')) {
+                    continue;
+                }
+
+                prune(Some(metric_type), labels);
+            }
+        }
+
         for update in &notification.update {
             let val = match update.val.as_ref() {
                 Some(v) => v,
@@ -112,7 +180,6 @@ impl GnmiSampleProcessor {
                     self.emit_state_set("leakage_state", "sensor", sensor, current, LEAKAGE_STATES);
                 }
             } else if combined.iter().any(|e| e.name == "platform-general") {
-                // switch-level singleton: no name key, counted as one entity.
                 entities.insert(("platform-general", ""));
                 self.process_platform_general_metric(&combined, val);
             }
@@ -557,6 +624,139 @@ fn leaf_matches(elems: &[&PathElem], expected: &[&str]) -> bool {
         .all(|(elem, name)| elem.name == *name)
 }
 
+/// An ancestor delete covers every mapped descendant; labels narrow keyed lists.
+fn delete_covers_metric<'a>(
+    deleted: &[&PathElem],
+    mapped: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mut mapped = mapped.into_iter();
+
+    deleted
+        .iter()
+        .all(|element| mapped.next() == Some(element.name.as_str()))
+}
+
+// The nonnumeric update branches above define these path-to-metric pairs.
+// Numeric interface leaves reuse their update dispatch table below.
+const OTHER_SAMPLE_METRIC_PATHS: &[(&str, &str)] = &[
+    (
+        "interfaces/interface/state/oper-status",
+        "interface_oper_status",
+    ),
+    (
+        "interfaces/interface/infiniband/state/physical-port-state",
+        "interface_physical_port_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/logical-port-state",
+        "interface_logical_port_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/speed",
+        "interface_link_speed_active",
+    ),
+    (
+        "interfaces/interface/infiniband/state/width",
+        "interface_link_width_active",
+    ),
+    (
+        "interfaces/interface/infiniband/state/supported-widths",
+        "interface_supported_width",
+    ),
+    (
+        "interfaces/interface/phy-diag/state/phy-manager-state",
+        "interface_phy_manager_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/vl-capabilities",
+        "interface_vl_capabilities_info",
+    ),
+    (
+        "components/component/healthz/state/status",
+        "component_health_status",
+    ),
+    (
+        "components/component/state/temperature/instant",
+        "component_temperature_celsius",
+    ),
+    (
+        "components/component/state/last-reboot-reason",
+        "component_last_reboot_reason",
+    ),
+    (
+        "components/component/state/oper-status",
+        "component_oper_status",
+    ),
+    (
+        "components/component/fan/state/speed",
+        "component_fan_speed",
+    ),
+    (
+        "components/component/power-supply/state/output-current",
+        "component_power_supply_output_current",
+    ),
+    (
+        "components/component/power-supply/state/input-current",
+        "component_power_supply_input_current",
+    ),
+    (
+        "components/component/power-supply/state/input-voltage",
+        "component_power_supply_input_voltage",
+    ),
+    (
+        "components/component/power-supply/state/output-power",
+        "component_power_supply_output_power",
+    ),
+    (
+        "components/component/power-supply/state/output-voltage",
+        "component_power_supply_output_voltage",
+    ),
+    (
+        "components/component/asic/state/asic-temp",
+        "component_asic_temperature_celsius",
+    ),
+    (
+        "components/component/cpu/utilization/state/avg",
+        "component_cpu_utilization",
+    ),
+    (
+        "platform-general/leak-sensors/leak-sensor/state/state",
+        "leakage_state",
+    ),
+    ("platform-general/state/contact", "platform_contact_info"),
+    ("platform-general/state/location", "platform_location_info"),
+    (
+        "platform-general/state/platform-name",
+        "platform_node_description_info",
+    ),
+    (
+        "platform-general/versions/state/nos-version",
+        "platform_os_version_info",
+    ),
+    (
+        "platform-general/versions/state/fw-version-bmc",
+        "platform_bmc_version_info",
+    ),
+    (
+        "platform-general/versions/state/fw-version-erot",
+        "platform_erot_version_info",
+    ),
+    ("platform-general/state/memory-used", "platform_memory_used"),
+    (
+        "platform-general/state/memory-total-size",
+        "platform_memory_total",
+    ),
+    (
+        "platform-general/state/disk-total-size",
+        "platform_disk_total",
+    ),
+    ("platform-general/state/disk-used", "platform_disk_used"),
+    (
+        "platform-general/state/ambient-temperature",
+        "platform_ambient_temperature",
+    ),
+];
+
 struct NumericLeafMapping {
     tail: &'static [&'static str],
     name: &'static str,
@@ -570,7 +770,7 @@ struct NumericLeaf {
 
 /// Table-driven dispatch for numeric `/interfaces/interface` leaves. The
 /// expected leaf path tail is matched against the live gNMI tree.
-fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
+fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
     const TABLE: &[NumericLeafMapping] = &[
         // OpenConfig interface counters (`/state/counters/*`)
         NumericLeafMapping {
@@ -877,6 +1077,10 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
         },
     ];
 
+    TABLE
+}
+
+fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
     // FEC histogram bins 0..=15 -> interface_fec_hist_{n}
     if let Some(leaf) = elems.last().map(|e| e.name.as_str())
         && let Some(bin) = leaf.strip_prefix("rs-num-corr-err-bin")
@@ -890,7 +1094,7 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
         });
     }
 
-    TABLE.iter().find_map(|m| {
+    numeric_interface_leaves().iter().find_map(|m| {
         leaf_matches(elems, m.tail).then_some(NumericLeaf {
             name: m.name,
             unit: m.unit,
@@ -1090,6 +1294,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingSink {
         events: Mutex<Vec<(EventContext, CollectorEvent)>>,
+        prunes: Mutex<Vec<(Option<String>, Vec<crate::metrics::MetricLabel>)>>,
     }
 
     impl DataSink for CapturingSink {
@@ -1107,6 +1312,20 @@ mod tests {
                 .expect("lock poisoned")
                 .push((context.clone(), event.clone()));
             Ok(())
+        }
+
+        fn prune_metrics(
+            &self,
+            _context: &EventContext,
+            metric_type: Option<&str>,
+            labels: &[crate::metrics::MetricLabel],
+            _unit: Option<&str>,
+            _label_names: Option<&[&str]>,
+        ) {
+            self.prunes
+                .lock()
+                .expect("capture mutex")
+                .push((metric_type.map(str::to_string), labels.to_vec()));
         }
     }
 
@@ -1550,6 +1769,164 @@ mod tests {
 
         let count = proc.process_notification(&notification);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn sample_container_delete_prunes_only_descendant_metrics() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+
+        let interface = vec![
+            make_path_elem("interfaces", &[]),
+            make_path_elem("interface", &[("name", "nvl0")]),
+        ];
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 10,
+            update: ["in-errors", "out-errors", "oper-status"]
+                .into_iter()
+                .map(|leaf| proto::Update {
+                    path: Some(proto::Path {
+                        elem: interface
+                            .iter()
+                            .cloned()
+                            .chain([make_path_elem("state", &[])])
+                            .chain((leaf != "oper-status").then(|| make_path_elem("counters", &[])))
+                            .chain([make_path_elem(leaf, &[])])
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::UintVal(1)),
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 20,
+            delete: vec![proto::Path {
+                elem: interface
+                    .into_iter()
+                    .chain([
+                        make_path_elem("state", &[]),
+                        make_path_elem("counters", &[]),
+                    ])
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let prunes = sink.prunes.lock().expect("capture mutex");
+
+        assert!(
+            prunes
+                .iter()
+                .any(|(kind, _)| kind.as_deref() == Some("interface_in_errors"))
+        );
+
+        assert!(
+            prunes
+                .iter()
+                .any(|(kind, _)| kind.as_deref() == Some("interface_out_errors"))
+        );
+
+        assert!(prunes.iter().all(|(kind, labels)| {
+            kind.as_deref() != Some("interface_oper_status")
+                && labels == &[(Cow::Borrowed("interface_name"), "nvl0".to_string())]
+        }));
+    }
+
+    #[test]
+    fn sample_deletes_prune_only_covered_metrics() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+
+        let cases = [
+            (
+                vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("oper-status", &[]),
+                ],
+                1,
+                Some("interface_oper_status"),
+                vec![(Cow::Borrowed("interface_name"), "nvl0".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                ],
+                1,
+                None,
+                vec![(Cow::Borrowed("interface_name"), "nvl0".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("components", &[]),
+                    make_path_elem("component", &[("name", "FAN-1")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("oper-status", &[]),
+                ],
+                0,
+                Some("component_oper_status"),
+                vec![(Cow::Borrowed("component_name"), "FAN-1".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("leak-sensors", &[]),
+                    make_path_elem("leak-sensor", &[("id", "7")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("state", &[]),
+                ],
+                0,
+                Some("leakage_state"),
+                vec![(Cow::Borrowed("sensor"), "7".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("location", &[]),
+                ],
+                0,
+                Some("platform_location_info"),
+                Vec::new(),
+            ),
+        ];
+
+        for (path, prefix_len, kind, labels) in cases {
+            let (prefix, deleted) = path.split_at(prefix_len);
+
+            processor.process_notification(&proto::Notification {
+                prefix: Some(proto::Path {
+                    elem: prefix.to_vec(),
+                    ..Default::default()
+                }),
+                delete: vec![proto::Path {
+                    elem: deleted.to_vec(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+            let actual = sink
+                .prunes
+                .lock()
+                .expect("capture mutex")
+                .drain(..)
+                .collect::<Vec<_>>();
+
+            assert_eq!(actual, vec![(kind.map(str::to_string), labels)]);
+        }
     }
 
     #[test]

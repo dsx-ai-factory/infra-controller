@@ -226,6 +226,10 @@ place. Verified end-to-end on a live cluster: sample DPU walks each dwell
 phase at the configured cadence, parks in `Rebooting`, resumes on annotation
 clear, and reaches `Ready` with clean bookkeeping.
 
-The remaining `TODO(#3323)` marker flags a fidelity decision, not a blocker:
-per-phase dwell durations (OS Installing should linger longer than the config
-phases).
+Every dwell-gated phase lingers for `--phase-dwell`, except OS Installing,
+which lingers for `--os-install-dwell` when that flag is set (default `0`,
+meaning the same as `--phase-dwell`). A real BFB install takes minutes while
+the config phases take seconds; setting `--os-install-dwell=5m` holds NICo in
+its DPF provisioning wait for that long without slowing the rest of the walk.
+Rebooting follows OS Installing in `HappyPath`, so the simulator cannot ask
+NICo for the host reboot before the install has run its course (#4495).

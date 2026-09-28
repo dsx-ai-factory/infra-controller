@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	provisioningv1 "github.com/nvidia/doca-platform/api/provisioning/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -129,6 +130,28 @@ func conditionsByType(t *testing.T, d *unstructured.Unstructured) map[string]map
 		out[typ] = c
 	}
 	return out
+}
+
+func TestDwellForPhase(t *testing.T) {
+	const phase, install = 3 * time.Second, 2 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		osInstall time.Duration
+		phase     provisioningv1.DPUPhase
+		want      time.Duration
+	}{
+		{"OS Installing uses its own dwell when set", install, provisioningv1.DPUOSInstalling, install},
+		{"OS Installing falls back to the phase dwell when unset", 0, provisioningv1.DPUOSInstalling, phase},
+		{"config phases keep the phase dwell", install, provisioningv1.DPUConfig, phase},
+		{"the phase after OS Installing keeps the phase dwell", install, provisioningv1.DPUClusterConfig, phase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &DPUDeviceReconciler{PhaseDwell: phase, OSInstallDwell: tc.osInstall}
+			if got := r.dwellFor(tc.phase); got != tc.want {
+				t.Fatalf("dwellFor(%s) = %v, want %v", tc.phase, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSelectDeployment(t *testing.T) {

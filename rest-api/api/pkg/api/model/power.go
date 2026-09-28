@@ -18,6 +18,7 @@ const (
 	PowerControlStateCycle      = "cycle"
 	PowerControlStateForceOff   = "forceoff"
 	PowerControlStateForceCycle = "forcecycle"
+	PowerControlStateACCycle    = "acpowercycle"
 )
 
 // ValidPowerControlStates defines the valid states for power control operations
@@ -27,6 +28,7 @@ var ValidPowerControlStates = []string{
 	PowerControlStateCycle,
 	PowerControlStateForceOff,
 	PowerControlStateForceCycle,
+	PowerControlStateACCycle,
 }
 
 var validPowerControlStatesAny = func() []interface{} {

@@ -46,7 +46,8 @@ network security group
 
 `-s, --stateful-egress`
 
-Optional, whether egress rules are stateful
+Enable stateful egress. Default: false. Rejected when site-level
+stateful ACL support is disabled
 
 `-r, --rules <RULES>`
 

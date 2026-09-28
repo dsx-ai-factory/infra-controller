@@ -22,30 +22,39 @@ MAT_MODE=scale HOST_COUNT=1000 helm-prereqs/setup-machine-a-tron.sh -y
    from-scratch runs are reproducible.
 1. **`MAT_MODE=scale`** — a scale profile
    (`helm-prereqs/values/machine-a-tron-scale.yaml`) using Controller Mode
-   with the `mat-k8s-controller` for dynamic per-BMC ClusterIP Services.
+   with the `mat-k8s-controller` for dynamic per-BMC Services.
 
 ## Architecture: Controller Mode
 
-The `mat-k8s-controller` dynamically creates one ClusterIP Service per BMC:
+The `mat-k8s-controller` dynamically creates one Service per BMC:
+
 - Discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true` label
 - Polls `/machines/status` from each pod
-- Creates Services with ClusterIP = BMC IP (assigned by NICo DHCP)
+- Creates Services with the BMC IP (assigned by NICo DHCP) as `externalIPs`
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
 
 **Requirements:**
-- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+
+- The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+  node network, and networks that nodes or pods must otherwise reach
+  (BMC IPs are Service externalIPs, for which kube-proxy programs forwarding
+  rules on every node). `setup-machine-a-tron.sh` checks every BMC network in
+  the values file against the ServiceCIDR and stops when it cannot determine
+  the ServiceCIDR (`SCALE_SERVICE_CIDRS`, `SCALE_BMC_PREFIXES`, and
+  `SCALE_ALLOW_UNKNOWN_SERVICE_CIDR` in the script header)
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
-- Leave `site_explorer.bmc_proxy` unset — NICo dials each BMC's ClusterIP directly
+- Leave `site_explorer.bmc_proxy` unset - NICo dials each BMC IP directly
 
 **Example NICo siteConfig:**
+
 ```toml
 allow_insecure_discovery = true
 
 [networks.MAT-BMC-SERVICES]
 type = "underlay"
-prefix = "10.96.64.0/18"
-gateway = "10.96.64.1"
+prefix = "10.200.0.0/18"
+gateway = "10.200.0.1"
 mtu = 1500
 ```
 

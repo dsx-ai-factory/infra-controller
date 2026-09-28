@@ -1,15 +1,17 @@
 # machine-a-tron site values — MULTI-POD Controller Mode
 #
-# Multiple machine-a-tron pods with controller-managed ClusterIP Services.
+# Multiple machine-a-tron pods with controller-managed per-BMC Services.
 # Each pod simulates hosts + DPUs, and the mat-k8s-controller automatically
-# creates Services with BMC IP as ClusterIP.
+# creates Services with the BMC IP as externalIP.
 #
 # Deploy with:
 #   helm upgrade -i nico-machine-a-tron helm/charts/nico-machine-a-tron \
 #       -n nico-system -f <your-copy>.yaml
 #
 # Requirements:
-#  * bmcDhcpRelayAddress must be within Kubernetes ServiceCIDR
+#  * The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#    node network, and networks that nodes or pods must otherwise reach
+#    (BMC IPs are Service externalIPs). Default ServiceCIDRs to stay clear of:
 #    - vanilla k8s: 10.96.0.0/12
 #    - kind: 10.96.0.0/16
 #    - k3d: 10.43.0.0/16
@@ -51,7 +53,7 @@ hwMacAddressRanges:
   enabled: true
   basePrefix: "02:01"
 
-# Controller mode - dynamically creates Services with BMC IP as ClusterIP
+# Controller mode - dynamically creates Services with the BMC IP as externalIP
 mat-k8s-controller:
   enabled: true
   config:
@@ -65,7 +67,7 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 100
         dpuPerHostCount: 2
-        bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+        bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
         underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
   mat-1:
     machines:
@@ -73,7 +75,7 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 100
         dpuPerHostCount: 2
-        bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
+        bmcDhcpRelayAddress: "10.200.0.1"  # NICo assigns unique IPs
         underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
 
 resources:

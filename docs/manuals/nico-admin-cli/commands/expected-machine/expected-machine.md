@@ -48,8 +48,8 @@ Print help (see a summary with -h)
 | [`show`](./expected-machine-show.md) | Show expected machine data |
 | [`add`](./expected-machine-add.md) | Add expected machine |
 | [`delete`](./expected-machine-delete.md) | Delete expected machine |
-| [`patch`](./expected-machine-patch.md) | Patch expected machine (partial update, preserves unprovided fields). |
-| [`update`](./expected-machine-update.md) | Update expected machine from JSON file (full replacement, consistent with API). |
+| [`patch`](./expected-machine-patch.md) | Patch an expected machine. |
+| [`update`](./expected-machine-update.md) | Update an expected machine from a JSON file |
 | [`replace-all`](./expected-machine-replace-all.md) | Replace all entries in the expected machines table with the entries from an inputted json file. |
 | [`erase`](./expected-machine-erase.md) | Erase all expected machines |
 

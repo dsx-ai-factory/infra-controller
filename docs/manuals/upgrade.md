@@ -40,7 +40,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions via server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- DPF operator and DPUService images are updated to the new `NICO_DPF_VERSION`.
+- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: that release). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
 
 ## Pre-upgrade checklist
 
@@ -175,7 +175,7 @@ export NICO_CORE_IMAGE_TAG=v2.1.0                      # new Core tag
 export NICO_REST_IMAGE_TAG=v2.1.0                      # new REST tag
 ```
 
-If you are upgrading DPF as part of this release, the DPF version is read from `NICO_DPF_VERSION` (defaulting to the value baked into `setup.sh`). You do not normally need to set this explicitly unless your site uses a pinned version.
+If you are upgrading DPF as part of this release, the DPF version is the pinned `helm-prereqs/doca-platform` commit of the `setup.sh` you run: the submodule gitlink in a git checkout, or `helm-prereqs/doca-platform.pin` in the packaged `nico-prereqs` chart, which `setup.sh` clones at that commit. There is no version variable to set, and both paths install the same commit. Air-gapped sites that set `NICO_DPF_SRC` manage that checkout themselves: update it to the same commit (`git submodule status helm-prereqs/doca-platform`, or the sha in `doca-platform.pin`), because `setup.sh` installs whatever it contains and only warns when its HEAD differs from the pin. Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
 
 DPF is enabled by default, and on DPF sites two more variables are **required** — preflight raises hard errors when they are unset:
 
@@ -185,6 +185,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 ```
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
+
+### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
+
+Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
 
 ### Run the pre-flight check
 
@@ -397,13 +401,22 @@ helm template metallb metallb/metallb --version "${METALLB_VERSION}" \
 
 ### 2.0 → 2.1: DPF version update
 
-The default `NICO_DPF_VERSION` in `setup.sh` is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
+The `helm-prereqs/doca-platform` submodule pin is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
 
 DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs, all of which persist across the upgrade. In-flight DPU provisioning workflows may pause while the DPF operator restarts; they resume automatically when the new operator pod comes up.
 
 ### 2.0 → 2.1: NICo Core startupProbe
 
 NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent.
+
+### 2.1 → 2.2: NICo REST postgres volume size
+
+NICo 2.2 raises the `postgres` StatefulSet's `volumeClaimTemplates` storage request from 1Gi to 10Gi. Kubernetes forbids changing that field on an existing StatefulSet, so phase 7c of `setup.sh` deletes the StatefulSet with `--cascade=orphan` and re-applies it; the `postgres-0` pod and its `postgres-data-postgres-0` PVC are kept. The PVC of an upgraded site stays at 1Gi. It can be left as is, or grown in place if the StorageClass has `allowVolumeExpansion: true` and its storage provisioner supports expansion:
+
+```bash
+kubectl patch pvc postgres-data-postgres-0 -n postgres \
+    -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+```
 
 ### 2.2 → 2.3: Machine-a-Tron startupProbe Default
 

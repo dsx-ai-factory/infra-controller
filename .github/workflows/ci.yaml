@@ -77,6 +77,9 @@ jobs:
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
+      - name: Test HBN management startup patches
+        run: python3 -B pxe/tests/test_hbn_management.py
+
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
@@ -957,6 +960,35 @@ jobs:
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
+  test-mat-k8s-controller:
+    name: test-mat-k8s-controller
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dev/k8s/machine-a-tron-controller/go.mod
+          cache: true
+          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+
+      - name: Run the mat-k8s-controller unit tests
+        run: make -C dev/k8s/machine-a-tron-controller test
+
   test-release-container-services:
     if: >-
       ${{
@@ -1791,6 +1823,10 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      # Uses python3-yaml installed by the configuration check above.
+      - name: Test DevSpace PostgreSQL connection manifests
+        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1885,11 +1921,17 @@ jobs:
       - name: Test legacy Flow manager cleanup
         run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
 
+      - name: Test REST postgres StatefulSet recreation
+        run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
       - name: Test health check namespaces
         run: bash helm-prereqs/tests/health-check-namespaces_test.sh
+
+      - name: Test health check external VIPs
+        run: bash helm-prereqs/tests/health-check-external-vips_test.sh
 
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
@@ -1902,6 +1944,12 @@ jobs:
 
       - name: Test DPF single Core deployment
         run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
+
+      - name: Test pinned submodule sync
+        run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
+
+      - name: Test doca-platform pin
+        run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
   build-push-helm-prereqs-chart:
     needs:
@@ -2163,6 +2211,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
+      - name: Test optional DPU OTEL Pod configuration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+
   build-push-bluefield-helm-charts:
     needs:
       - prepare
@@ -2239,6 +2293,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2426,6 +2481,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
 
       # CLI images

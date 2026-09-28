@@ -42,6 +42,12 @@ type DPUDeviceReconciler struct {
 	Namespace string
 	// PhaseDwell is how long each dwell-gated phase lingers before advancing.
 	PhaseDwell time.Duration
+	// OSInstallDwell is how long a DPU lingers in OS Installing. Zero means
+	// "same as PhaseDwell". A real BFB install takes minutes while the config
+	// phases take seconds, and NICo waits in its DPF provisioning state for the
+	// whole install; a longer value here exercises that wait without slowing
+	// every other phase.
+	OSInstallDwell time.Duration
 	// Concurrency is the number of parallel reconciles. Reconciles are
 	// per-DPUDevice and independent; the only shared writes are the
 	// node-level reboot/hold patches, which are idempotent (same-key merge
@@ -157,11 +163,9 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 	case simulator.GateDwell:
-		// TODO(#3323): per-phase dwell durations (OS Installing should linger
-		// longer than the config phases); today every dwell phase uses the one
-		// configured PhaseDwell.
+		dwell := r.dwellFor(dpu.Status.Phase)
 		if entered, err := time.Parse(time.RFC3339, dpu.Annotations[carbide.AnnSimPhaseEnteredAt]); err == nil {
-			if remain := r.PhaseDwell - time.Since(entered); remain > 0 {
+			if remain := dwell - time.Since(entered); remain > 0 {
 				return ctrl.Result{RequeueAfter: remain}, nil
 			}
 		} else {
@@ -170,7 +174,7 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err := r.setDPUAnnotation(ctx, dpu, carbide.AnnSimPhaseEnteredAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{RequeueAfter: r.PhaseDwell}, nil
+			return ctrl.Result{RequeueAfter: dwell}, nil
 		}
 	}
 
@@ -449,6 +453,15 @@ func (r *DPUDeviceReconciler) bfbFileFor(bfb string) string {
 // immutable spec no longer matches the deployment selecting its node; the
 // next reconcile recreates it.
 var errDPURecreating = errors.New("DPU deleted for recreation under its DPUDeployment")
+
+// dwellFor returns how long a dwell-gated phase lingers: OSInstallDwell for
+// OS Installing when set, PhaseDwell for everything else.
+func (r *DPUDeviceReconciler) dwellFor(phase provisioningv1.DPUPhase) time.Duration {
+	if phase == provisioningv1.DPUOSInstalling && r.OSInstallDwell > 0 {
+		return r.OSInstallDwell
+	}
+	return r.PhaseDwell
+}
 
 func (r *DPUDeviceReconciler) ensureDPU(
 	ctx context.Context, device *provisioningv1.DPUDevice, dpuName, nodeName string,

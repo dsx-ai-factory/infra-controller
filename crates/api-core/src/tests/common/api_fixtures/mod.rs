@@ -168,6 +168,15 @@ fn test_rack_firmware_update_manager(
     })
 }
 
+fn test_machine_info_provider(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::MachineInfoProvider>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_machine_info_provider(client))
+            as Arc<dyn component_manager::MachineInfoProvider>
+    })
+}
+
 pub(in crate::tests) mod dpu;
 pub(in crate::tests) mod host;
 pub(in crate::tests) mod ib_partition;
@@ -1747,7 +1756,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         common_pools.clone(),
         api.work_lock_manager_handle.clone(),
         site_explorer_rack_profiles,
-        rms_sim.as_rms_client(),
+        test_machine_info_provider(&rms_sim),
         credential_manager.clone(),
         api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
     );

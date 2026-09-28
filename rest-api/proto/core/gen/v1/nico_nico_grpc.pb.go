@@ -277,6 +277,7 @@ const (
 	Forge_DeleteExpectedRackGroup_FullMethodName                            = "/forge.Forge/DeleteExpectedRackGroup"
 	Forge_UpdateExpectedRackGroup_FullMethodName                            = "/forge.Forge/UpdateExpectedRackGroup"
 	Forge_GetExpectedRackGroup_FullMethodName                               = "/forge.Forge/GetExpectedRackGroup"
+	Forge_GetAllExpectedRackGroups_FullMethodName                           = "/forge.Forge/GetAllExpectedRackGroups"
 	Forge_FindExpectedRackGroupIds_FullMethodName                           = "/forge.Forge/FindExpectedRackGroupIds"
 	Forge_FindExpectedRackGroupsByIds_FullMethodName                        = "/forge.Forge/FindExpectedRackGroupsByIds"
 	Forge_ReplaceAllExpectedRackGroups_FullMethodName                       = "/forge.Forge/ReplaceAllExpectedRackGroups"
@@ -1034,6 +1035,8 @@ type ForgeClient interface {
 	// Replace the full record, including both lists and metadata.
 	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
+	// Return all declarations ordered by rack group ID; an empty site returns an empty list.
+	GetAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
 	FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
@@ -4037,6 +4040,16 @@ func (c *forgeClient) GetExpectedRackGroup(ctx context.Context, in *ExpectedRack
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectedRackGroup)
 	err := c.cc.Invoke(ctx, Forge_GetExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ExpectedRackGroupList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupList)
+	err := c.cc.Invoke(ctx, Forge_GetAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7105,6 +7118,8 @@ type ForgeServer interface {
 	// Replace the full record, including both lists and metadata.
 	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
 	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
+	// Return all declarations ordered by rack group ID; an empty site returns an empty list.
+	GetAllExpectedRackGroups(context.Context, *emptypb.Empty) (*ExpectedRackGroupList, error)
 	FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
@@ -8327,6 +8342,9 @@ func (UnimplementedForgeServer) UpdateExpectedRackGroup(context.Context, *Expect
 }
 func (UnimplementedForgeServer) GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) GetAllExpectedRackGroups(context.Context, *emptypb.Empty) (*ExpectedRackGroupList, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAllExpectedRackGroups not implemented")
 }
 func (UnimplementedForgeServer) FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupIds not implemented")
@@ -13684,6 +13702,24 @@ func _Forge_GetExpectedRackGroup_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetAllExpectedRackGroups(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19307,6 +19343,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetExpectedRackGroup",
 			Handler:    _Forge_GetExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "GetAllExpectedRackGroups",
+			Handler:    _Forge_GetAllExpectedRackGroups_Handler,
 		},
 		{
 			MethodName: "FindExpectedRackGroupIds",

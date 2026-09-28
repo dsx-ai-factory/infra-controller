@@ -542,6 +542,35 @@ impl GaugeMetrics {
         );
     }
 
+    /// Drops readings with the selected type, unit, and label values. When given,
+    /// label names must match the complete dynamic label set.
+    pub(crate) fn prune(
+        &self,
+        metric_type: Option<&str>,
+        labels: &[(Cow<'static, str>, String)],
+        unit: Option<&str>,
+        label_names: Option<&[Cow<'static, str>]>,
+    ) {
+        self.gauges.retain(|_, data| {
+            let matches = metric_type.is_none_or(|kind| data.metric_type == kind)
+                && labels.iter().all(|label| data.labels.contains(label))
+                && unit.is_none_or(|unit| data.unit == unit)
+                && label_names.is_none_or(|names| {
+                    data.labels.len() == names.len()
+                        && names
+                            .iter()
+                            .all(|name| data.labels.iter().any(|(actual, _)| actual == name))
+                });
+
+            !matches
+        });
+    }
+
+    /// Removes one reading by the key used when it was recorded.
+    pub(crate) fn prune_key(&self, key: &str) {
+        self.gauges.remove(&GaugeKey::from(key));
+    }
+
     pub fn sweep_stale(&self) {
         let current_gen = self.current_generation.load(Ordering::Acquire);
         self.gauges.retain(|_, data| data.generation == current_gen);

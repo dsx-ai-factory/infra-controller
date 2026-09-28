@@ -25,20 +25,16 @@ use crate::metadata::parse_rpc_labels;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Add an expected rack with its rack profile:
-    $ nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 \
-    abcdef01-2345-6789-abcd-ef0123456789
+Add a rack already declared in an expected rack group:
+    $ nico-admin-cli expected-rack add rack-01
 
 Add an expected rack with a metadata name and a label:
-    $ nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 \
-    abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01 --label DATACENTER:XYZ
+    $ nico-admin-cli expected-rack add rack-01 --meta-name rack-01 --label DATACENTER:XYZ
 
 ")]
 pub(crate) struct Args {
     #[clap(help = "Rack ID of the expected rack")]
     rack_id: RackId,
-    #[clap(help = "Rack profile ID of the expected rack")]
-    rack_profile_id: String,
 
     #[clap(
         long = "meta-name",
@@ -73,7 +69,7 @@ impl From<Args> for rpc::forge::ExpectedRack {
         };
         rpc::forge::ExpectedRack {
             rack_id: Some(value.rack_id),
-            rack_profile_id: Some(value.rack_profile_id.into()),
+            rack_profile_id: None,
             metadata: Some(metadata),
         }
     }

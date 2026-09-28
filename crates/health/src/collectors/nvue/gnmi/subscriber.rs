@@ -28,7 +28,7 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::client::{
-    GnmiClient, GnmiClientConfig, build_extended_subscribe_request,
+    GnmiClient, GnmiClientConfig, GnmiSubscription, build_extended_subscribe_request,
     nvue_leak_sensor_subscribe_path, nvue_subscribe_paths, system_events_prefix,
     system_events_subscribe_path,
 };
@@ -463,7 +463,7 @@ async fn subscribe_sample_with_cached_credentials(
     client_provider: &GnmiClientProvider,
     paths: &[proto::Path],
     sample_interval_nanos: u64,
-) -> Result<(tonic::Streaming<proto::SubscribeResponse>, u64), GnmiStreamOpenError> {
+) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
     let (client, credential_generation) =
         client_provider
             .new_client()
@@ -486,7 +486,7 @@ async fn subscribe_on_change_with_cached_credentials(
     client_provider: &GnmiClientProvider,
     prefix: &proto::Path,
     paths: &[proto::Path],
-) -> Result<(tonic::Streaming<proto::SubscribeResponse>, u64), GnmiStreamOpenError> {
+) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
     let (client, credential_generation) =
         client_provider
             .new_client()
@@ -508,7 +508,7 @@ async fn subscribe_on_change_with_cached_credentials(
 async fn subscribe_extended_with_cached_credentials(
     client_provider: &GnmiClientProvider,
     request: proto::SubscribeRequest,
-) -> Result<(tonic::Streaming<proto::SubscribeResponse>, u64), GnmiStreamOpenError> {
+) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
     let (client, credential_generation) =
         client_provider
             .new_client()
@@ -1010,7 +1010,7 @@ async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: Extended
 async fn consume_extended_stream(
     cancel_token: &CancellationToken,
     state: &mut ExtendedGnmiStreamState,
-    stream: &mut tonic::Streaming<proto::SubscribeResponse>,
+    stream: &mut GnmiSubscription,
     credential_generation: u64,
     backoff: &mut ExponentialBackoff,
 ) -> ExtendedStreamExit {

@@ -9,24 +9,113 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/labels"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
+
+const derivedTestProfile = "GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"
+
+type readbackCancelKey struct{}
+
+type expectedRackDBContextHook struct {
+	t       *testing.T
+	updates *atomic.Int64
+}
+
+func (h expectedRackDBContextHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	_, hasDeadline := ctx.Deadline()
+	assert.False(h.t, hasDeadline, "database operations must not inherit the Core workflow deadline")
+	return ctx
+}
+
+func (h expectedRackDBContextHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if h.updates != nil && strings.Contains(event.Query, `UPDATE "expected_rack"`) {
+		h.updates.Add(1)
+	}
+}
+
+func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *mock.Call, bulk bool) {
+	t.Helper()
+	var racks []*corev1.ExpectedRack
+	var mutationCtx context.Context
+	mutation.Run(func(args mock.Arguments) {
+		mutationCtx = args.Get(0).(context.Context)
+		if bulk {
+			racks = args.Get(3).(*corev1.ExpectedRackList).ExpectedRacks
+		} else {
+			racks = []*corev1.ExpectedRack{args.Get(3).(*corev1.ExpectedRack)}
+		}
+		for _, rack := range racks {
+			require.Empty(t, rack.GetRackProfileId().GetId(), "caller profile must not reach Core")
+		}
+		if cancel, ok := mutationCtx.Value(readbackCancelKey{}).(context.CancelFunc); ok {
+			cancel()
+		}
+	})
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).Return(func(ctx context.Context, _ tclient.StartWorkflowOptions, _ interface{}, args ...interface{}) tclient.WorkflowRun {
+		deadline, ok := mutationCtx.Deadline()
+		require.True(t, ok)
+		readDeadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		require.Equal(t, deadline, readDeadline, "readback must share the mutation budget")
+		request := args[0].(grpcproxy.Request)
+		result := &corev1.ExpectedRackList{}
+		for _, rack := range racks {
+			stored := proto.Clone(rack).(*corev1.ExpectedRack)
+			stored.RackProfileId = &corev1.RackProfileId{Id: derivedTestProfile}
+			if bulk {
+				stored.RackProfileId.Id += "_" + stored.GetRackId().GetId()
+			}
+			if stored.GetRackId().GetId() == "readback-empty-profile" {
+				stored.RackProfileId = nil
+			}
+			result.ExpectedRacks = append(result.ExpectedRacks, stored)
+		}
+		var message proto.Message = result
+		if bulk {
+			slices.Reverse(result.ExpectedRacks)
+			require.Equal(t, corev1.Forge_GetAllExpectedRacks_FullMethodName, request.FullMethod)
+		} else {
+			require.Equal(t, corev1.Forge_GetExpectedRack_FullMethodName, request.FullMethod)
+			var lookup corev1.ExpectedRackRequest
+			require.NoError(t, protojson.Unmarshal(request.RequestJSON, &lookup))
+			require.Equal(t, racks[0].GetRackId().GetId(), lookup.RackId)
+			message = result.ExpectedRacks[0]
+		}
+		encoded, err := protojson.Marshal(message)
+		require.NoError(t, err)
+		run := &tmocks.WorkflowRun{}
+		run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			args.Get(1).(*grpcproxy.Response).ResponseJSON = encoded
+		}).Return(nil)
+		return run
+	}, nil)
+}
 
 // testExpectedRackInitDB initializes a test database session
 func testExpectedRackInitDB(t *testing.T) *cdb.Session {
@@ -93,6 +182,7 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 	e := echo.New()
 
 	dbSession := testExpectedRackInitDB(t)
+	dbSession.DB.AddQueryHook(expectedRackDBContextHook{t: t})
 	defer dbSession.Close()
 
 	cfg := common.GetTestConfig()
@@ -150,7 +240,8 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateExpectedRack", mock.Anything).Return(mockWorkflowRun, nil)
+	mutation := mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateExpectedRack", mock.Anything).Return(mockWorkflowRun, nil)
+	mockExpectedRackReadback(t, mockTemporalClient, mutation, false)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewCreateExpectedRackHandler(dbSession, scp, cfg)
@@ -256,7 +347,7 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name: "invalid empty rack_profile_id",
+			name: "profile omitted and derived by Core",
 			requestBody: model.APIExpectedRackCreateRequest{
 				SiteID:        site.ID.String(),
 				RackID:        "test-rack-006",
@@ -267,7 +358,30 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName")
 				c.SetParamValues(org)
 			},
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:        "missing Core profile rolls back local create",
+			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-empty-profile"},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadGateway,
+		},
+		{
+			name:        "expired mutation budget does not start readback",
+			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-starved"},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+				ctx, cancel := context.WithCancel(c.Request().Context())
+				t.Cleanup(cancel)
+				c.SetRequest(c.Request().WithContext(context.WithValue(ctx, readbackCancelKey{}, cancel)))
+			},
+			expectedStatus: http.StatusGatewayTimeout,
 		},
 		{
 			name: "invalid siteId UUID",
@@ -349,6 +463,11 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
+			if tt.requestBody.RackID == "readback-empty-profile" || tt.requestBody.RackID == "readback-starved" {
+				count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedRack)(nil)).Where("rack_id = ?", tt.requestBody.RackID).Count(context.Background())
+				require.NoError(t, err)
+				assert.Zero(t, count)
+			}
 
 			if tt.expectedStatus == http.StatusCreated {
 				var response model.APIExpectedRack
@@ -357,6 +476,10 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 				// Server-generated UUID should be present
 				assert.NotEqual(t, uuid.Nil, response.ID, "Response should include a server-generated ID UUID")
 				assert.Equal(t, tt.requestBody.RackID, response.RackID, "RackID should round-trip")
+				assert.Equal(t, derivedTestProfile, response.RackProfileID)
+				stored, err := erDAO.Get(ctx, nil, response.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, derivedTestProfile, stored.RackProfileID)
 				if tt.requestBody.Name != nil {
 					assert.Equal(t, *tt.requestBody.Name, response.Name, "Name in response should match request")
 				}
@@ -902,10 +1025,11 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 		checkResponseContent func(t *testing.T, body []byte)
 	}{
 		{
-			name: "successful update of rack_profile_id",
+			name: "legacy profile ignored during metadata update",
 			id:   testER.ID.String(),
 			requestBody: model.APIExpectedRackUpdateRequest{
 				RackProfileID: cutil.GetPtr("profile-updated-001"),
+				Name:          cutil.GetPtr("updated rack"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -913,6 +1037,11 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testER.ID.String())
 			},
 			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedRack
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "profile-update-original", response.RackProfileID)
+			},
 		},
 		{
 			name: "successful update of name, description, and labels",
@@ -1032,7 +1161,7 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 			name: "cannot update on unmanaged site",
 			id:   unmanagedER.ID.String(),
 			requestBody: model.APIExpectedRackUpdateRequest{
-				RackProfileID: cutil.GetPtr("profile-should-not-update"),
+				Name: cutil.GetPtr("must-not-update"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1061,7 +1190,7 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 			name: "rack not found",
 			id:   "12345678-1234-1234-1234-123456789099",
 			requestBody: model.APIExpectedRackUpdateRequest{
-				RackProfileID: cutil.GetPtr("profile-should-not-update"),
+				Name: cutil.GetPtr("must-not-update"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1211,6 +1340,7 @@ func TestUpdateExpectedRackHandler_RackIDImmutable(t *testing.T) {
 	t.Run("omitted rack_id remains compatible", func(t *testing.T) {
 		rec := patch(model.APIExpectedRackUpdateRequest{
 			RackProfileID: cutil.GetPtr("profile-omitted"),
+			Name:          cutil.GetPtr("metadata-only-update"),
 		})
 
 		assert.Equal(t, http.StatusOK, rec.Code)
@@ -1383,6 +1513,8 @@ func TestDeleteExpectedRackHandler_Handle(t *testing.T) {
 func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedRackInitDB(t)
+	var profileUpdates atomic.Int64
+	dbSession.DB.AddQueryHook(expectedRackDBContextHook{t: t, updates: &profileUpdates})
 	defer dbSession.Close()
 
 	ctx := context.Background()
@@ -1425,7 +1557,8 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "ReplaceAllExpectedRacks", mock.Anything).Return(mockWorkflowRun, nil)
+	mutation := mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "ReplaceAllExpectedRacks", mock.Anything).Return(mockWorkflowRun, nil)
+	mockExpectedRackReadback(t, mockTemporalClient, mutation, true)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewReplaceAllExpectedRacksHandler(dbSession, scp, cfg)
@@ -1454,6 +1587,7 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 		expectedStatus   int
 		expectedRackIDs  []string
 		shouldCheckCount bool
+		checkClear       bool
 	}{
 		{
 			name: "successful replace from empty to 3 entries",
@@ -1464,11 +1598,16 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 						SiteID:        site.ID.String(),
 						RackID:        "replace-rack-001",
 						RackProfileID: "profile-replace-001",
+						Name:          cutil.GetPtr("Rack one"),
+						Description:   cutil.GetPtr("First rack"),
+						Labels:        map[string]string{"location.room": "room-a"},
 					},
 					{
 						SiteID:        site.ID.String(),
 						RackID:        "replace-rack-002",
 						RackProfileID: "profile-replace-002",
+						Name:          cutil.GetPtr("Rack two"),
+						Labels:        map[string]string{"location.room": "room-b"},
 					},
 					{
 						SiteID:        site.ID.String(),
@@ -1556,6 +1695,22 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name: "missing profile rolls back the entire replacement",
+			requestBody: model.APIReplaceAllExpectedRacksRequest{
+				SiteID: site.ID.String(),
+				ExpectedRacks: []*model.APIExpectedRackCreateRequest{
+					{SiteID: site.ID.String(), RackID: "valid-replacement"},
+					{SiteID: site.ID.String(), RackID: "readback-empty-profile"},
+				},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadGateway,
+		},
+		{
 			name: "cannot replace on unmanaged site",
 			requestBody: model.APIReplaceAllExpectedRacksRequest{
 				SiteID: unmanagedSite.ID.String(),
@@ -1574,6 +1729,18 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			},
 			expectedStatus: http.StatusForbidden,
 		},
+		{
+			name: "empty replacement clears only the target site without readback",
+			requestBody: model.APIReplaceAllExpectedRacksRequest{
+				SiteID: site.ID.String(), ExpectedRacks: []*model.APIExpectedRackCreateRequest{},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK, shouldCheckCount: true, checkClear: true,
+		},
 	}
 
 	_ = infraProv
@@ -1581,8 +1748,27 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			callsBefore := len(mockTemporalClient.Calls)
+			profileUpdates.Store(0)
+			var otherRack *cdbm.ExpectedRack
+			if tt.checkClear {
+				for _, targetSite := range []*cdbm.Site{site, unmanagedSite} {
+					rack, err := cdbm.NewExpectedRackDAO(dbSession).Create(ctx, nil, cdbm.ExpectedRackCreateInput{
+						ExpectedRackID: uuid.New(), SiteID: targetSite.ID, RackID: "clear-test-rack",
+						RackProfileID: "legacy-profile", CreatedBy: dbUser.ID,
+					})
+					require.NoError(t, err)
+					if targetSite.ID == unmanagedSite.ID {
+						otherRack = rack
+					}
+				}
+			}
 			if tt.setupBefore != nil {
 				tt.setupBefore()
+			}
+			var before []cdbm.ExpectedRack
+			if tt.expectedStatus == http.StatusBadGateway {
+				require.NoError(t, dbSession.DB.NewSelect().Model(&before).Order("id").Scan(ctx))
 			}
 
 			reqBody, _ := json.Marshal(tt.requestBody)
@@ -1597,12 +1783,30 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 
 			err := handler.Handle(c)
 
+			if tt.expectedStatus == http.StatusOK && len(tt.requestBody.ExpectedRacks) > 0 {
+				assert.EqualValues(t, 1, profileUpdates.Load(), "profiles must be written in one batch")
+			} else {
+				assert.Zero(t, profileUpdates.Load(), "empty or invalid replacements must not write profiles")
+			}
 			assert.Nil(t, err)
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
 
+			if tt.checkClear {
+				assert.JSONEq(t, "[]", rec.Body.String())
+				count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedRack)(nil)).Where("site_id = ?", site.ID).Count(ctx)
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				stored, err := cdbm.NewExpectedRackDAO(dbSession).Get(ctx, nil, otherRack.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, otherRack, stored)
+				calls := mockTemporalClient.Calls[callsBefore:]
+				require.Len(t, calls, 1, "clearing must invoke only the mutation, not profile readback")
+				assert.Equal(t, "ReplaceAllExpectedRacks", calls[0].Arguments.Get(2))
+				assert.Empty(t, calls[0].Arguments.Get(3).(*corev1.ExpectedRackList).ExpectedRacks)
+			}
 			if tt.shouldCheckCount && rec.Code == http.StatusOK {
 				var response []model.APIExpectedRack
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
@@ -1610,13 +1814,37 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 				assert.Equal(t, len(tt.expectedRackIDs), len(response), "Response should contain expected number of racks")
 
 				responseIDs := make(map[string]bool)
-				for _, er := range response {
+				for i, er := range response {
+					expected := tt.requestBody.ExpectedRacks[i]
+					assert.Equal(t, expected.RackID, er.RackID, "response must preserve request order")
+					assert.Equal(t, derivedTestProfile+"_"+er.RackID, er.RackProfileID)
+					stored, err := cdbm.NewExpectedRackDAO(dbSession).Get(ctx, nil, er.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, er.RackProfileID, stored.RackProfileID)
+					if expected.Name != nil {
+						assert.Equal(t, *expected.Name, stored.Name)
+					}
+					if expected.Description != nil {
+						assert.Equal(t, *expected.Description, stored.Description)
+					}
+					assert.Equal(t, len(expected.Labels), len(stored.Labels))
+					for key, value := range expected.Labels {
+						assert.Equal(t, value, stored.Labels[key])
+					}
+					assert.Equal(t, stored.Name, er.Name)
+					assert.Equal(t, stored.Description, er.Description)
+					assert.EqualValues(t, stored.Labels, er.Labels)
 					responseIDs[er.RackID] = true
 					assert.NotEqual(t, uuid.Nil, er.ID, "Each replaced rack should have a server-generated UUID")
 				}
 				for _, expected := range tt.expectedRackIDs {
 					assert.True(t, responseIDs[expected], "Response should contain rack ID %s", expected)
 				}
+			}
+			if tt.expectedStatus == http.StatusBadGateway {
+				var after []cdbm.ExpectedRack
+				require.NoError(t, dbSession.DB.NewSelect().Model(&after).Order("id").Scan(ctx))
+				assert.Equal(t, before, after)
 			}
 		})
 	}

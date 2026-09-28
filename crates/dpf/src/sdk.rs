@@ -833,6 +833,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
             .map(|_| resolved.interfaces.as_ref()),
         config.service_vpc_slots,
         &config.extra_bfcfg_parameters,
+        config.enable_delay_host_init,
     )?;
     let name = flavor.unique_name(&config.flavor_name)?;
     flavor.metadata.name = Some(name.clone());
@@ -879,6 +880,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         &config.proxy,
         resolved.pf_total_sf,
         &config.extra_bfcfg_parameters,
+        config.enable_delay_host_init,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
@@ -5557,6 +5559,7 @@ mod tests {
             &None,
             calculate_astra_pf_total_sf(build_astra_dpu_interfaces_vec().as_slice()).unwrap(),
             &[],
+            true,
         )
         .unwrap();
         let reference_keys: BTreeSet<_> = template

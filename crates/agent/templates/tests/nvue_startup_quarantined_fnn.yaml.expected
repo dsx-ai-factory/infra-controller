@@ -78,7 +78,7 @@
         ip:
           address:
             10.217.5.161/30: {} 
-          vrf: vpc_1025186 
+          vrf: vpc_1025186
     nve:
       vxlan:
         arp-nd-suppress: on

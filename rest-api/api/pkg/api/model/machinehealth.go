@@ -5,6 +5,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
@@ -12,6 +13,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
+	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
 
 // MachineHealthReportMode is the API-facing apply mode for a Machine health report override.
@@ -270,6 +272,51 @@ type APIMachineHealthReportEntryRequest struct {
 	Mode      MachineHealthReportMode        `json:"mode"`
 }
 
+// APIRackHealthReportEntryRequest is the request body for a Rack health report override.
+type APIRackHealthReportEntryRequest struct {
+	APIMachineHealthReportEntryRequest
+	SiteID string `json:"siteId"`
+}
+
+// Validate validates a Rack health report override request.
+func (r *APIRackHealthReportEntryRequest) Validate() error {
+	if err := validation.ValidateStruct(r,
+		validation.Field(&r.SiteID,
+			validation.Required.Error("siteId is required"),
+			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+	); err != nil {
+		return err
+	}
+	return r.APIMachineHealthReportEntryRequest.Validate()
+}
+
+// APITrayHealthReportEntryRequest is the request body for a Tray health report override.
+type APITrayHealthReportEntryRequest struct {
+	APIMachineHealthReportEntryRequest
+	SiteID string `json:"siteId"`
+	Type   string `json:"type"`
+}
+
+// Validate validates a Tray health report override request.
+func (r *APITrayHealthReportEntryRequest) Validate() error {
+	if err := validation.ValidateStruct(r,
+		validation.Field(&r.SiteID,
+			validation.Required.Error("siteId is required"),
+			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+		validation.Field(&r.Type,
+			validation.Required.Error("type is required"),
+			validation.In(validTrayTypesAny...).Error(
+				fmt.Sprintf("type must be one of %s", strings.Join(ValidTrayTypeNames(), ", ")),
+			),
+		),
+	); err != nil {
+		return err
+	}
+	return r.APIMachineHealthReportEntryRequest.Validate()
+}
+
 // Validate ensures the Machine health report entry request is acceptable.
 func (amhrer *APIMachineHealthReportEntryRequest) Validate() error {
 	err := validation.ValidateStruct(amhrer,
@@ -311,27 +358,33 @@ func (amhrer *APIMachineHealthReportEntryRequest) Validate() error {
 
 // ToProto converts an APIMachineHealthReportEntryRequest to its protobuf form.
 func (amhrer APIMachineHealthReportEntryRequest) ToProto(machineID string, triggeredBy *cdbm.User) *corev1.InsertMachineHealthReportRequest {
+	return &corev1.InsertMachineHealthReportRequest{
+		MachineId:         &corev1.MachineId{Id: machineID},
+		HealthReportEntry: amhrer.ToHealthReportEntryProto(triggeredBy),
+	}
+}
+
+// ToHealthReportEntryProto converts an APIMachineHealthReportEntryRequest to the shared
+// protobuf entry used by Machine, Rack, Switch, and Power Shelf health report RPCs.
+func (amhrer APIMachineHealthReportEntryRequest) ToHealthReportEntryProto(triggeredBy *cdbm.User) *corev1.HealthReportEntry {
 	observedAt := time.Now().Format(time.RFC3339Nano)
 
-	protoRequest := &corev1.InsertMachineHealthReportRequest{
-		MachineId: &corev1.MachineId{Id: machineID},
-		HealthReportEntry: &corev1.HealthReportEntry{
-			Report: &corev1.HealthReport{
-				Source:      amhrer.Source,
-				TriggeredBy: cutil.GetPtr(triggeredBy.ID.String()),
-				ObservedAt:  cutil.StrPtrToProtoTimePtr(&observedAt),
-			},
-			Mode: amhrer.Mode.ToProto(),
+	protoEntry := &corev1.HealthReportEntry{
+		Report: &corev1.HealthReport{
+			Source:      amhrer.Source,
+			TriggeredBy: cutil.GetPtr(triggeredBy.ID.String()),
+			ObservedAt:  cutil.StrPtrToProtoTimePtr(&observedAt),
 		},
+		Mode: amhrer.Mode.ToProto(),
 	}
 
 	for _, success := range amhrer.Successes {
-		protoRequest.HealthReportEntry.Report.Successes = append(protoRequest.HealthReportEntry.Report.Successes, success.ToProto())
+		protoEntry.Report.Successes = append(protoEntry.Report.Successes, success.ToProto())
 	}
 
 	for _, alert := range amhrer.Alerts {
-		protoRequest.HealthReportEntry.Report.Alerts = append(protoRequest.HealthReportEntry.Report.Alerts, alert.ToProto())
+		protoEntry.Report.Alerts = append(protoEntry.Report.Alerts, alert.ToProto())
 	}
 
-	return protoRequest
+	return protoEntry
 }
