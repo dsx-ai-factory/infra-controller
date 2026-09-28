@@ -1623,6 +1623,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		mockTaskIDs    []*flowv1.UUID
 		mockResultErr  error
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
 		{
@@ -1653,6 +1654,15 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1736,6 +1746,8 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 				return
 			}
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 
@@ -1777,6 +1789,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		mockTaskIDs    []*flowv1.UUID
 		mockResultErr  error
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
 		{
@@ -1804,6 +1817,14 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"%s"},"version":"24.11.0"}`, site.ID.String(), fwRackID),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"batch-tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1877,6 +1898,8 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 				return
 			}
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 
