@@ -199,6 +199,23 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, operatorRootConstraints, 1)
 
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "ipv6-prefix-length", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	_, err = ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	require.NoError(t, err)
+	v6AllocationBody, err := json.Marshal(model.APIAllocationCreateRequest{
+		Name: "ipv6-allocation", TenantID: tenant1.ID.String(), SiteID: site.ID.String(),
+		AllocationConstraints: []model.APIAllocationConstraintCreateRequest{{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbV6.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 80}},
+	})
+	require.NoError(t, err)
+	v6Allocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(v6AllocationBody))
+	v6Constraint, err := acDAO.GetByID(ctx, nil, uuid.MustParse(v6Allocation.AllocationConstraints[0].ID), nil)
+	require.NoError(t, err)
+	require.NotNil(t, v6Constraint.DerivedResourceID)
+	v6ChildBefore, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, *v6Constraint.DerivedResourceID, nil)
+	require.NoError(t, err)
+	v6UsageBefore, err := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, ipbV6)
+	require.NoError(t, err)
+
 	// Setup test data for Allocation Constraint Update
 	okBodyIT1, err := json.Marshal(model.APIAllocationConstraintUpdateRequest{ConstraintValue: 23})
 	assert.Nil(t, err)
@@ -334,6 +351,44 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		tmc                     *tmocks.Client
 		assertState             func(t *testing.T)
 	}{
+		{
+			name:               "preserve shorter-than-source error",
+			reqOrgName:         ipOrg1,
+			reqBody:            `{"constraintValue":63}`,
+			user:               ipu,
+			requestedAID:       v6Constraint.AllocationID,
+			requestedACS:       *v6Constraint,
+			acID:               v6Constraint.ID.String(),
+			expectedErr:        true,
+			expectedErrMessage: "New constraint value cannot be less than the source IP Block prefix length",
+			expectedStatus:     http.StatusBadRequest,
+		},
+		{
+			name:               "reject IPv6 length without changing the allocation",
+			reqOrgName:         ipOrg1,
+			reqBody:            `{"constraintValue":336}`,
+			user:               ipu,
+			requestedAID:       v6Constraint.AllocationID,
+			requestedACS:       *v6Constraint,
+			acID:               v6Constraint.ID.String(),
+			expectedErr:        true,
+			expectedErrMessage: "prefix length must be between 64 and 128",
+			expectedStatus:     http.StatusBadRequest,
+			assertState: func(t *testing.T) {
+				constraint, err := acDAO.GetByID(ctx, nil, v6Constraint.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, v6Constraint, constraint)
+				child, err := ipbDAO.GetByID(ctx, nil, *v6Constraint.DerivedResourceID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, v6ChildBefore, child)
+				usage, err := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, ipbV6)
+				require.NoError(t, err)
+				assert.Equal(t, v6UsageBefore, usage)
+				prefix, err := ipamStorage.ReadPrefix(ctx, "2001:db8::/80", ipam.GetIpamNamespaceForIPBlock(ctx, ipbV6.RoutingType, ip.ID.String(), site.ID.String()))
+				require.NoError(t, err)
+				assert.Equal(t, "2001:db8::/64", prefix.ParentCidr)
+			},
+		},
 		{
 			name:           "error when User is not found in Request Context",
 			reqOrgName:     ipOrg1,
@@ -599,7 +654,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			},
 		},
 		{
-			name:               "error updating IP Block Allocation Constraint value due to IPAM error",
+			name:               "error updating IP Block Allocation Constraint beyond the IPv4 maximum",
 			reqOrgName:         ipOrg1,
 			reqBody:            string(errBodyIP1),
 			user:               ipu,
@@ -608,7 +663,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			acID:               acsip1[0].ID.String(),
 			expectedErr:        true,
 			expectedStatus:     http.StatusBadRequest,
-			expectedIpamErrMsg: "Failed to create updated IPAM entry for Allocation Constraint's Tenant IP Block. Details: unable to persist created child:unable to parse cidr:invalid Prefix",
+			expectedIpamErrMsg: "prefix length must be between 16 and 32",
 		},
 	}
 	for _, tc := range tests {

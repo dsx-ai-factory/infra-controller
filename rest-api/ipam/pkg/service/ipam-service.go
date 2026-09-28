@@ -128,6 +128,14 @@ func (i *IPAMService) AcquireChildPrefix(ctx context.Context, req *connect.Reque
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
 	} else {
+		prefix, parseErr := netip.ParsePrefix(req.Msg.Cidr)
+		if parseErr != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, parseErr)
+		}
+		// Check the address family limit before narrowing the requested length to uint8.
+		if req.Msg.Length > uint32(prefix.Addr().BitLen()) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("prefix length must be at most %d", prefix.Addr().BitLen()))
+		}
 		resp, err = i.ipamer.AcquireChildPrefix(ctx, req.Msg.Cidr, uint8(req.Msg.Length))
 		if err != nil {
 			i.log.Error("acquirechildprefix", "error", err)
