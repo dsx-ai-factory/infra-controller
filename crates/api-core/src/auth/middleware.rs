@@ -572,6 +572,8 @@ mod tests {
 
     #[test]
     fn machineatron_scout_stream_requires_explicit_devspace_opt_in() {
+        // Denied cases emit the same global counter asserted by the denial tests.
+        let _metrics = MetricsCapture::start();
         let values: serde_yaml::Value = serde_yaml::from_str(include_str!(
             "../../../../dev/deployment/devspace/values.base.yaml"
         ))
