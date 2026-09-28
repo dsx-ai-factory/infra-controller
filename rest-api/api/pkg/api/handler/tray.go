@@ -820,7 +820,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle, acpowercycle)
+// @Description Power control a Tray identified by component ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -918,7 +918,7 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", apiRequest.State, trayStrID), "Tray")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
 	if err != nil {
 		return err
 	}
@@ -951,7 +951,7 @@ func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Trays
-// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle, acpowercycle). If no filter is specified, targets all trays in the Site.
+// @Description Power control Trays with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all trays in the Site.
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -1048,7 +1048,7 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Tray")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
 	if err != nil {
 		return err
 	}

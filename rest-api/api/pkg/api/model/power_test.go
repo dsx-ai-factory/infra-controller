@@ -22,44 +22,38 @@ func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
 }
 
 func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
+	states := []struct {
+		canonical string
+		legacy    string
+	}{
+		{canonical: PowerControlStateOn, legacy: "on"},
+		{canonical: PowerControlStateOff, legacy: "off"},
+		{canonical: PowerControlStateCycle, legacy: "cycle"},
+		{canonical: PowerControlStateForceOff, legacy: "forceoff"},
+		{canonical: PowerControlStateForceCycle, legacy: "forcecycle"},
+		{canonical: PowerControlStateACCycle, legacy: "acpowercycle"},
+	}
+	for _, state := range states {
+		t.Run("accepts canonical "+state.canonical, func(t *testing.T) {
+			request := APIUpdatePowerStateRequest{SiteID: "site-1", State: state.canonical}
+			assert.NoError(t, request.Validate())
+			assert.Equal(t, state.canonical, request.State)
+		})
+		t.Run("normalizes legacy "+state.legacy, func(t *testing.T) {
+			request := APIUpdatePowerStateRequest{SiteID: "site-1", State: state.legacy}
+			assert.NoError(t, request.Validate())
+			assert.Equal(t, state.canonical, request.State)
+		})
+	}
+
 	tests := []struct {
 		name    string
 		request APIUpdatePowerStateRequest
 		wantErr bool
 	}{
 		{
-			name:    "valid - on",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "on"},
-			wantErr: false,
-		},
-		{
-			name:    "valid - off",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "off"},
-			wantErr: false,
-		},
-		{
-			name:    "valid - cycle",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "cycle"},
-			wantErr: false,
-		},
-		{
-			name:    "valid - forceoff",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "forceoff"},
-			wantErr: false,
-		},
-		{
-			name:    "valid - forcecycle",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "forcecycle"},
-			wantErr: false,
-		},
-		{
-			name:    "valid - acpowercycle",
-			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "acpowercycle"},
-			wantErr: false,
-		},
-		{
 			name:    "invalid - missing siteId",
-			request: APIUpdatePowerStateRequest{State: "on"},
+			request: APIUpdatePowerStateRequest{State: PowerControlStateOn},
 			wantErr: true,
 		},
 		{
@@ -72,6 +66,11 @@ func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
 			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "reboot"},
 			wantErr: true,
 		},
+		{
+			name:    "invalid - arbitrary mixed case",
+			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "Forcecycle"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -82,6 +81,28 @@ func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestPowerControlStateWorkflowToken(t *testing.T) {
+	tests := []struct {
+		state string
+		want  string
+	}{
+		{state: PowerControlStateOn, want: "on"},
+		{state: PowerControlStateOff, want: "off"},
+		{state: PowerControlStateCycle, want: "cycle"},
+		{state: PowerControlStateForceOff, want: "forceoff"},
+		{state: PowerControlStateForceCycle, want: "forcecycle"},
+		{state: PowerControlStateACCycle, want: "acpowercycle"},
+		{state: "acpowercycle", want: "acpowercycle"},
+		{state: "unknown", want: "unknown"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.state, func(t *testing.T) {
+			assert.Equal(t, test.want, PowerControlStateWorkflowToken(test.state))
 		})
 	}
 }
@@ -127,23 +148,24 @@ func TestNewAPIUpdatePowerStateResponse(t *testing.T) {
 
 func TestAPIBatchUpdateRackPowerStateRequest_Validate(t *testing.T) {
 	tests := []struct {
-		name    string
-		request APIBatchUpdateRackPowerStateRequest
-		wantErr bool
+		name      string
+		request   APIBatchUpdateRackPowerStateRequest
+		wantState string
+		wantErr   bool
 	}{
 		{
-			name:    "valid - on with siteId",
-			request: APIBatchUpdateRackPowerStateRequest{SiteID: "site-1", State: "on"},
-			wantErr: false,
+			name:      "normalizes legacy on with siteId",
+			request:   APIBatchUpdateRackPowerStateRequest{SiteID: "site-1", State: "on"},
+			wantState: PowerControlStateOn,
 		},
 		{
-			name: "valid - with filter",
+			name: "normalizes legacy off with filter",
 			request: APIBatchUpdateRackPowerStateRequest{
 				SiteID: "site-1",
 				Filter: &RackFilter{Names: []string{"Rack-001"}},
 				State:  "off",
 			},
-			wantErr: false,
+			wantState: PowerControlStateOff,
 		},
 		{
 			name:    "invalid - missing siteId",
@@ -169,7 +191,45 @@ func TestAPIBatchUpdateRackPowerStateRequest_Validate(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+				assert.Equal(t, tt.wantState, tt.request.State)
 			}
+		})
+	}
+}
+
+func TestAPIBatchUpdateTrayPowerStateRequest_Validate(t *testing.T) {
+	tests := []struct {
+		name      string
+		request   APIBatchUpdateTrayPowerStateRequest
+		wantState string
+		wantErr   bool
+	}{
+		{
+			name:      "accepts canonical state",
+			request:   APIBatchUpdateTrayPowerStateRequest{SiteID: "site-1", State: PowerControlStateForceOff},
+			wantState: PowerControlStateForceOff,
+		},
+		{
+			name:      "normalizes legacy state",
+			request:   APIBatchUpdateTrayPowerStateRequest{SiteID: "site-1", State: "forcecycle"},
+			wantState: PowerControlStateForceCycle,
+		},
+		{
+			name:    "rejects arbitrary mixed case",
+			request: APIBatchUpdateTrayPowerStateRequest{SiteID: "site-1", State: "Forcecycle"},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.request.Validate()
+			if test.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, test.wantState, test.request.State)
 		})
 	}
 }

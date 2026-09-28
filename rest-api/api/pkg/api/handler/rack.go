@@ -696,7 +696,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle, acpowercycle)
+// @Description Power control a Rack identified by Rack ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -797,7 +797,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", apiRequest.State, rackStrID), "Rack")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), rackStrID), "Rack")
 	if err != nil {
 		return err
 	}
@@ -830,7 +830,7 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Racks
-// @Description Power control Racks with optional filters (on, off, cycle, forceoff, forcecycle, acpowercycle). If no filter is specified, targets all racks in the Site.
+// @Description Power control Racks with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all racks in the Site.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -915,7 +915,7 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Rack")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Rack")
 	if err != nil {
 		return err
 	}

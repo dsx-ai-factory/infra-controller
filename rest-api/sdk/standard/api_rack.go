@@ -1753,8 +1753,8 @@ PowerControlRack Power control a Rack
 
 Power control a Rack identified by its Rack ID.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1908,8 +1908,8 @@ PowerControlRacks Power control Racks
 
 Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 

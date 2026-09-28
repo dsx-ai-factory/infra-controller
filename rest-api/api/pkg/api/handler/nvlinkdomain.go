@@ -72,10 +72,11 @@ func (identity nvLinkDomainOperationWorkflowIdentity) powerWorkflowID(
 	state string,
 	overrideReadinessCheck bool,
 ) string {
-	identity.State = state
+	workflowToken := model.PowerControlStateWorkflowToken(state)
+	identity.State = workflowToken
 	identity.OverrideReadinessCheck = overrideReadinessCheck
 
-	return fmt.Sprintf("nvlink-domain-power-state-update-%s-%s", state, common.RequestHash(identity))
+	return fmt.Sprintf("nvlink-domain-power-state-update-%s-%s", workflowToken, common.RequestHash(identity))
 }
 
 func (identity nvLinkDomainOperationWorkflowIdentity) firmwareWorkflowID(

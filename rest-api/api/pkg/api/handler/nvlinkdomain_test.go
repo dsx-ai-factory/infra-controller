@@ -770,6 +770,8 @@ func TestNVLinkDomainOperationWorkflowIdentity_PowerWorkflowID(t *testing.T) {
 		RuleID:          &ruleID,
 	}
 	baseID := identity.powerWorkflowID("forceoff", true)
+	assert.Equal(t, baseID, identity.powerWorkflowID(model.PowerControlStateForceOff, true),
+		"canonical and legacy states must retain the same workflow identity")
 
 	tests := []struct {
 		name       string

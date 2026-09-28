@@ -12285,8 +12285,8 @@ paths:
       description: |-
         Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12302,7 +12302,7 @@ paths:
                   domainIds:
                     - 650e8400-e29b-41d4-a716-446655440001
                     - 750e8400-e29b-41d4-a716-446655440002
-                  state: 'off'
+                  state: 'Off'
       responses:
         '200':
           description: OK
@@ -12861,8 +12861,8 @@ paths:
       description: |-
         Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12875,7 +12875,7 @@ paths:
               power-off-all:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'off'
+                  state: 'Off'
               power-on-filtered:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
@@ -12883,7 +12883,7 @@ paths:
                     names:
                       - Rack-001
                       - Rack-002
-                  state: 'on'
+                  state: 'On'
       responses:
         '200':
           description: OK
@@ -12925,8 +12925,8 @@ paths:
       description: |-
         Power control a Rack identified by its Rack ID.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12939,19 +12939,19 @@ paths:
               power-on:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
               force-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: forcecycle
+                  state: ForceCycle
               ac-power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: acpowercycle
+                  state: ACPowerCycle
       responses:
         '200':
           description: OK
@@ -14703,8 +14703,8 @@ paths:
       description: |-
         Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14717,7 +14717,7 @@ paths:
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
       responses:
         '200':
           description: OK
@@ -15242,8 +15242,8 @@ paths:
       description: |-
         Power control Trays with optional filters. If no filter is specified, targets all trays in the Site.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         **Filter constraints:**
         - `rackId` and `rackName` are mutually exclusive
@@ -15260,13 +15260,13 @@ paths:
               power-on-all:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-off-by-rack:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     rackId: rack-01
-                  state: 'off'
+                  state: 'Off'
       responses:
         '200':
           description: OK
@@ -15307,8 +15307,8 @@ paths:
       description: |-
         Power control a Tray identified by its component ID or component MAC address.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
-        `acpowercycle` removes and restores AC power and is unsupported on Viking systems.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -15321,15 +15321,15 @@ paths:
               power-on:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-off:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'off'
+                  state: 'Off'
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
       responses:
         '200':
           description: OK
@@ -25646,13 +25646,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
             - acpowercycle
-          description: Target power state
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -25673,7 +25679,7 @@ components:
           domainIds:
             - 650e8400-e29b-41d4-a716-446655440001
             - 750e8400-e29b-41d4-a716-446655440002
-          state: cycle
+          state: Cycle
     NVLinkDomainFirmwareUpdateRequest:
       title: NVLinkDomainFirmwareUpdateRequest
       type: object
@@ -25791,13 +25797,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
             - acpowercycle
-          description: Target power state
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -25831,13 +25843,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
             - acpowercycle
-          description: Target power state
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -27176,6 +27194,12 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
@@ -27184,12 +27208,14 @@ components:
             - acpowercycle
           description: |-
             Power control state to apply:
-            - `on`: Power on the target(s)
-            - `off`: Graceful power off
-            - `cycle`: Graceful power cycle (restart)
-            - `forceoff`: Forced power off (immediate)
-            - `forcecycle`: Forced power cycle (immediate restart)
-            - `acpowercycle`: Remove and restore AC power (unsupported on Viking systems)
+            - `On`: Power on the target(s)
+            - `Off`: Graceful power off
+            - `Cycle`: Graceful power cycle (restart)
+            - `ForceOff`: Forced power off (immediate)
+            - `ForceCycle`: Forced power cycle (immediate restart)
+            - `ACPowerCycle`: Remove and restore AC power (unsupported on Viking systems)
+
+            Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -27206,11 +27232,11 @@ components:
             maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: 'on'
+          state: 'On'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: 'off'
+          state: 'Off'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: cycle
+          state: Cycle
     UpdatePowerStateResponse:
       title: UpdatePowerStateResponse
       type: object
