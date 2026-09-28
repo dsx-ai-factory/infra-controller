@@ -135,16 +135,18 @@ siteCredentials:
   enabled: false
   secretName: "nico-site-credentials"
   ## Only the passwords are used. site-explorer logs in with each BMC's own account.
+  ## A password left empty is generated on the first install (32 random alphanumeric
+  ## characters) and kept on upgrades. An explicit value wins.
   bmcRoot:
     username: "root"
-    password: ""          # any value that differs from the mock factory passwords (factory_password, 0penBmc)
+    password: ""          # an explicit value must differ from the mock factory passwords (factory_password, 0penBmc)
   uefi:
     dpu:
       username: ""
-      password: ""        # any non-empty value on a simulation site
+      password: ""
     host:
       username: ""
-      password: ""        # any non-empty value on a simulation site
+      password: ""
 
 certManager:
   siteRoot:

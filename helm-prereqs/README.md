@@ -211,9 +211,9 @@ The tables below summarize the keys that must be set per site.
 | `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
 | `siteCredentials.enabled` | `false` | No | Render the site-wide BMC root and the Unified Extensible Firmware Interface (UEFI) site defaults as a credential-file Secret for `nico-api`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values. |
-| `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | When enabled | Site-wide BMC root password that site-explorer rotates every BMC to. The render fails when the password is empty. It must also differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
-| `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | When enabled | DPU UEFI site default. The password must be non-empty and the username is not used. |
-| `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | When enabled | Host UEFI site default, same rules. |
+| `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | No | Site-wide BMC root password that site-explorer rotates every BMC to. Leave the password empty to generate a random 32-character value on the first install, which upgrades keep. An explicit value must differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
+| `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | No | DPU UEFI site default. An empty password is generated in the same way. The username is not used. |
+| `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | No | Host UEFI site default, same rules. |
 
 #### Site Credentials Secret
 
@@ -227,7 +227,7 @@ This is the same credential-file Secret the manual recipe above creates, with
 the two UEFI defaults added. The chart writes nothing to Vault. With the default
 `bmcSiteWideRootSource: local_first`, `nico-api` reads the file ahead of the
 persistent backends, after the environment source if one is configured, so an
-entry left in Vault by an earlier seeding is shadowed rather than removed; set
+entry left in Vault by an earlier seeding is shadowed rather than removed. Set
 `local` to make the file authoritative for version 0 as described above. Only
 the passwords are used: site-explorer logs in with each BMC's own account and
 `credential add-bmc --kind=site-wide-root` stores an empty username, so the
@@ -254,14 +254,33 @@ values unchanged after ingestion starts. Leave `NICO_DPF_BMC_ROOT_PASSWORD`
 unset: it makes setup point `existingSecret` at its own
 `nico-bmc-v0-credentials` Secret, and setup fails when the Core values already
 name this one. Pass the passwords through a values file or `--set-string`, not
-`--set`: it coerces a value that looks numeric and has no leading zero, so
+`--set`. `--set` coerces a value that looks numeric and has no leading zero, so
 `123` becomes a number and the render fails, while `0123` stays a string. The
-render fails when a password is missing or not a string.
+render fails when a password is not a string.
 
-With `siteCredentials` the passwords sit in clear text in the operator's values
-file and in the Helm release history (`helm get values`), and base64-encoded in
-the rendered Secret. That fits machine-a-tron and development sites, which the
-defaults target. For a production site, create the Secret out of band (External
+A password left empty is generated. The chart reads the release's Secret with a
+Helm `lookup` and keeps the value of the same entry, so `helm upgrade` does not
+rotate it. Without such an entry it draws 32 random alphanumeric characters. An
+existing credential file that does not parse, or an entry without a string
+password, fails the render instead of being replaced. Fix or remove that Secret
+first. An explicit value always wins. `helm template` and a client-side `--dry-run` have
+no cluster, so they print fresh values on every render, while `helm install` and
+`helm upgrade` keep them. Use `helm upgrade --dry-run=server` to preview the
+kept values. Read the generated passwords back with:
+
+```bash
+kubectl -n nico-system get secret nico-site-credentials -o jsonpath='{.data.credentials\.yaml}' | base64 -d
+```
+
+Uninstalling the release or setting `siteCredentials.enabled: false` deletes the
+Secret, so the next install generates new passwords. Save the output of that
+command first when devices are already rotated to the old value.
+
+With `siteCredentials` an explicit password sits in clear text in the operator's
+values file and in the Helm release history (`helm get values`). A generated
+password sits only in the rendered manifest (`helm get manifest`) and in the
+Secret. That fits machine-a-tron and development sites, which the defaults
+target. For a production site, create the Secret out of band (External
 Secrets Operator, Sealed Secrets, or a Vault sync) and point
 `nico-api.credentials.file.existingSecret` at it, as the manual recipe above
 does without this block.
@@ -270,7 +289,8 @@ On a machine-a-tron site, `setup-machine-a-tron.sh` Phase 4 still seeds the
 same three credentials in Vault and the file shadows them. Keep the chart
 passwords equal to the script's `BMC_PASSWORD` and `UEFI_*_PASSWORD` values,
 `NicoSiteRoot1` and `bluefield` by default, which are for simulated hardware
-only.
+only. A generated password does not match them, so set the passwords explicitly
+on a script-driven site.
 
 ### `values/nico-core.yaml`
 
