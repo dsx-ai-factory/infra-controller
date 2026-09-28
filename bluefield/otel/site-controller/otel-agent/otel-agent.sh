@@ -253,8 +253,7 @@ fi
 
 # Generate and verify the container config and install it in /etc/kubelet.d where
 # crictl will pick it up and run it automatically.
-sed "s|\${CARBIDE_API_IP_ADDR}|${CARBIDE_API_IP_ADDR}|g" "$TEMPLATE" > "$GENERATED_YAML"
-python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$GENERATED_YAML"
+python3 "${TEMPLATE%/*}/render_pod.py" "$TEMPLATE" "$CARBIDE_API" "$CARBIDE_API_IP_ADDR" > "$GENERATED_YAML"
 install -m 0644 "$GENERATED_YAML" "$OTEL_AGENT_CONFIG"
 
 # Wait for `crictl ps` to show the container

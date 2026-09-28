@@ -17,5 +17,7 @@
 
 mod common;
 mod gateway_lifecycle;
+mod rms_operations;
+mod rms_routing;
 mod source_list_contract;
 mod ufm_aggregation;

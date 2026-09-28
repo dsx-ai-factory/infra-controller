@@ -820,7 +820,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle, acpowercycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -951,7 +951,7 @@ func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Trays
-// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all trays in the Site.
+// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle, acpowercycle). If no filter is specified, targets all trays in the Site.
 // @Tags tray
 // @Accept json
 // @Produce json

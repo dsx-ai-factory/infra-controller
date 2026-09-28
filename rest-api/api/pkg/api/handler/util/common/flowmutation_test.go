@@ -155,6 +155,18 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			},
 		},
 		{
+			name: "AC power cycle",
+			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
+				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateACCycle, nil, true, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_ACPowerCycleRack_FullMethodName,
+			wantRequest: &flowv1.ACPowerCycleRackRequest{
+				TargetSpec:             mutationTargetSpec(rackID),
+				Description:            "API AC power cycle rack r1",
+				OverrideReadinessCheck: true,
+			},
+		},
+		{
 			name: "bring up",
 			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
 				return ExecuteBringUpRackWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)

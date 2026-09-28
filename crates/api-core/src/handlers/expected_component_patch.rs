@@ -61,8 +61,8 @@ pub(super) enum UpdateField {
 
 /// `UpdateMask` selects fields supported by the expected component PATCH RPCs.
 /// Parsing rejects missing masks and unsupported paths, deduplicates fields,
-/// and accepts empty masks. Callers separately validate credential-pair
-/// selection and values before merging.
+/// and accepts empty masks. Callers separately validate selected credential
+/// values before merging.
 pub(super) struct UpdateMask(HashSet<UpdateField>);
 
 impl UpdateMask {
@@ -125,7 +125,7 @@ impl UpdateMask {
         username: &str,
         password: &str,
     ) -> Result<(), CarbideError> {
-        self.validate_credentials_pair(
+        self.validate_credentials(
             "BMC",
             (UpdateField::BmcUsername, Some(username)),
             (UpdateField::BmcPassword, Some(password)),
@@ -137,34 +137,30 @@ impl UpdateMask {
         username: Option<&str>,
         password: Option<&str>,
     ) -> Result<(), CarbideError> {
-        self.validate_credentials_pair(
+        self.validate_credentials(
             "NVOS",
             (UpdateField::NvosUsername, username),
             (UpdateField::NvosPassword, password),
         )
     }
 
-    fn validate_credentials_pair(
+    fn validate_credentials(
         &self,
         kind: &str,
         (username_field, username): (UpdateField, Option<&str>),
         (password_field, password): (UpdateField, Option<&str>),
     ) -> Result<(), CarbideError> {
-        match (self.contains(username_field), self.contains(password_field)) {
-            (false, false) => Ok(()),
-            (true, true)
-                if username.is_some_and(|value| !value.is_empty())
-                    && password.is_some_and(|value| !value.is_empty()) =>
-            {
-                Ok(())
+        for (field, value, name) in [
+            (username_field, username, "username"),
+            (password_field, password, "password"),
+        ] {
+            if self.contains(field) && value.is_none_or(str::is_empty) {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "{kind} {name} must be present and nonempty"
+                )));
             }
-            (true, true) => Err(CarbideError::InvalidArgument(format!(
-                "{kind} username and password must be present and nonempty"
-            ))),
-            _ => Err(CarbideError::InvalidArgument(format!(
-                "{kind} username and password must be updated together"
-            ))),
         }
+        Ok(())
     }
 
     pub(super) fn update_metadata(
@@ -272,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_pairs_validate_presence_before_merge() {
+    fn selected_credentials_validate_presence_before_merge() {
         scenarios!(run = |(paths, username, password): (&[&str], Option<&str>, Option<&str>)| {
             let fields = UpdateMask::parse(Some(paths.iter().map(|path| (*path).to_string()).collect()), ExpectedComponent::Switch).unwrap();
             fields.validate_nvos_credentials(username, password).map_err(drop)
@@ -283,12 +279,13 @@ mod tests {
             "complete replacement" {
                 (&["nvos_username", "nvos_password"], Some("user"), Some("pass")) => Yields(()),
             }
-            "both fields must be selected even when both values exist" {
-                (&["nvos_username"], Some("user"), Some("pass")) => Fails,
-                (&["nvos_password"], Some("user"), Some("pass")) => Fails,
+            "only selected values are required" {
+                (&["nvos_username"], Some("user"), None) => Yields(()),
+                (&["nvos_password"], None, Some("pass")) => Yields(()),
             }
             "selection cannot supply an absent value" {
-                (&["nvos_username", "nvos_password"], None, Some("pass")) => Fails,
+                (&["nvos_username"], None, Some("pass")) => Fails,
+                (&["nvos_password"], Some("user"), None) => Fails,
             }
             "empty credentials cannot remove a pair" {
                 (&["nvos_username", "nvos_password"], Some(""), Some("pass")) => Fails,

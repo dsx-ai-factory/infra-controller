@@ -8,8 +8,9 @@ metadata:
   namespace: {{ include "nico-site-health-probe.namespace" . }}
   labels:
     {{- include "nico-site-health-probe.labels" . | nindent 4 }}
-    app.kubernetes.io/metrics: {{ $name }}
+    app.kubernetes.io/metrics: nico-site-health-probe
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-site-health-probe.selectorLabels" . | nindent 4 }}
   ports:

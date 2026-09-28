@@ -244,6 +244,8 @@ pub enum MockPowerState {
     #[default]
     On,
     Off,
+    /// Power could not be observed; Redfish reports a null `PowerState`.
+    Unknown,
     /// Power-on accepted; the host is not yet `On` (POST has not begun).
     PoweringOn,
     /// Graceful shutdown accepted; the OS is going down but power is still applied.
@@ -254,9 +256,19 @@ pub enum MockPowerState {
 }
 
 impl MockPowerState {
+    /// Checks whether the current power state permits a reset request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActionError::Internal`] for every request when the state is
+    /// [`Self::Unknown`], because power state is unavailable. Returns
+    /// [`ActionError::BadRequest`] when a known state prevents the request.
     pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
         type C = ResourceResetType;
         match (reset_type, self) {
+            (_, MockPowerState::Unknown) => Err(ActionError::Internal(eyre::eyre!(
+                "bmc-mock: power state is unavailable",
+            ))),
             (
                 C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
                 MockPowerState::Off,
@@ -287,6 +299,7 @@ impl fmt::Display for MockPowerState {
         match self {
             Self::On => "On".fmt(f),
             Self::Off => "Off".fmt(f),
+            Self::Unknown => "Unknown".fmt(f),
             Self::PoweringOn => "PoweringOn".fmt(f),
             Self::PoweringOff => "PoweringOff".fmt(f),
             Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),

@@ -54,6 +54,13 @@ pub struct DhcpConfig {
     pub dhcpv6_preferred_lifetime_secs: u32,
     #[serde(default)]
     pub dhcpv6_valid_lifetime_secs: u32,
+    /// Preference emitted only in DHCPv6 ADVERTISE messages.
+    ///
+    /// `None` preserves legacy configuration behavior (effective preference
+    /// zero); `Some(0)` is an explicit configured value and must not collapse
+    /// into omission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcpv6_server_preference: Option<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -91,6 +98,7 @@ impl Default for DhcpConfig {
             carbide_dhcp_server_v6: None,
             dhcpv6_preferred_lifetime_secs: 0,
             dhcpv6_valid_lifetime_secs: 0,
+            dhcpv6_server_preference: None,
         }
     }
 }
@@ -767,6 +775,7 @@ mod tests {
             carbide_dhcp_server_v6: Some("2001:db8::1".parse().unwrap()),
             dhcpv6_preferred_lifetime_secs: 3600,
             dhcpv6_valid_lifetime_secs: 7200,
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
 
@@ -787,6 +796,7 @@ mod tests {
         );
         assert_eq!(recovered.dhcpv6_preferred_lifetime_secs, 3600);
         assert_eq!(recovered.dhcpv6_valid_lifetime_secs, 7200);
+        assert_eq!(recovered.dhcpv6_server_preference, Some(0));
 
         // Deserialize old-style JSON and verify the new fields default cleanly.
         let old_wire = r#"{
@@ -806,6 +816,7 @@ mod tests {
         assert_eq!(old_config.carbide_dhcp_server_v6, None);
         assert_eq!(old_config.dhcpv6_preferred_lifetime_secs, 0);
         assert_eq!(old_config.dhcpv6_valid_lifetime_secs, 0);
+        assert_eq!(old_config.dhcpv6_server_preference, None);
     }
 
     /// Verifies per-interface IPv6 details round-trip and old host configs default them.

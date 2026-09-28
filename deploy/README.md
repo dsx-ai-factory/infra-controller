@@ -1,6 +1,13 @@
 
 # Kustomization inputs
 
+**Deprecated in NICo 2.3, removed in NICo 2.4.** The Kustomize deployment under
+`deploy/` is superseded by the Helm charts under `helm/`, which
+`helm-prereqs/setup.sh` installs; see the
+[quick start](../docs/getting-started/quick-start.md). Existing Kustomize
+deployments keep working in 2.3 but receive no new configuration; move to the
+Helm charts before upgrading to 2.4, when this directory is deleted.
+
 The `deploy/kustomization.yaml` file drives the top‑level deployment. Populate the placeholders below before applying any overlays.
 
 ## Table of contents

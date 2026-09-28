@@ -55,18 +55,13 @@ firmware, log, NMX-T, NMX-C, NVUE REST, and leak-related data when configured.
 
 ### Helm Configuration
 
-Enable hardware health in Helm values:
-
-```yaml
-nico-hardware-health:
-  enabled: true
-```
+`nico-hardware-health` is a core component of the umbrella chart and is
+always installed; it has no `enabled` toggle.
 
 Enable metrics scraping with its ServiceMonitor:
 
 ```yaml
 nico-hardware-health:
-  enabled: true
   replicas: 1
 
   serviceMonitor:
@@ -169,7 +164,7 @@ Collector defaults from the example config:
 | NVUE REST collector | `poll_interval` | `"1m"` | NVUE REST polling cadence. |
 | Leak processor | `minimum_alerts_per_report` | `1` | Leak alert threshold for health reports. |
 | Rack leak processor | `leaking_tray_threshold` | `2` | Rack-level leak threshold. |
-| Metrics | `endpoint` | `"0.0.0.0:9009"` | Metrics listener. |
+| Metrics | `endpoint` | `"0.0.0.0:9009"` | Explicit IPv4 listener override. The binary default is `[::]:9009` (dual-stack with IPv4 fallback when IPv6 socket setup is unavailable). [NICo Metrics](../observability/metrics.md#metrics-services-and-ipv6) describes configuration precedence. |
 | Metrics | `prefix` | `"carbide_hardware_health"` | Hardware-health metric prefix. |
 
 NMX-C connects directly to eligible primary switch-host gRPC endpoints whose

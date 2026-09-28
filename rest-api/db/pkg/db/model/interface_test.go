@@ -133,28 +133,76 @@ func TestInterface_EthernetKey(t *testing.T) {
 	same.Device = cutil.GetPtr("device")
 	same.DeviceInstance = &sameDeviceInstance
 	same.VpcPrefixID = cutil.GetPtr(uuid.New())
-	assert.Equal(t, base.EthernetInterfaceKey(), same.EthernetInterfaceKey(), "resolved prefixes must not change VPC-selector identity")
 
 	missingDeviceInstance := base
 	missingDeviceInstance.DeviceInstance = nil
-	assert.NotEqual(t, base.EthernetInterfaceKey(), missingDeviceInstance.EthernetInterfaceKey())
 
 	emptyProfile := base
 	emptyProfile.InlineRoutingProfile = &InterfaceInlineRoutingProfile{}
-	assert.NotEqual(t, base.EthernetInterfaceKey(), emptyProfile.EthernetInterfaceKey())
 
 	differentVpc := base
 	differentVpc.VpcID = cutil.GetPtr(uuid.New())
-	assert.NotEqual(t, base.EthernetInterfaceKey(), differentVpc.EthernetInterfaceKey())
 
 	virtualFunction := base
 	virtualFunction.IsPhysical = false
 	virtualFunction.VirtualFunctionID = cutil.GetPtr(1)
-	assert.NotEqual(t, base.EthernetInterfaceKey(), virtualFunction.EthernetInterfaceKey(), "a virtual function must not match a physical function")
 
 	otherVirtualFunction := virtualFunction
 	otherVirtualFunction.VirtualFunctionID = cutil.GetPtr(2)
-	assert.NotEqual(t, virtualFunction.EthernetInterfaceKey(), otherVirtualFunction.EthernetInterfaceKey())
+
+	prefixInterface := Interface{VpcPrefixID: cutil.GetPtr(uuid.New()), IsPhysical: true}
+	ipv6 := prefixInterface
+	ipv6.RequestedIpAddress = cutil.GetPtr("2001:db8::1")
+	expandedIPv6 := prefixInterface
+	expandedIPv6.RequestedIpAddress = cutil.GetPtr("2001:0DB8:0:0:0:0:0:1")
+	differentIPv6 := prefixInterface
+	differentIPv6.RequestedIpAddress = cutil.GetPtr("2001:db8::3")
+	invalidAddress := prefixInterface
+	invalidAddress.RequestedIpAddress = cutil.GetPtr("invalid-address")
+	otherInvalidAddress := prefixInterface
+	otherInvalidAddress.RequestedIpAddress = cutil.GetPtr("other-invalid-address")
+	withPrefixes := func(prefixes ...string) Interface {
+		ifc := base
+		ifc.InlineRoutingProfile = &InterfaceInlineRoutingProfile{AllowedAnycastPrefixes: prefixes}
+		return ifc
+	}
+	anycast := withPrefixes("192.0.2.0/24", "2001:db8::/64")
+	expandedAnycast := withPrefixes("192.0.2.0/24", "2001:0DB8:0000:0000::/64")
+
+	tests := []struct {
+		name  string
+		left  Interface
+		right Interface
+		equal bool
+	}{
+		{name: "resolved prefix preserves VPC selector identity", left: base, right: same, equal: true},
+		{name: "missing device instance", left: base, right: missingDeviceInstance},
+		{name: "empty inline profile differs from absent", left: base, right: emptyProfile},
+		{name: "different VPC", left: base, right: differentVpc},
+		{name: "physical and virtual functions differ", left: base, right: virtualFunction},
+		{name: "different virtual functions", left: virtualFunction, right: otherVirtualFunction},
+		{name: "equivalent IPv6 addresses", left: ipv6, right: expandedIPv6, equal: true},
+		{name: "different IPv6 addresses", left: ipv6, right: differentIPv6},
+		{name: "requested address differs from absent", left: ipv6, right: prefixInterface},
+		{name: "invalid address strings remain distinct", left: invalidAddress, right: otherInvalidAddress},
+		{name: "equivalent IPv6 anycast prefixes", left: anycast, right: expandedAnycast, equal: true},
+		{name: "anycast prefix length differs", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/65")},
+		{name: "anycast prefix host bits remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::1/64")},
+		{name: "anycast prefix order remains distinct", left: anycast, right: withPrefixes("2001:db8::/64", "192.0.2.0/24")},
+		{name: "duplicate anycast prefixes remain distinct", left: anycast, right: withPrefixes("192.0.2.0/24", "2001:db8::/64", "2001:db8::/64")},
+		{name: "invalid anycast prefixes remain distinct", left: withPrefixes("invalid-prefix"), right: withPrefixes("other-invalid-prefix")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.equal {
+				assert.Equal(t, tt.left.EthernetInterfaceKey(), tt.right.EthernetInterfaceKey())
+			} else {
+				assert.NotEqual(t, tt.left.EthernetInterfaceKey(), tt.right.EthernetInterfaceKey())
+			}
+		})
+	}
+	assert.Equal(t, "2001:0DB8:0:0:0:0:0:1", *expandedIPv6.RequestedIpAddress)
+	assert.Equal(t, []string{"192.0.2.0/24", "2001:0DB8:0000:0000::/64"}, expandedAnycast.InlineRoutingProfile.AllowedAnycastPrefixes)
 }
 
 func TestInterfaceSQLDAO_Create(t *testing.T) {

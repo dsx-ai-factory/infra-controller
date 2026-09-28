@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,9 +64,19 @@ type UIServer struct {
 	templates *template.Template
 }
 
+// formatEndpoint brackets IPv6 addresses when a port is supplied and preserves
+// the table's bare-address display when the server omits the port.
+func formatEndpoint(address string, port int32) string {
+	if port == 0 {
+		return address
+	}
+	return net.JoinHostPort(address, strconv.Itoa(int(port)))
+}
+
 func runUI() {
 	// Parse templates
 	tmpl, err := template.New("").Funcs(template.FuncMap{
+		"formatEndpoint": formatEndpoint,
 		"formatTime": func(t time.Time) string {
 			return t.Format("2006-01-02 15:04:05")
 		},

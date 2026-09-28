@@ -100,12 +100,11 @@ pub async fn clear(txn: &mut PgConnection) -> Result<(), DatabaseError> {
         .map_err(|err| DatabaseError::query(query, err))
 }
 
-/// update updates an existing expected rack's rack_profile_id and metadata.
+/// Updates metadata without changing the profile selected at creation.
 pub async fn update(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResult<()> {
-    let query = "UPDATE expected_racks SET rack_profile_id=$1, metadata_name=$2, metadata_description=$3, metadata_labels=$4 WHERE rack_id=$5";
+    let query = "UPDATE expected_racks SET metadata_name=$1, metadata_description=$2, metadata_labels=$3 WHERE rack_id=$4";
 
     let result = sqlx::query(query)
-        .bind(&rack.rack_profile_id)
         .bind(&rack.metadata.name)
         .bind(&rack.metadata.description)
         .bind(sqlx::types::Json(&rack.metadata.labels))

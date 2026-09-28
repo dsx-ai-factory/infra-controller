@@ -696,7 +696,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle, acpowercycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -830,7 +830,7 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Racks
-// @Description Power control Racks with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all racks in the Site.
+// @Description Power control Racks with optional filters (on, off, cycle, forceoff, forcecycle, acpowercycle). If no filter is specified, targets all racks in the Site.
 // @Tags rack
 // @Accept json
 // @Produce json

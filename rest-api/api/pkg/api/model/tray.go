@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
@@ -21,6 +22,13 @@ var APIToProtoComponentTypeName = map[string]string{
 	"Compute":    "COMPONENT_TYPE_COMPUTE",
 	"NVSwitch":   "COMPONENT_TYPE_NVSWITCH",
 	"PowerShelf": "COMPONENT_TYPE_POWERSHELF",
+}
+
+// ValidTrayTypeNames returns the supported API tray type names in deterministic order.
+func ValidTrayTypeNames() []string {
+	types := slices.Collect(maps.Keys(APIToProtoComponentTypeName))
+	slices.Sort(types)
+	return types
 }
 
 // ProtoToAPIComponentTypeName maps protobuf ComponentType to API tray type strings.
@@ -77,7 +85,8 @@ var ProtoToAPILeakHandlingStatusName = map[flowv1.LeakHandlingStatus]APILeakHand
 var validTrayTypesAny, ValidProtoComponentTypes = func() ([]interface{}, []flowv1.ComponentType) {
 	anyTypes := make([]interface{}, 0, len(APIToProtoComponentTypeName))
 	protoTypes := make([]flowv1.ComponentType, 0, len(APIToProtoComponentTypeName))
-	for apiName, protoName := range APIToProtoComponentTypeName {
+	for _, apiName := range ValidTrayTypeNames() {
+		protoName := APIToProtoComponentTypeName[apiName]
 		anyTypes = append(anyTypes, apiName)
 		protoTypes = append(protoTypes, flowv1.ComponentType(flowv1.ComponentType_value[protoName]))
 	}
@@ -196,7 +205,7 @@ func (f *TrayFilter) Validate() error {
 		validation.Field(&f.IDs, validation.Each(validation.Required)),
 		validation.Field(&f.Type,
 			validation.When(f.Type != nil, validation.In(validTrayTypesAny...).Error(
-				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
+				fmt.Sprintf("must be one of %s", strings.Join(ValidTrayTypeNames(), ", "))))),
 	)
 	if err != nil {
 		return err
@@ -329,7 +338,7 @@ func (r *APITrayGetAllRequest) Validate() error {
 		validation.Field(&r.IDs, validation.Each(validation.Required)),
 		validation.Field(&r.Type,
 			validation.When(r.Type != nil, validation.In(validTrayTypesAny...).Error(
-				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
+				fmt.Sprintf("must be one of %s", strings.Join(ValidTrayTypeNames(), ", "))))),
 	)
 	if err != nil {
 		return err
@@ -468,7 +477,7 @@ func (r *APITrayValidateAllRequest) Validate() error {
 		validation.Field(&r.IDs, validation.Each(validation.Required)),
 		validation.Field(&r.Type,
 			validation.When(r.Type != nil, validation.In(validTrayTypesAny...).Error(
-				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
+				fmt.Sprintf("must be one of %s", strings.Join(ValidTrayTypeNames(), ", "))))),
 	); err != nil {
 		return err
 	}

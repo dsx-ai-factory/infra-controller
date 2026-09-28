@@ -33,6 +33,7 @@ use carbide_site_explorer::{
 };
 use carbide_utils::test_support::test_meter::TestMeter;
 use db::work_lock_manager::WorkLockManagerHandle;
+use ipnetwork::IpNetwork;
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
@@ -44,7 +45,7 @@ use super::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
-use crate::ethernet_virtualization::EthVirtData;
+use crate::ethernet_virtualization::{EthVirtData, SiteFabricPrefixList};
 use crate::logging::level_filter::ActiveLevel;
 use crate::logging::log_limiter::LogLimiter;
 use crate::scout_stream::ConnectionRegistry;
@@ -132,6 +133,14 @@ impl TestApiBuilder {
             eth_data: Some(eth_data),
             ..self
         }
+    }
+
+    /// Replaces the site fabric ranges used to validate VPC and tenant network
+    /// segment prefixes in tests.
+    pub fn with_site_fabric_prefixes(mut self, prefixes: Vec<IpNetwork>) -> Self {
+        let eth_data = self.eth_data.get_or_insert_with(default_test_eth_virt_data);
+        eth_data.site_fabric_prefixes = SiteFabricPrefixList::from_ipnetwork_vec(prefixes);
+        self
     }
 
     pub fn with_dpf_sdk(self, dpf_sdk: Arc<dyn DpfOperations>) -> Self {

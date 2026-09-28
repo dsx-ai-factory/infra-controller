@@ -166,7 +166,7 @@ type: Opaque
 stringData:
   username: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  host: ${POSTGRES_HOST}
+  host: "${POSTGRES_HOST}"
   port: "${POSTGRES_PORT}"
   dbname: ${POSTGRES_DB}
   uri: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
@@ -177,7 +177,7 @@ metadata:
   name: nico-system-nico-database-config
   namespace: ${NAMESPACE}
 data:
-  DB_HOST: ${POSTGRES_HOST}
+  DB_HOST: "${POSTGRES_HOST}"
   DB_PORT: "${POSTGRES_PORT}"
   DB_NAME: ${POSTGRES_DB}
 ---

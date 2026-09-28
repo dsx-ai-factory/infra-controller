@@ -17,9 +17,9 @@
 
 //! Delta Energy Systems power shelf.
 //!
-//! Modeled on the real Delta scrape under
-//! `libredfish/tests/mockups/delta_powershelf/`. Two traits distinguish it
-//! from the Lite-On shelf and drive the site-explorer Delta code path:
+//! Modeled on a live Delta 810 shelf's Redfish responses, observed during
+//! development. Two traits distinguish it from the Lite-On shelf and drive
+//! the site-explorer Delta code path:
 //!
 //! * There is **no `/redfish/v1/Systems` collection** — the service root does
 //!   not advertise `Systems` and the collection endpoint 404s (see
@@ -104,6 +104,8 @@ impl DeltaPowerShelf<'_> {
                                 &format!("PowerSupplyUnit {}", idx + 1),
                             ))
                             .oem_delta_power_state(on)
+                            .oem_delta_fan_speed_target(0)
+                            .power_capacity_watts(5500.0)
                             .status(redfish::resource::Status::Ok)
                             .build()
                         })

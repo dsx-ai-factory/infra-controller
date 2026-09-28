@@ -21,9 +21,9 @@ use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVi
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
-use db::resource_pool::ResourcePoolDatabaseError;
+use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::vpc::{self};
-use db::{self, ObjectColumnFilter, network_security_group};
+use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::resource_pool;
 use model::tenant::{InvalidTenantOrg, Tenant};
 use model::vpc::{
@@ -729,8 +729,25 @@ async fn release_inactive_vpc_vni(
     }
 
     // The ownership lookup holds this allocation's row lock through commit,
-    // so releasing the checked value cannot free another owner's allocation.
-    db::resource_pool::release(inactive_pool, txn, inactive_vni).await?;
+    // so this release must apply. Treat a rejection as an invariant failure.
+    match db::resource_pool::release(
+        inactive_pool,
+        txn,
+        inactive_vni,
+        resource_pool::OwnerType::Vpc,
+        &vpc.id.to_string(),
+    )
+    .await?
+    {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "VPC `{}` no longer owns VNI `{inactive_vni}` in pool `{}`",
+                vpc.id,
+                inactive_pool.name(),
+            )));
+        }
+    }
 
     Ok(inactive_vni)
 }
@@ -1004,7 +1021,24 @@ pub(crate) async fn delete(
 
     if let Some((pool, vni)) = owned_allocation {
         // The ownership lookup above keeps the allocation locked until commit.
-        db::resource_pool::release(pool, &mut txn, vni).await?;
+        match db::resource_pool::release(
+            pool,
+            &mut txn,
+            vni,
+            resource_pool::OwnerType::Vpc,
+            &owner_id,
+        )
+        .await?
+        {
+            ConditionalWrite::Applied(()) => {}
+            ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "VPC `{vpc_id}` no longer owns VNI `{vni}` in pool `{}`",
+                    pool.name(),
+                ))
+                .into());
+            }
+        }
     }
 
     // Delete associated VPC peerings

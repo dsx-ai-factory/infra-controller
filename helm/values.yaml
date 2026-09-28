@@ -11,7 +11,15 @@
 ##
 ## Top-level `global:` values are automatically passed to ALL sub-charts.
 ## Per-subchart overrides go under <chart-name>: key.
-## Each sub-chart can be disabled via <chart-name>.enabled: false.
+##
+## Core components (nico-api, nico-bmc-proxy, nico-dhcp, nico-dns,
+## nico-hardware-health, nico-pxe, nico-ssh-console-rs) are mandatory and
+## always installed - there is no <chart-name>.enabled toggle for them, and
+## helm/Chart.yaml declares them as unconditional dependencies. A leftover
+## <chart-name>.enabled key for a core component is ignored, so values files
+## written for earlier releases keep working. Optional services
+## (nico-dsx-exchange-consumer, nico-ntp, unbound, nico-machine-a-tron) can
+## still be disabled via <chart-name>.enabled: false.
 ## =============================================================================
 
 ## ---------------------------------------------------------------------------
@@ -76,33 +84,30 @@ grafanaDashboards:
 ## ---------------------------------------------------------------------------
 ## nico-api — Core API server (gRPC + REST)
 ## Manages machines, provisioning, networking, firmware updates, and web UI.
-## Requires PostgreSQL and Vault.
+## Requires PostgreSQL and Vault. Mandatory - see helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-api:
-  enabled: true
+nico-api: {}
 
 ## ---------------------------------------------------------------------------
 ## nico-bmc-proxy — BMC proxy used by DPS-based power provisioning
-## Provides an authenticated HTTP proxy to each BMC known by nico.
-## Enabled by default as part of NICo Core; set enabled=false only when an
-## external BMC proxy is deployed and wired separately.
+## Provides an authenticated HTTP proxy to each BMC known by nico. Mandatory
+## - see helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-bmc-proxy:
-  enabled: true
+nico-bmc-proxy: {}
 
 ## ---------------------------------------------------------------------------
 ## nico-dhcp — DHCP server (Kea-based)
-## Provides DHCP for PXE boot and bare metal network assignment.
+## Provides DHCP for PXE boot and bare metal network assignment. Mandatory -
+## see helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-dhcp:
-  enabled: true
+nico-dhcp: {}
 
 ## ---------------------------------------------------------------------------
 ## nico-dns — Authoritative DNS server
-## Serves DNS records for managed machines and VPCs.
+## Serves DNS records for managed machines and VPCs. Mandatory - see
+## helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-dns:
-  enabled: true
+nico-dns: {}
 
 ## ---------------------------------------------------------------------------
 ## nico-dsx-exchange-consumer — DSX Exchange message consumer
@@ -112,23 +117,11 @@ nico-dsx-exchange-consumer:
   enabled: true
 
 ## ---------------------------------------------------------------------------
-## nico-flow — task, policy, and automation service
-## Flow ships as a STANDALONE Helm release in its own namespace; it is not
-## installed by `helm install nico ./helm`. The dependency is declared so the
-## chart lives at helm/charts/nico-flow (Helm convention), but the condition
-## keeps the umbrella from auto-rendering it. Deploy with:
-##   helm install flow ./helm/charts/nico-flow -n flow ...
-## (helm-prereqs/setup.sh phase 7h does this for you.)
-## ---------------------------------------------------------------------------
-nico-flow:
-  enabled: false
-
-## ---------------------------------------------------------------------------
 ## nico-hardware-health — Hardware health collector
 ## Collects and reports hardware health metrics from managed machines.
+## Mandatory - see helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-hardware-health:
-  enabled: true
+nico-hardware-health: {}
 
 ## ---------------------------------------------------------------------------
 ## nico-ntp — chrony NTP servers
@@ -143,10 +136,10 @@ nico-ntp:
 
 ## ---------------------------------------------------------------------------
 ## nico-pxe — PXE boot server
-## HTTP-based PXE server for OS provisioning workflows.
+## HTTP-based PXE server for OS provisioning workflows. Mandatory - see
+## helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
 nico-pxe:
-  enabled: true
   ## Optional CA bundle served to bootstrapping clients. Set at most one object
   ## name; leaving both empty preserves the PXE workload CA fallback.
   bootstrapRootCa:
@@ -157,10 +150,10 @@ nico-pxe:
 ## ---------------------------------------------------------------------------
 ## nico-ssh-console-rs — SSH console proxy
 ## Provides remote SSH access to managed machine BMCs and consoles.
-## NOTE: This chart reads .Values.imagePullSecrets (not global).
+## NOTE: This chart reads .Values.imagePullSecrets (not global). Mandatory -
+## see helm/Chart.yaml.
 ## ---------------------------------------------------------------------------
-nico-ssh-console-rs:
-  enabled: true
+nico-ssh-console-rs: {}
 
 ## ---------------------------------------------------------------------------
 ## unbound — Recursive DNS resolver (disabled by default)

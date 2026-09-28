@@ -109,7 +109,7 @@ fn site_prefix_is_eligible(site_prefix: &SitePrefix, vpc: &Vpc, prefix: IpNetwor
 /// Selects database scope for a new eligible tenant-managed IPv4 prefix.
 /// Tenant-managed SitePrefix creation is IPv4-only; other families stay global.
 /// This does not authorize overlap: pair, VNI, receiver, and Instance checks
-/// still apply, as do the original global database exclusions.
+/// still apply. Existing rows retain their stored scope.
 pub(super) fn vpc_prefix_overlap_scope(
     runtime_config: &CarbideConfig,
     site_prefix: &SitePrefix,
@@ -549,7 +549,10 @@ pub(crate) async fn validate_instance_network(
                 || db::vpc_prefix::probe_segment_prefixes(*prefix, txn)
                     .await?
                     .iter()
-                    .any(|other| other.vpc_id != *source_vpc_id)
+                    .any(|other| {
+                        other.vpc_id != Some(*source_vpc_id)
+                            && (other.vpc_id.is_some() || other.prefix.vpc_prefix_id.is_some())
+                    })
             {
                 duplicate_space = true;
                 break;
@@ -577,9 +580,9 @@ pub(crate) async fn validate_instance_network(
     Ok(())
 }
 
-/// `validate_vpc_policy` checks a changed routing profile against the tenant
-/// interfaces that use it. The caller holds the overlap lock before locking
-/// the VPC and keeps it through the write.
+/// `validate_vpc_policy` checks a changed routing profile against retained
+/// overlapping prefixes and the tenant interfaces that use it. The caller
+/// holds the overlap lock before locking the VPC and keeps it through the write.
 pub(super) async fn validate_vpc_policy(
     api: &Api,
     txn: &mut PgConnection,
@@ -590,6 +593,17 @@ pub(super) async fn validate_vpc_policy(
             && !vpc_uses_duplicate_space(api, txn, candidate).await?)
     {
         return Ok(());
+    }
+    // An empty VPC can still own overlapping prefixes that startup and other
+    // VPCs' DPU configurations must validate. Its routing must remain isolated.
+    if db::tenant_prefix_overlap::vpcs_use_duplicate_space(&mut *txn, &[candidate.id]).await? {
+        let fnn = api.runtime_config.fnn.as_ref().ok_or_else(policy_error)?;
+        if !fnn
+            .resolve_vpc_routing_profile(&candidate.config)?
+            .is_isolated_for_tenant_prefixes()
+        {
+            return Err(policy_error());
+        }
     }
     for host in load_policy_hosts(txn, &[candidate.id]).await? {
         if !needs_retained_policy_check(&host) {

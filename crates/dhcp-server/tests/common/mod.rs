@@ -126,6 +126,7 @@ fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
         carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
         dhcpv6_preferred_lifetime_secs: 3600,
         dhcpv6_valid_lifetime_secs: 7200,
+        dhcpv6_server_preference: Some(255),
         ..Default::default()
     }
 }

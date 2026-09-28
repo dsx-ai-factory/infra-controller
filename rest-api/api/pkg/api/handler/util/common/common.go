@@ -2157,6 +2157,14 @@ func ExecutePowerControlWorkflow(
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
 		}
+	case cam.PowerControlStateACCycle:
+		fullMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
+		flowRequest = &flowv1.ACPowerCycleRackRequest{
+			TargetSpec:             targetSpec,
+			Description:            fmt.Sprintf("API AC power cycle %s", entityName),
+			RuleId:                 ruleUUID,
+			OverrideReadinessCheck: overrideReadinessCheck,
+		}
 	default:
 		return nil, cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
 	}
