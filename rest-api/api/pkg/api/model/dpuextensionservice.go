@@ -49,7 +49,9 @@ const (
 )
 
 var (
-	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-]+`)
+	// Allow bracketed IPv6 and dotted hosts; exclude quotes and whitespace from single-quoted YAML targets.
+	// Keep in sync with crates/rpc/src/model/extension_service.rs.
+	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-.\[\]]+`)
 	dpuExtensionServiceObservabilityLogPathBadRE      = regexp.MustCompile(`[^a-zA-Z0-9\-_\/\.\@]+`)
 )
 

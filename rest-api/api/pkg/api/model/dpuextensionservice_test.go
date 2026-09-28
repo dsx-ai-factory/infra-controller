@@ -20,6 +20,33 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
+func TestAPIDpuExtensionServiceObservabilityConfigPrometheus_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{name: "IPv6", endpoint: "[::1]:9090"},
+		{name: "IPv4", endpoint: "192.0.2.10:9090"},
+		{name: "fully qualified hostname", endpoint: "metrics.example.com:9090"},
+		{name: "hostname", endpoint: "localhost:9090"},
+		{name: "quoted target", endpoint: "[::1]:9090'", wantErr: true},
+		{name: "newline", endpoint: "[::1]:9090\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := APIDpuExtensionServiceObservabilityConfigPrometheus{
+				Endpoint: tc.endpoint, ScrapeIntervalSeconds: 30,
+			}
+			err := config.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 	validUUID := uuid.New().String()
 
