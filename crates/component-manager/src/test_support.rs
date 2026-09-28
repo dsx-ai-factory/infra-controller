@@ -303,6 +303,7 @@ pub(crate) async fn seed_machine(
         ManagedHostState::Ready,
         Some(&expected_data),
         2,
+        None,
     )
     .await
     .expect("failed to create machine");

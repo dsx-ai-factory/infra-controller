@@ -224,6 +224,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         ManagedHostState::Ready,
         Some(&rack_data),
         2,
+        None,
     )
     .await?;
     db_machine::create(
@@ -233,6 +234,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         ManagedHostState::Ready,
         Some(&rack_data),
         2,
+        None,
     )
     .await?;
 
