@@ -784,6 +784,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
             Self::ensure_dpu_oob_interface_ownership(txn, explored_dpu).await?;
@@ -813,6 +814,8 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
         let hardware_info = HardwareInfo::default();
@@ -861,6 +864,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
@@ -875,6 +879,7 @@ impl MachineCreator {
                 ManagedHostState::Created,
                 None,
                 CURRENT_STATE_MODEL_VERSION,
+                requested_loopback_v6,
             )
             .await
             {
@@ -1054,6 +1059,8 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
 

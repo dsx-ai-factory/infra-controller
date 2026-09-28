@@ -941,6 +941,50 @@ pub(crate) async fn discovery_completed(
     Ok(Response::new(rpc::MachineDiscoveryCompletedResponse {}))
 }
 
+/// Resolve a DPU's deterministic loopback reservation during direct discovery.
+///
+/// Scout never reports the owning host expected machine, so the reservation is
+/// resolved by the DPU's serial alone. The reservation is keyed by the DPU
+/// pairing serial the operator declares, which is the product serial -- the same
+/// identity the supported discovery paths pair on. The board and chassis serials
+/// are deliberately not consulted: Scout reports shared placeholders (for
+/// example `Unspecified System Serial Number`) for them on BlueFields, so a
+/// reservation mistakenly declared with one of those strings would otherwise
+/// validate and match unrelated DPUs. An absent reservation (no DMI data, an
+/// empty product serial, or no matching row) leaves both address families on
+/// automatic allocation.
+///
+/// The lookup locks the matching reservation row for the creating transaction so
+/// the intent used for allocation cannot be moved to another DPU or cleared
+/// before the DPU is created; see [`db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update`].
+/// Resolve the operator's deterministic loopback reservation for a DPU during
+/// direct discovery, keyed by its trimmed product serial.
+///
+/// Only the product serial is used. It is the DPU pairing identity for the
+/// supported discovery paths, and it is globally unique. The board and chassis
+/// serials are deliberately *not* consulted as fallbacks: Scout reports shared
+/// `Unspecified...` placeholders for them on BlueFields, so a placeholder could
+/// otherwise match and hand one DPU another DPU's reservation. A missing or
+/// empty product serial resolves to no reservation, which leaves both families
+/// on automatic allocation. The lookup takes a row lock so a concurrent
+/// reservation edit cannot make this read stale before the address is claimed.
+async fn resolve_dpu_loopback_reservation(
+    txn: &mut sqlx::PgConnection,
+    hardware_info: &HardwareInfo,
+) -> Result<Option<model::expected_machine::DpuLoopbackReservation>, CarbideError> {
+    let Some(dmi) = hardware_info.dmi_data.as_ref() else {
+        return Ok(None);
+    };
+    let serial = dmi.product_serial.trim();
+    if serial.is_empty() {
+        return Ok(None);
+    }
+    Ok(
+        db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update(&mut *txn, serial)
+            .await?,
+    )
+}
+
 /// Builds NVLink discovery info from scout `GpuPlatformInfo` for every GPU that reported it.
 fn nvlink_info_from_gpu_platform_infos(
     platform_infos: &[&GpuPlatformInfo],
