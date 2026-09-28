@@ -133,14 +133,6 @@ env:
 
 extraEnv: []
 
-envFrom:
-  vaultApproleTokens:
-    secretName: nico-vault-approle-tokens
-  vaultToken:
-    secretName: nico-vault-token
-  vaultClusterInfo:
-    configMapName: vault-cluster-info
-
 # startupProbe gates liveness until MAT binds the redfish port, which happens
 # only after it registers every expected rack, host, switch and power shelf
 # with nico-api. DPUs are not registered: a GB200 rack has 71 BMCs but adds 36

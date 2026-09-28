@@ -32,6 +32,8 @@ global:
   imagePullSecrets:
     - name: machine-a-tron-pull
 
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
 image:
   pullPolicy: IfNotPresent
   repository: ""
@@ -63,12 +65,14 @@ pods:
   default: null  # Disable default pod
   mat-0:
     machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
       compute:
         hwType: wiwynn_gb200_nvl
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
   mat-1:
     machines:
       compute:
@@ -76,7 +80,7 @@ pods:
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.200.0.1"  # NICo assigns unique IPs
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
 
 resources:
   limits:

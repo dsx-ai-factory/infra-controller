@@ -9,21 +9,27 @@
 # Shared-proxy mode needs ONE Service for the whole fleet: site-explorer dials
 # `bmc_proxy` and the Redfish client injects `Forwarded: host=<BMC IP>`, which
 # the mock's registry uses to pick the simulated BMC. BMC addresses come from
-# the simulated OOB prefix (SCALE_OOB_PREFIX), NOT from the Service CIDR.
+# the simulated-oob segment (10.200.0.0/18 in nico-core-simulation.yaml), not
+# from the Service CIDR.
 #
 # OOB demand is 3 addresses per host -- one per simulated BMC -- so 4,500 hosts
-# need 13,500 and a /18 fits. Do not widen these prefixes casually: address
-# allocation cost scales with subnet size (see the note in
-# setup-machine-a-tron.sh), so an oversized prefix reduces throughput.
+# need 13,500 and a /18 fits. Do not widen the prefix casually: the allocator
+# materialises the whole host space per request (about three times slower at
+# /16 than at /18) while holding the fleet-wide admin-segment lock.
 #
 # Single pod on purpose: the chart emits one `-bmc-mock` Service per entry in
 # `pods`, so a single routable proxy host requires a single pod. Resources are
 # sized for the whole fleet in one process accordingly.
 #
-# Run with:
-#   MAT_MODE=scale HOST_COUNT=4500 DPU_PER_HOST=2 \
-#     VALUES_FILE=.../machine-a-tron-scale-4500-proxy.yaml ./setup-machine-a-tron.sh -y
-# and WITHOUT MAT_MULTIPOD=1 -- that variable is what selects controller mode.
+# Deploy with:
+#   helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+#     -n nico-mat --create-namespace \
+#     -f helm-prereqs/values/machine-a-tron-scale-4500-proxy.yaml
+# nico-core's site config must point site_explorer.bmc_proxy at the Service
+# named in configureBmcProxyHost below, port 1266.
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
 image:
   repository: ""
   tag: ""
@@ -40,6 +46,11 @@ machineATron:
   # templates/service.yaml: "<chart name>-<pod key>-bmc-mock".
   configureBmcProxyHost: "nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local"
   registerExpectedMachines: true
+  # Pin every mock BMC to the site root so site-explorer logs in without
+  # rotating per-BMC passwords. Must equal siteCredentials.bmcRoot.password
+  # in helm-prereqs/values.yaml.
+  hostBmcPassword: "NicoSiteRoot1"
+  dpuBmcPassword: "NicoSiteRoot1"
 macAddressPool:
   enabled: true
   basePrefix: "02:00"
@@ -97,13 +108,6 @@ pods:
   default:
     machines:
       rack-machines: null
-      # MUST be keyed `dell-hosts`. setup-machine-a-tron.sh appends a second
-      # values file defining machines.dell-hosts with HOST_COUNT, and Helm
-      # deep-merges by KEY -- so a different key here makes Helm ADD a second
-      # machine group rather than override this one, and the fleet renders at
-      # twice the requested size. That doubles simulated address demand and can
-      # exhaust the configured prefixes. The render gate in
-      # setup-machine-a-tron.sh fails the run if it ever happens again.
       dell-hosts:
         hwType: dell_poweredge_r750
         hostCount: 4500
@@ -114,7 +118,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        # Simulated networks (Phase 5/6 constants).
+        # Gateways of [networks.simulated-oob] and [networks.simulated-underlay].
         bmcDhcpRelayAddress: "10.200.0.1"
         underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
