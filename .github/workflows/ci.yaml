@@ -847,6 +847,8 @@ jobs:
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            set -euo pipefail
+
             docker buildx imagetools create -t \
               ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide:${{ needs.prepare.outputs.version }} \
               ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide@${{ needs.build-release-container-x86_64.outputs.image_digest }} \
