@@ -1281,6 +1281,57 @@ func TestIpamer_NewPrefix(t *testing.T) {
 func TestIpamer_DeletePrefix(t *testing.T) {
 	ctx := context.Background()
 
+	for _, tc := range []struct {
+		name                     string
+		remove                   func(Ipamer, *Prefix) error
+		expectedRootReservations uint64
+	}{
+		{
+			name: "delete prefix with allocated subprefixes",
+			remove: func(ipam Ipamer, prefix *Prefix) error {
+				_, err := ipam.DeletePrefix(ctx, prefix.Cidr)
+				return err
+			},
+			expectedRootReservations: 1,
+		},
+		{
+			name: "release prefix with allocated subprefixes",
+			remove: func(ipam Ipamer, prefix *Prefix) error {
+				return ipam.ReleaseChildPrefix(ctx, prefix)
+			},
+			expectedRootReservations: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ipam := New(ctx)
+			root, err := ipam.NewPrefix(ctx, "2001:db8::/120")
+			require.NoError(t, err)
+			child, err := ipam.AcquireChildPrefix(ctx, root.Cidr, 122)
+			require.NoError(t, err)
+			grandchild, err := ipam.AcquireChildPrefix(ctx, child.Cidr, 124)
+			require.NoError(t, err)
+
+			err = tc.remove(ipam, child)
+			require.ErrorContains(t, err, "has allocated child prefixes")
+			storedRoot := ipam.PrefixFrom(ctx, root.Cidr)
+			storedChild := ipam.PrefixFrom(ctx, child.Cidr)
+			require.NotNil(t, storedRoot)
+			require.NotNil(t, storedChild)
+			require.Equal(t, uint64(1), storedRoot.acquiredPrefixes())
+			require.Equal(t, uint64(1), storedChild.acquiredPrefixes())
+			require.NotNil(t, ipam.PrefixFrom(ctx, grandchild.Cidr))
+
+			err = ipam.ReleaseChildPrefix(ctx, grandchild)
+			require.NoError(t, err)
+			err = tc.remove(ipam, ipam.PrefixFrom(ctx, child.Cidr))
+			require.NoError(t, err)
+			require.Nil(t, ipam.PrefixFrom(ctx, child.Cidr))
+			storedRoot = ipam.PrefixFrom(ctx, root.Cidr)
+			require.NotNil(t, storedRoot)
+			require.Equal(t, tc.expectedRootReservations, storedRoot.acquiredPrefixes())
+		})
+	}
+
 	testWithBackends(t, func(t *testing.T, ipam *ipamer) {
 		// IPv4
 		prefix, err := ipam.NewPrefix(ctx, "192.168.0.0/20")
