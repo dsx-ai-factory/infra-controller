@@ -267,7 +267,8 @@ func (i *IPAMService) PrefixUsage(ctx context.Context, req *connect.Request[v1.P
 
 	subnetCount := i.ipamer.GetSubnetCount(ctx, req.Msg.Cidr)
 
-	u.AvailableIPs = u.AvailableIPs - 3*subnetCount
+	// A subnet's reserved address count can exceed the prefix size; do not wrap below zero.
+	u.AvailableIPs -= min(u.AvailableIPs, 3*subnetCount)
 
 	return &connect.Response[v1.PrefixUsageResponse]{
 		Msg: &v1.PrefixUsageResponse{
