@@ -10,7 +10,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1151,10 +1150,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 	ctx context.Context,
 	req *pb.CreateOperationRuleRequest,
 ) (*pb.CreateOperationRuleResponse, error) {
-	// Parse rule definition from JSON
-	var ruleDef operationrules.RuleDefinition
-	if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-		return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+	// Parse the rule definition through the version-aware decoder so every
+	// accepted definition can also be decoded after it is persisted.
+	ruleDef, err := operationrules.UnmarshalRuleDefinition(
+		[]byte(req.GetRuleDefinitionJson()),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 	}
 
 	// Create rule object
@@ -1164,13 +1166,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 		Description:    req.GetDescription(),
 		OperationType:  protobuf.OperationTypeFromProto(req.GetOperationType()),
 		OperationCode:  req.GetOperationCode(),
-		RuleDefinition: ruleDef,
+		RuleDefinition: *ruleDef,
 		IsDefault:      req.GetIsDefault(),
 	}
 
 	// Validate rule
 	if err := rule.Validate(); err != nil {
-		return nil, fmt.Errorf("rule validation failed: %w", err)
+		return nil, status.Errorf(codes.InvalidArgument, "rule validation failed: %v", err)
 	}
 
 	// Store in database
@@ -1203,15 +1205,17 @@ func (rs *FlowServerImpl) UpdateOperationRule(
 		updates["description"] = req.GetDescription()
 	}
 	if req.RuleDefinitionJson != nil {
-		var ruleDef operationrules.RuleDefinition
-		if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-			return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+		ruleDef, err := operationrules.UnmarshalRuleDefinition(
+			[]byte(req.GetRuleDefinitionJson()),
+		)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 		}
 		// Validate the rule definition
 		if err := ruleDef.Validate(); err != nil {
-			return nil, fmt.Errorf("rule definition validation failed: %w", err)
+			return nil, status.Errorf(codes.InvalidArgument, "rule definition validation failed: %v", err)
 		}
-		updates["rule_definition"] = ruleDef
+		updates["rule_definition"] = *ruleDef
 	}
 	// Note: is_default is NOT updatable via UpdateRule - use SetRuleAsDefault instead
 
