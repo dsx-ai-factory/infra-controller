@@ -14,6 +14,47 @@ SCRIPT = Path(__file__).with_name("bootstrap-prereqs.sh")
 
 
 class BootstrapPrereqsTest(unittest.TestCase):
+    def test_rendered_vault_listener_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "vault.yaml"
+            result = subprocess.run(
+                ["bash", "-c", '''
+kubectl() {
+    case "$*" in
+        'apply -f -')
+            printf '%s\\n' '---' >> "$BOOTSTRAP_TEST_MANIFEST"
+            cat >> "$BOOTSTRAP_TEST_MANIFEST"
+            ;;
+        'rollout status statefulset/vault '*) exit 91 ;;
+        *) return 1 ;;
+    esac
+}
+helm() { return 1; }
+export -f kubectl helm
+source "$1"
+''', "bash", str(SCRIPT)],
+                env={
+                    **os.environ,
+                    "LOCAL_DEV_INSTALL_CERT_MANAGER": "0",
+                    "LOCAL_DEV_INSTALL_POSTGRES": "0",
+                    "LOCAL_DEV_INSTALL_VAULT": "1",
+                    "LOCAL_DEV_VAULT_TOKEN": "test-token",
+                    "BOOTSTRAP_TEST_MANIFEST": str(manifest),
+                },
+                capture_output=True, text=True, timeout=15,
+            )
+            # Capture the real Vault emitter before rollout or credential setup.
+            self.assertEqual(result.returncode, 91, result.stderr)
+            resources = {
+                (item["kind"], item["metadata"]["name"]): item
+                for item in yaml.safe_load_all(manifest.read_text())
+            }
+            statefulset = resources[("StatefulSet", "vault")]
+            container = statefulset["spec"]["template"]["spec"]["containers"][0]
+            self.assertIn("-dev-listen-address=[::]:8200", container["args"])
+            environment = {item["name"]: item["value"] for item in container["env"]}
+            self.assertEqual(environment["VAULT_DEV_LISTEN_ADDRESS"], "[::]:8200")
+
     def test_postgres_host_in_connection_objects(self):
         # A trailing colon breaks YAML; brackets must stay text, not a YAML list.
         for host in ("2001:db8:1:2:3:4::", "[2001:db8::1]", "postgres.example.test"):

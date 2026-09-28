@@ -1824,7 +1824,7 @@ jobs:
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
       # Uses python3-yaml installed by the configuration check above.
-      - name: Test DevSpace PostgreSQL connection manifests
+      - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
 
       # Charts with tests must be listed explicitly.
