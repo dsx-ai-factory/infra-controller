@@ -2562,6 +2562,7 @@ pub enum CleanupContext {
     #[default]
     Deprovision,
     InitialDiscovery,
+    Reset,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, EnumIter)]
 #[serde(rename_all = "lowercase")]
