@@ -1002,7 +1002,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1100,7 +1100,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchRackFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch rack firmware update request")
