@@ -1579,16 +1579,21 @@ jobs:
           username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
       - name: Create and push multi-arch manifest
-        run: |
-          docker buildx imagetools create -t \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
 
-          docker buildx imagetools create -t \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-            ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
 
   build-release-machine-validation-artifacts-x86-host:
     needs:
@@ -2374,6 +2379,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart
@@ -2400,7 +2408,7 @@ jobs:
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "$NEEDS" | jq -r '
             to_entries[]
-            | select((.key | startswith("build-")) or (.key | startswith("test-")))
+            | select((.key | startswith("build-")) or (.key | startswith("test-")) or (.key | startswith("merge-manifests-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
           ' >> "$GITHUB_STEP_SUMMARY"
 
@@ -2423,6 +2431,8 @@ jobs:
           IMAGES["build-forge-cli-x86_64"]="${{ needs.build-forge-cli-x86_64.outputs.image_ref }}"
           IMAGES["build-forge-cli-aarch64"]="${{ needs.build-forge-cli-aarch64.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-runner"]="${{ needs.build-release-machine-validation-runner.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-artifacts-x86-host"]="${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
@@ -2483,6 +2493,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart

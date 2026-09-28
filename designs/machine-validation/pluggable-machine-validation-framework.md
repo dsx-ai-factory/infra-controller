@@ -178,7 +178,9 @@ Every plugin receives a versioned, non-secret JSON input at
 to `/opt/forge/mv/output/result.json` by default. A Scout deployment can set its
 common container-visible base directory with
 `--machine-validation-plugin-contract-dir <absolute-path>`; Scout then mounts
-`<base>/input` and `<base>/output` in every plugin container. The input identifies the run, attempt,
+`<base>/input` and `<base>/output` in every plugin container and sets
+`NICO_MV_CONTRACT_DIR=<base>`. Plugins use this environment variable to locate
+`input/input.json` and `output/result.json`. The input identifies the run, attempt,
 machine, context, plugin revision, deadline, and site-defined parameters. The
 result declares `pass`, `fail`, or `error` with a short summary and optional
 findings.

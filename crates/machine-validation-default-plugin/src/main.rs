@@ -1,14 +1,15 @@
 mod checks;
 
-use std::fs;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 use checks::{default_checks, run_check};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const INPUT: &str = "/opt/forge/mv/input/input.json";
-const OUTPUT: &str = "/opt/forge/mv/output/result.json";
+const CONTRACT_DIR_ENV: &str = "NICO_MV_CONTRACT_DIR";
+const DEFAULT_CONTRACT_DIR: &str = "/opt/forge/mv";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,16 +57,36 @@ pub(crate) struct Finding {
 }
 
 fn main() {
-    if let Err(error) = run(INPUT, OUTPUT) {
+    let (input_path, output_path) = contract_paths();
+    if let Err(error) = run(&input_path, &output_path) {
         eprintln!("{error}");
         std::process::exit(2);
     }
 }
 
-fn run(input_path: &str, output_path: &str) -> Result<(), String> {
-    let input: Input =
-        serde_json::from_slice(&fs::read(input_path).map_err(|e| format!("read input: {e}"))?)
-            .map_err(|e| format!("parse input: {e}"))?;
+/// Returns the contract paths selected by Scout, or the documented default for direct use.
+fn contract_paths() -> (PathBuf, PathBuf) {
+    contract_paths_from(env::var_os(CONTRACT_DIR_ENV))
+}
+
+/// Derives input and output paths from an optional container-visible contract directory.
+fn contract_paths_from(contract_dir: Option<OsString>) -> (PathBuf, PathBuf) {
+    let contract_dir = contract_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTRACT_DIR));
+    (
+        contract_dir.join("input/input.json"),
+        contract_dir.join("output/result.json"),
+    )
+}
+
+/// Runs configured basic checks and publishes the Machine Validation result contract.
+fn run(input_path: &Path, output_path: &Path) -> Result<(), String> {
+    let input: Input = serde_json::from_slice(
+        &fs::read(input_path)
+            .map_err(|e| format!("read plugin input {}: {e}", input_path.display()))?,
+    )
+    .map_err(|e| format!("parse input: {e}"))?;
     if input.contract_version != "v1" || input.kind != "MachineValidationPluginInput" {
         return Err("unsupported plugin input contract".to_owned());
     }
@@ -102,8 +123,8 @@ fn run(input_path: &str, output_path: &str) -> Result<(), String> {
     write_result(output_path, &result)
 }
 
-fn write_result(path: &str, result: &ResultFile<'_>) -> Result<(), String> {
-    let path = Path::new(path);
+/// Atomically publishes the plugin result after the complete JSON document is written.
+fn write_result(path: &Path, result: &ResultFile<'_>) -> Result<(), String> {
     let directory = path.parent().ok_or("result path has no parent")?;
     fs::create_dir_all(directory).map_err(|e| format!("create output directory: {e}"))?;
     let temporary = directory.join(format!(".result.json.{}.tmp", std::process::id()));
@@ -155,8 +176,21 @@ mod tests {
             summary: "ok".to_owned(),
             findings: vec![],
         };
-        write_result(output.to_str().unwrap(), &result).unwrap();
+        write_result(&output, &result).unwrap();
         assert!(output.is_file());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn uses_the_configured_contract_directory() {
+        let (input, output) = contract_paths_from(Some("/var/lib/nico/plugin-contract".into()));
+        assert_eq!(
+            input,
+            Path::new("/var/lib/nico/plugin-contract/input/input.json")
+        );
+        assert_eq!(
+            output,
+            Path::new("/var/lib/nico/plugin-contract/output/result.json")
+        );
     }
 }

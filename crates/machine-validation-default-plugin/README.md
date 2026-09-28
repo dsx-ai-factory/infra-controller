@@ -33,6 +33,11 @@ The plugin uses the host-installed DCGM through
 profile. A missing or unusable host DCGM installation is a plugin execution
 error.
 
+Scout sets `NICO_MV_CONTRACT_DIR` to the container-visible contract directory
+when it starts the plugin. The plugin reads `input/input.json` and writes
+`output/result.json` below that directory. The default is `/opt/forge/mv` when
+the variable is not set, which also supports direct local invocation.
+
 Sites can build and configure dedicated plugins for more detailed,
 long-running, hardware-specific, or workflow-specific tests.
 

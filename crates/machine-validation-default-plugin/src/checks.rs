@@ -1,5 +1,5 @@
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -11,6 +11,7 @@ type CheckHandler = fn(&Value) -> Result<Option<Finding>, String>;
 
 const CHECKS: &[(&str, CheckHandler)] = &[("dcgm-diagnostic", run_dcgm_diagnostic)];
 
+/// Returns the baseline checks used when the site provides no explicit check list.
 pub(crate) fn default_checks() -> Vec<RequestedCheck> {
     vec![RequestedCheck {
         name: "dcgm-diagnostic".to_owned(),
@@ -18,6 +19,7 @@ pub(crate) fn default_checks() -> Vec<RequestedCheck> {
     }]
 }
 
+/// Dispatches one named basic check and returns a finding only when it fails.
 pub(crate) fn run_check(check: &RequestedCheck) -> Result<Option<Finding>, String> {
     let (_, handler) = CHECKS
         .iter()
@@ -26,6 +28,7 @@ pub(crate) fn run_check(check: &RequestedCheck) -> Result<Option<Finding>, Strin
     handler(&check.parameters)
 }
 
+/// Runs the configured host DCGM diagnostic and preserves diagnostic failures as findings.
 fn run_dcgm_diagnostic(parameters: &Value) -> Result<Option<Finding>, String> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -48,6 +51,9 @@ fn run_dcgm_diagnostic(parameters: &Value) -> Result<Option<Finding>, String> {
         .output()
         .map_err(|error| format!("run host dcgmi: {error}"))?;
     let output = bounded_output(&command.stdout, &command.stderr);
+    if chroot_invocation_failed(&command) {
+        return Err(format!("run host dcgmi: {output}"));
+    }
     Ok((!command.status.success()).then(|| Finding {
         name: "dcgm-diagnostic",
         message: if output.is_empty() {
@@ -58,6 +64,7 @@ fn run_dcgm_diagnostic(parameters: &Value) -> Result<Option<Finding>, String> {
     }))
 }
 
+/// Checks that the selected DCGM executable exists in the mounted host root.
 fn validate_host_dcgm(path: &Path) -> Result<(), String> {
     if path.is_file() {
         Ok(())
@@ -66,6 +73,7 @@ fn validate_host_dcgm(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Maps a validated absolute host path to its location below the `/host` mount.
 fn host_binary_path(host_root: &Path, binary_path: &str) -> Result<PathBuf, String> {
     let binary_path = Path::new(binary_path);
     if !binary_path.is_absolute()
@@ -83,9 +91,11 @@ fn host_binary_path(host_root: &Path, binary_path: &str) -> Result<PathBuf, Stri
     Ok(host_root.join(relative))
 }
 
+/// Builds a locale-stable chroot invocation for the selected host DCGM executable.
 fn dcgm_command(host_root: &Path, binary_path: &str, level: u8) -> Command {
     let mut command = Command::new("chroot");
     command
+        .env("LC_ALL", "C")
         .arg(host_root)
         .args([binary_path, "diag", "-r"])
         .arg(level.to_string());
@@ -100,18 +110,33 @@ fn default_dcgmi_path() -> String {
     "/usr/bin/dcgmi".to_owned()
 }
 
+/// Identifies GNU chroot errors without reclassifying a DCGM diagnostic exit code.
+fn chroot_invocation_failed(command: &Output) -> bool {
+    matches!(command.status.code(), Some(125..=127))
+        && String::from_utf8_lossy(&command.stderr).starts_with("chroot: ")
+}
+
+/// Combines diagnostic output and bounds it without splitting a UTF-8 character.
 fn bounded_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut output = format!(
         "{}\n{}",
         String::from_utf8_lossy(stdout),
         String::from_utf8_lossy(stderr)
     );
-    output.truncate(MAX_DIAGNOSTIC_OUTPUT);
+    if output.len() > MAX_DIAGNOSTIC_OUTPUT {
+        let mut end = MAX_DIAGNOSTIC_OUTPUT;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
+    }
     output.trim().to_owned()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
     use super::*;
 
     #[test]
@@ -144,6 +169,27 @@ mod tests {
     fn bounds_diagnostic_output() {
         let output = bounded_output(&vec![b'x'; MAX_DIAGNOSTIC_OUTPUT + 1], b"");
         assert!(output.len() <= MAX_DIAGNOSTIC_OUTPUT);
+    }
+
+    #[test]
+    fn bounds_diagnostic_output_at_a_utf8_boundary() {
+        let mut output = vec![b'x'; MAX_DIAGNOSTIC_OUTPUT - 1];
+        output.extend_from_slice("é".as_bytes());
+        assert_eq!(
+            bounded_output(&output, b""),
+            "x".repeat(MAX_DIAGNOSTIC_OUTPUT - 1)
+        );
+    }
+
+    #[test]
+    fn recognizes_chroot_startup_diagnostics() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(127 << 8),
+            stdout: vec![],
+            stderr: b"chroot: failed to run command '/usr/bin/dcgmi': No such file or directory\n"
+                .to_vec(),
+        };
+        assert!(chroot_invocation_failed(&output));
     }
 
     #[test]
