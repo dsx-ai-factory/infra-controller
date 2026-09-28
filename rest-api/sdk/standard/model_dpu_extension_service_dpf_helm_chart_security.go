@@ -83,7 +83,7 @@ func (o *DpuExtensionServiceDpfHelmChartSecurity) GetSpiffe() map[string]interfa
 	return o.Spiffe
 }
 
-// GetSpiffeOk returns a tuple with the Spiffe field value if set, nil otherwise
+// GetSpiffeOk returns a tuple with the Spiffe field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDpfHelmChartSecurity) GetSpiffeOk() (map[string]interface{}, bool) {
 	if o == nil || IsNil(o.Spiffe) {
