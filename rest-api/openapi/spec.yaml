@@ -367,6 +367,9 @@ tags:
 
       Active Deprecations:
 
+      Expected Rack and Expected Rack Group:
+      - `PUT /expected-rack` and `PUT /expected-rack-group` are deprecated in favor of the explicit full-Site mutation paths `PUT /expected-rack/all` and `PUT /expected-rack-group/all`. The deprecated routes preserve identical request, response, Site scoping, authorization, validation, and mutation semantics for backward compatibility; no removal release is scheduled.
+
       Instance:
       - `infrastructureProviderId` query parameter on the list Instances endpoint was deprecated and will be removed on October 10th, 2026 0:00 UTC. Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the `siteId` parameter to scope results to a specific Infrastructure Provider's Sites.
 
@@ -5264,8 +5267,11 @@ paths:
         - Expected Rack
     put:
       summary: Replace all Expected Racks
-      operationId: replace-all-expected-rack
+      operationId: replace-all-expected-rack-legacy
+      deprecated: true
       description: |-
+        Deprecated compatibility route. Use `PUT /v2/org/{org}/nico/expected-rack/all` instead. This route preserves the same Site scoping, authorization, validation, response, and mutation semantics during migration.
+
         Replace the full set of Expected Racks for a Site with the provided list. All existing Expected Racks for the Site that are not in the request body will be deleted, and any new Expected Racks in the request will be created. Existing Expected Racks with matching `rackId` values will be updated.
 
         Every entry in `expectedRacks` must reference the same `siteId` as the top-level `siteId`. `rackId` values must be unique within the request. The `expectedRacks` array may be empty to clear all Expected Racks for the Site.
@@ -5328,6 +5334,39 @@ paths:
         in: path
         required: true
         description: Name of the Org
+    put:
+      summary: Replace all Expected Racks
+      operationId: replace-all-expected-rack
+      description: |-
+        Replace the full set of Expected Racks for a Site with the provided list. All existing Expected Racks for the Site that are not in the request body will be deleted, and any new Expected Racks in the request will be created. Existing Expected Racks with matching `rackId` values will be updated.
+
+        Every entry in `expectedRacks` must reference the same `siteId` as the top-level `siteId`. `rackId` values must be unique within the request. The `expectedRacks` array may be empty to clear all Expected Racks for the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Racks if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackList'
+        description: Replace-all Expected Racks request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRack'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack
     delete:
       summary: Delete all Expected Racks
       operationId: delete-all-expected-rack
@@ -5614,8 +5653,11 @@ paths:
         - Expected Rack Group
     put:
       summary: Replace all Expected Rack Groups
-      operationId: replace-all-expected-rack-group
+      operationId: replace-all-expected-rack-group-legacy
+      deprecated: true
       description: |-
+        Deprecated compatibility route. Use `PUT /v2/org/{org}/nico/expected-rack-group/all` instead. This route preserves the same Site scoping, authorization, validation, response, and mutation semantics during migration.
+
         Replace the full set of Expected Rack Groups for a Site with the provided list. All existing rows for the Site are deleted and the supplied replacement set is created atomically, so response UUIDs may differ from earlier rows even when `rackGroupId` is unchanged.
 
         Every entry in `expectedRackGroups` must reference the same `siteId` as the top-level `siteId`. The `rackGroupId` values must be unique within the request. The `expectedRackGroups` array may be empty to clear all Expected Rack Groups for the Site.
@@ -5682,6 +5724,39 @@ paths:
         in: path
         required: true
         description: Name of the Org
+    put:
+      summary: Replace all Expected Rack Groups
+      operationId: replace-all-expected-rack-group
+      description: |-
+        Replace the full set of Expected Rack Groups for a Site with the provided list. All existing rows for the Site are deleted and the supplied replacement set is created atomically, so response UUIDs may differ from earlier rows even when `rackGroupId` is unchanged.
+
+        Every entry in `expectedRackGroups` must reference the same `siteId` as the top-level `siteId`. The `rackGroupId` values must be unique within the request. The `expectedRackGroups` array may be empty to clear all Expected Rack Groups for the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackGroupList'
+        description: Replace-all Expected Rack Groups request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
     delete:
       summary: Delete all Expected Rack Groups
       operationId: delete-all-expected-rack-group

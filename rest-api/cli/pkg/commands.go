@@ -347,7 +347,7 @@ func collectOperations(spec *Spec) []resolvedOp {
 			{"DELETE", item.Delete},
 		}
 		for _, me := range methods {
-			if me.op == nil {
+			if me.op == nil || me.op.Deprecated {
 				continue
 			}
 			tag := "other"

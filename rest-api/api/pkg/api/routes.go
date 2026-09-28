@@ -603,12 +603,17 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllExpectedRackHandler(dbSession, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/expected-rack/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRacksHandler(dbSession, scp, cfg),
+		},
+		{
+			// Deprecated compatibility route. New callers use PUT /expected-rack/all.
 			Path:    apiPathPrefix + "/expected-rack",
 			Method:  http.MethodPut,
 			Handler: apiHandler.NewReplaceAllExpectedRacksHandler(dbSession, scp, cfg),
 		},
 		{
-			// "all" suffix disambiguates from the path-param Delete handler below.
 			Path:    apiPathPrefix + "/expected-rack/all",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteAllExpectedRacksHandler(dbSession, scp, cfg),
@@ -640,6 +645,12 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllExpectedRackGroupHandler(dbSession, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/expected-rack-group/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			// Deprecated compatibility route. New callers use PUT /expected-rack-group/all.
 			Path:    apiPathPrefix + "/expected-rack-group",
 			Method:  http.MethodPut,
 			Handler: apiHandler.NewReplaceAllExpectedRackGroupsHandler(dbSession, scp, cfg),

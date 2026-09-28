@@ -66,6 +66,23 @@ func TestToKebab(t *testing.T) {
 	}
 }
 
+func TestCollectOperations(t *testing.T) {
+	spec := &Spec{Paths: map[string]PathItem{
+		"/preferred": {
+			Put: &Operation{OperationID: "replace-all-resource"},
+		},
+		"/legacy": {
+			Put: &Operation{OperationID: "replace-all-resource-legacy", Deprecated: true},
+		},
+	}}
+
+	operations := collectOperations(spec)
+
+	require.Len(t, operations, 1)
+	assert.Equal(t, "replace-all-resource", operations[0].op.OperationID)
+	assert.Equal(t, "/preferred", operations[0].path)
+}
+
 func TestClientFromContextExplicitTokenCommandOverridesCachedConfigToken(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &ConfigFile{
@@ -445,6 +462,41 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestGeneratedCommandInfos_ExpectedInventoryReplaceAllPaths(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	operations := make(map[string]GeneratedCommandInfo)
+	for _, info := range GeneratedCommandInfos(spec) {
+		operations[info.OperationID] = info
+	}
+
+	tests := []struct {
+		operationID string
+		path        string
+	}{
+		{
+			operationID: "replace-all-expected-rack",
+			path:        "/v2/org/{org}/nico/expected-rack/all",
+		},
+		{
+			operationID: "replace-all-expected-rack-group",
+			path:        "/v2/org/{org}/nico/expected-rack-group/all",
+		},
+	}
+	for _, tt := range tests {
+		operation, ok := operations[tt.operationID]
+		require.True(t, ok, "missing %s", tt.operationID)
+		assert.Equal(t, http.MethodPut, operation.Method)
+		assert.Equal(t, tt.path, operation.Path)
+	}
+
+	_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
+	assert.False(t, hasRackLegacy)
+	_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
+	assert.False(t, hasRackGroupLegacy)
 }
 
 func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
