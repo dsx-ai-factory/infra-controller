@@ -113,7 +113,8 @@ do
 		# administratively down, so treat an unreadable value as no carrier yet.
 		if [ ! -r "$carrier_file" ] || [ "$(cat "$carrier_file" 2>/dev/null)" != 1 ]; then
 			not_ready=no_carrier
-		elif ! global_addresses=$("$ip_command" -o address show dev "$preferred_interface" scope global); then
+		# Wait for IPv6 duplicate address detection before disabling other interfaces.
+		elif ! global_addresses=$("$ip_command" -o address show dev "$preferred_interface" scope global -tentative -dadfailed); then
 			not_ready=address_inspection_failed
 		elif [ -z "$global_addresses" ]; then
 			not_ready=no_global_address
