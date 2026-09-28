@@ -50,11 +50,16 @@ helm-prereqs/
 ├── clean.sh                    # Teardown script - removes everything in reverse order
 ├── unseal_vault.sh             # Vault init + unseal (called by setup.sh Phase 4)
 ├── bootstrap_ssh_host_key.sh   # SSH host key generation (called by setup.sh Phase 4)
+├── check-external-service-vips.py  # Core VIP preflight (called by preflight.sh)
+├── check-mat-service-cidr.py   # machine-a-tron BMC network vs ServiceCIDR preflight
+├── ingestion-rate-report.sh    # machine-a-tron ingestion curves from the database timestamps
 ├── helmfile.yaml               # Helmfile release definitions for all prerequisite components
 ├── Chart.yaml                  # nico-prereqs Helm chart metadata
 ├── values.yaml                 # Top-level values (siteName, PostgreSQL tuning)
 ├── values/
 │   ├── nico-core.yaml           # NICo Core deployment values (hostname, siteConfig, VIPs)
+│   ├── nico-core-simulation.yaml  # NICo Core values for a machine-a-tron simulation site
+│   ├── machine-a-tron*.yaml     # machine-a-tron chart values: Override Mode and the scale profiles
 │   ├── nico-rest.yaml           # NICo REST deployment values (Keycloak config)
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
 │   └── metallb-config.yaml     # MetalLB IP pools, BGP peers, and advertisements
@@ -210,7 +215,7 @@ The tables below summarize the keys that must be set per site.
 | `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
 | `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
 | `siteCredentials.enabled` | `false` | No | Render the site-wide BMC root and the Unified Extensible Firmware Interface (UEFI) site defaults as a credential-file Secret for `nico-api`. Refer to [Site Credentials Secret](#site-credentials-secret). |
-| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values. |
+| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values and, on a machine-a-tron site, `machineATron.siteCredentialsSecret.name` in the machine-a-tron values. |
 | `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | No | Site-wide BMC root password that site-explorer rotates every BMC to. Leave the password empty to generate a random 32-character value on the first install, which upgrades keep. An explicit value must differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
 | `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | No | DPU UEFI site default. An empty password is generated in the same way. The username is not used. |
 | `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | No | Host UEFI site default, same rules. |
@@ -285,12 +290,16 @@ Secrets Operator, Sealed Secrets, or a Vault sync) and point
 `nico-api.credentials.file.existingSecret` at it, as the manual recipe above
 does without this block.
 
-On a machine-a-tron site, `setup-machine-a-tron.sh` Phase 4 still seeds the
-same three credentials in Vault and the file shadows them. Keep the chart
-passwords equal to the script's `BMC_PASSWORD` and `UEFI_*_PASSWORD` values,
-`NicoSiteRoot1` and `bluefield` by default, which are for simulated hardware
-only. A generated password does not match them, so set the passwords explicitly
-on a script-driven site.
+On a machine-a-tron site, the machine-a-tron chart reads
+`bmc_site_wide_root.password` from this Secret when it renders, so a generated
+password reaches the mocks without a manual step. With the scale profiles the
+mock BMCs start at the site root without a copy of the password in the
+machine-a-tron values. `helm-prereqs/values/machine-a-tron.yaml` disables the
+lookup (`machineATron.siteCredentialsSecret.name: ""`) so Override Mode
+exercises credential rotation from the factory defaults.
+`machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
+looked-up value. Refer to
+[Helm-Only Deployment](../helm/charts/nico-machine-a-tron/README.md#helm-only-deployment).
 
 ### `values/nico-core.yaml`
 

@@ -1,27 +1,27 @@
 # =============================================================================
-# machine-a-tron.yaml — site values template
+# machine-a-tron.yaml - site values template
 #
-# Copy this file and fill in site-specific values before deploying, OR let
-# setup-machine-a-tron.sh consume it directly (it fills the site-specific
-# fields from the running nico-core site config).
+# Copy this file and fill in the site-specific values before deploying.
 # See docs/development/machine-a-tron-deployment.md for the full guide.
 #
 # Deployment mode: Override Mode (nginxBmcProxy.enabled: false)
 #   site-explorer's Redfish calls are redirected to machine-a-tron's mock BMC.
-#   Not compatible with real hardware — use only on simulation-only clusters.
+#   Not compatible with real hardware. Use only on simulation-only clusters.
 #
-# IMPORTANT — the redirect is driven by nico-core, not this chart. nico-core's
+# IMPORTANT: the redirect is driven by nico-core, not this chart. nico-core's
 # site_explorer config must contain (note the CROSS-NAMESPACE FQDN):
 #   [site_explorer]
 #   bmc_proxy = "nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local:1266"
 # (Field is `bmc_proxy`, a single "host:port" string. The older
 #  override_target_ip/override_target_port fields are DEPRECATED, and
-#  override_target_host was never a valid field. setup-machine-a-tron.sh sets
-#  bmc_proxy for you.)  The FQDN is REQUIRED: site-explorer runs in nico-system
-#  and cannot resolve the bare service name (which resolves against its own
-#  namespace) — a bare name yields a Redfish "connection refused". Setting
-#  bmc_proxy at launch also makes allow_changing_bmc_proxy default to true,
-#  which is what lets configureBmcProxyHost (below) work at runtime.
+#  override_target_host was never a valid field.) Set it in the nico-core
+#  values (nico-api.siteConfig.nicoApiSiteConfig), not in the live ConfigMap,
+#  so a Core upgrade keeps it. The FQDN is REQUIRED: site-explorer runs in
+#  nico-system and cannot resolve the bare service name (which resolves
+#  against its own namespace) - a bare name yields a Redfish "connection
+#  refused". Setting bmc_proxy at launch also makes allow_changing_bmc_proxy
+#  default to true, which is what lets configureBmcProxyHost (below) work at
+#  runtime.
 # =============================================================================
 
 ## REQUIRED: the machine-a-tron image. Set it here or on the command line with
@@ -51,7 +51,7 @@ machineATron:
   # site_explorer.bmc_proxy at "<host>:<service.bmcMock.port>" at runtime.
   # This ONLY succeeds if nico-core has allow_changing_bmc_proxy=true (which is
   # the default once nico-core launches with bmc_proxy set). It is a
-  # belt-and-suspenders companion to the nico-core bmc_proxy setting — harmless
+  # belt-and-suspenders companion to the nico-core bmc_proxy setting, harmless
   # when both are set to the same target.
   # MUST be the cross-namespace FQDN (site-explorer is in nico-system and cannot
   # resolve the bare name). Update the ".nico-mat." segment if you deploy to a
@@ -85,14 +85,14 @@ pods:
       rack-machines: null
       dell-hosts:
         hwType: dell_poweredge_r750
-        # SIZING: machine-a-tron allocates one OOB DHCP IP per BMC interface —
-        # 1 per host + 1 per DPU. Total = hostCount + hostCount*dpuPerHostCount.
-        # This MUST fit the usable addresses in the OOB/underlay DHCP pool of your
-        # nico-core site config, or discovery reports "No IP addresses left in
+        # SIZING: one BMC address per host and per DPU, so the OOB network
+        # needs hostCount x (1 + dpuPerHostCount) addresses, the admin network
+        # the same, and the underlay network hostCount x dpuPerHostCount plus
+        # one per switch. Usable addresses per prefix = 2^(32 - mask) -
+        # reserve_first - 1. Overflow shows as "No IP addresses left in
         # prefix ..." and machines never register.
-        #   e.g. a /28 pool with a gateway and a few reserved addresses yields
-        #   ~10 usable → hostCount:3 * dpuPerHostCount:2 = 9 fits; 5*2=15 does not.
-        # setup-machine-a-tron.sh estimates the pool size and warns if you overflow.
+        #   e.g. a /28 with a gateway and reserve_first = 2 yields 13 usable:
+        #   hostCount 3 x (1 + 2) = 9 fits; 5 x (1 + 2) = 15 does not.
         hostCount: 3
         dpuPerHostCount: 2
         dpuRebootDelay: 1
@@ -101,11 +101,11 @@ pods:
         runIntervalWorking: "1s"
         runIntervalIdle: "10s"
         networkStatusRunInterval: "20s"
-        # Gateway of the BMC (OOB) network in nico-core site config; relay for BMC DHCP.
-        # (setup-machine-a-tron.sh fills both relays from the running nico-core config.)
+        # Gateway of the [networks.<oob>] stanza of the nico-core site config
+        # (simulated-oob in values/nico-core-simulation.yaml); relay for BMC DHCP.
         bmcDhcpRelayAddress: "FILL_IN"
-        # Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP
-        # (simulated-underlay in scale mode).
+        # Gateway of the [networks.<underlay>] stanza that serves DPU OOB and
+        # switch NVOS DHCP (simulated-underlay in values/nico-core-simulation.yaml).
         underlayDhcpRelayAddress: "FILL_IN"
         dpusInNicMode: false
 
