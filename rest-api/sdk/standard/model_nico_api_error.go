@@ -28,11 +28,11 @@ type NICoAPIError struct {
 	Message *string `json:"message,omitempty"`
 	// Additional data about the error
 	Data map[string]interface{} `json:"data,omitempty"`
-	// Optional classification of a rejected request. True permits a bounded, delayed retry; it does not guarantee availability or eventual success. False means do not automatically repeat the request. Omission means unclassified, not false. Instance create reports true only for a unique current instance owned by the requesting tenant with status Terminating; conflicting live operations report false. Missing or ambiguous machine associations remain unclassified.
+	// True permits bounded retries with backoff, without guaranteeing success. False prohibits automatic retries. Omission means unclassified.
 	Retryable *bool `json:"retryable,omitempty"`
-	// Optional minimum delay in seconds before a permitted retry, present only with retryable true. Omission means no server delay estimate is available; use bounded client backoff. Instance release-pending errors omit this field.
+	// Minimum delay before retrying, present only with retryable true. When omitted, use bounded client backoff.
 	RetryAfterSeconds *int32 `json:"retryAfterSeconds,omitempty"`
-	// Reconcile means an instance create outcome is uncertain, including a workflow start acknowledgement failure, timeout, lost workflow-result read, site transport/server failure, or REST commit failure after allocation. retryable is false. Check the original operation and ownership before another create; an empty REST result alone does not rule out allocation on the site. Omitted on errors without a recovery action. A lost HTTP response has no metadata: reconcile that outcome rather than blindly retrying.
+	// Reconcile requires checking the original operation's outcome before another mutation. retryable is false. Omission means no action specified.
 	RecoveryAction *string `json:"recoveryAction,omitempty"`
 }
 

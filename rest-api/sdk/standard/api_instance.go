@@ -213,6 +213,16 @@ Create an Instance for Tenant.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
+Machine-unavailable errors are retryable only when a unique current Instance
+belongs to this Tenant and is Terminating. Other current occupants are not
+retryable. Missing or ambiguous associations remain unclassified. No retry
+delay is estimated for release-pending errors.
+
+Uncertain create outcomes return `recoveryAction: Reconcile`, including
+workflow and post-allocation commit failures. Check the original operation
+and ownership before another create. An empty REST result does not rule out
+a Site allocation. Also reconcile after a lost HTTP response.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateInstanceRequest
