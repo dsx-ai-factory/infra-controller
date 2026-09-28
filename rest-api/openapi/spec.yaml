@@ -236,25 +236,13 @@ tags:
   - name: Machine
     description: |-
       Machine is a physical server that contains CPUs, GPUs, memory, storage, and networking hardware. Machines are the physical building blocks of a Site.
+
+      Machine-scoped operations manage attached DPUs, health reports, validation runs and results, BMC and chassis resets, power, decommissioning, and status history.
   - name: DPU Machine
     description: |-
       A DPU (Data Processing Unit) is a programmable network device installed in a Machine that runs its own operating system, so NICo tracks each DPU as a Machine of its own alongside the host Machine it is attached to. NICo provisions the DPU and uses it to enforce network isolation and Machine trust for the host, including when that host moves between Tenants.
 
-      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, see the DPU Reprovision tag.
-  - name: Machine Validation
-    description: |-
-      Machine Validation is the mechanism through which a series of validation tests are executed against a Machine verify its integrity. The tests are run for each Machine on ingestion, they can also be run on-demand.
-  - name: BMC Reset
-    x-displayName: BMC Reset
-    description: |-
-      BMC Reset allows resetting a Machine's BMC
-  - name: DPU Reprovision
-    x-displayName: DPU Reprovision
-    description: |-
-      DPU Reprovision allows re-provisioning Machine's DPUs
-  - name: Machine Capability
-    description: |-
-      Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
+      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, use the DPU reprovision operation under Machine.
   - name: Rack
     description: |-
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
@@ -11216,7 +11204,7 @@ paths:
     patch:
       summary: Reset Machine BMC
       tags:
-        - BMC Reset
+        - Machine
       requestBody:
         required: true
         content:
@@ -11243,6 +11231,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reset-machine-bmc
+      x-fern-sdk-group-name:
+        - machine
+        - bmc
       description: |-
         Reset the BMC of a specific Machine. When an Instance is attached to the
         Machine, `acknowledgeAttachedInstance` must be `true`.
@@ -11331,7 +11322,7 @@ paths:
     patch:
       summary: Reprovision Machine DPUs
       tags:
-        - DPU Reprovision
+        - Machine
       requestBody:
         required: true
         content:
@@ -11358,6 +11349,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reprovision-machine-dpu
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
       description: |-
         Trigger DPU reprovisioning for a Machine. Before calling this operation,
         create a Machine health report containing an alert whose ID is
@@ -11402,6 +11396,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Get all health reports for a specific Machine.
 
@@ -11434,6 +11431,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: create-or-update-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Add or update health report override for a specific Machine.
         
@@ -11476,6 +11476,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: delete-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Remove a health report override for a specific Machine.
 
@@ -11620,7 +11623,7 @@ paths:
     get:
       summary: Retrieve Machine validation runs
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation runs
@@ -11639,6 +11642,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-runs
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation runs for a specific Machine.
 
@@ -11646,7 +11652,7 @@ paths:
     post:
       summary: Create an on-demand Machine validation run
       tags:
-        - Machine Validation
+        - Machine
       requestBody:
         content:
           application/json:
@@ -11668,6 +11674,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: start-machine-validation
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Create an on-demand Machine validation run. The Machine must be in a state accepted by NICo Core.
 
@@ -11689,7 +11698,7 @@ paths:
     get:
       summary: Retrieve Machine validation results
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation results
@@ -11708,6 +11717,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-results
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation results for a specific Machine.
 
@@ -11994,6 +12006,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-dpu-machines
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
   '/v2/org/{org}/nico/machine/gpu/stats':
     parameters:
       - schema:
