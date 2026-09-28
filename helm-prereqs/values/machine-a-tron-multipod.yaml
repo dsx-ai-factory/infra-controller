@@ -41,8 +41,9 @@ image:
 
 machineATron:
   configureBmcProxyHost: ""
-  hostBmcPassword: NicoSiteRoot1
-  dpuBmcPassword: NicoSiteRoot1
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
   nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
   registerExpectedMachines: true
 

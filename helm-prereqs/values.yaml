@@ -98,9 +98,11 @@ vault:
     #       password: "0penBmc"
     ## Host BMC factory default for machine-a-tron mock hosts, keyed by the
     ## lowercase BMC vendor (`dell` for the Dell PowerEdge mocks). Needed when
-    ## machineATron.hostBmcPassword is unset (Override Mode): site-explorer logs
+    ## the mocks are not pinned (values/machine-a-tron.yaml disables the site
+    ## credentials lookup and leaves hostBmcPassword unset): site-explorer logs
     ## in with this password and rotates the mock to the site root. The scale
-    ## values files pin the password instead. Values are
+    ## profiles pin the mocks to the site root the machine-a-tron chart reads
+    ## from the site credentials Secret. Values are
     ## bmc_mock::DUMMY_FACTORY_USERNAME and DUMMY_FACTORY_PASSWORD.
     # - path: "machines/all_hosts/factory_default/bmc-metadata-items/dell"
     #   data:
@@ -135,14 +137,14 @@ siteCredentials:
   ## Only the passwords are used. site-explorer logs in with each BMC's own account.
   bmcRoot:
     username: "root"
-    password: ""          # machine-a-tron test value: NicoSiteRoot1
+    password: ""          # any value that differs from the mock factory passwords (factory_password, 0penBmc)
   uefi:
     dpu:
       username: ""
-      password: ""        # machine-a-tron test value: bluefield
+      password: ""        # any non-empty value on a simulation site
     host:
       username: ""
-      password: ""        # machine-a-tron test value: bluefield
+      password: ""        # any non-empty value on a simulation site
 
 certManager:
   siteRoot:

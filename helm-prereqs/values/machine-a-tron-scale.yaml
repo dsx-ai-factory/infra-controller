@@ -36,11 +36,9 @@ machineATron:
   nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
   configureBmcProxyHost: ""  # Not used in controller mode
   registerExpectedMachines: true
-  # Pin every mock BMC to the site root so site-explorer logs in without
-  # rotating per-BMC passwords. Must equal siteCredentials.bmcRoot.password
-  # in helm-prereqs/values.yaml.
-  hostBmcPassword: "NicoSiteRoot1"
-  dpuBmcPassword: "NicoSiteRoot1"
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
 
 # Enable auto-generated MAC pools (prevents collisions in multi-pod)
 macAddressPool:

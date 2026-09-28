@@ -48,6 +48,33 @@ Core site configuration. Follow the
 [deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
 those steps.
 
+The chart reads the site-wide BMC root password from the `nico-site-credentials`
+Secret with a Helm `lookup` and pins every mock BMC to it. Install that Secret
+(`siteCredentials` in helm-prereqs) before the chart. Without the Secret the
+chart omits both password lines and the mocks keep their factory passwords, so
+enable `siteCredentials` in helm-prereqs for the multipod and scale profiles.
+`machineATron.siteCredentialsSecret` names the Secret, its namespace, and the
+`credentials.yaml` key whose `bmc_site_wide_root.password` entry is read.
+`machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
+looked-up value. When neither source sets a password, `mat.toml` carries no
+password line and each mock keeps its factory default, which site-explorer then
+rotates.
+
+The password lands in clear text in the `mat.toml` ConfigMap, which fits the
+simulated hardware this chart targets. A caller without `get` on Secrets in
+`nico-system` fails the render with the API error. Set
+`machineATron.siteCredentialsSecret.name: ""` to disable the lookup in that
+case.
+
+The lookup runs when the chart renders, so run `helm upgrade` on the
+machine-a-tron release after the password changes. With `persistence.enabled`,
+a mock that restores a snapshot keeps the credentials the snapshot saved, so the
+new password reaches only mocks without a snapshot. `helm template` and
+client-side `--dry-run` have no cluster, so the looked-up password is missing
+from their rendered `mat.toml`. Only an explicit `hostBmcPassword` or
+`dpuBmcPassword` appears there. Use `--dry-run=server` to see the looked-up
+value.
+
 The example scopes the Docker configuration JSON to the registry that
 machine-a-tron pulls from and uses the registry login variables from the
 deployment guide. It writes the base64-encoded payload to a temporary file that

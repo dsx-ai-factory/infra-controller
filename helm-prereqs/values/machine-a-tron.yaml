@@ -66,6 +66,13 @@ machineATron:
   # managed host when no expected_machines row matches the discovered BMC MAC
   # ("Refusing to create managed host, expected machines entry not found").
   registerExpectedMachines: true
+  # Leave the mocks at their factory passwords so site-explorer exercises the
+  # credential rotation flow (seed the host factory default in Vault, see the
+  # kvSeeds comment in helm-prereqs/values.yaml). Drop this block to pin the
+  # mocks to the site root from the site credentials Secret like the scale
+  # profiles do.
+  siteCredentialsSecret:
+    name: ""
 
 pods:
   # The chart's own values.yaml ships a mat-0 pod. Null it, or this file's
