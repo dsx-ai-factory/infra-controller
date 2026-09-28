@@ -1850,6 +1850,8 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					DeviceInstance:       *sac.DeviceInstance,
 					AttachmentType:       sac.AttachmentType,
 					VirtualFunctionID:    sac.VirtualFunctionID,
+					BridgeName:           sac.BridgeName,
+					OvnNetworkName:       sac.OvnNetworkName,
 					Status:               cdbm.SpectrumXAttachmentStatusPending,
 					CreatedBy:            dbUser.ID,
 				})

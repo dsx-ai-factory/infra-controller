@@ -2012,6 +2012,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				DeviceInstance:       *sac.DeviceInstance,
 				AttachmentType:       sac.AttachmentType,
 				VirtualFunctionID:    sac.VirtualFunctionID,
+				BridgeName:           sac.BridgeName,
+				OvnNetworkName:       sac.OvnNetworkName,
 				Status:               cdbm.SpectrumXAttachmentStatusPending,
 				CreatedBy:            dbUser.ID,
 			})
@@ -4099,6 +4101,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					DeviceInstance:       *apiSxA.DeviceInstance,
 					AttachmentType:       apiSxA.AttachmentType,
 					VirtualFunctionID:    apiSxA.VirtualFunctionID,
+					BridgeName:           apiSxA.BridgeName,
+					OvnNetworkName:       apiSxA.OvnNetworkName,
 					Status:               cdbm.SpectrumXAttachmentStatusPending,
 					CreatedBy:            dbUser.ID,
 				})

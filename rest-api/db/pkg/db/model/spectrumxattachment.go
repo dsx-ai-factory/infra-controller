@@ -39,9 +39,8 @@ const (
 // returns Physical, the zero enum, because API-side validation is the gate that rejects it
 // long before a row reaches the wire.
 //
-// OVS maps onto Core's `Ovn`, which is the same attachment under its older name. Core renames
-// that enum value to `Ovs` in a separate proto sync, and this mapping follows once that merges.
-// The name matters on the wire because attachments reach the Site as protojson.
+// OVS maps onto Core's `OVS` enum value. The name matters on the wire because attachments
+// reach the Site as protojson.
 // FromProto maps the attachment type Core reports onto the persisted value, the inverse of
 // ToProto. An unrecognized value leaves the type empty rather than guessing at one, since
 // guessing would let a report match a row of a different type.
@@ -129,14 +128,20 @@ type SpectrumXAttachment struct {
 	DeviceInstance       int                     `bun:"device_instance,notnull"`
 	AttachmentType       SpectrumXAttachmentType `bun:"attachment_type,notnull"`
 	VirtualFunctionID    *int                    `bun:"virtual_function_id"`
-	MacAddress           *string                 `bun:"mac_address"`
-	IPAddress            *string                 `bun:"ip_address"`
-	Status               string                  `bun:"status,notnull"`
-	IsMissingOnSite      bool                    `bun:"is_missing_on_site,notnull"`
-	Created              time.Time               `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated              time.Time               `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted              *time.Time              `bun:"deleted,soft_delete"`
-	CreatedBy            uuid.UUID               `bun:"type:uuid,notnull"`
+	// BridgeName and OvnNetworkName are the OVS attachment metadata. They are
+	// client-supplied config (required/allowed only for the OVS attachment type),
+	// not Site-allocated, so unlike MacAddress/IPAddress they are set on create
+	// and never populated from inventory status.
+	BridgeName      *string    `bun:"bridge_name"`
+	OvnNetworkName  *string    `bun:"ovn_network_name"`
+	MacAddress      *string    `bun:"mac_address"`
+	IPAddress       *string    `bun:"ip_address"`
+	Status          string     `bun:"status,notnull"`
+	IsMissingOnSite bool       `bun:"is_missing_on_site,notnull"`
+	Created         time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated         time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted         *time.Time `bun:"deleted,soft_delete"`
+	CreatedBy       uuid.UUID  `bun:"type:uuid,notnull"`
 }
 
 // ToProto converts this SpectrumXAttachment into the attachment entry Core expects inside
@@ -169,6 +174,16 @@ func (sxa *SpectrumXAttachment) FromProto(attachment *corev1.InstanceSpxAttachme
 		virtualFunctionID := int(attachment.GetAttachmentVf().GetVfIndex())
 		sxa.VirtualFunctionID = &virtualFunctionID
 	}
+
+	if ovs := attachment.GetAttachmentOvs(); ovs != nil {
+		bridgeName := ovs.GetBridgeName()
+		sxa.BridgeName = &bridgeName
+		// ovn_network_name is optional on the wire; preserve unset vs. set.
+		if ovs.OvnNetworkName != nil {
+			ovnNetworkName := ovs.GetOvnNetworkName()
+			sxa.OvnNetworkName = &ovnNetworkName
+		}
+	}
 }
 
 func (sxa *SpectrumXAttachment) ToProto() *corev1.InstanceSpxAttachment {
@@ -180,6 +195,16 @@ func (sxa *SpectrumXAttachment) ToProto() *corev1.InstanceSpxAttachment {
 	}
 	if sxa.VirtualFunctionID != nil {
 		attachment.AttachmentVf = &corev1.SpxAttachmentVf{VfIndex: uint32(*sxa.VirtualFunctionID)}
+	}
+	// attachment_ovs is required by Core when the type is OVS. bridge_name is a
+	// required string; validation guarantees it is set for OVS attachments, and
+	// ovn_network_name is optional and passes through as-is.
+	if sxa.AttachmentType == SpectrumXAttachmentTypeOVS {
+		ovs := &corev1.SpxAttachmentOvs{OvnNetworkName: sxa.OvnNetworkName}
+		if sxa.BridgeName != nil {
+			ovs.BridgeName = *sxa.BridgeName
+		}
+		attachment.AttachmentOvs = ovs
 	}
 	return attachment
 }
@@ -194,6 +219,8 @@ type SpectrumXAttachmentCreateInput struct {
 	DeviceInstance        int
 	AttachmentType        SpectrumXAttachmentType
 	VirtualFunctionID     *int
+	BridgeName            *string
+	OvnNetworkName        *string
 	MacAddress            *string
 	IPAddress             *string
 	Status                string
@@ -207,6 +234,8 @@ type SpectrumXAttachmentUpdateInput struct {
 	DeviceInstance        *int
 	AttachmentType        *SpectrumXAttachmentType
 	VirtualFunctionID     *int
+	BridgeName            *string
+	OvnNetworkName        *string
 	MacAddress            *string
 	IPAddress             *string
 	Status                *string
@@ -457,6 +486,8 @@ func (sxasd SpectrumXAttachmentSQLDAO) CreateMultiple(ctx context.Context, tx *d
 			DeviceInstance:       input.DeviceInstance,
 			AttachmentType:       input.AttachmentType,
 			VirtualFunctionID:    input.VirtualFunctionID,
+			BridgeName:           input.BridgeName,
+			OvnNetworkName:       input.OvnNetworkName,
 			MacAddress:           input.MacAddress,
 			IPAddress:            input.IPAddress,
 			Status:               input.Status,
@@ -531,6 +562,16 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		sxa.VirtualFunctionID = input.VirtualFunctionID
 		updatedFields = append(updatedFields, "virtual_function_id")
 		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "virtual_function_id", *input.VirtualFunctionID)
+	}
+	if input.BridgeName != nil {
+		sxa.BridgeName = input.BridgeName
+		updatedFields = append(updatedFields, "bridge_name")
+		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "bridge_name", *input.BridgeName)
+	}
+	if input.OvnNetworkName != nil {
+		sxa.OvnNetworkName = input.OvnNetworkName
+		updatedFields = append(updatedFields, "ovn_network_name")
+		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "ovn_network_name", *input.OvnNetworkName)
 	}
 	if input.MacAddress != nil {
 		sxa.MacAddress = input.MacAddress

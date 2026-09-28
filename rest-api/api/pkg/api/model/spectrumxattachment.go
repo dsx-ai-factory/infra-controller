@@ -26,6 +26,12 @@ type APISpectrumXAttachmentCreateOrUpdateRequest struct {
 	AttachmentType cdbm.SpectrumXAttachmentType `json:"attachmentType"`
 	// VirtualFunctionID must be omitted, as virtual functions are not currently supported
 	VirtualFunctionID *int `json:"virtualFunctionId"`
+	// BridgeName is the OVS bridge the attachment uses. Required for an OVS attachment and
+	// must be omitted for any other attachment type.
+	BridgeName *string `json:"bridgeName"`
+	// OvnNetworkName is the OVN network the OVS attachment maps onto. Optional for an OVS
+	// attachment and must be omitted for any other attachment type.
+	OvnNetworkName *string `json:"ovnNetworkName"`
 }
 
 // Validate ensures the values passed in request are acceptable
@@ -61,6 +67,28 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 		}
 	}
 
+	// OVS metadata is client-owned config Core requires for an OVS attachment: bridge_name is
+	// mandatory and ovn_network_name is optional. For any other type the fields carry no meaning
+	// and must be omitted so a caller cannot silently attach OVS metadata to a Physical row.
+	if sacr.AttachmentType == cdbm.SpectrumXAttachmentTypeOVS {
+		if sacr.BridgeName == nil || *sacr.BridgeName == "" {
+			return validation.Errors{
+				"bridgeName": errors.New("bridgeName is required for an OVS attachment"),
+			}
+		}
+	} else {
+		if sacr.BridgeName != nil {
+			return validation.Errors{
+				"bridgeName": errors.New("bridgeName is only supported for an OVS attachment"),
+			}
+		}
+		if sacr.OvnNetworkName != nil {
+			return validation.Errors{
+				"ovnNetworkName": errors.New("ovnNetworkName is only supported for an OVS attachment"),
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -88,6 +116,10 @@ type APISpectrumXAttachment struct {
 	AttachmentType cdbm.SpectrumXAttachmentType `json:"attachmentType"`
 	// VirtualFunctionID is the virtual function the attachment uses
 	VirtualFunctionID *int `json:"virtualFunctionId"`
+	// BridgeName is the OVS bridge the attachment uses, set only for an OVS attachment
+	BridgeName *string `json:"bridgeName"`
+	// OvnNetworkName is the OVN network the OVS attachment maps onto, set only for an OVS attachment
+	OvnNetworkName *string `json:"ovnNetworkName"`
 	// MacAddress is the MAC address the Site allocated for the attachment
 	MacAddress *string `json:"macAddress"`
 	// IPAddress is the IP address the Site allocated for the attachment
@@ -115,6 +147,8 @@ func NewAPISpectrumXAttachment(dbsxa *cdbm.SpectrumXAttachment) *APISpectrumXAtt
 		DeviceInstance:       dbsxa.DeviceInstance,
 		AttachmentType:       dbsxa.AttachmentType,
 		VirtualFunctionID:    dbsxa.VirtualFunctionID,
+		BridgeName:           dbsxa.BridgeName,
+		OvnNetworkName:       dbsxa.OvnNetworkName,
 		MacAddress:           dbsxa.MacAddress,
 		IPAddress:            dbsxa.IPAddress,
 		Status:               dbsxa.Status,
