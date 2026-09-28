@@ -10,6 +10,8 @@
 | 0.2 | 2026-09-27 | Sunil Kumar | Add explicit-state alternative reference |
 | 0.3 | 2026-09-28 | Sunil Kumar | Define phased API and event delivery |
 | 0.4 | 2026-09-28 | Sunil Kumar | Define durable workflow, recovery, and security boundaries |
+| 0.5 | 2026-09-28 | Sunil Kumar | Clarify targeted-instance caller and ownership |
+| 0.6 | 2026-09-28 | Sunil Kumar | Define attempt idempotency and durable request recovery |
 |  |  |  |  |
 
 # **1. Introduction**
@@ -230,6 +232,8 @@ ExternalValidationHold
 ExternalValidationAttempt
   request_id
   hold_id
+  validation_service_identity
+  caller_idempotency_key
   state                  // Open, Passed, Failed, Cancelled, TimedOut
   opened_at
   timeout_at
@@ -242,6 +246,13 @@ most one open attempt for a hold. `hold_id` remains stable for the cycle;
 `request_id` changes for every attempt. NICo stores this state independently
 of the health override so it can reconcile a missing override and retain the
 audit record after clearing it.
+
+NICo enforces these invariants in the database: a partial unique constraint
+permits only one `Open` attempt per `hold_id`, and the pair
+`(validation_service_identity, caller_idempotency_key)` is unique. Attempt
+creation locks the hold and inserts the attempt in the same transaction. These
+constraints, rather than client timing, decide which concurrent `Start` call
+wins.
 
 The timeout fields have distinct meanings:
 
@@ -295,9 +306,9 @@ workflow is:
 1. List and reconcile active external-validation holds. This is the
    authoritative discovery path, including after service restart or missed
    notifications.
-2. Call `StartExternalValidation(machine_id)` for a pending hold. NICo opens
-   one attempt and returns an opaque `request_id`; an already-open attempt is
-   not opened again.
+2. Call `StartExternalValidation(machine_id, caller_idempotency_key)` for a
+   pending hold. NICo opens one attempt and returns an opaque `request_id`; an
+   already-open attempt is not opened again.
 3. Create a targeted validation instance for that exact machine using the
    configured validation tenant and `allowUnhealthyMachine: true`.
 4. Run its own validation or repair work in that instance.
@@ -311,7 +322,7 @@ NICo provides these workflow APIs:
 | API | Purpose |
 | :--- | :--- |
 | `ListExternalValidationHolds()` | Returns all active holds and their current attempt status. This is the authoritative discovery and recovery API. |
-| `StartExternalValidation(machine_id)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
+| `StartExternalValidation(machine_id, caller_idempotency_key)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
 | `CompleteExternalValidation(request_id, outcome, details, validation_instance_id)` | Records a result only for the matching active attempt. Replaying the same completion is idempotent; an old or closed `request_id` is rejected. |
 | `RemoveExternalValidationHold(machine_id, reason)` | Audited break-glass recovery; not the normal completion path. |
 
@@ -346,7 +357,7 @@ includes:
 machine_id
 hold_id                     // stable for this external-validation cycle
 hold_state                  // Pending, AttemptOpen, AwaitingCleanup, Satisfied, or Recovery
-request_id                  // present only when an attempt is open
+request_id                  // present for an open or cleanup-pending attempt
 validation_instance_id      // present when NICo observes the targeted instance
 created_at
 attempt_timeout_at          // present only when an attempt is open
@@ -365,11 +376,13 @@ Request:
 
 ```text
 machine_id
+caller_idempotency_key    // caller-generated UUID, retained across retries
 ```
 
 NICo verifies that the caller is the configured validation identity, the
 machine is in the caller's site, the machine is `Ready`, and an active hold
-exists. It then atomically opens one attempt and returns:
+exists. It then atomically opens one attempt, generates and persists an opaque
+`request_id`, and returns:
 
 ```text
 status: Opened
@@ -380,18 +393,40 @@ attempt_timeout_at
 ```
 
 If the caller retries after a timeout or service restart and the attempt is
-already open, NICo returns `status: AlreadyOpen` with the existing `request_id`
-and attempt status; it does not create a second attempt. If the hold has been
-cleared or is not eligible, NICo returns `status: NoActiveHold`. Once a failed,
-cancelled, or timed-out attempt is closed, a subsequent start opens a new
-attempt with a new `request_id`.
+already open with the same `caller_idempotency_key`, NICo returns the originally
+persisted `request_id`; it does not create a second attempt. A different key
+while an attempt is open returns `status: AlreadyOpen` with that active request
+and its status. If the hold has been cleared or is not eligible, NICo returns
+`status: NoActiveHold`. Once a failed, cancelled, or timed-out attempt is
+closed, a subsequent start with a new idempotency key opens a new attempt with
+a new `request_id`.
 
-After `Opened`, the service creates a targeted instance for the returned
-`machine_id`, in its configured validation tenant, with
+The external service must persist the `caller_idempotency_key` before calling
+`StartExternalValidation` and persist the returned `request_id` before creating
+the targeted instance. If it crashes between either step, it calls `Start` again
+with the same key or uses `ListExternalValidationHolds()` to recover the durable
+active `request_id`. NICo never relies on an in-memory request ID.
+
+#### **Targeted Instance Caller and Ownership**
+
+The caller of targeted instance creation is the configured
+`validation_service_identity`, operated by the external-validation team. NICo
+does not create the instance and does not invoke the external team's API on its
+behalf. The service calls the existing targeted-instance creation API with the
+held `machine_id`, requests placement in `validation_tenant_id`, and sets
 `allowUnhealthyMachine: true`. `StartExternalValidation` does not allocate the
 machine and does not remove the hold. If targeted instance creation cannot
 proceed, the service reports `Cancelled` or allows the attempt timeout to close
 it; the hold remains in place.
+
+The resulting instance belongs to `validation_tenant_id`; that tenant is the
+execution environment for the external team's validation or repair work. The
+external-validation service owns the operational lifecycle of that instance:
+it waits for it to become usable, runs the work, reports the outcome through
+`CompleteExternalValidation`, and releases the instance. NICo owns the host
+lifecycle and hold only. On completion, NICo verifies that the supplied
+instance is assigned to the held machine and belongs to the configured
+validation tenant.
 
 #### **CompleteExternalValidation**
 
@@ -487,8 +522,9 @@ new DSX Exchange event contract. NICo creates and owns the
 `PreventAllocations` hold while keeping the machine in `Ready`. The
 site-controlled external-validation service uses
 `ListExternalValidationHolds()` to discover and reconcile pending work, then
-uses `StartExternalValidation()` to obtain a `request_id` before creating a
-targeted instance with `allowUnhealthyMachine: true`.
+uses `StartExternalValidation(machine_id, caller_idempotency_key)` to obtain a
+`request_id` before creating a targeted instance with
+`allowUnhealthyMachine: true`.
 
 The service performs its validation or repair work inside that tenant instance
 and calls `CompleteExternalValidation()` with the same `request_id`. NICo
