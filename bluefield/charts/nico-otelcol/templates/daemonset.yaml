@@ -60,6 +60,8 @@ spec:
               {{- . | nindent 14 }}
           {{- end }}
           env:
+            - name: CONTAINER_RUNTIME_ENDPOINT
+              value: unix://{{ .Values.containerdSocket }}
             - name: NICO_DPU_AGENT_METRICS_TARGET
               value: carbide-dpf-cluster-{{ .Values.nico_dpu_agent }}.dpf-operator-system.svc.cluster.local:8888
             - name: NICO_FMDS_METRICS_TARGET
@@ -105,6 +107,8 @@ spec:
             - name: config-fragments
               mountPath: /etc/otelcol-contrib/config-fragments
               readOnly: true
+            - name: containerd-socket
+              mountPath: {{ .Values.containerdSocket }}
         - name: node-exporter
           image: "{{ .Values.nodeExporter.image.repository }}:{{ .Values.nodeExporter.image.tag }}"
           imagePullPolicy: {{ .Values.nodeExporter.image.pullPolicy }}
@@ -204,6 +208,10 @@ spec:
           hostPath:
             path: /etc/otelcol-contrib/config-fragments
             type: DirectoryOrCreate
+        - name: containerd-socket
+          hostPath:
+            path: {{ .Values.containerdSocket }}
+            type: Socket
         - name: host-proc
           hostPath:
             path: /proc

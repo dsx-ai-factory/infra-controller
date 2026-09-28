@@ -31,6 +31,7 @@
 
 ARG GO_VERSION=1.26.4
 ARG OTELCOL_VERSION=0.155.0
+ARG CRICTL_VERSION=1.34.0
 
 # ---------------------------------------------------------------------------
 # Builder (host-native Go, cross-compiles to arm64)
@@ -85,6 +86,35 @@ RUN cd /build/ocb-build && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=readonly -o otelcol-contrib .
 
 # ---------------------------------------------------------------------------
+# Downloader: fetch and verify crictl (build-only; curl/tar stay out of the
+# runtime image)
+# ---------------------------------------------------------------------------
+FROM debian:12-slim AS crictl-downloader
+
+ARG CRICTL_VERSION
+# sha256 of crictl-v${CRICTL_VERSION}-linux-arm64.tar.gz from the cri-tools
+# release page; update alongside CRICTL_VERSION.
+ARG CRICTL_SHA256=c31d252e203df5f4cf37f314bd3092eb79087e791631c1e607087c74b6d0423f
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /dl
+
+# crictl: lets the punt_stats receiver exec into the doca-hbn container over
+# the containerd socket (mounted at runtime) to read punt stats, since
+# doca-hbn's stats file is not reachable any other way from this container.
+RUN curl -fsSL --retry 5 --retry-connrefused --max-time 300 \
+        "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${CRICTL_VERSION}/crictl-v${CRICTL_VERSION}-linux-arm64.tar.gz" \
+        -o crictl.tar.gz \
+    && echo "${CRICTL_SHA256}  crictl.tar.gz" | sha256sum -c - \
+    && mkdir -p extract \
+    && tar -xzf crictl.tar.gz -C extract crictl \
+    && rm crictl.tar.gz
+
+# ---------------------------------------------------------------------------
 # Runtime (arm64)
 # ---------------------------------------------------------------------------
 FROM debian:12-slim
@@ -94,6 +124,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev1 \
     systemd \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=crictl-downloader --chmod=755 /dl/extract/crictl /usr/bin/crictl
 
 # Collector binary
 COPY --from=builder --chmod=755 /build/ocb-build/otelcol-contrib /usr/bin/otelcol-contrib
