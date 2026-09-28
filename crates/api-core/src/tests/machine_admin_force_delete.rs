@@ -574,9 +574,10 @@ async fn force_delete_marked_host_address(
     assert!(response.all_done);
 
     let mut txn = env.pool.begin().await.unwrap();
-    let parked = db::machine_interface_address::find_reserved(txn.as_mut(), Some(mac), Some(address))
-        .await
-        .unwrap();
+    let parked =
+        db::machine_interface_address::find_reserved(txn.as_mut(), Some(mac), Some(address))
+            .await
+            .unwrap();
     let rows_remaining: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM machine_interface_addresses WHERE address = $1")
             .bind(address)
