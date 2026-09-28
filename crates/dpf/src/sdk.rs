@@ -2441,7 +2441,10 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
             paused: None,
             security: Some(DpuServiceSecurity {
                 privileged: Some(service.security.privileged),
-                spiffe: service.security.spiffe.then_some(DpuServiceSecuritySpiffe {}),
+                spiffe: service
+                    .security
+                    .spiffe
+                    .then_some(DpuServiceSecuritySpiffe {}),
             }),
             service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
                 DpuServiceServiceDaemonSet {

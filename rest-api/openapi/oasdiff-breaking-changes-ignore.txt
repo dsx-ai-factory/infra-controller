@@ -304,3 +304,6 @@ API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's pro
 # Expected Rack Group PATCH already rejects requests with no non-null update fields.
 API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'if' subschema to the request body
 API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'else' subschema to the request body
+
+API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
