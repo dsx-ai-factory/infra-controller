@@ -12,3 +12,6 @@ tests:
       - equal:
           path: spec.strategy.type
           value: Recreate
+      - equal:
+          path: spec.strategy.rollingUpdate
+          value: null
