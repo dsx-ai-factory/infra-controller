@@ -258,6 +258,7 @@ struct MachineValidationExecution {
 }
 
 /// The immutable plugin data attached to a run item when its plan was created.
+#[derive(Clone)]
 struct PluginRunItem {
     run_item_id: String,
     attempt: u32,
@@ -1099,9 +1100,7 @@ impl MachineValidation {
         test: &rpc::forge::MachineValidationTest,
         context: String,
         validation_id: MachineValidationId,
-        run_item_id: String,
-        attempt: u32,
-        attempt_id: Option<String>,
+        run_item: PluginRunItem,
     ) -> MachineValidationExecution {
         let mut result = rpc::forge::MachineValidationResult {
             test_id: Some(test.test_id.clone()),
@@ -1171,8 +1170,8 @@ impl MachineValidation {
             let deadline = started_at + chrono::Duration::seconds(timeout as i64);
             let input = plugin_input(
                 validation_id,
-                &run_item_id,
-                attempt,
+                &run_item.run_item_id,
+                run_item.attempt,
                 machine_id,
                 &context,
                 test,
@@ -1195,7 +1194,8 @@ impl MachineValidation {
                         let plugin_execution = if execution_timeout.is_zero() {
                             Err("plugin timeout exhausted while pulling its image".to_owned())
                         } else {
-                            let log_sender = self.clone().plugin_attempt_log_stream(attempt_id);
+                            let log_sender =
+                                self.clone().plugin_attempt_log_stream(run_item.attempt_id);
                             execute_plugin(
                                 &spec,
                                 &input,
@@ -1477,9 +1477,7 @@ impl MachineValidation {
                                     &snapshot_test,
                                     context.to_string(),
                                     validation_id,
-                                    run_item.run_item_id.clone(),
-                                    run_item.attempt,
-                                    run_item.attempt_id.clone(),
+                                    run_item.clone(),
                                 )
                                 .await
                         }
