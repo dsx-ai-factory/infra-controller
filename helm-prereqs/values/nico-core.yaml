@@ -145,6 +145,14 @@ nico-api:
       deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
 
       # -----------------------------------------------------------------------
+      # FNN related configuration
+      # FNN support is mandatory for nico-api to function
+      # datacenter_asn is a root key and has to stay above the first [table].
+      # -----------------------------------------------------------------------
+      # Replace 4266030000 with the ASN for the physical datacenter itself
+      datacenter_asn = 4266030000
+
+      # -----------------------------------------------------------------------
       # Site explorer — periodic background scan of site inventory
       # -----------------------------------------------------------------------
       [site_explorer]
@@ -233,15 +241,6 @@ nico-api:
       # -----------------------------------------------------------------------
       [machine_state_controller]
       failure_retry_time = "90m"
-
-      # -----------------------------------------------------------------------
-      # FNN related configuration
-      # FNN support is mandatory for nico-api to function
-      # -----------------------------------------------------------------------
-
-      # datacenter_asn
-      # Replace 4266030000 with the ASN for the physical datacenter itself
-      datacenter_asn = 4266030000
 
 
       [fnn.admin_vpc]
