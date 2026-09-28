@@ -8,6 +8,11 @@ the effect of each throughput knob in isolation. Companion to
 > same treatment as the scale-testing companion above. Tracked under epic
 > dsx-ai-factory/infra-controller#3738; per-knob results are recorded on the
 > subtickets #3758-#3763.
+>
+> The Default column lists the values at the time of the plan. The explorer
+> defaults have since been raised to 360 explorations, 100 machines, and 100
+> concurrent explorations per iteration. Refer to
+> [Large Site Sizing and Settings](large-site-sizing-and-settings.md).
 
 ## Knob inventory
 

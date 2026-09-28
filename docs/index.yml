@@ -388,6 +388,8 @@ navigation:
               path: development/machine-a-tron-deployment.md
             - page: Machine-a-tron RMS Mock
               path: development/machine-a-tron-rms-mock.md
+            - page: Large Site Sizing and Settings
+              path: development/large-site-sizing-and-settings.md
         - page: Glossary
           path: glossary.md
 
