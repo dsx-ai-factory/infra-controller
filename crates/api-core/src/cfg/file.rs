@@ -6387,6 +6387,10 @@ path = "credentials.yaml"
             ),
             ("{{ .Values.service.perObjectStateMetrics.port }}", "9091"),
             (
+                "{{ .Values.machineStateController.maxConcurrency | int }}",
+                "10",
+            ),
+            (
                 "{{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}",
                 "[]",
             ),

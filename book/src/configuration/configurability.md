@@ -378,6 +378,13 @@ and `failure_retry_time` knobs:
 Defaults are reasonable; touch these only when you have a specific timing
 constraint.
 
+`[machine_state_controller.controller] max_concurrency` (default 10) caps how
+many machine handlers run at the same time. Raise it for large sites, since time
+to `ready` scales with hosts divided by this value. Values of 80 to 120 suited a
+250-rack site, and higher values slowed ingestion because the handlers contend
+for the admin network segment lock. The nico-api chart exposes it as
+`machineStateController.maxConcurrency`.
+
 ### Host health thresholds
 
 `[host_health]` — `hardware_health_reports = "MonitorOnly"` or `"Enforce"`,
