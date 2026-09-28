@@ -1415,6 +1415,8 @@ async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_r
             ManagedHostState::Ready,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
         // Leave the BMC interface unattached for preingestion remediation.
@@ -2006,6 +2008,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -2033,6 +2036,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -2060,6 +2064,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -3570,6 +3575,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -3627,6 +3633,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         bmc_ip_allocation: Default::default(),
         host_lifecycle_profile: Default::default(),
         server_name: None,
+        dpu_loopback_reservations: None,
     };
     db::expected_machine::update(&mut txn, &host1_expected_machine).await?;
     txn.commit().await?;

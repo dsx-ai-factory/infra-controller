@@ -1165,10 +1165,15 @@ impl ApiClient {
         bmc_ip_allocation: Option<::rpc::forge::BmcIpAllocationType>,
         host_lifecycle_profile: Option<::rpc::forge::HostLifecycleProfile>,
         interfaces: Option<String>,
+        dpu_loopback_reservations: Option<String>,
     ) -> Result<(), CarbideCliError> {
         let parsed_interfaces = interfaces
             .as_deref()
             .map(serde_json::from_str::<Vec<rpc::ExpectedInterface>>)
+            .transpose()?;
+        let parsed_reservations = dpu_loopback_reservations
+            .as_deref()
+            .map(crate::expected_machines::common::parse_dpu_loopback_reservations_flag)
             .transpose()?;
         let paths = [
             (bmc_username.is_some(), "bmc_username"),
@@ -1200,6 +1205,7 @@ impl ApiClient {
                 "host_lifecycle_profile.disable_lockdown",
             ),
             (parsed_interfaces.is_some(), "host_nics"),
+            (parsed_reservations.is_some(), "dpu_loopback_reservations"),
         ]
         .into_iter()
         .filter(|(selected, _)| *selected)
@@ -1227,7 +1233,8 @@ impl ApiClient {
                     .id
             }
         };
-        // Legacy records can be selected by MAC even when they have no ID.
+        // Legacy records can be selected by MAC even when they have no ID, so
+        // the native fast path only runs once the record resolves to an ID.
         if let Some(resolved_id) = resolved_id {
             let metadata = (meta_name.is_some() || meta_description.is_some() || labels.is_some())
                 .then(|| rpc::Metadata {
@@ -1255,6 +1262,7 @@ impl ApiClient {
                     bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
                     host_lifecycle_profile,
                     host_nics: parsed_interfaces.unwrap_or_default(),
+                    dpu_loopback_reservations: parsed_reservations,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1291,6 +1299,7 @@ impl ApiClient {
             bmc_ip_allocation,
             host_lifecycle_profile,
             interfaces,
+            dpu_loopback_reservations,
         )
         .await
     }
@@ -1318,6 +1327,7 @@ impl ApiClient {
         bmc_ip_allocation: Option<::rpc::forge::BmcIpAllocationType>,
         host_lifecycle_profile: Option<::rpc::forge::HostLifecycleProfile>,
         interfaces: Option<String>,
+        dpu_loopback_reservations: Option<String>,
     ) -> Result<(), CarbideCliError> {
         let get_req = match (bmc_mac_address, id) {
             (Some(_), Some(_)) => {
@@ -1350,6 +1360,12 @@ impl ApiClient {
             .map(|s| serde_json::from_str::<Vec<rpc::ExpectedInterface>>(&s))
             .transpose()?;
         let replace_interfaces = parsed_interfaces.is_some();
+        // Omitted flag preserves the stored reservations; a present value (an
+        // empty array clears, a populated array replaces) is authoritative.
+        let parsed_reservations = dpu_loopback_reservations
+            .as_deref()
+            .map(crate::expected_machines::common::parse_dpu_loopback_reservations_flag)
+            .transpose()?;
         let legacy_bmc_fields = legacy_bmc_patch_fields(
             &expected_machine,
             bmc_ip_address,
@@ -1404,6 +1420,8 @@ impl ApiClient {
             host_lifecycle_profile: host_lifecycle_profile
                 .or(expected_machine.host_lifecycle_profile),
             server_name: expected_machine.server_name,
+            dpu_loopback_reservations: parsed_reservations
+                .or(expected_machine.dpu_loopback_reservations),
         };
 
         self.0
@@ -1454,6 +1472,9 @@ impl ApiClient {
                         }
                     }),
                     server_name: machine.server_name,
+                    // Forward the optional wrapper unchanged: an omitted field
+                    // preserves stored reservations, an empty list clears them.
+                    dpu_loopback_reservations: machine.dpu_loopback_reservations,
                 })
                 .collect(),
         };

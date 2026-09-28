@@ -782,7 +782,8 @@ mod test {
                 )
                 .try_into()
                 .unwrap();
-                machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
+                machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2, None)
+                    .await?;
                 crate::dpa_interface::persist(
                     NewDpaInterface {
                         machine_id: id,
@@ -957,6 +958,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         let interface = super::persist(
@@ -1023,7 +1025,7 @@ mod test {
         let id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
 
-        machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
+        machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2, None).await?;
 
         let new_intf = NewDpaInterface {
             mac_address: MacAddress::from_str("00:11:22:33:44:55")?,
@@ -1063,6 +1065,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -1151,6 +1154,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -1214,6 +1218,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -1405,6 +1410,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
