@@ -746,6 +746,8 @@ Each deployment sets `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE` environment varia
 
 The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its Site Agent Temporal certificate is within `10` days of expiry. If it is empty, the daily rotation run fails without rotating any Site.
 
+The site worker sets the `site` namespace retention to `temporal.siteNamespace.retention` on startup, `72h` by default. That's how long failed, canceled, terminated, and timed out workflows are kept. An hourly cron deletes successful inventory workflows sooner, once they are older than `temporal.siteNamespace.successfulInventoryRetention`, `24h` by default. Set either value to `0` to turn it off. If Temporal rejects the retention update, the worker logs a warning and starts anyway. Temporal only applies a new retention to workflows that close after the change.
+
 ### Secrets mounted at runtime
 
 | Secret | Description |

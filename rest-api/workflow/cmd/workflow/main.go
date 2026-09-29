@@ -260,7 +260,11 @@ func run(ctx context.Context) error {
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.DeleteInfiniBandPartitionByID)
 	} else if tcfg.Namespace == cwfn.SiteNamespace {
-		// Workflows triggered by Site Agent
+		// Deletes successful inventory workflows before the namespace retention would
+		w.RegisterWorkflow(siteWorkflow.DeleteSuccessfulInventoryWorkflows)
+
+		// Workflows triggered by Site Agent. Keep the inventory workflows in sync with
+		// inventoryWorkflowTypes in pkg/activity/site/retention.go.
 		// Machine Workflows
 		w.RegisterWorkflow(machineWorkflow.UpdateMachineInventory)
 
@@ -457,6 +461,12 @@ func run(ctx context.Context) error {
 		w.RegisterActivity(&userManager)
 	}
 
+	if tcfg.Namespace == cwfn.SiteNamespace {
+		// Inventory retention activities
+		inventoryRetentionManager := siteActivity.NewManageInventoryRetention(tc, cfg.GetTemporalSiteNamespaceSuccessfulInventoryRetention())
+		w.RegisterActivity(&inventoryRetentionManager)
+	}
+
 	// A failing health or metrics server stops the worker so the failure
 	// leaves through run instead of a panic in a goroutine.
 	serveErrs := make(chan error, 2)
@@ -490,6 +500,33 @@ func run(ctx context.Context) error {
 		}
 		interrupt <- struct{}{}
 	}()
+
+	// These have to run before w.Run, which blocks until the worker shuts down
+	if tcfg.Namespace == cwfn.SiteNamespace {
+		siteRetention := cfg.GetTemporalSiteNamespaceRetention()
+		if siteRetention > 0 {
+			// The worker's certificate may not be allowed to update the namespace, so a failure only logs
+			tnc, nerr := tsdkClient.NewNamespaceClient(tOptions)
+			if nerr != nil {
+				log.Warn().Err(nerr).Msg("failed to create Temporal namespace client")
+			} else {
+				rctx, cancel := context.WithTimeout(ctx, cwfn.RetentionUpdateTimeout)
+				nerr = cwfn.EnsureRetention(rctx, tnc, tcfg.Namespace, siteRetention)
+				cancel()
+				tnc.Close()
+				if nerr != nil {
+					log.Warn().Err(nerr).Msg("failed to ensure Site namespace retention")
+				}
+			}
+		}
+
+		if cfg.GetTemporalSiteNamespaceSuccessfulInventoryRetention() > 0 {
+			_, err = siteWorkflow.ExecuteDeleteSuccessfulInventoryWorkflows(ctx, tc)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to trigger Delete Successful Inventory Workflows workflow")
+			}
+		}
+	}
 
 	// Start listening to the Task Queue
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("starting Temporal worker")
