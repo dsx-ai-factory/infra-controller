@@ -920,10 +920,10 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -1050,10 +1050,10 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
 		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1179,12 +1179,12 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1311,12 +1311,12 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

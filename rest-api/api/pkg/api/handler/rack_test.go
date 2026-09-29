@@ -25,6 +25,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,7 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -1083,8 +1085,18 @@ func TestUpdateRackPowerStateHandler_Handle(t *testing.T) {
 		rackID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - power on rack",
 			reqOrg:         org,
@@ -1186,7 +1198,11 @@ func TestUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1211,6 +1227,11 @@ func TestUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1249,8 +1270,17 @@ func TestBatchUpdateRackPowerStateHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - power on all racks (no filter)",
 			reqOrg:         org,
@@ -1310,7 +1340,11 @@ func TestBatchUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1335,6 +1369,11 @@ func TestBatchUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1376,10 +1415,20 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 		rackID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - firmware update with authentication data",
 			reqOrg:         org,
@@ -1439,7 +1488,11 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1474,6 +1527,11 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				assert.Contains(t, rec.Body.String(), tt.expectedError)
 				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
@@ -1517,8 +1575,18 @@ func TestBringUpRackHandler_Handle(t *testing.T) {
 		rackID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - bring up rack",
 			reqOrg:         org,
@@ -1568,7 +1636,11 @@ func TestBringUpRackHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1593,6 +1665,11 @@ func TestBringUpRackHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1631,8 +1708,17 @@ func TestBatchBringUpRackHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - bring up all racks (no filter)",
 			reqOrg:         org,
@@ -1685,7 +1771,11 @@ func TestBatchBringUpRackHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1710,6 +1800,11 @@ func TestBatchBringUpRackHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1748,10 +1843,19 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "success - firmware update all racks with authentication data",
 			reqOrg:         org,
@@ -1798,7 +1902,11 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				testFlowProxyFailure(mockWorkflowRun, tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1832,6 +1940,11 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				assert.Contains(t, rec.Body.String(), tt.expectedError)
 				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
