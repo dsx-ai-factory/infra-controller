@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::rack::RackGroupId;
+use carbide_uuid::rack::{RackGroupId, RackId};
 use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupRack, RackGroupTopology};
 use model::metadata::Metadata;
 use sqlx::{FromRow, PgConnection};
@@ -53,8 +53,24 @@ pub async fn find_by_rack_group_id(
     Ok(Some(row.into_group()))
 }
 
-#[cfg(test)]
-async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
+/// Locks up to two matching groups for reading so callers can reject ambiguous membership.
+pub async fn find_by_rack_id(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+) -> DatabaseResult<Vec<ExpectedRackGroup>> {
+    let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE racks @> $1 ORDER BY rack_group_id LIMIT 2 FOR SHARE";
+    let rows: Vec<GroupRow> = sqlx::query_as(query)
+        .bind(sqlx::types::Json(
+            serde_json::json!([{"rack_id": rack_id.as_str()}]),
+        ))
+        .fetch_all(txn)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    Ok(rows.into_iter().map(GroupRow::into_group).collect())
+}
+
+/// Returns all expected rack groups ordered by their external ID.
+pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
     let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups ORDER BY rack_group_id";
     let rows: Vec<GroupRow> = sqlx::query_as(query)
         .fetch_all(&mut *txn)

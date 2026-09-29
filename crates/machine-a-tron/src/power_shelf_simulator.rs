@@ -201,12 +201,13 @@ impl PowerShelfActor {
         let host_info = self.host_info.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.bmc_injection.clone();
-        let (actor, mailbox) = Actor::new(self, PowerShelfMessage::Run);
+        let (actor, mailbox) = Actor::new();
 
         let join_handle = tokio::task::Builder::new()
             .name(&format!("Power shelf {mat_id}"))
-            .spawn(actor.run())
+            .spawn(actor.run(self))
             .unwrap();
+        let _ = mailbox.send(PowerShelfMessage::Run);
 
         PowerShelfHandle(Arc::new(PowerShelfActorHandle {
             mailbox,

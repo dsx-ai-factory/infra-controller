@@ -7,16 +7,11 @@ metadata:
   labels:
     {{- include "mat-k8s-controller.labels" . | nindent 4 }}
 spec:
+  # Namespace-scoped controller without leader election: one replica always
   replicas: 1
-  {{- if .Values.gateway.enabled }}
-  # Gateway partition and QoS state is process-local, so an old and a new pod
-  # must not serve the gateway Service at the same time during a rollout.
-  # Kubernetes rejects rollingUpdate together with Recreate, so an existing
-  # Deployment's defaulted field is cleared on upgrade.
   strategy:
     type: Recreate
     rollingUpdate: null
-  {{- end }}
   selector:
     matchLabels:
       {{- include "mat-k8s-controller.selectorLabels" . | nindent 6 }}

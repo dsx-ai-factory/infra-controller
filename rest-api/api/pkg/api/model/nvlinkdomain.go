@@ -29,6 +29,7 @@ type APIBatchUpdateNVLinkDomainPowerStateRequest struct {
 
 // Validate checks the NVLink Domain IDs and power-control fields.
 func (r *APIBatchUpdateNVLinkDomainPowerStateRequest) Validate() error {
+	r.State = normalizePowerControlState(r.State)
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID,
 			validation.Required.Error("siteId is required"),

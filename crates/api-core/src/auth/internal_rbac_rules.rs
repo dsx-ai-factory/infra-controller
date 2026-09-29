@@ -331,6 +331,8 @@ impl InternalRBACRules {
         x.perm("TriggerDpuReprovisioning", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("TriggerHostReprovisioning", vec![ForgeAdminCLI, Flow]);
         x.perm("ListDpuWaitingForReprovisioning", vec![ForgeAdminCLI]);
+        x.perm("TriggerManagedHostReset", vec![ForgeAdminCLI]);
+        x.perm("ListManagedHostsWaitingForReset", vec![ForgeAdminCLI]);
         x.perm("MarkManualFirmwareUpgradeComplete", vec![ForgeAdminCLI]);
         x.perm(
             "ListHostsWaitingForReprovisioning",
@@ -903,6 +905,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "GetExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetAllExpectedRackGroups",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(

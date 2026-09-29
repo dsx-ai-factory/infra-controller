@@ -24,13 +24,31 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Parser, Debug, Serialize, Deserialize)]
+/// Update an expected power shelf.
+///
+/// Select the shelf by either BMC MAC address or ID. Supply at least one update field.
+/// With Core PATCH, supplied fields replace their stored values and omitted fields remain unchanged.
+/// Supplied labels replace the whole label collection. An empty metadata name or description clears that field.
+///
+/// Supply a BMC username, password, or both. Each omitted credential field keeps its stored value.
+/// Core PATCH rejects empty selected credentials. Legacy fallback uses the validation rules on the older server.
+///
+/// The command first tries Core PATCH, which merges selected fields atomically. It falls back to
+/// the legacy update on `Unimplemented` or `PermissionDenied`, or when a MAC lookup returns no ID.
+/// The legacy shelf update reads the record, merges selected fields locally, and replaces it.
+/// Omitted fields keep their stored values, but concurrent changes can be overwritten on that path.
+/// The legacy request still requires authorization. Other PATCH errors and failed legacy updates
+/// remain errors.
+///
+/// https://github.com/dsx-ai-factory/infra-controller/pull/6359
+#[derive(Parser, Debug, Clone, Serialize, Deserialize)]
+#[clap(verbatim_doc_comment)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Update an expected power shelf's BMC credentials, selecting it by MAC address:
+Correct a power shelf's BMC password while preserving the username:
     $ nico-admin-cli expected-power-shelf update --bmc-mac-address 00:11:22:33:44:55 \
-    --bmc-username admin --bmc-password mynewpassword
+    --bmc-password mynewpassword
 
 Update an expected power shelf's serial number, selecting it by ID:
     $ nico-admin-cli expected-power-shelf update --id 12345678-1234-5678-90ab-cdef01234567 \
@@ -63,7 +81,6 @@ pub(crate) struct Args {
         short = 'u',
         long,
         group = "group",
-        requires("bmc_password"),
         help = "BMC username of the expected power shelf"
     )]
     bmc_username: Option<String>,
@@ -71,7 +88,6 @@ pub(crate) struct Args {
         short = 'p',
         long,
         group = "group",
-        requires("bmc_username"),
         help = "BMC password of the expected power shelf"
     )]
     bmc_password: Option<String>,
@@ -86,21 +102,21 @@ pub(crate) struct Args {
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
-        help = "The name that should be used as part of the Metadata for newly created Power Shelves. If empty, the Power Shelf Id will be used"
+        help = "Replace the metadata name. An empty value clears it; PATCH preserves it when omitted"
     )]
     meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
-        help = "The description that should be used as part of the Metadata for newly created Power Shelves"
+        help = "Replace the metadata description. An empty value clears it; PATCH preserves it when omitted"
     )]
     meta_description: Option<String>,
 
     #[clap(
         long = "label",
         value_name = "LABEL",
-        help = "A label that will be added as metadata for the newly created Machine. The labels key and value must be separated by a : character",
+        help = "Replace all metadata labels with the supplied key or key:value entries. Repeat for each label. Duplicate keys are rejected; label order is not preserved. PATCH preserves omitted labels",
         action = clap::ArgAction::Append
     )]
     labels: Option<Vec<String>>,
@@ -108,7 +124,7 @@ pub(crate) struct Args {
     #[clap(
         long = "host_name",
         value_name = "HOST_NAME",
-        help = "Host name of the power shelf",
+        help = "Unsupported for expected power shelf updates. Omit this option",
         action = clap::ArgAction::Append
     )]
     host_name: Option<String>,
@@ -188,39 +204,65 @@ impl Args {
         .map(|(_, path)| path.to_string())
         .collect()
     }
+
+    pub(super) fn apply_to(
+        self,
+        shelf: rpc::forge::ExpectedPowerShelf,
+    ) -> rpc::forge::ExpectedPowerShelf {
+        let metadata =
+            if self.meta_name.is_some() || self.meta_description.is_some() || self.labels.is_some()
+            {
+                let metadata = shelf.metadata.unwrap_or_default();
+                Some(rpc::forge::Metadata {
+                    name: self.meta_name.unwrap_or(metadata.name),
+                    description: self.meta_description.unwrap_or(metadata.description),
+                    labels: self
+                        .labels
+                        .map(crate::metadata::parse_rpc_labels)
+                        .unwrap_or(metadata.labels),
+                })
+            } else {
+                shelf.metadata
+            };
+        rpc::forge::ExpectedPowerShelf {
+            expected_power_shelf_id: self
+                .id
+                .map(|id| ::rpc::common::Uuid {
+                    value: id.to_string(),
+                })
+                .or(shelf.expected_power_shelf_id),
+            bmc_mac_address: self
+                .bmc_mac_address
+                .map(|m| m.to_string())
+                .unwrap_or(shelf.bmc_mac_address),
+            bmc_username: self.bmc_username.unwrap_or(shelf.bmc_username),
+            bmc_password: self.bmc_password.unwrap_or(shelf.bmc_password),
+            shelf_serial_number: self
+                .shelf_serial_number
+                .unwrap_or(shelf.shelf_serial_number),
+            bmc_ip_address: self
+                .bmc_ip_address
+                .map(|ip| ip.to_string())
+                .unwrap_or(shelf.bmc_ip_address),
+            metadata,
+            rack_id: self.rack_id.or(shelf.rack_id),
+            bmc_retain_credentials: self.bmc_retain_credentials.or(shelf.bmc_retain_credentials),
+        }
+    }
 }
 
 impl From<Args> for rpc::forge::ExpectedPowerShelf {
     fn from(args: Args) -> Self {
-        rpc::forge::ExpectedPowerShelf {
-            expected_power_shelf_id: args.id.map(|id| ::rpc::common::Uuid {
-                value: id.to_string(),
-            }),
-            bmc_mac_address: args
-                .bmc_mac_address
-                .map(|m| m.to_string())
-                .unwrap_or_default(),
-            bmc_username: args.bmc_username.unwrap_or_default(),
-            bmc_password: args.bmc_password.unwrap_or_default(),
-            shelf_serial_number: args.shelf_serial_number.unwrap_or_default(),
-            bmc_ip_address: args
-                .bmc_ip_address
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            metadata: Some(rpc::forge::Metadata {
-                name: args.meta_name.unwrap_or_default(),
-                description: args.meta_description.unwrap_or_default(),
-                labels: crate::metadata::parse_rpc_labels(args.labels.unwrap_or_default()),
-            }),
-            rack_id: args.rack_id,
-            bmc_retain_credentials: args.bmc_retain_credentials,
-        }
+        args.apply_to(Self {
+            metadata: Some(rpc::forge::Metadata::default()),
+            ..Default::default()
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases};
     use rpc::forge::{ExpectedPowerShelf, Label, Metadata};
 
@@ -239,6 +281,28 @@ mod tests {
         };
         check_cases(
             [
+                Case {
+                    scenario: "standalone BMC username",
+                    input: ["--bmc-username", "new-bmc-user"],
+                    expect: Yields((
+                        vec!["bmc_username".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_username: "new-bmc-user".to_string(),
+                            ..base.clone()
+                        },
+                    )),
+                },
+                Case {
+                    scenario: "standalone BMC password",
+                    input: ["--bmc-password", "new-bmc-password"],
+                    expect: Yields((
+                        vec!["bmc_password".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_password: "new-bmc-password".to_string(),
+                            ..base.clone()
+                        },
+                    )),
+                },
                 Case {
                     scenario: "standalone BMC IP address",
                     input: ["--bmc-ip-address", "192.0.2.10"],
@@ -312,25 +376,12 @@ mod tests {
     }
 
     #[test]
-    fn updates_require_a_field_and_complete_credentials() {
-        check_cases(
-            [
-                Case {
-                    scenario: "selector alone is not an update",
-                    input: vec![],
-                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
-                },
-                Case {
-                    scenario: "metadata does not bypass credential pairing",
-                    input: vec!["--meta-name", "shelf", "--bmc-username", "admin"],
-                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
-                },
-            ],
-            |flags| {
-                Args::try_parse_from(["update", "--id", ID].into_iter().chain(flags))
-                    .map(|_| ())
-                    .map_err(|error| error.kind())
-            },
+    fn updates_require_a_field() {
+        assert_eq!(
+            Args::try_parse_from(["update", "--id", ID])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::MissingRequiredArgument,
         );
     }
 }

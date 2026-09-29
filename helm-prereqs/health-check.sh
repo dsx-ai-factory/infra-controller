@@ -597,12 +597,17 @@ done < <(kc get externalsecret -A --no-headers \
 section "External Service VIPs (LoadBalancer)"
 while IFS= read -r _SVC; do
   [[ -z "${_SVC}" ]] && continue
-  _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+    -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
   _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
     -o jsonpath='{.spec.ports[0].port}')
-  if [[ -n "${_IP}" && "${_IP}" != "pending" ]]; then
-    pass "svc/${_SVC}: ${_IP}:${_PORT}"
+  if [[ -n "${_IPS}" ]]; then
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      pass "svc/${_SVC}: ${_ADDRESS}:${_PORT}"
+    done <<< "${_IPS}"
   else
     fail "svc/${_SVC}: no external IP (still pending)"
   fi
@@ -630,15 +635,15 @@ elif ! _pod_has_command "${METALLB_NS}" "${_SPEAKER}" speaker nc; then
 else
   while IFS= read -r _SVC; do
     [[ -z "${_SVC}" ]] && continue
-    _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-      -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+      -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
     _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].port}')
     _PROTO=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].protocol}')
 
     # Skip if no IP assigned yet
-    [[ -z "${_IP}" || "${_IP}" == "pending" ]] && continue
+    [[ -z "${_IPS}" ]] && continue
 
     # UDP-only services cannot be tested with TCP nc; DNS UDP is covered by the
     # DNS section, NTP has no reliable probe, DHCP requires a full handshake.
@@ -646,12 +651,19 @@ else
     [[ "${_PROTO}" == "UDP" ]] && continue
     printf '%s' "${_SVC}" | grep -q "udp" && continue
 
-    if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
-        nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
-      pass "svc/${_SVC}: ${_IP}:${_PORT} reachable from host network"
-    else
-      fail "svc/${_SVC}: ${_IP}:${_PORT} not reachable (BGP route missing or service not listening)"
-    fi
+    # One reachable VIP does not prove the other family works on a dual-stack Service.
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      # Brackets are for display; nc takes the bare IP as its host argument.
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
+          nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
+        pass "svc/${_SVC}: ${_ADDRESS}:${_PORT} reachable from host network"
+      else
+        fail "svc/${_SVC}: ${_ADDRESS}:${_PORT} not reachable (BGP route missing or service not listening)"
+      fi
+    done <<< "${_IPS}"
   done < <(kc get svc -n "${NICO_NS}" --no-headers 2>/dev/null | \
     awk '$2=="LoadBalancer"{print $1}')
 fi

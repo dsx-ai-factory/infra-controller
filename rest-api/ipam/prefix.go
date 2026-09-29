@@ -158,6 +158,9 @@ func (i *ipamer) DeletePrefix(ctx context.Context, cidr string) (*Prefix, error)
 	if p.hasIPs() {
 		return nil, fmt.Errorf("prefix %s has ips, delete prefix not possible", p.Cidr)
 	}
+	if p.acquiredPrefixes() > 0 {
+		return nil, fmt.Errorf("prefix %s has allocated child prefixes, delete prefix not possible", p.Cidr)
+	}
 	prefix, err := i.storage.DeletePrefix(ctx, *p, i.namespace)
 	if err != nil {
 		return nil, fmt.Errorf("delete prefix:%s %w", cidr, err)

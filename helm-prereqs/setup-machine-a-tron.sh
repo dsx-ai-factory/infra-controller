@@ -37,10 +37,12 @@
 #    We always re-copy nico-roots from nico-system and (Phase 8) delete the old
 #    cert secret so cert-manager reissues from the CURRENT CA.
 #
-#  * BMC site-root credential (Phase 5): site-explorer's check_preconditions
+#  * BMC site-root credential (Phase 4): site-explorer's check_preconditions
 #    requires the Vault credential machines/bmc/site/root. It is NOT in the
-#    default nico-prereqs kvSeeds, so without it site-explorer aborts every run
-#    with MissingCredentials and never explores anything.
+#    default nico-prereqs kvSeeds; the chart provides it only through the
+#    siteCredentials Secret (off by default), so without either site-explorer
+#    aborts every run with MissingCredentials and never explores anything.
+#    Phase 4 seeds it when it is absent or still at a factory value.
 #
 #  * bmc_proxy field name (Phase 6): the site_explorer config field is
 #    `bmc_proxy = "host:port"` (a single string). `override_target_host` is NOT
@@ -138,6 +140,14 @@
 #   SCALE_STATE_MAX_CONCURRENCY
 #                          Tuning override: [machine_state_controller.controller]
 #                          max_concurrency (parallel state-machine tasks).
+#   SCALE_SERVICE_CIDRS    Cluster Service CIDR(s), space-separated, when the
+#                          preflight cannot read them from the cluster.
+#   SCALE_BMC_PREFIXES     BMC network prefixes to validate against the
+#                          ServiceCIDR, space-separated, for bmcDhcpRelayAddress
+#                          networks the live site config does not declare yet.
+#   SCALE_ALLOW_UNKNOWN_SERVICE_CIDR
+#                          Set to 1 to deploy when the ServiceCIDR cannot be
+#                          determined. Default: stop.
 #   INGEST_RATE_CSV        Where the Phase 10 loop writes its per-sample
 #                          ingestion counters (CSV). Default: a file under /tmp.
 #   DPF_SIM_IMAGE          dpf-sim-controller image ref for Phase 4b. Default:
@@ -209,9 +219,10 @@ NICO_DB="nico_system_nico"
 
 # --- deployment mode ---------------------------------------------------------
 # override (default): all Redfish through site_explorer.bmc_proxy → one mock.
-# scale: Controller Mode — mat-k8s-controller creates one ClusterIP Service per
-#   BMC with ClusterIP = BMC IP. Uses values/machine-a-tron-scale.yaml plus a
-#   NICo network covering the BMC IP range. See the chart README "Controller Mode".
+# scale: Controller Mode - mat-k8s-controller creates one Service per BMC with
+#   the BMC IP published as externalIP. Uses values/machine-a-tron-scale.yaml
+#   plus a NICo network covering the BMC IP range. See the chart README
+#   "Controller Mode".
 MAT_MODE="${MAT_MODE:-override}"
 # Networks for scale mode. The OOB gateway must match the scale values file
 # (bmcDhcpRelayAddress). Both are sized from MEASURED demand, not from the host
@@ -229,9 +240,12 @@ MAT_MODE="${MAT_MODE:-override}"
 # 9.8ms at /18 against 28.6ms at /16, and it does that holding the fleet-wide
 # admin-segment lock. Sizing these generously is NOT free.
 #
-# Controller Mode has the opposite constraint: its BMC addresses are ClusterIPs
-# and must come from the Kubernetes ServiceCIDR, so it must override these.
-SCALE_OOB_PREFIX="${SCALE_OOB_PREFIX:-10.96.64.0/18}";  SCALE_OOB_GW="${SCALE_OOB_GW:-10.96.64.1}"
+# Controller Mode publishes the BMC addresses as Service externalIPs, for which
+# kube-proxy programs forwarding rules on every node, so the OOB range must lie
+# outside the cluster ServiceCIDR, pod CIDR, node network, and any network the
+# nodes or pods must otherwise reach. The default clears the kubeadm
+# (10.96.0.0/12), kubespray (10.233.0.0/18) and Kind defaults.
+SCALE_OOB_PREFIX="${SCALE_OOB_PREFIX:-10.200.0.0/18}";  SCALE_OOB_GW="${SCALE_OOB_GW:-10.200.0.1}"
 SCALE_ADMIN_PREFIX="${SCALE_ADMIN_PREFIX:-10.102.0.0/18}"; SCALE_ADMIN_GW="${SCALE_ADMIN_GW:-10.102.0.1}"
 # DPU OOB and switch NVOS DHCP relay target. NICo predicts DPU oob interfaces
 # on an underlay-typed segment and rejects DHCP relayed from any other type,
@@ -378,6 +392,105 @@ kubectl get deploy nico-api -n "$NICO_SYSTEM_NS" >/dev/null 2>&1 || die "nico-ap
 [[ -n "$(_pg_primary)" ]] || die "no Postgres primary in $POSTGRES_NS"
 kubectl get pod vault-0 -n "$VAULT_NS" >/dev/null 2>&1 || die "vault-0 not found in $VAULT_NS"
 ok "NICo Core present: nico-api, postgres primary $(_pg_primary), vault-0"
+if [[ "$MAT_MODE" == "scale" ]]; then
+    # Controller Mode publishes BMC IPs as Service externalIPs, which the
+    # apiserver does not validate, so a BMC network inside the ServiceCIDR
+    # collides silently with allocated clusterIPs. Every BMC network this run
+    # deploys is checked: the SCALE_OOB_PREFIX segment plus the network of each
+    # bmcDhcpRelayAddress in the values file, resolved from the live site
+    # config's [networks.*] stanzas or SCALE_BMC_PREFIXES (comments in the values
+    # file are documentation, not evidence). Every explicit CIDR must parse. ServiceCIDR
+    # sources: SCALE_SERVICE_CIDRS, else ServiceCIDR objects (k8s 1.33+),
+    # kubeadm's ClusterConfiguration, then the apiserver flag. Unknown means
+    # stop, unless SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 accepts the risk.
+    _SVC_CIDRS="${SCALE_SERVICE_CIDRS:-}"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl get servicecidrs -o jsonpath='{.items[*].spec.cidrs[*]}' 2>/dev/null || true)"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl get cm kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
+        | awk '/serviceSubnet:/ {print $2}' | tr ',' ' ' || true)"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl cluster-info dump 2>/dev/null \
+        | grep -oE 'service-cluster-ip-range=[^" ]+' | head -1 | cut -d= -f2 | tr ',' ' ' || true)"
+    if [[ -z "$_SVC_CIDRS" ]]; then
+        if [[ "${SCALE_ALLOW_UNKNOWN_SERVICE_CIDR:-0}" == "1" ]]; then
+            warn "could not determine the cluster ServiceCIDR; continuing because SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 (the BMC networks must lie outside it)"
+        else
+            die "could not determine the cluster ServiceCIDR (no ServiceCIDR object, kubeadm-config or apiserver flag readable); set SCALE_SERVICE_CIDRS=\"<cidr> ...\" to the cluster's Service CIDR(s), or SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 to deploy without the check"
+        fi
+    fi
+    _SITE_NETS="$(mktemp)"
+    kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o go-template='{{range $k, $v := .data}}{{$v}}{{"\n"}}{{end}}' > "$_SITE_NETS" 2>/dev/null || true
+    _NETCHK="$(python3 - "$VALUES_FILE" "$SCALE_OOB_PREFIX" "${SCALE_BMC_PREFIXES:-}" "$_SVC_CIDRS" "$_SITE_NETS" <<'PY'
+import ipaddress, re, sys
+values_file, oob_prefix, extra, svc, site_path = sys.argv[1:6]
+text = open(values_file).read()
+site = open(site_path).read()
+
+def nets(cands, source):
+    """Parse CIDRs; an explicit token that is not a CIDR is reported, never dropped."""
+    out = []
+    for c in cands:
+        try:
+            out.append(ipaddress.ip_network(c, strict=False))
+        except ValueError:
+            bad.append(f"{source}={c}")
+    return out
+
+bad = []
+oob = ipaddress.ip_network(oob_prefix, strict=False)
+site_nets = nets(re.findall(r'^\s*prefix\s*=\s*"([^"]+)"', site, re.M), "site-config")
+extra_nets = nets(extra.split(), "SCALE_BMC_PREFIXES")
+svc_nets = nets(svc.split(), "SCALE_SERVICE_CIDRS")
+# Relay addresses of every machine group (camelCase and rack-group snake_case
+# keys); commented-out lines are ignored, as in the pool-fit check.
+relays = []
+for raw in text.splitlines():
+    if not raw.strip() or raw.lstrip().startswith("#"):
+        continue
+    m = re.match(r'\s*(bmcDhcpRelayAddress|oobDhcpRelayAddress|bmc_dhcp_relay_address|oob_dhcp_relay_address)\s*:\s*(\S.*)$', raw)
+    if not m:
+        continue
+    try:
+        relays.append(ipaddress.ip_address(re.sub(r"\s+#.*$", "", m.group(2)).strip().strip('"\'')))
+    except ValueError:
+        pass
+
+def resolve(addr):
+    # Most specific containing prefix wins: a relay sits inside its own
+    # segment and inside any wider range the site config declares.
+    best = None
+    for net in [oob] + site_nets + extra_nets:
+        if addr in net and (best is None or net.prefixlen > best.prefixlen):
+            best = net
+    return best
+
+prefixes, unresolved = {oob}, []
+for r in relays:
+    n = resolve(r)
+    if n is None:
+        unresolved.append(str(r))
+    else:
+        prefixes.add(n)
+prefixes |= set(extra_nets)
+order = sorted(prefixes, key=lambda n: (int(n.network_address), n.prefixlen))
+overlaps = [f"{p} overlaps {c}" for p in order for c in svc_nets if p.overlaps(c)]
+print("PREFIXES " + " ".join(str(p) for p in order))
+if bad:
+    print("BADCIDR " + " ".join(bad))
+if unresolved:
+    print("UNRESOLVED " + " ".join(sorted(set(unresolved))))
+if overlaps:
+    print("OVERLAP " + ", ".join(overlaps))
+PY
+)"
+    rm -f "$_SITE_NETS"
+    _NET_BAD="$(sed -n 's/^BADCIDR //p' <<<"$_NETCHK")"
+    [[ -z "$_NET_BAD" ]] || die "not a CIDR: ${_NET_BAD}; every entry of SCALE_SERVICE_CIDRS and SCALE_BMC_PREFIXES and every [networks.*] prefix in the site config must be <address>/<length>"
+    _NET_PFX="$(sed -n 's/^PREFIXES //p' <<<"$_NETCHK")"
+    _NET_UNRES="$(sed -n 's/^UNRESOLVED //p' <<<"$_NETCHK")"
+    _NET_OVL="$(sed -n 's/^OVERLAP //p' <<<"$_NETCHK")"
+    [[ -z "$_NET_UNRES" ]] || die "cannot determine the BMC network of bmcDhcpRelayAddress ${_NET_UNRES} in ${VALUES_FILE}; create its [networks.*] stanza in the site config before running setup, or set SCALE_BMC_PREFIXES=\"<cidr> ...\" (comments in the values file do not count)"
+    [[ -z "$_NET_OVL" ]] || die "BMC network overlaps the cluster ServiceCIDR: ${_NET_OVL}; Controller Mode publishes BMC IPs as Service externalIPs, so every BMC network must lie outside it (helm/charts/nico-machine-a-tron/README.md, Requirements)"
+    [[ -z "$_SVC_CIDRS" ]] || ok "BMC networks ${_NET_PFX} are outside the ServiceCIDR (${_SVC_CIDRS})"
+fi
 
 # portable extraction (macOS BSD sed/grep lack \s): [[:space:]] + awk on quotes
 MAT_IMAGE_TAG="${MAT_IMAGE_TAG:-$(grep -E '^[[:space:]]*tag:' "$VALUES_FILE" | head -1 | awk -F'"' '{print $2}')}"
@@ -973,7 +1086,7 @@ print("changed" if changed else "nochange")
 PY
 )"
     if [[ "$_PATCH_RESULT" == mismatch* ]]; then
-        die "site config ${_PATCH_RESULT#mismatch } - keep the SCALE_* prefixes this site was set up with, or remove the stanza and its network segment before re-running"
+        die "site config ${_PATCH_RESULT#mismatch } - remove the stanza and its network segment before re-running, or re-run with the SCALE_* prefixes this site was set up with if SCALE_OOB_PREFIX still clears the cluster ServiceCIDR"
     fi
     if [[ "$_PATCH_RESULT" == "changed" ]]; then
         kubectl apply -f "$CM_JSON" >/dev/null
@@ -1016,22 +1129,37 @@ PY
         # allocation_strategy is forced to 'dynamic': templates may be
         # 'reserved' (static-assignments segments), which rejects every mat
         # DHCP with "configured for static DHCP leases only".
-        psql_q "INSERT INTO network_segments
-            SELECT (jsonb_populate_record(ns, jsonb_build_object(
-                'id', gen_random_uuid()::text, 'name', '${name}',
-                'allocation_strategy', 'dynamic',
-                'vlan_id', NULL, 'vni_id', NULL))).*
-            FROM network_segments ns
-            WHERE ns.network_segment_type::text ILIKE '${typ}' LIMIT 1;" >/dev/null \
-            || die "failed to create segment ${name} (no ${typ} template segment?)"
         # svi_ip = gateway: the FNN host network-config builder requires an
         # SVI IP on L2 segments — without it get_managed_host_network_config
         # fails with "SVI IP is not allocated" and hosts park in dpuinit at
         # waitingfornetworkconfig.
-        psql_q "INSERT INTO network_prefixes (segment_id, prefix, gateway, num_reserved, svi_ip)
+        # Share the API's overlap lock and check both tables. The cloned
+        # segment and its global prefix must either both exist or neither.
+        local created
+        created="$(psql_q "BEGIN;
+            SELECT pg_advisory_xact_lock(hashtextextended('tenant_prefix_overlap:checks', 0));
+            WITH created_segment AS (
+                INSERT INTO network_segments
+                SELECT (jsonb_populate_record(ns, jsonb_build_object(
+                    'id', gen_random_uuid()::text, 'name', '${name}',
+                    'allocation_strategy', 'dynamic',
+                    'vlan_id', NULL, 'vni_id', NULL))).*
+                FROM network_segments ns
+                WHERE ns.network_segment_type::text ILIKE '${typ}'
+                  AND NOT EXISTS (SELECT 1 FROM network_prefixes WHERE prefix && '${pfx}'::cidr)
+                  AND NOT EXISTS (SELECT 1 FROM network_vpc_prefixes
+                      WHERE prefix && '${pfx}'::cidr
+                        AND overlap_vpc_id IS NOT NULL)
+                LIMIT 1
+                RETURNING id
+            )
+            INSERT INTO network_prefixes (segment_id, prefix, gateway, num_reserved, svi_ip)
             SELECT id, '${pfx}'::cidr, '${gw}'::inet, ${rsv}, '${gw}'::inet
-            FROM network_segments WHERE name='${name}';" >/dev/null \
-            || die "failed to add prefix ${pfx} to segment ${name}"
+            FROM created_segment
+            RETURNING 'created:1';
+            COMMIT;")" || die "failed to create segment ${name} with prefix ${pfx}"
+        [[ "$created" == *"created:1"* ]] \
+            || die "segment ${name} was not created: prefix ${pfx} overlaps existing address space or no ${typ} template exists"
         ok "segment ${name} created: ${pfx} (gw ${gw}, svi ${gw}, reserved ${rsv})"
     }
     _ensure_segment "simulated-oob"   "underlay" "$SCALE_OOB_PREFIX"   "$SCALE_OOB_GW"   "$SCALE_RESERVE"
@@ -1332,7 +1460,8 @@ def prefix_for(relay):
     if relay == "<default>":
         return default_prefix
     # Most specific containing prefix wins: a relay sits inside both its own
-    # segment and the wide ServiceCIDR, and only the narrow one is its pool.
+    # segment and any wider range the file documents (such as the parent
+    # block the segments are carved from), and only the narrow one is its pool.
     best = None
     for cand in re.findall(r'([0-9]+(?:\.[0-9]+){3}/[0-9]+)', text):
         try:

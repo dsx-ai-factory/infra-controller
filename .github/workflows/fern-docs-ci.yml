@@ -25,12 +25,14 @@ on:
   pull_request:
     paths:
       - 'fern/**'
+      - 'docs/**'
       - '.github/workflows/fern-docs-ci.yml'
   push:
     branches:
       - 'pull-request/[0-9]+'
     paths:
       - 'fern/**'
+      - 'docs/**'
       - '.github/workflows/fern-docs-ci.yml'
 
 permissions:

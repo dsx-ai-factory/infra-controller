@@ -19,21 +19,21 @@ import (
 
 func TestParseLabelInt(t *testing.T) {
 	// Empty input is "Core didn't write this label" — ok=true so callers
-	// treat it as Core authoritatively saying zero (the unset default).
-	// Non-empty unparsable input is a Core data bug — ok=false so callers
-	// can preserve Flow's existing value rather than clobber it with 0.
+	// authoritatively clear a prior value to the unknown-position sentinel.
+	// Non-empty invalid input is a Core data bug — ok=false so callers
+	// can preserve Flow's existing value rather than clobber it.
 	for _, tc := range []struct {
 		in     string
 		want   int
 		wantOK bool
 	}{
-		{"", 0, true},
+		{"", unknownPositionValue, true},
 		{"0", 0, true},
 		{"7", 7, true},
-		{"-3", -3, true},
-		{"abc", 0, false},   // strconv.Atoi rejects non-numeric
-		{"3.14", 0, false},  // strconv.Atoi rejects floats
-		{"  4  ", 0, false}, // strconv.Atoi rejects whitespace
+		{"-3", unknownPositionValue, false},
+		{"abc", unknownPositionValue, false},   // strconv.Atoi rejects non-numeric
+		{"3.14", unknownPositionValue, false},  // strconv.Atoi rejects floats
+		{"  4  ", unknownPositionValue, false}, // strconv.Atoi rejects whitespace
 	} {
 		t.Run(tc.in, func(t *testing.T) {
 			got, ok := parseLabelInt(tc.in)
@@ -54,12 +54,24 @@ func TestPopulateLabelsIntoSpec_MalformedIntMarksPreserve(t *testing.T) {
 		labelComponentTrayIdx:      "1",
 		labelComponentHostID:       "",
 	})
-	assert.True(t, s.preserveFields["slot_id"], "malformed slot_id label must mark preserve so UPDATE doesn't clobber Flow's existing value with 0")
+	assert.True(t, s.preserveFields["slot_id"], "malformed slot_id label must mark preserve so UPDATE doesn't clobber Flow's existing position")
 	assert.False(t, s.preserveFields["tray_index"])
-	assert.False(t, s.preserveFields["host_id"], "empty label is Core saying zero, not a malformation")
-	assert.Equal(t, 0, s.SlotID, "malformed input still falls back to 0 for the spec field; the preserve flag is what gates the write")
+	assert.False(t, s.preserveFields["host_id"], "empty label is an authoritative unknown position, not a malformation")
+	assert.Equal(t, unknownPositionValue, s.SlotID, "malformed inserts must use unknown rather than a valid zero position")
 	assert.Equal(t, 1, s.TrayIndex)
-	assert.Equal(t, 0, s.HostID)
+	assert.Equal(t, unknownPositionValue, s.HostID)
+}
+
+func TestPopulateLabelsIntoSpec_MissingAndExplicitZeroStayDistinct(t *testing.T) {
+	s := expectedComponentSpec{}
+	populateLabelsIntoSpec(&s, map[string]string{
+		labelComponentSlotID:  "0",
+		labelComponentTrayIdx: "",
+	})
+
+	assert.Equal(t, 0, s.SlotID, "an explicit zero is a valid position")
+	assert.Equal(t, unknownPositionValue, s.TrayIndex)
+	assert.Equal(t, unknownPositionValue, s.HostID, "an omitted label is unknown")
 }
 
 func TestMachineDetailToSpec(t *testing.T) {
@@ -445,15 +457,15 @@ func TestApplyComponentChanges_PreservedFieldsKeepFlowValue(t *testing.T) {
 	desired := &model.Component{
 		Name:      "n",
 		Model:     "m",
-		SlotID:    0, // would-be overwrite from parseLabelInt fallback
-		TrayIndex: 0,
-		HostID:    0,
+		SlotID:    unknownPositionValue,
+		TrayIndex: unknownPositionValue,
+		HostID:    unknownPositionValue,
 	}
 	spec := expectedComponentSpec{
 		preserveFields: map[string]bool{"slot_id": true, "tray_index": true, "host_id": true},
 	}
 	applyComponentChanges(existing, desired, spec)
-	assert.Equal(t, 7, existing.SlotID, "preserve flag must protect Flow's value from malformed-label fallback zero")
+	assert.Equal(t, 7, existing.SlotID, "preserve flag must protect Flow's value from the malformed-label sentinel")
 	assert.Equal(t, 8, existing.TrayIndex)
 	assert.Equal(t, 9, existing.HostID)
 }

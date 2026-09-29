@@ -42,8 +42,10 @@ fn timestamp_or_default(ts: &Option<Timestamp>, default: &Timestamp) -> String {
     ts.as_ref().unwrap_or(default).to_string()
 }
 
-fn convert_domain_to_nice_format(domain: &::rpc::protos::dns::Domain) -> CarbideCliResult<String> {
-    let width = 10;
+pub(in crate::domain) fn convert_domain_to_nice_format(
+    domain: &::rpc::protos::dns::Domain,
+) -> CarbideCliResult<String> {
+    let width = 11;
     let mut lines = String::new();
 
     let timestamp_default = &Timestamp::default();
@@ -52,10 +54,14 @@ fn convert_domain_to_nice_format(domain: &::rpc::protos::dns::Domain) -> Carbide
     let domain_created = timestamp_or_default(&domain.created, timestamp_default);
     let domain_updated = timestamp_or_default(&domain.updated, timestamp_default);
     let domain_deleted = timestamp_or_default(&domain.deleted, timestamp_default);
+    let default_ttl = domain
+        .default_ttl
+        .map_or_else(|| "site default".to_string(), |secs| format!("{secs}s"));
 
     let data = vec![
         ("ID", domain_id.as_str()),
         ("NAME", domain.name.as_str()),
+        ("DEFAULT TTL", default_ttl.as_str()),
         ("CREATED", domain_created.as_str()),
         ("UPDATED", domain_updated.as_str()),
         ("DELETED", domain_deleted.as_str()),

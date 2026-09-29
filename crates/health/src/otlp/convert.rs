@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::SystemTime;
 
 use opentelemetry::logs::AnyValue;
@@ -405,19 +406,26 @@ fn convert_event(
     }
 }
 
-/// Builds an OTLP log export request grouped by endpoint.
-///
-/// `include_alert_details` is the receiving target's policy, so one target can
-/// carry per-alert detail while another receives only the report counts.
-pub fn build_export_request(
-    batch: &[(EventContext, CollectorEvent)],
-    include_alert_details: bool,
-) -> ExportLogsServiceRequest {
-    let observed_nanos = SystemTime::now()
+/// Current time in nanoseconds since the Unix epoch, recorded once per export
+/// batch as its observed time.
+pub fn export_time_nanos() -> u64 {
+    SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as u64;
+        .as_nanos() as u64
+}
 
+/// Builds an OTLP log export request grouped by endpoint.
+///
+/// `observed_nanos` is the batch's export time; building the same batch with
+/// the same time yields the same records. `include_alert_details` is the
+/// receiving target's policy, so one target can carry per-alert detail while
+/// another receives only the report counts.
+pub fn build_export_request(
+    batch: &[(EventContext, CollectorEvent)],
+    observed_nanos: u64,
+    include_alert_details: bool,
+) -> ExportLogsServiceRequest {
     let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpLogRecord>)> = HashMap::new();
 
     for (context, event) in batch {
@@ -450,20 +458,50 @@ pub fn build_export_request(
     ExportLogsServiceRequest { resource_logs }
 }
 
-/// Builds an OTLP metric export request grouped by endpoint.
+/// Builds an OTLP metric export request grouped by endpoint and metric descriptor.
 ///
-/// Every sample maps to an OTLP `Gauge` point; Sum and Histogram mapping can
-/// be added when the health metric model exposes those temporality choices.
+/// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
+/// the batch's export time. Samples with the same name, type, and unit share
+/// one metric envelope within their endpoint, preserving their input order as
+/// datapoints. Sum and Histogram mapping can be added when the health metric
+/// model exposes those temporality choices.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
+    observed_nanos: u64,
     metric_name_prefix: &str,
 ) -> ExportMetricsServiceRequest {
-    let observed_nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(|(context, sample)| (context, sample)),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
 
-    let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpMetric>)> = HashMap::new();
+/// Builds the same wire format from owned or shared queue entries.
+pub(crate) fn build_queued_metrics_export_request(
+    batch: &[crate::sink::otlp::QueuedMetric],
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(crate::sink::otlp::QueuedMetric::pair),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
+
+fn build_metrics_export_request_from_pairs<'a>(
+    batch: impl IntoIterator<Item = (&'a EventContext, &'a MetricSample)>,
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
+    type EndpointMetrics<'a> = (
+        Vec<KeyValue>,
+        Vec<OtlpMetric>,
+        HashMap<(&'a str, &'a str, &'a str), usize>,
+    );
+
+    let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
         // Switch identity rides once on the resource attributes (switch.id,
@@ -482,31 +520,50 @@ pub fn build_metrics_export_request(
             ..Default::default()
         };
 
-        let otlp_metric = OtlpMetric {
-            // match the Prometheus sink's full series name exactly so Grafana queries
-            // resolve identically across both export paths.
-            name: format!(
-                "{}_{}_{}_{}",
-                metric_name_prefix, sample.name, sample.metric_type, sample.unit
-            ),
-            description: String::new(),
-            unit: sample.unit.clone(),
-            data: Some(metric::Data::Gauge(OtlpGauge {
-                data_points: vec![data_point],
-            })),
-            ..Default::default()
+        let (_, metrics, descriptor_indices) = by_endpoint
+            .entry((&context.endpoint_key, context.collector_type))
+            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+
+        let metric_index =
+            match descriptor_indices.entry((&sample.name, &sample.metric_type, &sample.unit)) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    entry.insert(metrics.len());
+
+                    metrics.push(OtlpMetric {
+                        // Match the Prometheus sink's full series name exactly so
+                        // Grafana queries resolve identically across both export paths.
+                        name: format!(
+                            "{}_{}_{}_{}",
+                            metric_name_prefix, sample.name, sample.metric_type, sample.unit
+                        ),
+                        description: String::new(),
+                        unit: sample.unit.clone(),
+                        data: Some(metric::Data::Gauge(OtlpGauge {
+                            data_points: vec![data_point],
+                        })),
+                        ..Default::default()
+                    });
+
+                    continue;
+                }
+            };
+
+        // Entries are created as Gauges above; adding a point must not replace
+        // earlier points that share this descriptor.
+        let Some(metric::Data::Gauge(gauge)) = metrics
+            .get_mut(metric_index)
+            .and_then(|metric| metric.data.as_mut())
+        else {
+            unreachable!("metric descriptor map contains only gauges");
         };
 
-        by_endpoint
-            .entry(resource_group_key(context))
-            .or_insert_with(|| (resource_attributes(context), Vec::new()))
-            .1
-            .push(otlp_metric);
+        gauge.data_points.push(data_point);
     }
 
     let resource_metrics = by_endpoint
         .into_values()
-        .map(|(attrs, metrics)| ResourceMetrics {
+        .map(|(attrs, metrics, _)| ResourceMetrics {
             resource: Some(Resource {
                 attributes: otlp_attributes(attrs),
                 ..Default::default()
@@ -860,7 +917,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
@@ -923,7 +980,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
@@ -1029,7 +1086,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
         assert_eq!(request.resource_logs.len(), 1);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
@@ -1047,7 +1104,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "UNSPECIFIED");
@@ -1063,7 +1120,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "FATAL");
@@ -1102,7 +1159,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
@@ -1125,7 +1182,7 @@ mod tests {
             (ctx.clone(), CollectorEvent::MetricCollectionStart),
             (ctx, CollectorEvent::MetricCollectionEnd),
         ];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
         assert!(request.resource_logs.is_empty());
     }
 
@@ -1182,7 +1239,11 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(test_context(), report)], include_alert_details);
+        let request = build_export_request(
+            &[(test_context(), report)],
+            EXPORT_NANOS,
+            include_alert_details,
+        );
 
         request.resource_logs[0].scope_logs[0].log_records[0].clone()
     }
@@ -1234,7 +1295,7 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(test_context(), report)], true);
+        let request = build_export_request(&[(test_context(), report)], EXPORT_NANOS, true);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
         let attrs = record.attributes.as_slice();
 
@@ -1419,7 +1480,7 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(ctx, report)], true);
+        let request = build_export_request(&[(ctx, report)], EXPORT_NANOS, true);
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
         let attrs = record.attributes.as_slice();
@@ -1589,7 +1650,7 @@ mod tests {
         };
 
         let batch = vec![log(ctx1.clone()), log(ctx2), log(ctx1)];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
 
         assert_eq!(request.resource_logs.len(), 2);
         let total_records: usize = request
@@ -1627,6 +1688,7 @@ mod tests {
                 (rest_ctx, sample("nvue_rest")),
                 (gnmi_ctx, sample("nvue_gnmi")),
             ],
+            EXPORT_NANOS,
             "carbide_hardware_health",
         );
 
@@ -1643,6 +1705,113 @@ mod tests {
     }
 
     #[test]
+    fn metric_points_share_descriptors_only_within_their_resource() {
+        let first = test_context();
+
+        let second = EventContext {
+            endpoint_key: "other-endpoint".to_string(),
+            ..first.clone()
+        };
+
+        let sample = |metric_type: &str, unit: &str, interface: &str, value: f64| MetricSample {
+            key: interface.to_string(),
+            name: "nvue_gnmi".to_string(),
+            metric_type: metric_type.to_string(),
+            unit: unit.to_string(),
+            value,
+            labels: vec![(Cow::Borrowed("interface_name"), interface.to_string())],
+            context: None,
+        };
+
+        let batch = [
+            (first.clone(), sample("status", "state", "swp1", 1.0)),
+            (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (first.clone(), sample("status", "state", "swp2", 0.0)),
+            (second, sample("status", "state", "swp3", 3.0)),
+            (first, sample("status", "state", "swp4", -0.0)),
+        ];
+
+        let request = build_metrics_export_request(&batch, EXPORT_NANOS, "health");
+
+        assert_eq!(request.resource_metrics.len(), 2);
+
+        let first_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("42:9e:b1:bd:9d:dd")
+                })
+            })
+            .expect("first endpoint resource");
+
+        let metrics = &first_resource.scope_metrics[0].metrics;
+
+        assert_eq!(metrics.len(), 2);
+
+        let status = metrics
+            .iter()
+            .find(|metric| metric.name == "health_nvue_gnmi_status_state")
+            .expect("status metric");
+
+        let metric::Data::Gauge(gauge) = status.data.as_ref().expect("gauge data") else {
+            panic!("status metric must be a gauge");
+        };
+
+        let points: Vec<_> = gauge
+            .data_points
+            .iter()
+            .map(|point| {
+                let value = match point.value.as_ref().expect("point value") {
+                    number_data_point::Value::AsDouble(value) => value.to_bits(),
+                    _ => panic!("point must contain a double"),
+                };
+
+                (
+                    attr_value(&point.attributes, "interface_name"),
+                    value,
+                    point.time_unix_nano,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            points,
+            [
+                (Some("swp1"), 1.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp2"), 0.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp4"), (-0.0f64).to_bits(), EXPORT_NANOS),
+            ]
+        );
+
+        let second_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("other-endpoint")
+                })
+            })
+            .expect("second endpoint resource");
+
+        let second_metrics = &second_resource.scope_metrics[0].metrics;
+
+        assert_eq!(second_metrics.len(), 1);
+
+        let metric::Data::Gauge(gauge) = second_metrics[0].data.as_ref().expect("gauge data")
+        else {
+            panic!("second resource metric must be a gauge");
+        };
+
+        assert_eq!(gauge.data_points.len(), 1);
+
+        assert_eq!(
+            attr_value(&gauge.data_points[0].attributes, "interface_name"),
+            Some("swp3")
+        );
+    }
+
+    #[test]
     fn metric_export_name_uses_full_prometheus_series_name() {
         let ctx = test_context();
         let sample = MetricSample {
@@ -1655,7 +1824,8 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(ctx, sample)], "carbide_hardware_health");
+        let request =
+            build_metrics_export_request(&[(ctx, sample)], EXPORT_NANOS, "carbide_hardware_health");
         let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
 
         assert_eq!(metrics.len(), 1);
@@ -1702,7 +1872,11 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(context, sample)], "carbide_hardware_health");
+        let request = build_metrics_export_request(
+            &[(context, sample)],
+            EXPORT_NANOS,
+            "carbide_hardware_health",
+        );
         let resource_metrics = &request.resource_metrics[0];
         let metrics = &resource_metrics.scope_metrics[0].metrics;
 

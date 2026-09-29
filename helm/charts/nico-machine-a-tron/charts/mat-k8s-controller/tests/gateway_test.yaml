@@ -42,9 +42,6 @@ tests:
       - isNull:
           path: spec.template.spec.automountServiceAccountToken
         template: templates/deployment.yaml
-      - isNull:
-          path: spec.strategy
-        template: templates/deployment.yaml
 
   - it: should render no gateway resources when the controller is disabled
     set:
@@ -58,62 +55,61 @@ tests:
   - it: should run the gateway from the controller image with its config, token and probes
     set:
       enabled: true
+      image:
+        repository: test-registry/mat-k8s-controller
+        tag: test-tag
       gateway:
         enabled: true
+        port: 9443
+        existingAuthSecret: test-ufm-auth
       config:
         logLevel: debug
     template: templates/deployment.yaml
     asserts:
-      - equal:
-          path: spec.strategy
-          value:
-            type: Recreate
-            rollingUpdate: null
       - lengthEqual:
           path: spec.template.spec.containers
           count: 2
+      - exists:
+          path: spec.template.spec.containers[?(@.name=="gateway")]
       - equal:
-          path: spec.template.spec.containers[1].name
-          value: gateway
+          path: spec.template.spec.containers[?(@.name=="gateway")].image
+          value: test-registry/mat-k8s-controller:test-tag
       - equal:
-          path: spec.template.spec.containers[1].image
-          value: mat-k8s-controller:0.1.0
-      - equal:
-          path: spec.template.spec.containers[1].command
+          path: spec.template.spec.containers[?(@.name=="gateway")].command
           value: [/mat-protocol-gateway]
       - equal:
-          path: spec.template.spec.containers[1].args
+          path: spec.template.spec.containers[?(@.name=="gateway")].args
           value: [/etc/mat-protocol-gateway/gateway.toml]
       - equal:
-          path: spec.template.spec.containers[1].env
+          path: spec.template.spec.containers[?(@.name=="gateway")].env
           value:
             - name: RUST_LOG
               value: debug
             - name: UFM_MOCK_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: nico-machine-a-tron-ufm-mock-auth
+                  name: test-ufm-auth
                   key: token
       - equal:
-          path: spec.template.spec.containers[1].ports
+          path: spec.template.spec.containers[?(@.name=="gateway")].ports
           value:
             - name: ufm
-              containerPort: 8443
+              containerPort: 9443
               protocol: TCP
       - equal:
-          path: spec.template.spec.containers[1].livenessProbe.httpGet
+          path: spec.template.spec.containers[?(@.name=="gateway")].livenessProbe.httpGet
           value:
             path: /livez
             port: ufm
             scheme: HTTPS
       - equal:
-          path: spec.template.spec.containers[1].readinessProbe.httpGet
+          path: spec.template.spec.containers[?(@.name=="gateway")].readinessProbe.httpGet
           value:
             path: /readyz
             port: ufm
             scheme: HTTPS
       - equal:
-          path: spec.template.spec.containers[1].volumeMounts
+          path: spec.template.spec.containers[?(@.name=="gateway")].volumeMounts
           value:
             - name: gateway-config
               mountPath: /etc/mat-protocol-gateway
@@ -121,15 +117,15 @@ tests:
             - name: gateway-tls
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
-      - equal:
-          path: spec.template.spec.volumes[1]
-          value:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
             name: gateway-config
             configMap:
               name: RELEASE-NAME-mat-k8s-controller-gateway-config
-      - equal:
-          path: spec.template.spec.volumes[2]
-          value:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
             name: gateway-tls
             secret:
               secretName: RELEASE-NAME-mat-k8s-controller-gateway-tls
@@ -145,22 +141,30 @@ tests:
           path: spec.template.spec.automountServiceAccountToken
           value: false
       - equal:
-          path: spec.template.spec.containers[0].volumeMounts
+          path: spec.template.spec.containers[?(@.name=="controller")].volumeMounts
           value:
             - name: kube-api-access
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
       - equal:
-          path: spec.template.spec.volumes[0].name
-          value: kube-api-access
-      - equal:
-          path: spec.template.spec.volumes[0].projected.sources[0].serviceAccountToken.path
+          path: spec.template.spec.volumes[?(@.name=="kube-api-access")].projected.sources[0].serviceAccountToken.path
           value: token
       - notContains:
-          path: spec.template.spec.containers[1].volumeMounts
+          path: spec.template.spec.containers[?(@.name=="gateway")].volumeMounts
           content:
             name: kube-api-access
           any: true
+
+  - it: should default the UFM token to the parent chart's mock Secret
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="gateway")].env[?(@.name=="UFM_MOCK_AUTH_TOKEN")].valueFrom.secretKeyRef.name
+          value: nico-machine-a-tron-ufm-mock-auth
 
   - it: should read the UFM token from the configured Secret
     set:
@@ -171,7 +175,7 @@ tests:
     template: templates/deployment.yaml
     asserts:
       - equal:
-          path: spec.template.spec.containers[1].env[1].valueFrom.secretKeyRef.name
+          path: spec.template.spec.containers[?(@.name=="gateway")].env[?(@.name=="UFM_MOCK_AUTH_TOKEN")].valueFrom.secretKeyRef.name
           value: shared-ufm-auth
 
   - it: should render the gateway TOML with the listener, TLS files and inventory CA
@@ -195,6 +199,19 @@ tests:
           path: data["gateway.toml"]
           pattern: '\[sources\]\nca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"\ninsecure_skip_verify = false\n'
 
+  - it: should render an IPv6 listener with the configured gateway port
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+        listenIpAddress: "::"
+        port: 9443
+    template: templates/gateway-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '(^|\n)listen_address = "\[::\]:9443"\n'
+
   - it: should skip inventory verification with the controller when configured
     set:
       enabled: true
@@ -216,6 +233,7 @@ tests:
       enabled: true
       gateway:
         enabled: true
+        port: 9443
     template: templates/gateway-service.yaml
     asserts:
       - equal:
@@ -238,7 +256,7 @@ tests:
           path: spec.ports
           value:
             - name: ufm
-              port: 8443
+              port: 9443
               targetPort: ufm
               protocol: TCP
 

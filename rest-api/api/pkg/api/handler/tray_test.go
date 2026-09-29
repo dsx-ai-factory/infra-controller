@@ -35,6 +35,7 @@ import (
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/protobuf/proto"
 )
 
 func testTrayInitDB(t *testing.T) *cdb.Session {
@@ -636,7 +637,17 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 				// For error cases, reply with an empty response
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetComponentsResponse{})
 			}
-			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, nil)
+			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetComponentsRequest
+				testFlowProxyRequest(t, args, &req)
+				orderBy := tt.queryParams["orderBy"]
+				if orderBy == "" {
+					orderBy = model.TrayDefaultOrderBy
+				}
+				parts := strings.Split(orderBy, "_")
+				expected := model.GetProtoTrayOrderByFromQueryParam(strings.ToLower(strings.Join(parts[:len(parts)-1], "_")), parts[len(parts)-1])
+				assert.True(t, proto.Equal(expected, req.OrderBy))
+			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			// Build query string
@@ -687,6 +698,12 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			if tt.expectedTotal != nil {
 				assert.Equal(t, *tt.expectedTotal, pr.Total)
 			}
+			expectedOrderBy := tt.queryParams["orderBy"]
+			if expectedOrderBy == "" {
+				expectedOrderBy = model.TrayDefaultOrderBy
+			}
+			require.NotNil(t, pr.OrderBy)
+			assert.Equal(t, expectedOrderBy, *pr.OrderBy)
 		})
 	}
 }
@@ -1349,6 +1366,15 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
+			name:           "success - AC power cycle tray",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"acpowercycle"}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:           "failure - invalid state",
 			reqOrg:         org,
 			user:           providerUser,
@@ -1463,6 +1489,14 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
+			name:           "success - AC power cycle all trays",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"acpowercycle"}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:           "failure - missing siteId",
 			reqOrg:         org,
 			user:           providerUser,
@@ -1557,6 +1591,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		body           string
 		mockTaskIDs    []*flowv1.UUID
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
 		{
@@ -1577,6 +1612,15 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1637,6 +1681,8 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 
@@ -1677,6 +1723,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		body           string
 		mockTaskIDs    []*flowv1.UUID
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
 		{
@@ -1695,6 +1742,14 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"%s"},"version":"24.11.0"}`, site.ID.String(), fwRackID),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"batch-tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1752,6 +1807,8 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 

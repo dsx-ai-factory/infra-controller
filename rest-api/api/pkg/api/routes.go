@@ -603,12 +603,17 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllExpectedRackHandler(dbSession, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/expected-rack/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRacksHandler(dbSession, scp, cfg),
+		},
+		{
+			// Deprecated compatibility route. New callers use PUT /expected-rack/all.
 			Path:    apiPathPrefix + "/expected-rack",
 			Method:  http.MethodPut,
 			Handler: apiHandler.NewReplaceAllExpectedRacksHandler(dbSession, scp, cfg),
 		},
 		{
-			// "all" suffix disambiguates from the path-param Delete handler below.
 			Path:    apiPathPrefix + "/expected-rack/all",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteAllExpectedRacksHandler(dbSession, scp, cfg),
@@ -627,6 +632,48 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/expected-rack/:id",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteExpectedRackHandler(dbSession, scp, cfg),
+		},
+		// ExpectedRackGroup endpoints
+		{
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateExpectedRackGroupHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedRackGroupHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			// Deprecated compatibility route. New callers use PUT /expected-rack-group/all.
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/all",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetExpectedRackGroupHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateExpectedRackGroupHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteExpectedRackGroupHandler(dbSession, scp, cfg),
 		},
 		// ExpectedSwitch endpoints
 		{
@@ -1258,6 +1305,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetRackHandler(dbSession, tc, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/rack/:id/health-report",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/health-report",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewCreateOrUpdateRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/health-report/:source",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/rack/:id/validation",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewValidateRackHandler(dbSession, tc, scp, cfg),
@@ -1307,6 +1369,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetTrayHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewCreateOrUpdateTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report/:source",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteTrayHealthReportHandler(dbSession, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",

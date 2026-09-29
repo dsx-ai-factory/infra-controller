@@ -742,7 +742,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 
 		patchExpectedMachineRequest := apiRequest.ToProto(em)
 		var secretFields []string
-		if apiRequest.DefaultBmcPassword != nil {
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil {
 			secretFields = []string{"expectedMachine"}
 		}
 
@@ -1681,7 +1681,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		patchRequest := &corev1.PatchExpectedMachinesRequest{Patches: patches}
 		var secretFields []string
 		if slices.ContainsFunc(apiRequests, func(request model.APIExpectedMachineUpdateRequest) bool {
-			return request.DefaultBmcPassword != nil
+			return request.DefaultBmcUsername != nil || request.DefaultBmcPassword != nil
 		}) {
 			secretFields = []string{"patches"}
 		}

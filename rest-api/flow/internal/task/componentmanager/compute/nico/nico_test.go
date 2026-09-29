@@ -108,17 +108,45 @@ func TestInjectExpectation(t *testing.T) {
 }
 
 func TestPowerControl_HappyPath(t *testing.T) {
-	m := New(nicoapi.NewMockClient(), nil)
-
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1", "machine-2"},
+	tests := map[string]struct {
+		operation operations.PowerOperation
+		want      corev1.SystemPowerControl
+	}{
+		"power on": {
+			operation: operations.PowerOperationPowerOn,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_ON,
+		},
+		"graceful power cycle": {
+			operation: operations.PowerOperationRestart,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART,
+		},
+		"forced power cycle": {
+			operation: operations.PowerOperationForceRestart,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART,
+		},
+		"AC power cycle": {
+			operation: operations.PowerOperationColdReset,
+			want:      corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_AC_POWERCYCLE,
+		},
 	}
 
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
-		Operation: operations.PowerOperationPowerOn,
-	})
-	require.NoError(t, err)
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := nicoapi.NewMockClient()
+			m := New(client, nil)
+			target := common.Target{
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1", "machine-2"},
+			}
+
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation: test.operation,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, client.LastComponentPowerControlRequest().GetAction())
+			assert.Nil(t, client.LastGetComponentInventoryRequest())
+		})
+	}
 }
 
 func TestMACTargetRequests(t *testing.T) {

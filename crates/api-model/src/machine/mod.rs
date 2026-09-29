@@ -688,6 +688,47 @@ impl ManagedHostStateSnapshot {
             })
     }
 
+    /// `needs_site_prefix_isolation` selects hosts that can still serve tenant
+    /// traffic, including assignments that have not switched out of Admin yet.
+    /// A deleted Instance is not proof that forwarding stopped. Hosts remain
+    /// included until every expected DPU acknowledges the return to Admin, or
+    /// decommissioning finishes replacing the managed DPU configuration.
+    /// `WaitingForNetworkReconfig` and `Failed` hosts need no further update
+    /// once every DPU acknowledges their current Admin configuration. A later
+    /// transition to Tenant requests a new network version before forwarding.
+    pub fn needs_site_prefix_isolation(&self) -> bool {
+        if self.host_snapshot.associated_dpu_machine_ids().is_empty()
+            || matches!(
+                self.managed_state,
+                ManagedHostState::Decommissioning {
+                    decommissioning_state: DecommissioningState::Decommissioned,
+                }
+            )
+        {
+            return false;
+        }
+
+        if self.use_admin_network()
+            && matches!(
+                self.managed_state,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::WaitingForNetworkReconfig
+                        | InstanceState::Failed { .. },
+                }
+            )
+        {
+            return !self.managed_host_network_config_version_synced();
+        }
+
+        self.instance.is_some()
+            || !self.use_admin_network()
+            || matches!(self.managed_state, ManagedHostState::Assigned { .. })
+            || (matches!(
+                self.managed_state,
+                ManagedHostState::ForceDeletion | ManagedHostState::Decommissioning { .. }
+            ) && !self.managed_host_network_config_version_synced())
+    }
+
     /// Sort the DPUs by pci address and then make sure the primary DPU is the first.
     pub fn sort_dpu_snapshots(&mut self) -> Result<(), ManagedHostStateSnapshotError> {
         let mac_pci_map: HashMap<MacAddress, Option<&str>> = self
@@ -793,7 +834,7 @@ impl Display for MachineLastRebootRequestedMode {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineLastRebootRequested {
     pub time: DateTime<Utc>,
     pub mode: MachineLastRebootRequestedMode,
@@ -875,6 +916,10 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
 
     /// Last time when host reprovision requested
     pub host_reprovision_requested: Option<HostReprovisionRequest>,
+
+    /// When set by an operator, the state controller tears down the host's instance
+    /// and DPF resources, then re-ingests it.
+    pub reset_requested: Option<ResetRequest>,
 
     /// When set by an external entity, the state controller transitions the host into
     /// [`ManagedHostState::Maintenance`] to execute the requested operation.
@@ -963,6 +1008,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             health_reports: self.health_reports,
             reprovision_requested: self.reprovision_requested,
             host_reprovision_requested: self.host_reprovision_requested,
+            reset_requested: self.reset_requested,
             machine_maintenance_requested: self.machine_maintenance_requested,
             decommission_requested: self.decommission_requested,
             bmc_credential_rotation_requested: self.bmc_credential_rotation_requested,
@@ -1371,6 +1417,11 @@ pub enum ManagedHostState {
         decommissioning_state: DecommissioningState,
     },
 
+    /// Host is being torn down and re-ingested at an operator's request.
+    Reset {
+        reset_state: ResetState,
+    },
+
     /// An unassigned Ready host is converging its Redfish boot configuration
     /// to the desired boot interface persisted on the machine.
     ///
@@ -1585,6 +1636,19 @@ pub enum DeconfiguringDpuState {
     WaitForInstallComplete { task_id: String },
     WaitingForBootAfterBfbInstall,
     Complete,
+}
+
+/// Sub-states of [`ManagedHostState::Reset`]: delete the tenant instance, then delete
+/// the DPF CRs and wait for them to drain before re-ingesting from DPU discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+pub enum ResetState {
+    DeletingInstance,
+    /// Deletes the CRs and polls until they are gone. Registration refuses a CR that
+    /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
+    /// rather than for the delete to be accepted.
+    DeletingCrs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2718,6 +2782,14 @@ pub struct HostReprovisionRequest {
     pub request_reset: Option<bool>,
 }
 
+/// Struct to store information if a managed host reset is requested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetRequest {
+    pub requested_at: DateTime<Utc>,
+    pub initiator: String,
+    pub started_at: Option<DateTime<Utc>>,
+}
+
 pub use crate::rack::RackFirmwareUpgradeStatus;
 
 /// Should a forge-dpu-agent upgrade itself?
@@ -2937,6 +3009,7 @@ impl Display for ManagedHostState {
             ManagedHostState::Decommissioning {
                 decommissioning_state,
             } => write!(f, "Decommissioning/{decommissioning_state}"),
+            ManagedHostState::Reset { reset_state } => write!(f, "Reset/{reset_state:?}"),
             ManagedHostState::BootConfiguring {
                 boot_config_state, ..
             } => {
@@ -3051,6 +3124,7 @@ impl ManagedHostState {
             ManagedHostState::Decommissioning {
                 decommissioning_state,
             } => format!("Decommissioning/{decommissioning_state}"),
+            ManagedHostState::Reset { reset_state } => format!("Reset/{reset_state:?}"),
             ManagedHostState::BootConfiguring {
                 boot_config_state, ..
             } => {
@@ -3307,6 +3381,7 @@ pub fn state_sla(
             ),
             DecommissioningState::Decommissioned => StateSla::no_sla(),
         },
+        ManagedHostState::Reset { .. } => StateSla::with_sla(slas::RESET, time_in_state),
         ManagedHostState::BootConfiguring {
             boot_config_state: ReadyBootConfigState::Failed { .. },
             ..
@@ -3870,6 +3945,166 @@ mod tests {
                 DpuNetworkConfigCase::AllExpectedCurrent => true,
                 DpuNetworkConfigCase::MissingSnapshots => false,
                 DpuNetworkConfigCase::PartialSnapshots => false,
+            }
+        );
+    }
+
+    #[test]
+    fn site_prefix_isolation_retains_hosts_until_admin_is_applied() {
+        use crate::instance::config::InstanceConfig;
+        use crate::instance::config::tenant_config::TenantConfig;
+        use crate::instance::status::InstanceStatusObservations;
+        use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
+
+        enum Scenario {
+            Idle,
+            AssignmentBeforeTenantMode,
+            TenantModeWithoutInstance,
+            TenantModeWithoutDpus,
+            ReturningToAdminWithMissingSnapshots,
+            AdminAppliedWithInstance,
+            FailedAfterAdminApplied,
+            FailedBeforeAdminApplied,
+            FailedWithTenantApplied,
+            ForceDeletionWithMissingSnapshots,
+            ForceDeletionAfterAdminApplied,
+            DecommissioningWithInstance,
+            DecommissionedWithInstance,
+        }
+
+        let instance = InstanceSnapshot {
+            id: carbide_uuid::instance::InstanceId::nil(),
+            machine_id: host_machine().id.into(),
+            instance_type_id: None,
+            metadata: Metadata::default(),
+            config: InstanceConfig {
+                tenant: TenantConfig {
+                    tenant_organization_id: "tenant-a".parse().unwrap(),
+                    tenant_keyset_ids: Vec::new(),
+                    hostname: None,
+                },
+                os: OperatingSystem {
+                    user_data: None,
+                    variant: OperatingSystemVariant::Ipxe(InlineIpxe {
+                        ipxe_script: "boot".to_string(),
+                    }),
+                    phone_home_enabled: false,
+                    run_provisioning_instructions_on_every_boot: false,
+                },
+                network: Default::default(),
+                infiniband: Default::default(),
+                network_security_group_id: None,
+                extension_services: Default::default(),
+                nvlink: Default::default(),
+                spxconfig: Default::default(),
+                power_profile: None,
+            },
+            config_version: ConfigVersion::initial(),
+            network_config_version: ConfigVersion::initial(),
+            ib_config_version: ConfigVersion::initial(),
+            nvlink_config_version: ConfigVersion::initial(),
+            spx_config_version: ConfigVersion::initial(),
+            storage_config_version: ConfigVersion::initial(),
+            extension_services_config_version: ConfigVersion::initial(),
+            observations: InstanceStatusObservations {
+                network: HashMap::new(),
+                extension_services: HashMap::new(),
+                phone_home_last_contact: None,
+            },
+            use_custom_pxe_on_boot: false,
+            custom_pxe_reboot_requested: false,
+            deleted: None,
+            update_network_config_request: None,
+        };
+        value_scenarios!(run = |scenario| {
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.network_config.use_admin_network = Some(true);
+            host.managed_state = ManagedHostState::Ready;
+            match scenario {
+                Scenario::Idle => {}
+                Scenario::AssignmentBeforeTenantMode => {
+                    host.managed_state = ManagedHostState::Assigned {
+                        instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+                    };
+                }
+                Scenario::TenantModeWithoutInstance => {
+                    host.host_snapshot.network_config.use_admin_network = Some(false);
+                }
+                Scenario::TenantModeWithoutDpus => {
+                    host.host_snapshot.network_config.use_admin_network = Some(false);
+                    for interface in &mut host.host_snapshot.status.interfaces {
+                        interface.attached_dpu_machine_id = None;
+                    }
+                    host.dpu_snapshots.clear();
+                }
+                Scenario::ReturningToAdminWithMissingSnapshots | Scenario::AdminAppliedWithInstance => {
+                    host.instance = Some(instance.clone());
+                    host.managed_state = ManagedHostState::Assigned {
+                        instance_state: InstanceState::WaitingForNetworkReconfig,
+                    };
+                    if matches!(scenario, Scenario::ReturningToAdminWithMissingSnapshots) {
+                        host.dpu_snapshots.clear();
+                    }
+                }
+                Scenario::FailedAfterAdminApplied
+                | Scenario::FailedBeforeAdminApplied
+                | Scenario::FailedWithTenantApplied => {
+                    host.instance = Some(instance.clone());
+                    host.managed_state = ManagedHostState::Assigned {
+                        instance_state: InstanceState::Failed {
+                            details: FailureDetails {
+                                cause: FailureCause::NVMECleanFailed {
+                                    err: "cleanup failed".to_string(),
+                                },
+                                failed_at: DateTime::<Utc>::UNIX_EPOCH,
+                                source: FailureSource::Scout,
+                            },
+                            machine_id: host.host_snapshot.id.into(),
+                        },
+                    };
+                    match scenario {
+                        Scenario::FailedBeforeAdminApplied => {
+                            host.dpu_snapshots[0].network_status_observation = None;
+                        }
+                        Scenario::FailedWithTenantApplied => {
+                            host.host_snapshot.network_config.use_admin_network = Some(false);
+                        }
+                        _ => {}
+                    }
+                }
+                Scenario::ForceDeletionWithMissingSnapshots | Scenario::ForceDeletionAfterAdminApplied => {
+                    host.managed_state = ManagedHostState::ForceDeletion;
+                    if matches!(scenario, Scenario::ForceDeletionWithMissingSnapshots) {
+                        host.dpu_snapshots.clear();
+                    }
+                }
+                Scenario::DecommissioningWithInstance | Scenario::DecommissionedWithInstance => {
+                    host.instance = Some(instance.clone());
+                    host.dpu_snapshots.clear();
+                    host.managed_state = ManagedHostState::Decommissioning {
+                        decommissioning_state: match scenario {
+                            Scenario::DecommissionedWithInstance => DecommissioningState::Decommissioned,
+                            _ => DecommissioningState::SuppressingSiteExplorer,
+                        },
+                    };
+                }
+            }
+            host.needs_site_prefix_isolation()
+        };
+            "receiver membership" {
+                Scenario::Idle => false,
+                Scenario::AssignmentBeforeTenantMode => true,
+                Scenario::TenantModeWithoutInstance => true,
+                Scenario::TenantModeWithoutDpus => false,
+                Scenario::ReturningToAdminWithMissingSnapshots => true,
+                Scenario::AdminAppliedWithInstance => false,
+                Scenario::FailedAfterAdminApplied => false,
+                Scenario::FailedBeforeAdminApplied => true,
+                Scenario::FailedWithTenantApplied => true,
+                Scenario::ForceDeletionWithMissingSnapshots => true,
+                Scenario::ForceDeletionAfterAdminApplied => false,
+                Scenario::DecommissioningWithInstance => true,
+                Scenario::DecommissionedWithInstance => false,
             }
         );
     }

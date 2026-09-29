@@ -303,6 +303,9 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.RackDefaultOrderBy)
+	}
 
 	// Validate pagination attributes
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.RackOrderByFieldMap)))
@@ -696,7 +699,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Rack identified by Rack ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -797,7 +800,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", apiRequest.State, rackStrID), "Rack")
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), rackStrID), "Rack")
 	if err != nil {
 		return err
 	}
@@ -830,7 +833,7 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Racks
-// @Description Power control Racks with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all racks in the Site.
+// @Description Power control Racks with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all racks in the Site.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -915,7 +918,7 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Rack")
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Rack")
 	if err != nil {
 		return err
 	}
@@ -1002,7 +1005,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1100,7 +1103,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchRackFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch rack firmware update request")

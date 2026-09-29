@@ -288,7 +288,7 @@ pub(crate) async fn start_runtime(
         dynamic_settings.bmc_proxy.clone(),
     );
 
-    let (rms_client, site_explorer_rms_client, switch_system_image_rms_api) =
+    let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
         match carbide_config.rms.api_url.clone() {
             Some(url) if !url.is_empty() => {
                 let rms_client_config = librms::client_config::RmsClientConfig::new(
@@ -309,11 +309,18 @@ pub(crate) async fn start_runtime(
                     librms::RmsClientPool::new(&site_explorer_rms_api_config)
                         .create_client()
                         .await;
+
+                let site_explorer_machine_info_provider = Arc::new(
+                    component_manager::rms::rms_machine_info_provider(site_explorer_rms_client),
+                )
+                    as Arc<dyn component_manager::MachineInfoProvider>;
+
                 let switch_system_image_rms_api =
                     Arc::new(librms::RackManagerApi::new(&rms_api_config));
+
                 (
                     Some(shared_rms_client),
-                    Some(site_explorer_rms_client),
+                    Some(site_explorer_machine_info_provider),
                     Some(switch_system_image_rms_api),
                 )
             }
@@ -672,7 +679,7 @@ pub(crate) async fn start_runtime(
         initialize_and_start_controllers(
             join_set,
             api_service.clone(),
-            site_explorer_rms_client,
+            site_explorer_machine_info_provider,
             meter.clone(),
             per_object_prometheus_registry,
             ipmi_tool.clone(),
@@ -931,6 +938,7 @@ async fn initialize_dpf_sdk(
                 .extra_bfcfg_parameters(
                     carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
                 )
+                .enable_delay_host_init(deployment.enable_delay_host_init)
                 .deployment_type(deployment_type);
             if let Some(bluefield_software) = bluefield_software {
                 builder = builder.bluefield_software(bluefield_software);
@@ -1266,7 +1274,7 @@ impl<'a> SeedData<'a> {
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
-    site_explorer_rms_client: Option<Arc<dyn librms::RmsApi>>,
+    site_explorer_machine_info_provider: Option<Arc<dyn component_manager::MachineInfoProvider>>,
     meter: Meter,
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
@@ -1788,6 +1796,17 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build NetworkSegmentController");
 
+    StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(
+            crate::site_prefix_controller::SitePrefixReadiness {
+                vpc_isolation_behavior: carbide_config.vpc_isolation_behavior,
+            },
+        ))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())
@@ -2076,7 +2095,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
-        site_explorer_rms_client,
+        site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
