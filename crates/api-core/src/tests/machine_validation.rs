@@ -720,7 +720,7 @@ async fn concurrent_on_demand_requests_create_only_one_run(
 
     let request = || {
         tonic::Request::new(rpc::forge::MachineValidationOnDemandRequest {
-            machine_id: Some(machine_id.clone()),
+            machine_id: Some(machine_id),
             action: rpc::forge::machine_validation_on_demand_request::Action::Start.into(),
             tags: Vec::new(),
             allowed_tests: Vec::new(),
@@ -738,7 +738,9 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     tokio::select! {
         result = &mut first => panic!("first request passed the machine lock: {result:?}"),
         result = &mut second => panic!("second request passed the machine lock: {result:?}"),
-        _ = wait_for_blocked_query(&env.pool, gate_pid, "FOR UPDATE OF machines") => {},
+        // pg_stat_activity.query can truncate this long SELECT before its
+        // trailing FOR UPDATE clause, so match the beginning of the query.
+        _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT row_to_json(m.*)") => {},
     }
     gate.commit().await?;
 
