@@ -69,6 +69,7 @@ mod managed_host_decommissioning;
 mod managed_host_reset;
 #[cfg(feature = "linux-build")]
 mod measured_boot;
+mod mlx_device_report;
 mod network_security_group;
 mod network_segment;
 mod network_segment_find;
@@ -79,6 +80,7 @@ mod preingestion_dpu_nic_mode;
 mod primary_interface;
 mod rack_health;
 mod rack_state_controller;
+mod redfish_actions;
 mod resource_pool;
 mod site_explorer;
 mod site_prefix;

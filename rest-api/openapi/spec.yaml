@@ -367,6 +367,9 @@ tags:
 
       Active Deprecations:
 
+      Expected Rack and Expected Rack Group:
+      - `PUT /expected-rack` and `PUT /expected-rack-group` are deprecated in favor of the explicit full-Site mutation paths `PUT /expected-rack/all` and `PUT /expected-rack-group/all`. The deprecated routes preserve identical request, response, Site scoping, authorization, validation, and mutation semantics for backward compatibility; no removal release is scheduled.
+
       Instance:
       - `infrastructureProviderId` query parameter on the list Instances endpoint was deprecated and will be removed on October 10th, 2026 0:00 UTC. Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the `siteId` parameter to scope results to a specific Infrastructure Provider's Sites.
 
@@ -5264,8 +5267,11 @@ paths:
         - Expected Rack
     put:
       summary: Replace all Expected Racks
-      operationId: replace-all-expected-rack
+      operationId: replace-all-expected-rack-legacy
+      deprecated: true
       description: |-
+        Deprecated compatibility route. Use `PUT /v2/org/{org}/nico/expected-rack/all` instead. This route preserves the same Site scoping, authorization, validation, response, and mutation semantics during migration.
+
         Replace the full set of Expected Racks for a Site with the provided list. All existing Expected Racks for the Site that are not in the request body will be deleted, and any new Expected Racks in the request will be created. Existing Expected Racks with matching `rackId` values will be updated.
 
         Every entry in `expectedRacks` must reference the same `siteId` as the top-level `siteId`. `rackId` values must be unique within the request. The `expectedRacks` array may be empty to clear all Expected Racks for the Site.
@@ -5328,6 +5334,39 @@ paths:
         in: path
         required: true
         description: Name of the Org
+    put:
+      summary: Replace all Expected Racks
+      operationId: replace-all-expected-rack
+      description: |-
+        Replace the full set of Expected Racks for a Site with the provided list. All existing Expected Racks for the Site that are not in the request body will be deleted, and any new Expected Racks in the request will be created. Existing Expected Racks with matching `rackId` values will be updated.
+
+        Every entry in `expectedRacks` must reference the same `siteId` as the top-level `siteId`. `rackId` values must be unique within the request. The `expectedRacks` array may be empty to clear all Expected Racks for the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Racks if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackList'
+        description: Replace-all Expected Racks request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRack'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack
     delete:
       summary: Delete all Expected Racks
       operationId: delete-all-expected-rack
@@ -5614,8 +5653,11 @@ paths:
         - Expected Rack Group
     put:
       summary: Replace all Expected Rack Groups
-      operationId: replace-all-expected-rack-group
+      operationId: replace-all-expected-rack-group-legacy
+      deprecated: true
       description: |-
+        Deprecated compatibility route. Use `PUT /v2/org/{org}/nico/expected-rack-group/all` instead. This route preserves the same Site scoping, authorization, validation, response, and mutation semantics during migration.
+
         Replace the full set of Expected Rack Groups for a Site with the provided list. All existing rows for the Site are deleted and the supplied replacement set is created atomically, so response UUIDs may differ from earlier rows even when `rackGroupId` is unchanged.
 
         Every entry in `expectedRackGroups` must reference the same `siteId` as the top-level `siteId`. The `rackGroupId` values must be unique within the request. The `expectedRackGroups` array may be empty to clear all Expected Rack Groups for the Site.
@@ -5682,6 +5724,39 @@ paths:
         in: path
         required: true
         description: Name of the Org
+    put:
+      summary: Replace all Expected Rack Groups
+      operationId: replace-all-expected-rack-group
+      description: |-
+        Replace the full set of Expected Rack Groups for a Site with the provided list. All existing rows for the Site are deleted and the supplied replacement set is created atomically, so response UUIDs may differ from earlier rows even when `rackGroupId` is unchanged.
+
+        Every entry in `expectedRackGroups` must reference the same `siteId` as the top-level `siteId`. The `rackGroupId` values must be unique within the request. The `expectedRackGroups` array may be empty to clear all Expected Rack Groups for the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackGroupList'
+        description: Replace-all Expected Rack Groups request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
     delete:
       summary: Delete all Expected Rack Groups
       operationId: delete-all-expected-rack-group
@@ -8427,7 +8502,23 @@ paths:
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: Invalid request or unavailable Machine. Only classified release-pending errors permit retries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                release-pending:
+                  value:
+                    source: nico
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    data: null
+                    retryable: true
+                validation-error:
+                  value:
+                    source: nico
+                    message: Error validating request data
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -8435,10 +8526,45 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: Server error. An uncertain create outcome includes retryable false and recovery instructions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                uncertain-create-outcome:
+                  value:
+                    source: nico
+                    message: Instance allocation completed but REST transaction failed. Do not retry automatically. Check Instance 497f6eca-6276-4993-bfeb-53cbbbba6f08 on Site 60189e9c-7d12-438c-b9ca-6998d9c364b1 in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-497f6eca-6276-4993-bfeb-53cbbbba6f08 before creating again.
+                    data: null
+                    retryable: false
+                generic-server-error:
+                  value:
+                    source: nico
+                    message: Failed to retrieve Machine Instance association
+                    data: null
+        '503':
+          description: Site communication unavailable. An uncertain outcome includes retryable false and recovery instructions.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Site communication timed out. An uncertain outcome includes retryable false and recovery instructions.
+          $ref: '#/components/responses/GenericHttpError'
       description: |
         Create an Instance for Tenant.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Machine-unavailable errors are retryable only when a unique current Instance
+        belongs to this Tenant and is Terminating. Other current occupants are not
+        retryable. Missing or ambiguous associations remain unclassified. No retry
+        delay is estimated for release-pending errors.
+
+        Uncertain create outcomes return `retryable: false` and recovery instructions
+        in `message`. Check the identified Instance and Site in REST. If the Instance
+        is absent or its outcome is unclear, ask the Site operator to verify the Core
+        allocation and workflow before creating again. An empty REST result does not
+        rule out a Site allocation. Follow the same checks after a lost HTTP response.
       requestBody:
         content:
           application/json:
@@ -12285,7 +12411,8 @@ paths:
       description: |-
         Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12301,7 +12428,7 @@ paths:
                   domainIds:
                     - 650e8400-e29b-41d4-a716-446655440001
                     - 750e8400-e29b-41d4-a716-446655440002
-                  state: 'off'
+                  state: 'Off'
       responses:
         '200':
           description: OK
@@ -12387,7 +12514,7 @@ paths:
               - MODEL_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `NAME_ASC`; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
       responses:
         '200':
           description: OK
@@ -12860,7 +12987,8 @@ paths:
       description: |-
         Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12873,7 +13001,7 @@ paths:
               power-off-all:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'off'
+                  state: 'Off'
               power-on-filtered:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
@@ -12881,7 +13009,7 @@ paths:
                     names:
                       - Rack-001
                       - Rack-002
-                  state: 'on'
+                  state: 'On'
       responses:
         '200':
           description: OK
@@ -12923,7 +13051,8 @@ paths:
       description: |-
         Power control a Rack identified by its Rack ID.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -12936,15 +13065,19 @@ paths:
               power-on:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
               force-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: forcecycle
+                  state: ForceCycle
+              ac-power-cycle:
+                value:
+                  siteId: 550e8400-e29b-41d4-a716-446655440000
+                  state: ACPowerCycle
       responses:
         '200':
           description: OK
@@ -13269,7 +13402,7 @@ paths:
               - TYPE_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `NAME_ASC`; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
       responses:
         '200':
           description: OK
@@ -13437,7 +13570,8 @@ paths:
       description: |-
         List Operation Rules on a Site. Filters compose with AND; results are paginated
         and the `X-Pagination` response header reports the total count over the
-        post-filter set.
+        post-filter set. Results are ordered by creation time descending, then
+        Rule UUID descending.
 
         Org must have an Infrastructure Provider entity. User must have authorization
         role with `PROVIDER_ADMIN` suffix.
@@ -14045,7 +14179,8 @@ paths:
       description: |-
         List Task Runs on a Site. Filters compose with AND; results are paginated
         and the `X-Pagination` response header reports the total count over the
-        post-filter set.
+        post-filter set. Results are ordered by creation time descending, then
+        Task Run UUID descending.
 
         Org must have an Infrastructure Provider entity. User must have
         authorization role with `PROVIDER_ADMIN` suffix.
@@ -14252,7 +14387,8 @@ paths:
         `GET /task/{taskId}`.
 
         Filters compose with AND. Results are paginated; the `X-Pagination`
-        response header reports the total count over the post-filter set.
+        response header reports the total count over the post-filter set. Results
+        are ordered by phase index, then the unique sequence index.
 
         Task Runs are site-scoped; `siteId` must be the Site that owns the
         Task Run. Org must have an Infrastructure Provider entity. User must have
@@ -14696,7 +14832,8 @@ paths:
       description: |-
         Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14709,7 +14846,7 @@ paths:
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
       responses:
         '200':
           description: OK
@@ -15234,7 +15371,8 @@ paths:
       description: |-
         Power control Trays with optional filters. If no filter is specified, targets all trays in the Site.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         **Filter constraints:**
         - `rackId` and `rackName` are mutually exclusive
@@ -15251,13 +15389,13 @@ paths:
               power-on-all:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-off-by-rack:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     rackId: rack-01
-                  state: 'off'
+                  state: 'Off'
       responses:
         '200':
           description: OK
@@ -15298,7 +15436,8 @@ paths:
       description: |-
         Power control a Tray identified by its component ID or component MAC address.
 
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+        Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+        Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -15311,15 +15450,15 @@ paths:
               power-on:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'on'
+                  state: 'On'
               power-off:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: 'off'
+                  state: 'Off'
               power-cycle:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  state: cycle
+                  state: Cycle
       responses:
         '200':
           description: OK
@@ -20756,7 +20895,7 @@ components:
             - integer
             - 'null'
           minimum: 1
-          maximum: 65535
+          maximum: 16777215
           readOnly: true
           description: Explicitly requested VNI for the VPC if one was requested at creation time
         vni:
@@ -21016,7 +21155,7 @@ components:
             - integer
             - 'null'
           minimum: 1
-          maximum: 65535
+          maximum: 16777215
           description: Explicitly requested VNI for the VPC
         nvLinkLogicalPartitionId:
           type:
@@ -25636,12 +25775,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
-          description: Target power state
+            - acpowercycle
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -25662,7 +25808,7 @@ components:
           domainIds:
             - 650e8400-e29b-41d4-a716-446655440001
             - 750e8400-e29b-41d4-a716-446655440002
-          state: cycle
+          state: Cycle
     NVLinkDomainFirmwareUpdateRequest:
       title: NVLinkDomainFirmwareUpdateRequest
       type: object
@@ -25780,12 +25926,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
-          description: Target power state
+            - acpowercycle
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -25819,12 +25972,19 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
-          description: Target power state
+            - acpowercycle
+          description: Target power state. Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -27163,18 +27323,28 @@ components:
         state:
           type: string
           enum:
+            - 'On'
+            - 'Off'
+            - Cycle
+            - ForceOff
+            - ForceCycle
+            - ACPowerCycle
             - 'on'
             - 'off'
             - cycle
             - forceoff
             - forcecycle
+            - acpowercycle
           description: |-
             Power control state to apply:
-            - `on`: Power on the target(s)
-            - `off`: Graceful power off
-            - `cycle`: Graceful power cycle (restart)
-            - `forceoff`: Forced power off (immediate)
-            - `forcecycle`: Forced power cycle (immediate restart)
+            - `On`: Power on the target(s)
+            - `Off`: Graceful power off
+            - `Cycle`: Graceful power cycle (restart)
+            - `ForceOff`: Forced power off (immediate)
+            - `ForceCycle`: Forced power cycle (immediate restart)
+            - `ACPowerCycle`: Remove and restore AC power (unsupported on Viking systems)
+
+            Exact lowercase forms are also accepted for compatibility.
         ruleId:
           type: string
           format: uuid
@@ -27191,11 +27361,11 @@ components:
             maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: 'on'
+          state: 'On'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: 'off'
+          state: 'Off'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          state: cycle
+          state: Cycle
     UpdatePowerStateResponse:
       title: UpdatePowerStateResponse
       type: object
@@ -31587,7 +31757,7 @@ components:
         - repoURL
         - chartName
         - chartVersion
-        - security.privileged
+        - security
       properties:
         repoURL:
           type: string
@@ -31602,15 +31772,34 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
-        security.privileged:
-          type: boolean
-          description: DPF privileged-workload setting. This is a literal dotted key, not a nested security object; false is valid.
+        security:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
           type: [object, 'null']
           additionalProperties: true
           description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
         serviceDaemonSet:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartServiceDaemonSet'
+    DpuExtensionServiceDpfHelmChartSecurity:
+      title: DpuExtensionServiceDpfHelmChartSecurity
+      type: object
+      additionalProperties: false
+      description: Security settings projected onto the DPF DPUService.
+      required:
+        - privileged
+      properties:
+        privileged:
+          type: boolean
+          description: DPF privileged-workload setting; false is valid.
+        spiffe:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSpiffe'
+          description: Presence-gated opt-in to SPIFFE workload identity. Supply an empty object to enable it.
+    DpuExtensionServiceDpfHelmChartSpiffe:
+      title: DpuExtensionServiceDpfHelmChartSpiffe
+      type: object
+      additionalProperties: false
+      description: Empty presence-gated SPIFFE configuration for a DPF DPUService.
+      example: {}
     DpuExtensionServiceDpfHelmChartServiceDaemonSet:
       title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
       type: [object, 'null']
@@ -31693,7 +31882,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -32168,6 +32357,16 @@ components:
             - object
             - 'null'
           description: Additional data about the error
+        retryable:
+          type: boolean
+          description: |-
+            True permits bounded retries with backoff, without guaranteeing success.
+            False prohibits automatic retries. Omission means unclassified.
+      example:
+        source: nico
+        message: Machine is assigned to an Instance, cannot be used for new Instance
+        data: null
+        retryable: true
     ServiceAccount:
       title: ServiceAccount
       type: object

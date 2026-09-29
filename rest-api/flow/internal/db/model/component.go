@@ -94,6 +94,11 @@ var defaultComponentPagination = dbquery.Pagination{
 	Total:  0,
 }
 
+var defaultComponentOrderBy = []dbquery.OrderBy{
+	{Column: "c.name", Direction: dbquery.OrderAscending},
+	{Column: "c.id", Direction: dbquery.OrderAscending},
+}
+
 func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err error) {
 	err = idb.NewSelect().Model(&Component{}).Scan(ctx, &ret)
 	return ret, err
@@ -166,10 +171,14 @@ func GetListOfComponents(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultComponentOrderBy
 	if orderBy != nil {
 		qualifiedOrderBy := *orderBy
 		qualifiedOrderBy.Column = "c." + qualifiedOrderBy.Column
-		conf.DefaultOrderBy = []dbquery.OrderBy{qualifiedOrderBy}
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			qualifiedOrderBy,
+			{Column: "c.id", Direction: dbquery.OrderAscending},
+		}
 	}
 
 	// Always include BMCs relation

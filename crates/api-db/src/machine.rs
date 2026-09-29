@@ -51,6 +51,7 @@ use model::machine::network::{
 };
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
+use model::machine::status::MlxDeviceObservation;
 use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, Dpf, DpuInfo, DpuInfoStatusObservation, DpuMachine,
@@ -66,7 +67,7 @@ use model::resource_pool::ResourcePoolError;
 use model::resource_pool::common::{CommonPools, LOOPBACK_IP_V6};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
+use sqlx::{FromRow, PgConnection, PgTransaction, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
@@ -724,6 +725,9 @@ pub async fn update_reboot_time<ID: MachineIdSubtypeTrait>(
     Ok(())
 }
 
+/// Records a new reboot or power request at the supplied time.
+/// Reboots start unverified; other modes skip restart verification. The
+/// verification attempt count starts at zero in either case.
 pub async fn update_reboot_requested_explicit_time(
     machine_id: &MachineId,
     txn: &mut PgConnection,
@@ -741,9 +745,20 @@ pub async fn update_reboot_requested_explicit_time(
         verification_attempts: Some(0),
     };
 
+    record_reboot_request(machine_id, txn, &data).await
+}
+
+/// Records a new reboot or power request, replacing the previous record in full.
+/// The caller supplies its timestamp, mode, and initial verification state.
+/// Use `update_restart_verification_status` to verify an existing attempt.
+pub async fn record_reboot_request(
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+    request: &MachineLastRebootRequested,
+) -> Result<(), DatabaseError> {
     let query = "UPDATE machines SET last_reboot_requested=$1 WHERE id=$2 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(&data))
+        .bind(sqlx::types::Json(request))
         .bind(machine_id)
         .fetch_one(txn)
         .await
@@ -759,24 +774,52 @@ pub async fn update_reboot_requested_time(
     update_reboot_requested_explicit_time(machine_id, txn, mode, Utc::now()).await
 }
 
+/// The captured reboot record no longer matches, or the machine or request is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebootVerificationNotCurrent;
+
+/// Updates verification only while every field of the captured request still matches.
+///
+/// Compares the record under a machine-row lock held until the caller's
+/// transaction ends. Only verification status and attempt count are changed.
+/// Missing machines, absent requests, and changed records share
+/// `NotApplied(RebootVerificationNotCurrent)`.
 pub async fn update_restart_verification_status(
     machine_id: &MachineId,
-    mut current_reboot: MachineLastRebootRequested,
+    current_reboot: MachineLastRebootRequested,
     verified: Option<bool>,
     attempts: i32,
-    txn: &mut PgConnection,
-) -> Result<(), DatabaseError> {
-    current_reboot.restart_verified = verified;
-    current_reboot.verification_attempts = Some(attempts);
+    txn: &mut PgTransaction<'_>,
+) -> Result<ConditionalWrite<(), RebootVerificationNotCurrent>, DatabaseError> {
+    let query = "SELECT last_reboot_requested FROM machines WHERE id=$1 FOR NO KEY UPDATE";
+    let stored: Option<Option<sqlx::types::Json<MachineLastRebootRequested>>> =
+        sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_optional(txn.as_mut())
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(sqlx::types::Json(stored_reboot)) = stored.flatten() else {
+        return Ok(ConditionalWrite::NotApplied(RebootVerificationNotCurrent));
+    };
 
-    let query = "UPDATE machines SET last_reboot_requested=$1 WHERE id=$2 RETURNING id";
+    // Compare typed values: legacy JSON can spell UTC as `+00:00` and omit
+    // optional fields. A SQL timestamp cast would also lose nanoseconds.
+    if stored_reboot != current_reboot {
+        return Ok(ConditionalWrite::NotApplied(RebootVerificationNotCurrent));
+    }
+
+    let query = "UPDATE machines
+                 SET last_reboot_requested = last_reboot_requested || jsonb_build_object(
+                     'restart_verified', $1::boolean, 'verification_attempts', $2::integer)
+                 WHERE id=$3 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(&current_reboot))
+        .bind(verified)
+        .bind(attempts)
         .bind(machine_id)
-        .fetch_one(txn)
+        .fetch_one(txn.as_mut())
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(())
+    Ok(ConditionalWrite::Applied(()))
 }
 
 /// Records the database statement execution time as the machine's cleanup timestamp.
@@ -1272,6 +1315,33 @@ pub async fn update_spx_status_observation(
                         <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
+}
+
+/// `update_mlx_device_observation` saves an unfiltered observation if none
+/// exists or the new timestamp is at least as recent. Comparisons use the
+/// database's timestamp precision. Returns `NotApplied` if the machine is
+/// missing or a newer observation is stored. Callers must validate report
+/// ownership and completeness.
+pub async fn update_mlx_device_observation(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    observation: &MlxDeviceObservation,
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+                (mlx_device_observation IS NULL
+                    OR (mlx_device_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
+        .bind(sqlx::types::Json(observation))
         .bind(machine_id)
         .fetch_optional(txn)
         .await
@@ -3807,10 +3877,12 @@ mod test {
         use model::machine::infiniband::MachineInfinibandStatusObservation;
         use model::machine::nvlink::MachineNvLinkStatusObservation;
         use model::machine::spx::MachineSpxStatusObservation;
+        use model::machine::status::MlxDeviceObservation;
 
         use super::{
             MachineObservationNotCurrent, update_infiniband_status_observation,
-            update_nvlink_status_observation, update_spx_status_observation,
+            update_mlx_device_observation, update_nvlink_status_observation,
+            update_spx_status_observation,
         };
         use crate::ConditionalWrite::{Applied, NotApplied};
 
@@ -3841,6 +3913,7 @@ mod test {
             "infiniband_status_observation",
             "nvlink_status_observation",
             "spx_status_observation",
+            "mlx_device_observation",
         ] {
             for Case {
                 scenario,
@@ -3925,6 +3998,17 @@ mod test {
                             serde_json::to_value(observation)?,
                         )
                     }
+                    "mlx_device_observation" => {
+                        let observation = MlxDeviceObservation {
+                            observed_at,
+                            devices: Vec::new(),
+                        };
+                        (
+                            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation)
+                                .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
                     _ => unreachable!("the table contains only observation columns"),
                 };
                 assert_eq!(
@@ -3949,6 +4033,126 @@ mod test {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn mlx_observation_round_trips_through_machine_snapshot(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+            "observed_at": "2026-09-16T16:00:00.123456789Z",
+            "devices": [
+                {
+                    "pci_name": "0000:01:00.0",
+                    "device_type": "ConnectX8",
+                    "psid": "MT_0000001111",
+                    "part_number": "MCX813106AS-VEA",
+                    "fw_version_current": "40.45.1000"
+                },
+                {
+                    "pci_name": "0000:b4:00.0",
+                    "device_type": "BlueField3",
+                    "status": "Failed to open device"
+                }
+            ]
+        }))?;
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            NotApplied(MachineObservationNotCurrent),
+            "a missing machine cannot accept an observation"
+        );
+        let machine = super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        assert_eq!(machine.status.mlx_device_observation, None);
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            Applied(())
+        );
+        txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn concurrent_mlx_observations_preserve_newer_report(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let newer = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:01Z".parse()?,
+            devices: Vec::new(),
+        };
+        let older = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:00Z".parse()?,
+            devices: Vec::new(),
+        };
+        let mut newer_txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
+            Applied(())
+        );
+        let mut older_txn = pool.begin().await?;
+        let release_newer = async {
+            // The older write must reach the locked row before the newer
+            // report commits, so its predicate must be rechecked after waiting.
+            wait_until_blocked_on(&pool, "UPDATE machines SET mlx_device_observation", 1).await;
+            newer_txn.commit().await
+        };
+        let (older_result, released) =
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                tokio::join!(
+                    update_mlx_device_observation(older_txn.as_mut(), &machine_id, &older),
+                    release_newer,
+                )
+            })
+            .await
+            .expect("the older observation must finish after the newer transaction commits");
+        released?;
+        assert_eq!(older_result?, NotApplied(MachineObservationNotCurrent));
+        older_txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(newer));
         Ok(())
     }
 
@@ -4257,6 +4461,78 @@ mod test {
             "both dpa_interfaces rows should cascade to the stable id",
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn reboot_verification_waits_for_a_concurrent_request(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::{MachineLastRebootRequested, MachineLastRebootRequestedMode};
+
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let captured = MachineLastRebootRequested {
+            time: chrono::DateTime::from_timestamp(1_722_000_000, 0).unwrap(),
+            mode: MachineLastRebootRequestedMode::Reboot,
+            restart_verified: Some(false),
+            verification_attempts: Some(0),
+        };
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        super::record_reboot_request(&machine_id, setup.as_mut(), &captured).await?;
+        setup.commit().await?;
+
+        let newer = MachineLastRebootRequested {
+            time: captured.time + chrono::Duration::seconds(1),
+            ..captured
+        };
+        let mut replacement = pool.begin().await?;
+        super::record_reboot_request(&machine_id, replacement.as_mut(), &newer).await?;
+
+        let verify = async {
+            let mut txn = pool.begin().await?;
+            let result = super::update_restart_verification_status(
+                &machine_id,
+                captured,
+                Some(true),
+                1,
+                &mut txn,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_replacement = async {
+            // The new request is still uncommitted. Verification must wait at
+            // its locking read, then compare against the newly committed value.
+            // Without that lock, it reads the old value and only its UPDATE waits.
+            wait_until_blocked_on(&pool, "last_reboot_requested", 1).await;
+            replacement.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(verify, commit_replacement)
+        })
+        .await??;
+        assert_eq!(
+            result,
+            crate::ConditionalWrite::NotApplied(super::RebootVerificationNotCurrent)
+        );
+        let stored: sqlx::types::Json<MachineLastRebootRequested> =
+            sqlx::query_scalar("SELECT last_reboot_requested FROM machines WHERE id=$1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(stored.0, newer);
         Ok(())
     }
 

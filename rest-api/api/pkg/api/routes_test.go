@@ -56,8 +56,8 @@ func TestNewAPIRoutes(t *testing.T) {
 		"nvlink-logical-partition":  4,
 		"expected-machine":          9,
 		"expected-power-shelf":      5,
-		"expected-rack":             7,
-		"expected-rack-group":       7,
+		"expected-rack":             8,
+		"expected-rack-group":       8,
 		"expected-switch":           5,
 		"instance-type":             5,
 		"machine":                   21,
@@ -118,6 +118,22 @@ func TestNewAPIRoutes(t *testing.T) {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
 			}
 
+			expectedInventoryPathsWithoutBulkMutations := []string{
+				"/expected-machine",
+				"/expected-power-shelf",
+				"/expected-switch",
+			}
+			for _, path := range expectedInventoryPathsWithoutBulkMutations {
+				assertRouteDoesNotExist(t, got, http.MethodPut, "/org/:orgName/"+cfg.GetAPIName()+path+"/all")
+				assertRouteDoesNotExist(t, got, http.MethodDelete, "/org/:orgName/"+cfg.GetAPIName()+path+"/all")
+			}
+
+			rackPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-rack"
+			assertRouteExists(t, got, http.MethodPut, rackPath)
+			assertRouteExists(t, got, http.MethodPut, rackPath+"/all")
+			assertRouteExists(t, got, http.MethodDelete, rackPath+"/all")
+			assertRouteBefore(t, got, http.MethodDelete, rackPath+"/all", http.MethodDelete, rackPath+"/:id")
+
 			rackGroupPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-rack-group"
 			for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodPut} {
 				assertRouteExists(t, got, method, rackGroupPath)
@@ -125,6 +141,7 @@ func TestNewAPIRoutes(t *testing.T) {
 			for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
 				assertRouteExists(t, got, method, rackGroupPath+"/:id")
 			}
+			assertRouteExists(t, got, http.MethodPut, rackGroupPath+"/all")
 			assertRouteExists(t, got, http.MethodDelete, rackGroupPath+"/all")
 			assertRouteBefore(t, got, http.MethodDelete, rackGroupPath+"/all", http.MethodDelete, rackGroupPath+"/:id")
 
@@ -249,6 +266,17 @@ func assertRouteExists(t *testing.T, routes []Route, method, path string) {
 	}
 
 	assert.Failf(t, "route not found", "missing %s %s", method, path)
+}
+
+func assertRouteDoesNotExist(t *testing.T, routes []Route, method, path string) {
+	t.Helper()
+
+	for _, route := range routes {
+		if route.Method == method && route.Path == path {
+			assert.Failf(t, "unexpected route found", "unexpected %s %s", method, path)
+			return
+		}
+	}
 }
 
 func assertRouteBefore(t *testing.T, routes []Route, firstMethod, firstPath, secondMethod, secondPath string) {

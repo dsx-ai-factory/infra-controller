@@ -522,6 +522,18 @@ system_events_enabled = true
 [collectors.nvue.gnmi.paths]
 components_enabled = true
 interfaces_enabled = true
+# Optional exact interface leaf paths relative to `/interfaces/interface`.
+# Omit to subscribe to the full interface subtree. A nonempty list subscribes
+# to only these leaves for every interface on an independent SAMPLE stream.
+# Paths must map to built-in interface metrics; an unmapped path is rejected
+# when the switch collector starts. An NVOS rejection reports the requested
+# path set and retries this stream without interrupting components or platform
+# telemetry. Set interfaces_enabled = false to disable interface telemetry.
+# interface_paths = [
+#   ["state", "oper-status"],
+#   ["infiniband", "state", "physical-port-state"],
+#   ["phy-diag", "state", "raw-ber"],
+# ]
 # Switch-level memory, disk utilization, and ambient temperature from
 # `/platform-general/state` (a singleton, not keyed by interface or component name).
 platform_general_enabled = true
@@ -579,8 +591,7 @@ leak_sensors_enabled = false
 #
 # The output can instead use a finite state_set or info domain. Values outside
 # the declared domain, malformed values, and unsupported value encodings do
-# not produce metrics. Delete notifications are ignored; emitted metrics remain
-# until the collector is removed.
+# not produce metrics. Delete notifications remove matching Prometheus series.
 # A state_set output uses the reserved `state` label and emits one series per
 # declared state: 1 for the current state and 0 for the others. An info output
 # emits one constant-1 series with the matched value in its configured label.

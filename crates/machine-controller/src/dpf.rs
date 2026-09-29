@@ -18,6 +18,7 @@
 //! DPF SDK trait abstraction for testability.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,7 +51,8 @@ const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
 /// carbide-controlled. Propagates to the DPU CR.
 const CONTROLLED_DEVICE_LABEL: &str = "carbide.nvidia.com/controlled.device";
 
-/// Label populated with the host BMC address on both DPUDevice and DPUNode resources.
+/// Host BMC address on DPUDevice and DPUNode resources.
+/// IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens.
 pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 
 /// Trait for DPF SDK operations used by Carbide.
@@ -300,7 +302,10 @@ impl ResourceLabeler for CarbideDPFLabeler {
     fn device_labels(&self, info: &DpuDeviceInfo) -> BTreeMap<String, String> {
         BTreeMap::from([
             (CONTROLLED_DEVICE_LABEL.to_string(), "true".to_string()),
-            (HOST_BMC_IP_LABEL.to_string(), info.host_bmc_ip.to_string()),
+            (
+                HOST_BMC_IP_LABEL.to_string(),
+                host_bmc_ip_label_value(info.host_bmc_ip),
+            ),
             (
                 "carbide.nvidia.com/is-primary-dpu".to_string(),
                 info.is_primary.to_string(),
@@ -334,11 +339,25 @@ impl ResourceLabeler for CarbideDPFLabeler {
     }
 
     fn node_context_labels(&self, info: &DpuNodeInfo) -> BTreeMap<String, String> {
-        BTreeMap::from([(HOST_BMC_IP_LABEL.to_string(), info.host_bmc_ip.to_string())])
+        BTreeMap::from([(
+            HOST_BMC_IP_LABEL.to_string(),
+            host_bmc_ip_label_value(info.host_bmc_ip),
+        )])
     }
 
     fn dpu_label_selector(&self) -> Option<String> {
         Some(format!("{CONTROLLED_DEVICE_LABEL}=true"))
+    }
+}
+
+fn host_bmc_ip_label_value(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        // Kubernetes labels cannot contain colons or start/end with a hyphen.
+        IpAddr::V6(ip) => ip
+            .segments()
+            .map(|segment| format!("{segment:04x}"))
+            .join("-"),
     }
 }
 
@@ -997,5 +1016,45 @@ mod bmc_password_tests {
             classify_unresolved_rotation_target(&empty_store, error, false).await,
             DpfError::InvalidState(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn host_bmc_ip_labels_preserve_ipv4_and_encode_ipv6() {
+        let labeler = CarbideDPFLabeler::new("test/deployment".to_string());
+        for (address, expected) in [
+            ("192.0.2.10", "192.0.2.10"),
+            ("::1", "0000-0000-0000-0000-0000-0000-0000-0001"),
+            ("2001:db8::", "2001-0db8-0000-0000-0000-0000-0000-0000"),
+        ] {
+            let host_bmc_ip = address.parse().unwrap();
+            let device = DpuDeviceInfo {
+                device_id: "device-1".to_string(),
+                dpu_bmc_ip: "192.0.2.20".parse().unwrap(),
+                host_bmc_ip,
+                serial_number: "SN1".to_string(),
+                dpu_machine_id: "machine-1".to_string(),
+                is_primary: true,
+            };
+            let node = DpuNodeInfo {
+                node_id: "node-1".to_string(),
+                host_bmc_ip,
+                device_ids: vec![device.device_id.clone()],
+                deployment_type: DpuDeploymentType::Bf3,
+            };
+            assert_eq!(labeler.device_labels(&device)[HOST_BMC_IP_LABEL], expected);
+            assert_eq!(
+                labeler.node_context_labels(&node)[HOST_BMC_IP_LABEL],
+                expected
+            );
+            assert_eq!(
+                expected.replace('-', ":").parse::<IpAddr>().unwrap(),
+                host_bmc_ip
+            );
+        }
     }
 }

@@ -758,7 +758,7 @@ func (r ApiGetAllTrayRequest) PageSize(pageSize int32) ApiGetAllTrayRequest {
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;NAME_ASC&#x60;; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
 func (r ApiGetAllTrayRequest) OrderBy(orderBy string) ApiGetAllTrayRequest {
 	r.orderBy = &orderBy
 	return r
@@ -1527,7 +1527,8 @@ PowerControlTray Power control a Tray
 
 Power control a Tray identified by its component ID or component MAC address.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1692,7 +1693,8 @@ PowerControlTrays Power control Trays
 
 Power control Trays with optional filters. If no filter is specified, targets all trays in the Site.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive

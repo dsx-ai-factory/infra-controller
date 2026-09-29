@@ -77,6 +77,12 @@ jobs:
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
+      - name: Test HBN management startup patches
+        run: python3 -B pxe/tests/test_hbn_management.py
+
+      - name: Test Scout interface readiness
+        run: python3 -B pxe/tests/test_scout_network.py
+
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
@@ -1821,7 +1827,7 @@ jobs:
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
       # Uses python3-yaml installed by the configuration check above.
-      - name: Test DevSpace PostgreSQL connection manifests
+      - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
 
       # Charts with tests must be listed explicitly.
@@ -1926,6 +1932,9 @@ jobs:
 
       - name: Test health check namespaces
         run: bash helm-prereqs/tests/health-check-namespaces_test.sh
+
+      - name: Test health check external VIPs
+        run: bash helm-prereqs/tests/health-check-external-vips_test.sh
 
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
@@ -2205,11 +2214,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
-      - name: Test optional DPU OTEL Pod configuration
+      - name: Test site-controller OTEL configuration
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-yaml
+          sudo apt-get install -y --no-install-recommends python3-yaml jq
           /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
 
   build-push-bluefield-helm-charts:
     needs:

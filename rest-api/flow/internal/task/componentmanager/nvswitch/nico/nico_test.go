@@ -130,6 +130,19 @@ func TestPowerControl(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestPowerControlRejectsColdReset(t *testing.T) {
+	m := New(nicoapi.NewMockClient(), nil)
+	target := common.Target{
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
+	}
+
+	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationColdReset,
+	})
+	require.ErrorContains(t, err, "unsupported power operation for NVSwitch: ColdReset")
+}
+
 func TestMACTargetRequests(t *testing.T) {
 	client := nicoapi.NewMockClient()
 	m := New(client, nil)
