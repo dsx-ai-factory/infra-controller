@@ -1856,6 +1856,7 @@ jobs:
             helm/rest/nico-rest/charts/nico-rest-api
             helm/rest/nico-rest/charts/nico-rest-common
             helm/rest/nico-rest/charts/nico-rest-site-manager
+            helm/rest/nico-rest/charts/nico-rest-workflow
 
   build-push-helm-chart:
     needs:

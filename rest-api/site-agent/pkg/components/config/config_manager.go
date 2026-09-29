@@ -34,6 +34,10 @@ const (
 	DefaultFlowGrpcCACertPath     = "/etc/core-grpc/ca.crt"
 	DefaultFlowGrpcClientCertPath = "/etc/core-grpc/tls.crt"
 	DefaultFlowGrpcClientKeyPath  = "/etc/core-grpc/tls.key"
+
+	// DefaultBootstrapSecretName is the bootstrap Secret the Site Agent reads and updates when
+	// BOOTSTRAP_SECRET_NAME is unset.
+	DefaultBootstrapSecretName = "bootstrap-info"
 )
 
 // NewElektraConfig reads configurations from env variables and returns
@@ -187,6 +191,7 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&enableTLS, "enableTLS", os.Getenv("ENABLE_TLS"), "Enable TLS based auth")
 	flag.StringVar(&disableBootstrap, "disableBootstrap", os.Getenv("DISABLE_BOOTSTRAP"), "Disable secret based bootstrap")
 	flag.StringVar(&conf.BootstrapSecret, "bootstrapSecret", os.Getenv("BOOTSTRAP_SECRET"), "Bootstrap secret")
+	flag.StringVar(&conf.BootstrapSecretName, "bootstrapSecretName", os.Getenv("BOOTSTRAP_SECRET_NAME"), "Bootstrap secret name")
 	flag.StringVar(&watcherInterval, "watcherInterval", os.Getenv("WATCHER_INTERVAL"), "Watcher Interval")
 	flag.StringVar(&podName, "podName", os.Getenv("POD_NAME"), "POD Name")
 	flag.StringVar(&conf.PodNamespace, "podNamespace", os.Getenv("POD_NAMESPACE"), "POD Namespace")
@@ -252,6 +257,9 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 
 	if conf.BootstrapSecret == "" {
 		conf.BootstrapSecret = "/etc/sitereg/"
+	}
+	if conf.BootstrapSecretName == "" {
+		conf.BootstrapSecretName = DefaultBootstrapSecretName
 	}
 
 	// Site ID
@@ -355,10 +363,10 @@ func validateInventorySchedule(schedule string) error {
 
 	interval, err := swu.InventoryIntervalFromSchedule(schedule)
 	if err != nil {
-		return fmt.Errorf("Temporal inventory %w", err)
+		return fmt.Errorf("the Temporal inventory %w", err)
 	}
 	if interval > cutil.MaxInventoryReceiptInterval {
-		return fmt.Errorf("Temporal inventory schedule %q collects every %v, which is slower than the %v maximum",
+		return fmt.Errorf("the Temporal inventory schedule %q collects every %v, which is slower than the %v maximum",
 			schedule, interval, cutil.MaxInventoryReceiptInterval)
 	}
 

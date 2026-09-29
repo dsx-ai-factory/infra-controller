@@ -942,6 +942,49 @@ certificates, External Secrets sync status, LoadBalancer VIP assignment, and
 basic in-cluster connectivity. Failures exit non-zero; warnings and skipped
 probes are reported without failing the run.
 
+## Manually Renewing the Site Agent Temporal certificate
+
+The Site Agent connects to Temporal with a client certificate from Site Manager
+that is valid for `90` days, and the cloud worker renews it automatically. Once
+the certificate is within `10` days of expiry, the daily `rotate-certs-and-otps`
+workflow in the Temporal `cloud` namespace rolls the Site's OTP. The Site Agent
+then uses the new OTP to download a new certificate.
+
+Only renew the certificate by hand if that automated rotation failed, such as
+when:
+
+- a `rotate-certs-and-otps` run fails for the Site
+- `RotateTemporalCertAccessOTP` fails in the Site's Temporal namespace
+- the certificate has already expired, so the Site Agent can no longer reach
+  Temporal to receive a new OTP
+
+Renewing by hand restarts the Site Agent, and rolling the OTP while an automated
+rotation is in progress makes that rotation fail.
+
+To renew it, run this from the repo root with the Site's cluster as the current
+kubeconfig context:
+
+```bash
+helm-prereqs/renew-site-agent-temporal-cert.sh --dry-run
+helm-prereqs/renew-site-agent-temporal-cert.sh
+```
+
+The script finds the namespace that holds the `nico-rest-site-agent-config`
+ConfigMap and reads the Site ID from its `CLUSTER_ID`. It stops if that ID does
+not match the `site-registration` Secret, or if the current context cannot patch
+that Secret, delete the Site Agent pod, and port-forward. It then rolls the
+Site's OTP in Site Manager, writes the new OTP to `site-registration`, and
+restarts `nico-rest-site-agent-0` twice: once to download the new certificate
+and once to load it. It succeeds when the Site Agent logs that its Temporal
+worker started.
+
+`--dry-run` reports the certificate expiry and Site Manager bootstrap state
+without changing anything, and `--yes` skips the confirmation prompt. Set
+`REST_NS` to skip namespace detection, for example when more than one namespace
+runs a Site Agent. Set `LOCAL_PORT` if local port `18100`, which the script uses
+to port-forward Site Manager, is taken. It needs `kubectl`, `curl`, and
+`python3`.
+
 ## Teardown
 
 > **This destroys Vault and PostgreSQL data.** `reclaimPolicy: Retain` protects
