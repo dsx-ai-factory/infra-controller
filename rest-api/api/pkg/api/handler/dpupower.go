@@ -54,7 +54,9 @@ func (h DpuPowerControlHandler) Handle(c echo.Context) error {
 	if err := common.ValidateKnownQueryParams(c.QueryParams(), query); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	query.SiteID = c.QueryParam("siteId")
+	if err := c.Bind(&query); err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request query data", nil)
+	}
 	if err := query.Validate(); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating DPU power control query", err)
 	}
