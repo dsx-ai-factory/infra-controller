@@ -1232,10 +1232,20 @@ mod tests {
                 .expect("closures"),
             connection_established_timestamp: Gauge::new("test_established", "test")
                 .expect("established gauge"),
+            connection_established_timestamp_seconds: Gauge::new(
+                "test_established_seconds",
+                "test",
+            )
+            .expect("established seconds gauge"),
             notifications_received_total: Counter::new("test_notifications", "test")
                 .expect("notifications"),
             last_notification_timestamp: Gauge::new("test_last_notification", "test")
                 .expect("last notification"),
+            last_notification_timestamp_seconds: Gauge::new(
+                "test_last_notification_seconds",
+                "test",
+            )
+            .expect("last notification seconds"),
             notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
                 "test_processing",
                 "test",
