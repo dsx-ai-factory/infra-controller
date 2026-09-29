@@ -18,6 +18,7 @@ use std::str::FromStr;
 use ::rpc::forge as rpc;
 use carbide_uuid::machine::MachineId;
 use model::lldp::LldpNeighbor;
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -61,12 +62,14 @@ pub(crate) async fn report_lldp_neighbors(
         .report
         .ok_or(CarbideError::MissingArgument("report"))?;
 
-    handle_lldp_report(api, &machine_id, report).await?;
+    let mut txn = api.txn_begin().await?;
+    handle_lldp_report(&mut txn, &machine_id, report).await?;
+    txn.commit().await?;
     Ok(Response::new(()))
 }
 
 pub(crate) async fn handle_lldp_report(
-    api: &Api,
+    txn: &mut PgConnection,
     machine_id: &MachineId,
     report: rpc::LldpReport,
 ) -> Result<(), CarbideError> {
@@ -87,7 +90,7 @@ pub(crate) async fn handle_lldp_report(
                 .map(LldpNeighbor::try_from)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(CarbideError::from)?;
-            store_neighbors(api, machine_id, &neighbors).await
+            store_neighbors(txn, machine_id, &neighbors).await
         }
         // The reporter has already confirmed nothing changed, so what nico-api
         // holds is still current.
@@ -109,13 +112,11 @@ pub(crate) async fn handle_lldp_report(
 
 /// Replace the machine's stored neighbors with new ones.
 async fn store_neighbors(
-    api: &Api,
+    txn: &mut PgConnection,
     machine_id: &MachineId,
     neighbors: &[LldpNeighbor],
 ) -> Result<(), CarbideError> {
-    let mut txn = api.txn_begin().await?;
-    db::machine_lldp_neighbor::replace_all(&mut txn, machine_id, neighbors).await?;
-    txn.commit().await?;
+    db::machine_lldp_neighbor::replace_all(txn, machine_id, neighbors).await?;
     tracing::debug!(%machine_id, neighbors = neighbors.len(), "Stored LLDP neighbors");
     Ok(())
 }

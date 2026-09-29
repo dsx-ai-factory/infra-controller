@@ -26,7 +26,9 @@ use rpc::forge::forge_server::Forge;
 
 use crate::tests::common;
 use crate::tests::common::api_fixtures::dpu::dpu_discover_machine;
-use crate::tests::common::api_fixtures::{create_managed_host, network_configured_with_lldp};
+use crate::tests::common::api_fixtures::{
+    create_managed_host, network_configured_with_lldp, try_network_configured_with_lldp,
+};
 
 #[crate::sqlx_test]
 async fn test_lldp_topology(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -463,38 +465,42 @@ async fn test_scout_lldp_report_reconciles_stored_neighbors(pool: sqlx::PgPool) 
 }
 
 #[crate::sqlx_test]
-async fn test_dpu_lldp_report_rejection_does_not_fail_network_status(pool: sqlx::PgPool) {
+async fn test_dpu_lldp_report_rejection_fails_network_status(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
-    let stored_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
     network_configured_with_lldp(
         &env,
         &dpu_id,
         lldp_report(
-            rpc::forge::LldpReportResult::Updated,
-            vec![stored_neighbor.clone()],
+            Updated,
+            vec![neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9")],
         ),
     )
     .await;
+    let stored_observation = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT network_status_observation FROM machines WHERE id = $1",
+        )
+        .bind(dpu_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    };
+    let observation_before = stored_observation().await;
+    let links_before = stored_links(&env, &dpu_id).await;
 
-    // The fixture unwraps the RPC, so reaching the assertion proves the status report succeeded.
-    network_configured_with_lldp(
+    let status = try_network_configured_with_lldp(
         &env,
         &dpu_id,
-        lldp_report(
-            rpc::forge::LldpReportResult::Updated,
-            vec![neighbor("not-a-mac", "aa", "swp1")],
-        ),
+        lldp_report(Updated, vec![neighbor("not-a-mac", "aa", "swp1")]),
     )
-    .await;
-    assert_eq!(
-        stored_links(&env, &dpu_id).await,
-        vec![(
-            "B0:00:00:00:00:01".to_string(),
-            "bb:bb:bb:bb:bb:bb".to_string(),
-            "swp9".to_string(),
-        )]
-    );
+    .await
+    .expect_err("rejected LLDP report");
+
+    // The LLDP write shares the status transaction, so the network status rolls back with it.
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(stored_observation().await, observation_before);
+    assert_eq!(stored_links(&env, &dpu_id).await, links_before);
 }
 
 #[crate::sqlx_test]

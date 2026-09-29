@@ -1150,6 +1150,10 @@ pub(crate) async fn record_dpu_network_status(
         .await?;
     }
 
+    if let Some(lldp) = request.lldp {
+        lldp::handle_lldp_report(&mut txn, &dpu_machine_id, lldp).await?;
+    }
+
     txn.commit().await?;
 
     // Check if we need to flag this forge-dpu-agent for upgrade or mark an upgrade completed
@@ -1197,14 +1201,6 @@ pub(crate) async fn record_dpu_network_status(
 
     if let Some(astra_config_status) = request.astra_config_status.as_ref() {
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
-    }
-
-    // The network status is already committed, and the agent re-sends a rejected LLDP report
-    // until the RPC succeeds, so an LLDP failure must not fail the status report.
-    if let Some(lldp) = request.lldp
-        && let Err(err) = lldp::handle_lldp_report(api, &dpu_machine_id, lldp).await
-    {
-        tracing::warn!(%dpu_machine_id, error = %err, "Failed to store DPU LLDP report");
     }
 
     // If this all worked and the DPU is healthy, we shouldn't emit a log line

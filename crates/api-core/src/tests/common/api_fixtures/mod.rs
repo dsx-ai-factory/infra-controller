@@ -2211,6 +2211,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         None,
     )
     .await
+    .unwrap()
 }
 
 /// Fake an iteration of forge-dpu-agent that attaches `lldp` to its network status report.
@@ -2219,6 +2220,17 @@ pub(in crate::tests) async fn network_configured_with_lldp(
     dpu_machine_id: &DpuMachineId,
     lldp: rpc::forge::LldpReport,
 ) {
+    try_network_configured_with_lldp(env, dpu_machine_id, lldp)
+        .await
+        .unwrap()
+}
+
+/// Like [`network_configured_with_lldp`], but returns the status report's result.
+pub(in crate::tests) async fn try_network_configured_with_lldp(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+) -> Result<(), tonic::Status> {
     report_network_status(env, dpu_machine_id, None, None, Some(lldp)).await
 }
 
@@ -2230,7 +2242,7 @@ async fn report_network_status(
     dpu_health: Option<rpc::health::HealthReport>,
     extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
     lldp: Option<rpc::forge::LldpReport>,
-) {
+) -> Result<(), tonic::Status> {
     let network_config = env
         .api
         .get_managed_host_network_config(Request::new(
@@ -2373,11 +2385,10 @@ async fn report_network_status(
         instance_config_version = ?instance_config_version,
         "machine network configured",
     );
-    let _ = env
-        .api
+    env.api
         .record_dpu_network_status(Request::new(status))
         .await
-        .unwrap();
+        .map(|_| ())
 }
 
 /// Fake hardware health service reporting health
