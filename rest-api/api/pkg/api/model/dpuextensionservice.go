@@ -14,6 +14,7 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 	k8scorev1 "k8s.io/api/core/v1"
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
@@ -48,7 +49,9 @@ const (
 )
 
 var (
-	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-]+`)
+	// Allow bracketed IPv6 and dotted hosts; exclude quotes and whitespace from single-quoted YAML targets.
+	// Keep in sync with crates/rpc/src/model/extension_service.rs.
+	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-.\[\]]+`)
 	dpuExtensionServiceObservabilityLogPathBadRE      = regexp.MustCompile(`[^a-zA-Z0-9\-_\/\.\@]+`)
 )
 
@@ -71,18 +74,48 @@ func ValidatePodYaml(yamlData []byte) error {
 	return nil
 }
 
-// ValidateDpfHelmChartData checks that the given bytes are a DPF Helm chart definition.
-// The field rules mirror DpfHelmChartServiceData::validate in Core so an invalid
-// definition is rejected with a specific message before a workflow is dispatched.
-func ValidateDpfHelmChartData(jsonData []byte) error {
-	var chart struct {
-		RepoURL            string         `json:"repoURL"`
-		ChartName          string         `json:"chartName"`
-		ChartVersion       string         `json:"chartVersion"`
-		SecurityPrivileged *bool          `json:"security.privileged"`
-		Values             map[string]any `json:"values"`
-	}
+// dpfHelmChartData defines a DPF Helm extension service's Data field
+type dpfHelmChartData struct {
+	RepoURL          string                        `json:"repoURL"`
+	ChartName        string                        `json:"chartName"`
+	ChartVersion     string                        `json:"chartVersion"`
+	Security         *dpfHelmChartSecurity         `json:"security"`
+	Values           map[string]any                `json:"values,omitempty"`
+	ServiceDaemonSet *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
+}
 
+// dpfHelmChartSecurity defines DPF workload security settings
+type dpfHelmChartSecurity struct {
+	Privileged *bool                       `json:"privileged"`
+	Spiffe     *dpfHelmChartSecuritySpiffe `json:"spiffe,omitempty"`
+}
+
+type dpfHelmChartSecuritySpiffe struct{}
+
+// dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
+// excluding placement fields such as nodeSelector, which NICo owns in Core.
+type dpfHelmChartServiceDaemonSet struct {
+	Labels         *map[string]string             `json:"labels,omitempty"`
+	Annotations    *map[string]string             `json:"annotations,omitempty"`
+	Resources      *map[string]intstr.IntOrString `json:"resources,omitempty"`
+	UpdateStrategy *dpfDaemonSetUpdateStrategy    `json:"updateStrategy,omitempty"`
+}
+
+type dpfDaemonSetUpdateStrategy struct {
+	Type          *string                    `json:"type,omitempty"`
+	RollingUpdate *dpfDaemonSetRollingUpdate `json:"rollingUpdate,omitempty"`
+}
+
+type dpfDaemonSetRollingUpdate struct {
+	MaxSurge       *intstr.IntOrString `json:"maxSurge,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// ValidateDpfHelmChartData checks the REST-facing shape of a DPF Helm chart
+// definition and rejects the known NICo-owned placement override. Kubernetes
+// and DPF semantic validation is canonical in Core before persistence.
+func ValidateDpfHelmChartData(jsonData []byte) error {
+	var chart dpfHelmChartData
 	if err := json.Unmarshal(jsonData, &chart); err != nil {
 		return fmt.Errorf("failed to parse json: %w", err)
 	}
@@ -103,7 +136,7 @@ func ValidateDpfHelmChartData(jsonData []byte) error {
 		return errors.New("chartVersion must not be empty")
 	}
 
-	if chart.SecurityPrivileged == nil {
+	if chart.Security == nil || chart.Security.Privileged == nil {
 		return errors.New("security.privileged must be specified")
 	}
 

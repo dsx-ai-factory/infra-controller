@@ -168,6 +168,15 @@ fn test_rack_firmware_update_manager(
     })
 }
 
+fn test_machine_info_provider(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::MachineInfoProvider>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_machine_info_provider(client))
+            as Arc<dyn component_manager::MachineInfoProvider>
+    })
+}
+
 pub(in crate::tests) mod dpu;
 pub(in crate::tests) mod host;
 pub(in crate::tests) mod ib_partition;
@@ -483,6 +492,7 @@ impl TestEnv {
             ManagedHostState::RotatingBmc { .. } => state.clone(),
             ManagedHostState::RotatingHostUefi { .. } => state.clone(),
             ManagedHostState::Decommissioning { .. } => state.clone(),
+            ManagedHostState::Reset { .. } => state.clone(),
             ManagedHostState::RotatingDpuUefi { .. } => state.clone(),
             ManagedHostState::RotatingNicLockdown => state.clone(),
             ManagedHostState::BomValidating { .. } => state.clone(),
@@ -1746,7 +1756,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         common_pools.clone(),
         api.work_lock_manager_handle.clone(),
         site_explorer_rack_profiles,
-        rms_sim.as_rms_client(),
+        test_machine_info_provider(&rms_sim),
         credential_manager.clone(),
         api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
     );
@@ -1782,6 +1792,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     let domain: carbide_uuid::domain::DomainId = api
         .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
             name: "dwrt1.com".to_string(),
+            default_ttl: None,
         }))
         .await
         .unwrap()
@@ -2328,6 +2339,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
             .map(|instance| instance.dpu_extension_service_version),
         dpu_extension_services,
         astra_config_status: None,
+        lldp: None,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),

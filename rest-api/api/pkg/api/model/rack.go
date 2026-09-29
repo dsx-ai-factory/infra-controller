@@ -56,7 +56,10 @@ var RackFilterFieldMap = map[string]flowv1.RackFilterField{
 	"model":        flowv1.RackFilterField_RACK_FILTER_FIELD_MODEL,
 }
 
-// RackOrderByFieldMap maps API field names to Flow protobuf order by enum
+// RackDefaultOrderBy is the deterministic REST ordering used when orderBy is omitted.
+const RackDefaultOrderBy = "NAME_ASC"
+
+// RackOrderByFieldMap maps API field names to Flow protobuf order by enum.
 var RackOrderByFieldMap = map[string]flowv1.RackOrderByField{
 	"name":         flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_NAME,
 	"manufacturer": flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER,
@@ -356,22 +359,23 @@ func (ab *APIBMC) FromProto(protoBMC *flowv1.BMCInfo) {
 
 // APIRackComponent represents a component within a rack
 type APIRackComponent struct {
-	ID              string    `json:"id"`
-	RackID          string    `json:"rackId"`
-	Type            string    `json:"type"`
-	Name            string    `json:"name"`
-	SerialNumber    string    `json:"serialNumber"`
-	Manufacturer    string    `json:"manufacturer"`
-	Model           string    `json:"model"`
-	Description     string    `json:"description"`
-	FirmwareVersion string    `json:"firmwareVersion"`
-	SlotID          int32     `json:"slotId"`
-	TrayIdx         int32     `json:"trayIdx"`
-	HostID          int32     `json:"hostId"`
-	BMCs            []*APIBMC `json:"bmcs"`
-	PowerState      string    `json:"powerState"`
-	OperationStatus string    `json:"operationStatus"`
-	LeakStatus      string    `json:"leakStatus"`
+	ID                 string                `json:"id"`
+	RackID             string                `json:"rackId"`
+	Type               string                `json:"type"`
+	Name               string                `json:"name"`
+	SerialNumber       string                `json:"serialNumber"`
+	Manufacturer       string                `json:"manufacturer"`
+	Model              string                `json:"model"`
+	Description        string                `json:"description"`
+	FirmwareVersion    string                `json:"firmwareVersion"`
+	SlotID             int32                 `json:"slotId"`
+	TrayIdx            int32                 `json:"trayIdx"`
+	HostID             int32                 `json:"hostId"`
+	BMCs               []*APIBMC             `json:"bmcs"`
+	PowerState         string                `json:"powerState"`
+	OperationStatus    string                `json:"operationStatus"`
+	LeakStatus         string                `json:"leakStatus"`
+	LeakHandlingStatus APILeakHandlingStatus `json:"leakHandlingStatus"`
 }
 
 // FromProto converts a proto Component to an APIRackComponent
@@ -385,6 +389,11 @@ func (arc *APIRackComponent) FromProto(protoComponent *flowv1.Component) {
 	arc.PowerState = protoComponent.GetPowerState()
 	arc.OperationStatus = enumOr(ProtoToAPIPhaseName, protoComponent.GetStatus().GetPhase(), "Unknown")
 	arc.LeakStatus = enumOr(ProtoToAPILeakStatusName, protoComponent.GetLeakStatus(), "Unknown")
+	arc.LeakHandlingStatus = enumOr(
+		ProtoToAPILeakHandlingStatusName,
+		protoComponent.GetLeakHandlingStatus(),
+		APILeakHandlingStatusUnknown,
+	)
 
 	// Get rack ID
 	arc.RackID = protoComponent.GetRackExternalId()

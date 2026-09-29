@@ -166,7 +166,7 @@ type: Opaque
 stringData:
   username: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  host: ${POSTGRES_HOST}
+  host: "${POSTGRES_HOST}"
   port: "${POSTGRES_PORT}"
   dbname: ${POSTGRES_DB}
   uri: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
@@ -177,7 +177,7 @@ metadata:
   name: nico-system-nico-database-config
   namespace: ${NAMESPACE}
 data:
-  DB_HOST: ${POSTGRES_HOST}
+  DB_HOST: "${POSTGRES_HOST}"
   DB_PORT: "${POSTGRES_PORT}"
   DB_NAME: ${POSTGRES_DB}
 ---
@@ -339,14 +339,15 @@ spec:
         - name: vault
           image: hashicorp/vault:1.20.2
           imagePullPolicy: IfNotPresent
+          # Vault's IPv6 wildcard serves IPv6 probes and IPv4 bootstrap requests.
           args:
             - server
             - -dev
-            - -dev-listen-address=0.0.0.0:8200
+            - -dev-listen-address=[::]:8200
             - -dev-root-token-id=${VAULT_TOKEN}
           env:
             - name: VAULT_DEV_LISTEN_ADDRESS
-              value: 0.0.0.0:8200
+              value: "[::]:8200"
           ports:
             - containerPort: 8200
               name: http

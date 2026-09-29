@@ -605,7 +605,7 @@ mod tests {
         // deleting the final live prefix removes it.
         let mut txn = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(txn.as_mut())
         .await
@@ -651,7 +651,7 @@ mod tests {
         // needs the shared zone after both transactions commit.
         let mut setup = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(setup.as_mut())
         .await
@@ -707,7 +707,7 @@ mod tests {
         // the final zone exactly once.
         let mut setup = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(setup.as_mut())
         .await

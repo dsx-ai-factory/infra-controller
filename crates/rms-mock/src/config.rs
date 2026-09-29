@@ -25,6 +25,24 @@ pub struct RmsMockConfig {
     /// Reported by `GetVersion`. `librms` issues `GetVersion` as its
     /// connection liveness probe, so this is the first call any client makes.
     pub version_string: String,
+
+    /// Jobs that fail instead of completing. Set by the host in Rust, not
+    /// from configuration; nothing fails unless named here.
+    #[serde(skip)]
+    pub faults: FaultConfig,
+
+    /// The object ids `ListFirmwareObjects` reports. An apply whose document
+    /// names no `Id` is attributed to the first; an empty list is an empty
+    /// catalog.
+    pub firmware_object_ids: Vec<String>,
+}
+
+/// Which node-level jobs fail. A selected job still reports running before
+/// it fails.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaultConfig {
+    /// Node ids, as the caller sends them, whose jobs fail.
+    pub fail_jobs_for_node_ids: Vec<String>,
 }
 
 impl Default for RmsMockConfig {
@@ -32,6 +50,8 @@ impl Default for RmsMockConfig {
         Self {
             version_string: concat!("machine-a-tron-rms-mock/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
+            faults: FaultConfig::default(),
+            firmware_object_ids: vec!["rms-mock-fw-1.0.0".to_string()],
         }
     }
 }

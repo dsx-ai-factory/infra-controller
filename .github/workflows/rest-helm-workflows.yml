@@ -38,7 +38,7 @@ jobs:
             valueOverrides: '[]'
           - chart: helm/rest/nico-mcp
             valueOverrides: '[]'
-          - chart: helm/charts/nico-flow
+          - chart: helm/nico-flow
             valueOverrides: '[]'
           - chart: rest-api/temporal-helm/temporal
             valueOverrides: '[]'
@@ -76,7 +76,7 @@ jobs:
           - helm/rest/nico-rest
           - helm/rest/nico-rest-site-agent
           - helm/rest/nico-mcp
-          - helm/charts/nico-flow
+          - helm/nico-flow
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -45,6 +45,8 @@ use rpc::{
 };
 use scout::{CarbideClientError, CarbideClientResult};
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tryhard::{RetryFutureConfig, RetryPolicy};
 use x509_parser::pem::parse_x509_pem;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -55,6 +57,7 @@ mod client;
 mod deprovision;
 mod discovery;
 mod firmware_upgrade;
+mod lldp_report;
 mod machine_validation;
 mod metrics;
 mod mlx_device;
@@ -68,6 +71,7 @@ struct DevEnv {
 }
 static IN_QEMU_VM: Lazy<RwLock<DevEnv>> = Lazy::new(|| RwLock::new(DevEnv { in_qemu: false }));
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+const LLDP_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const REBOOT_COMPLETED_PATH: &str = "/tmp/reboot_completed";
 const MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE: usize = 1500;
 const CLOUD_INIT_OUTPUT_LOG: &str = "/var/log/cloud-init-output.log";
@@ -260,57 +264,89 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
         }),
     };
 
+    // Report LLDP neighbors on each poll, re-sending only when the snapshot
+    // changes. The reporter's cache must live across loop iterations.
+    let mut lldp_reporter = lldp_report::LldpReporter::new(
+        machine_id,
+        config.api.clone(),
+        client::forge_client_config(config),
+    );
+
+    // Spawn any further background task into this set and give it a clone of
+    // this token, so one cancel and one join below shut them all down.
+    let mut background_tasks = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+
+    let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
+        carbide_host_support::lldp_collector::collect_lldp_neighbors,
+        LLDP_COLLECTION_INTERVAL,
+        &mut background_tasks,
+        cancel_token.clone(),
+    );
+
     let mut scout_stream_started = false;
-    loop {
-        if is_time_to_check_certs_expiry(next_certs_check_time) {
-            next_certs_check_time = get_next_certs_check_datetime()?;
-            tracing::info!(
-                %next_certs_check_time,
-                "Renewed next certificate check time",
-            );
+    let outcome: Result<(), eyre::Report> = async {
+        loop {
+            if is_time_to_check_certs_expiry(next_certs_check_time) {
+                next_certs_check_time = get_next_certs_check_datetime()?;
+                tracing::info!(
+                    %next_certs_check_time,
+                    "Renewed next certificate check time",
+                );
 
-            if check_certs_validity(&client_cert)? {
-                initial_setup(config).await?;
+                if check_certs_validity(&client_cert)? {
+                    initial_setup(config).await?;
+                }
             }
-        }
-        let controller_response = match query_api_with_retries(config, &machine_id).await {
-            Ok(action) => action,
-            Err(e) => {
-                report_scout_error(config, None, Some(machine_interface_id), &e).await?;
-                rpc_forge::ForgeAgentControlResponse::noop()
+            if let Some(collected) = latest_lldp.latest() {
+                lldp_report::report_lldp_neighbors(&mut lldp_reporter, collected).await;
             }
-        };
-        if let Some(action) = controller_response.action {
-            let action_name = action.as_str_name();
-            // Capture the action label before handle_action consumes `action`.
-            let scout_action = metrics::ScoutAction::from(&action);
-            let result = handle_action(action, &machine_id, machine_interface_id, config).await;
-            emit(match result {
-                Ok(()) => metrics::ScoutActionHandled::Ok {
-                    action: scout_action,
-                    action_name,
-                },
-                Err(error) => metrics::ScoutActionHandled::Error {
-                    action: scout_action,
-                    action_name,
-                    error: error.to_string(),
-                },
-            });
-        } else {
-            tracing::warn!("API response did not contain an action, skipping.");
-        }
 
-        // Ensure the first scout API query has run before we establish
-        // a Scout stream connection. There's no technical reason requiring
-        // this, other than it seemed to make sense to do 1 control
-        // request/response action flow before setting up any additional
-        // scaffolding.
-        if !scout_stream_started {
-            scout_stream_started = true;
-            stream::start_scout_stream(machine_id, config);
+            let controller_response = match query_api_with_retries(config, &machine_id).await {
+                Ok(action) => action,
+                Err(e) => {
+                    report_scout_error(config, None, Some(machine_interface_id), &e).await?;
+                    rpc_forge::ForgeAgentControlResponse::noop()
+                }
+            };
+            if let Some(action) = controller_response.action {
+                let action_name = action.as_str_name();
+                // Capture the action label before handle_action consumes `action`.
+                let scout_action = metrics::ScoutAction::from(&action);
+                let result = handle_action(action, &machine_id, machine_interface_id, config).await;
+                emit(match result {
+                    Ok(()) => metrics::ScoutActionHandled::Ok {
+                        action: scout_action,
+                        action_name,
+                    },
+                    Err(error) => metrics::ScoutActionHandled::Error {
+                        action: scout_action,
+                        action_name,
+                        error: error.to_string(),
+                    },
+                });
+            } else {
+                tracing::warn!("API response did not contain an action, skipping.");
+            }
+
+            // Ensure the first scout API query has run before we establish
+            // a Scout stream connection. There's no technical reason requiring
+            // this, other than it seemed to make sense to do 1 control
+            // request/response action flow before setting up any additional
+            // scaffolding.
+            if !scout_stream_started {
+                scout_stream_started = true;
+                stream::start_scout_stream(machine_id, config);
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
+    .await;
+
+    cancel_token.cancel();
+    background_tasks.join_all().await;
+
+    outcome
 }
 
 async fn run_standalone(config: &Options) -> Result<(), eyre::Report> {

@@ -20,7 +20,7 @@
           address:
             10.0.1.0/31: {} 
             2001:db8::0/127: {} 
-          vrf: vpc_100 
+          vrf: vpc_100
     nve:
       vxlan:
         arp-nd-suppress: on
@@ -234,6 +234,18 @@
       api:
         listening-address:
           0.0.0.0: {}
+      config:
+        snippet:
+          frr.conf: |
+            interface pf0vf0_if vrf vpc_100
+             no ipv6 nd suppress-ra
+             ipv6 nd prefix 2001:db8::/127 no-autoconfig
+             ipv6 nd ra-lifetime 1800
+             ipv6 nd managed-config-flag
+             ipv6 nd other-config-flag
+             ipv6 nd rdnss 2001:db8::53 1800
+             ipv6 nd rdnss 2001:db8::54 1800
+            !
     vrf:
       default:
         router:
@@ -434,5 +446,3 @@
                 source-port:
                   '68': {}
         type: ipv4
-
-

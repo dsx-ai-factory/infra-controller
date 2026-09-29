@@ -25,21 +25,22 @@ Replace all expected rack groups from a JSON file:
     $ nico-admin-cli expected-rack-group replace-all --filename ./rack-groups.json
 
 File shape (an empty expected_rack_groups array clears all groups):
-    {\"expected_rack_groups\":[{\"rack_group_id\":\"nvl5-gp1-jhb01\",\"topology\":\"gb200_nvl72r1_c2g4\",\"rack_ids\":[],\"members\":[]}]}
+    {\"expected_rack_groups\":[{\"rack_group_id\":\"nvl5-gp1-jhb01\",\"topology\":\"gb200_nvl72r1_c2g4\",\"racks\":[]}]}
 
 The optional expected_rack_groups_count must equal the array length.
 metadata uses name, description, and labels as [{\"key\":\"location.datacenter\",\"value\":\"JHB01\"}].
 
 ")]
 pub(crate) struct Args {
-    /// JSON inventory file. Missing rack_ids/members/metadata default to empty.
+    /// JSON inventory file. Missing racks/metadata default to empty.
     ///
     /// The root object contains expected_rack_groups, an array of objects with
-    /// rack_group_id, topology, rack_ids, members, and metadata. The optional
+    /// rack_group_id, topology, racks, and metadata. The optional
     /// expected_rack_groups_count must match the array length. An empty array
     /// clears all groups.
     ///
-    /// Each member has type, manufacturer, and id. Metadata contains name,
+    /// Each rack has rack_id and members; each member has type, manufacturer, and id.
+    /// Metadata contains name,
     /// description, and labels as an array of {key, value} objects. Export a
     /// compatible file with --format json expected-rack-group show.
     #[arg(short, long)]

@@ -59,3 +59,49 @@ func TestAPIMachineHealthReportEntryRequestValidateAndToProto(t *testing.T) {
 	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Successes: []APIMachineHealthProbeSuccess{{}}}).Validate())
 	assert.Error(t, (&APIMachineHealthReportEntryRequest{Source: "source", Mode: MachineHealthReportModeMerge, Alerts: []APIMachineHealthProbeAlert{{ID: "alert"}}}).Validate())
 }
+
+func TestAPIRackHealthReportEntryRequest_Validate(t *testing.T) {
+	validReport := APIMachineHealthReportEntryRequest{Source: "overrides.sre", Mode: MachineHealthReportModeMerge}
+	tests := []struct {
+		name    string
+		request APIRackHealthReportEntryRequest
+		wantErr bool
+	}{
+		{name: "valid", request: APIRackHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: validReport}},
+		{name: "invalid site ID", request: APIRackHealthReportEntryRequest{SiteID: "not-a-uuid", APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+		{name: "missing report source", request: APIRackHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: APIMachineHealthReportEntryRequest{Mode: MachineHealthReportModeMerge}}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantErr {
+				assert.Error(t, test.request.Validate())
+				return
+			}
+			assert.NoError(t, test.request.Validate())
+		})
+	}
+}
+
+func TestAPITrayHealthReportEntryRequest_Validate(t *testing.T) {
+	validReport := APIMachineHealthReportEntryRequest{Source: "overrides.sre", Mode: MachineHealthReportModeMerge}
+	tests := []struct {
+		name    string
+		request APITrayHealthReportEntryRequest
+		wantErr bool
+	}{
+		{name: "valid", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), Type: "PowerShelf", APIMachineHealthReportEntryRequest: validReport}},
+		{name: "missing type", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+		{name: "unsupported type", request: APITrayHealthReportEntryRequest{SiteID: uuid.NewString(), Type: "CDU", APIMachineHealthReportEntryRequest: validReport}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantErr {
+				assert.Error(t, test.request.Validate())
+				return
+			}
+			assert.NoError(t, test.request.Validate())
+		})
+	}
+}

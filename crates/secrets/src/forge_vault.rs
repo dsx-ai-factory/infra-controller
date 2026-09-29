@@ -1155,14 +1155,15 @@ enum EnumerationMode {
 
 /// Whether an enumerated path is skipped, and if so, whether the skip
 /// should count toward "something eligible was intentionally skipped"
-/// (the caller's `excluded_prefix_found`).
+/// (one of the caller's exclusion-found flags).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathExclusion {
     /// Not excluded; read and imported normally.
     Included,
-    /// Skipped, and reported to the caller as an exclusion. Used for
-    /// caller-requested prefixes such as `CredentialPrefix::UfmAuth`.
-    ExcludedAndCounted,
+    /// Skipped because a caller-requested prefix matched.
+    ExcludedByPrefix,
+    /// Skipped because a caller-requested exact path matched.
+    ExcludedByExactPath,
     /// Skipped, but never reported as an exclusion. The token-refresh
     /// probe is not a credential, but it exists on every site that has
     /// ever authenticated to Vault, so counting it would let a genuinely
@@ -1171,7 +1172,11 @@ enum PathExclusion {
     ExcludedAndUncounted,
 }
 
-fn vault_path_exclusion(path: &str, excluded_prefixes: &[CredentialPrefix]) -> PathExclusion {
+fn vault_path_exclusion(
+    path: &str,
+    excluded_prefixes: &[CredentialPrefix],
+    excluded_paths: &[&str],
+) -> PathExclusion {
     if path == TOKEN_REFRESH_PROBE_PATH {
         return PathExclusion::ExcludedAndUncounted;
     }
@@ -1179,7 +1184,10 @@ fn vault_path_exclusion(path: &str, excluded_prefixes: &[CredentialPrefix]) -> P
         .iter()
         .any(|prefix| path.starts_with(prefix.as_str()))
     {
-        return PathExclusion::ExcludedAndCounted;
+        return PathExclusion::ExcludedByPrefix;
+    }
+    if excluded_paths.contains(&path) {
+        return PathExclusion::ExcludedByExactPath;
     }
     PathExclusion::Included
 }
@@ -1298,8 +1306,8 @@ impl ForgeVaultClient {
         path_prefix: &str,
         mode: EnumerationMode,
     ) -> Result<Vec<String>, SecretsError> {
-        let (paths, _) = self
-            .list_secrets_for_path_excluding(path_prefix, mode, &[])
+        let (paths, _, _) = self
+            .list_secrets_for_path_excluding(path_prefix, mode, &[], &[])
             .await?;
         Ok(paths)
     }
@@ -1309,13 +1317,15 @@ impl ForgeVaultClient {
         path_prefix: &str,
         mode: EnumerationMode,
         excluded_prefixes: &[CredentialPrefix],
-    ) -> Result<(Vec<String>, bool), SecretsError> {
+        excluded_paths: &[&str],
+    ) -> Result<(Vec<String>, bool, bool), SecretsError> {
         let vault_client = self.vault_client().await?;
         let mount = &self.vault_client_config.kv_mount_location;
 
         let mut paths = Vec::new();
         let mut stack = vec![path_prefix.to_string()];
         let mut excluded_prefix_found = false;
+        let mut excluded_path_found = false;
 
         while let Some(dir) = stack.pop() {
             let Some(entries) = list_vault_path(vault_client.deref(), mount, &dir, mode).await?
@@ -1330,10 +1340,13 @@ impl ForgeVaultClient {
                 } else {
                     format!("{dir}{entry}")
                 };
-
-                match vault_path_exclusion(&full, excluded_prefixes) {
-                    PathExclusion::ExcludedAndCounted => {
+                match vault_path_exclusion(&full, excluded_prefixes, excluded_paths) {
+                    PathExclusion::ExcludedByPrefix => {
                         excluded_prefix_found = true;
+                        continue;
+                    }
+                    PathExclusion::ExcludedByExactPath => {
+                        excluded_path_found = true;
                         continue;
                     }
                     PathExclusion::ExcludedAndUncounted => continue,
@@ -1348,7 +1361,7 @@ impl ForgeVaultClient {
             }
         }
 
-        Ok((paths, excluded_prefix_found))
+        Ok((paths, excluded_prefix_found, excluded_path_found))
     }
 
     /// get_secrets returns all secrets in the KV mount (paths plus
@@ -1378,11 +1391,31 @@ impl ForgeVaultClient {
         &self,
         excluded_prefixes: &[CredentialPrefix],
     ) -> Result<(Vec<(String, Credentials)>, bool), SecretsError> {
-        let (paths, excluded_prefix_found) = self
-            .list_secrets_for_path_excluding("", EnumerationMode::Strict, excluded_prefixes)
+        let (secrets, excluded_prefix_found, _) = self
+            .get_secrets_strict_excluding(excluded_prefixes, &[])
+            .await?;
+        Ok((secrets, excluded_prefix_found))
+    }
+
+    /// Returns all secrets outside the excluded prefixes and exact paths,
+    /// failing on the first list or read error. Excluded credentials are not
+    /// read. The booleans report whether a prefix and exact path, respectively,
+    /// were found during enumeration.
+    pub async fn get_secrets_strict_excluding(
+        &self,
+        excluded_prefixes: &[CredentialPrefix],
+        excluded_paths: &[&str],
+    ) -> Result<(Vec<(String, Credentials)>, bool, bool), SecretsError> {
+        let (paths, excluded_prefix_found, excluded_path_found) = self
+            .list_secrets_for_path_excluding(
+                "",
+                EnumerationMode::Strict,
+                excluded_prefixes,
+                excluded_paths,
+            )
             .await?;
         let secrets = self.read_secrets(&paths, EnumerationMode::Strict).await?;
-        Ok((secrets, excluded_prefix_found))
+        Ok((secrets, excluded_prefix_found, excluded_path_found))
     }
 
     /// get_secrets_for_prefix returns all secrets
@@ -1744,12 +1777,12 @@ mod tests {
     #[test]
     fn excluded_vault_prefix_covers_the_directory_and_its_credentials() {
         for (path, expected) in [
-            ("ufm/", PathExclusion::ExcludedAndCounted),
-            ("ufm/default/auth", PathExclusion::ExcludedAndCounted),
+            ("ufm/", PathExclusion::ExcludedByPrefix),
+            ("ufm/default/auth", PathExclusion::ExcludedByPrefix),
             ("machines/bmc/site/root", PathExclusion::Included),
         ] {
             assert_eq!(
-                vault_path_exclusion(path, &[CredentialPrefix::UfmAuth]),
+                vault_path_exclusion(path, &[CredentialPrefix::UfmAuth], &[]),
                 expected,
                 "{path}"
             );
@@ -1779,7 +1812,24 @@ mod tests {
             ("machines/bmc/site/root", &[][..], PathExclusion::Included),
         ] {
             assert_eq!(
-                vault_path_exclusion(path, excluded_prefixes),
+                vault_path_exclusion(path, excluded_prefixes, &[]),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_vault_path_exclusion_does_not_cover_versioned_children() {
+        let excluded = "machines/bmc/site/root";
+
+        for (path, expected) in [
+            (excluded, PathExclusion::ExcludedByExactPath),
+            ("machines/bmc/site/root/", PathExclusion::Included),
+            ("machines/bmc/site/root/v1", PathExclusion::Included),
+        ] {
+            assert_eq!(
+                vault_path_exclusion(path, &[], &[excluded]),
                 expected,
                 "{path}"
             );

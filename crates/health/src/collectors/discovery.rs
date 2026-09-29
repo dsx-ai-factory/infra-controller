@@ -146,7 +146,17 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         let mut entities = Vec::new();
         let mut sensor_ids = HashSet::new();
 
-        if let Some(systems) = service_root.systems().await? {
+        // A power shelf has no ComputerSystems, and Delta shelves do not serve
+        // `/redfish/v1/Systems` at all. nv-redfish files a vendor-less Redfish
+        // 1.9.0 service root under its anonymous quirk bucket and guesses that
+        // URL when the root omits it, so asking would turn the 404 into a fatal
+        // iteration and hide every supply of the shelf.
+        let systems = if self.collect_shelf_power {
+            None
+        } else {
+            service_root.systems().await?
+        };
+        if let Some(systems) = systems {
             for system in systems.members().await? {
                 let system = Arc::new(system);
 
@@ -396,6 +406,20 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
             let entity_id = entity.raw().odata_id.to_string();
+            let (oem_power_output, oem_fan_speed_target_percent) = match entity.oem_delta() {
+                Ok(Some(delta)) => (delta.power(), delta.fan_speed_target()),
+                Ok(None) => (None, None),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        power_supply = %entity.raw().odata_id,
+                        bmc_address = ?self.endpoint.addr,
+                        rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
+                        "Ignoring unparsable Delta OEM power supply data"
+                    );
+                    (None, None)
+                }
+            };
             let oem_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
                 None
             } else {
@@ -429,6 +453,8 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 chassis: chassis.clone(),
                 sensors,
                 oem_capacity_watts,
+                oem_power_output,
+                oem_fan_speed_target_percent,
             });
         }
     }
@@ -822,6 +848,251 @@ mod bmc_mock_integration_tests {
             .collect();
         assert_eq!(capacities, expected);
         assert_eq!(fetch_failures, 0);
+    }
+
+    /// Delta reports capacity as the *standard* `PowerCapacityWatts`, unlike
+    /// LiteOn's non-standard OEM string. This proves the existing
+    /// standard-field-wins branch in `discover_power_supplies` already covers
+    /// Delta with no vendor-specific code: every supply emits
+    /// `powersupply_capacity` from the standard field while the OEM fallback
+    /// stays unused. Asserting only that `oem_capacity_watts` is `None` would
+    /// hold for any non-LiteOn chassis regardless of the standard field, so
+    /// the emitted metric is the observation that can fail.
+    #[tokio::test]
+    async fn delta_supplies_resolve_capacity_from_standard_field() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc().await;
+        let chassis = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present")
+            .members()
+            .await
+            .expect("chassis members")
+            .into_iter()
+            .next()
+            .expect("fixture has one chassis");
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:66"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+        let mut entities = Vec::new();
+        let mut sensor_ids = HashSet::new();
+        collector
+            .discover_power_supplies(
+                &Arc::new(chassis),
+                &fetch_failures,
+                &mut entities,
+                &mut sensor_ids,
+            )
+            .await;
+
+        let supplies: Vec<_> = entities
+            .iter()
+            .filter_map(|entity| match entity {
+                DiscoveredEntity::PowerSupply {
+                    oem_capacity_watts, ..
+                } => Some((*oem_capacity_watts, entity.derived_metrics())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(supplies.len(), 6, "Delta fixture exposes 6 PSU bays");
+        for (oem_capacity_watts, metrics) in &supplies {
+            let capacity: Vec<_> = metrics
+                .iter()
+                .filter(|metric| metric.metric_type == "powersupply_capacity")
+                .map(|metric| (metric.unit, metric.value))
+                .collect();
+
+            assert_eq!(capacity, vec![("watts", 5500.0)]);
+            assert_eq!(
+                *oem_capacity_watts, None,
+                "the OEM fallback must stay unused when the standard field is present"
+            );
+        }
+
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// A Delta shelf advertises no `Systems` collection and answers 404 at
+    /// `/redfish/v1/Systems`. nv-redfish files a vendor-less Redfish 1.9.0
+    /// service root under its anonymous quirk bucket and guesses that URL
+    /// anyway, so a full discovery iteration must not turn the 404 into a
+    /// fatal error: the six supplies and the shelf chassis must still be
+    /// published.
+    #[tokio::test]
+    async fn delta_shelf_full_discovery_publishes_supplies_without_systems() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc().await;
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:68"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+
+        let entities = collector
+            .discover_entities(&fetch_failures)
+            .await
+            .expect("a shelf without /redfish/v1/Systems must still be discovered");
+
+        let supplies = entities
+            .iter()
+            .filter(|entity| matches!(entity, DiscoveredEntity::PowerSupply { .. }))
+            .count();
+        let shelf_chassis = entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity,
+                    DiscoveredEntity::Chassis {
+                        shelf_power: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(supplies, 6, "Delta fixture exposes 6 PSU bays");
+        assert_eq!(
+            shelf_chassis, 1,
+            "the shelf chassis carries the shelf power evidence"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// LiteOn shelves do serve `/redfish/v1/Systems`, holding a system with no
+    /// processors, memory or drives. Skipping the Systems lookup on shelf
+    /// endpoints must leave what discovery publishes for them unchanged.
+    #[tokio::test]
+    async fn liteon_shelf_full_discovery_publishes_supplies() {
+        let h = liteon_powershelf_bmc().await;
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:69"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+
+        let entities = collector
+            .discover_entities(&fetch_failures)
+            .await
+            .expect("LiteOn shelf discovery");
+
+        let supplies = entities
+            .iter()
+            .filter(|entity| matches!(entity, DiscoveredEntity::PowerSupply { .. }))
+            .count();
+        let shelf_chassis = entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity,
+                    DiscoveredEntity::Chassis {
+                        shelf_power: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(supplies, 6, "LiteOn fixture exposes 6 PSU bays");
+        assert_eq!(
+            shelf_chassis, 1,
+            "the shelf chassis carries the shelf power evidence"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
+    }
+
+    /// Delta reports commanded PSU power state and fan speed target only
+    /// under the OEM extension; this proves discovery collects both and
+    /// that a shelf with a mixed on/off PSU set reports each supply's own
+    /// value rather than one shelf-wide value.
+    #[tokio::test]
+    async fn delta_supplies_resolve_oem_power_and_fan_speed() {
+        let h = bmc_mock::test_support::delta_powershelf_bmc_with_psu_power(vec![
+            true, true, false, true, true, true,
+        ])
+        .await;
+        let chassis = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present")
+            .members()
+            .await
+            .expect("chassis members")
+            .into_iter()
+            .next()
+            .expect("fixture has one chassis");
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:77"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+        let mut entities = Vec::new();
+        let mut sensor_ids = HashSet::new();
+        collector
+            .discover_power_supplies(
+                &Arc::new(chassis),
+                &fetch_failures,
+                &mut entities,
+                &mut sensor_ids,
+            )
+            .await;
+
+        let mut power_by_id: BTreeMap<String, Option<bool>> = BTreeMap::new();
+        let mut fan_speed_by_id: BTreeMap<String, Option<i64>> = BTreeMap::new();
+        for entity in &entities {
+            if let DiscoveredEntity::PowerSupply {
+                entity,
+                oem_power_output,
+                oem_fan_speed_target_percent,
+                ..
+            } = entity
+            {
+                power_by_id.insert(entity.raw().id.to_string(), *oem_power_output);
+                fan_speed_by_id.insert(entity.raw().id.to_string(), *oem_fan_speed_target_percent);
+            }
+        }
+
+        let expected_power: BTreeMap<String, Option<bool>> = [
+            ("PowerSupplyUnit 1", true),
+            ("PowerSupplyUnit 2", true),
+            ("PowerSupplyUnit 3", false),
+            ("PowerSupplyUnit 4", true),
+            ("PowerSupplyUnit 5", true),
+            ("PowerSupplyUnit 6", true),
+        ]
+        .into_iter()
+        .map(|(id, v)| (id.to_string(), Some(v)))
+        .collect();
+        assert_eq!(power_by_id, expected_power);
+        assert!(
+            fan_speed_by_id.values().all(|v| *v == Some(0)),
+            "a PSU-controlled fan reports FanSpeedTarget 0, which must stay \
+             distinguishable from an absent field: {fan_speed_by_id:?}"
+        );
+        assert_eq!(fetch_failures.load(Ordering::Relaxed), 0);
     }
 
     /// Resolve a GPU identity for every processor the mock BMC exposes, keyed by

@@ -72,10 +72,11 @@ func (identity nvLinkDomainOperationWorkflowIdentity) powerWorkflowID(
 	state string,
 	overrideReadinessCheck bool,
 ) string {
-	identity.State = state
+	workflowToken := model.PowerControlStateWorkflowToken(state)
+	identity.State = workflowToken
 	identity.OverrideReadinessCheck = overrideReadinessCheck
 
-	return fmt.Sprintf("nvlink-domain-power-state-update-%s-%s", state, common.RequestHash(identity))
+	return fmt.Sprintf("nvlink-domain-power-state-update-%s-%s", workflowToken, common.RequestHash(identity))
 }
 
 func (identity nvLinkDomainOperationWorkflowIdentity) firmwareWorkflowID(
@@ -113,7 +114,7 @@ func NewUpdateNVLinkDomainPowerStateHandler(
 // Handle godoc
 // @Summary Power control an NVLink Domain
 // @Description Power control an NVLink Domain identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -200,9 +201,8 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -212,11 +212,8 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
 		"NVLink Domain",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -246,7 +243,7 @@ func NewBatchUpdateNVLinkDomainPowerStateHandler(
 // Handle godoc
 // @Summary Power control NVLink Domains
 // @Description Power control one or more NVLink Domains identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -326,9 +323,8 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -338,11 +334,8 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 		identity.powerWorkflowID(request.State, request.OverrideReadinessCheck),
 		"NVLink Domains",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -372,7 +365,7 @@ func NewUpdateNVLinkDomainFirmwareHandler(
 // Handle godoc
 // @Summary Firmware update an NVLink Domain
 // @Description Update firmware on an NVLink Domain identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -462,9 +455,8 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -478,11 +470,8 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domain",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -512,7 +501,7 @@ func NewBatchUpdateNVLinkDomainFirmwareHandler(
 // Handle godoc
 // @Summary Firmware update NVLink Domains
 // @Description Update firmware on one or more NVLink Domains identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -595,9 +584,8 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -611,11 +599,8 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domains",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

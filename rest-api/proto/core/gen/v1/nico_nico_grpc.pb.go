@@ -205,6 +205,8 @@ const (
 	Forge_ListDpuWaitingForReprovisioning_FullMethodName                    = "/forge.Forge/ListDpuWaitingForReprovisioning"
 	Forge_TriggerHostReprovisioning_FullMethodName                          = "/forge.Forge/TriggerHostReprovisioning"
 	Forge_ListHostsWaitingForReprovisioning_FullMethodName                  = "/forge.Forge/ListHostsWaitingForReprovisioning"
+	Forge_TriggerManagedHostReset_FullMethodName                            = "/forge.Forge/TriggerManagedHostReset"
+	Forge_ListManagedHostsWaitingForReset_FullMethodName                    = "/forge.Forge/ListManagedHostsWaitingForReset"
 	Forge_TriggerBmcCredentialRotation_FullMethodName                       = "/forge.Forge/TriggerBmcCredentialRotation"
 	Forge_TriggerUefiCredentialRotation_FullMethodName                      = "/forge.Forge/TriggerUefiCredentialRotation"
 	Forge_TriggerNicLockdownCredentialRotation_FullMethodName               = "/forge.Forge/TriggerNicLockdownCredentialRotation"
@@ -228,6 +230,7 @@ const (
 	Forge_RemoveRouteServers_FullMethodName                                 = "/forge.Forge/RemoveRouteServers"
 	Forge_ReplaceRouteServers_FullMethodName                                = "/forge.Forge/ReplaceRouteServers"
 	Forge_UpdateAgentReportedInventory_FullMethodName                       = "/forge.Forge/UpdateAgentReportedInventory"
+	Forge_ReportLldpNeighbors_FullMethodName                                = "/forge.Forge/ReportLldpNeighbors"
 	Forge_UpdateInstancePhoneHomeLastContact_FullMethodName                 = "/forge.Forge/UpdateInstancePhoneHomeLastContact"
 	Forge_SetHostUefiPassword_FullMethodName                                = "/forge.Forge/SetHostUefiPassword"
 	Forge_ClearHostUefiPassword_FullMethodName                              = "/forge.Forge/ClearHostUefiPassword"
@@ -274,6 +277,7 @@ const (
 	Forge_DeleteExpectedRackGroup_FullMethodName                            = "/forge.Forge/DeleteExpectedRackGroup"
 	Forge_UpdateExpectedRackGroup_FullMethodName                            = "/forge.Forge/UpdateExpectedRackGroup"
 	Forge_GetExpectedRackGroup_FullMethodName                               = "/forge.Forge/GetExpectedRackGroup"
+	Forge_GetAllExpectedRackGroups_FullMethodName                           = "/forge.Forge/GetAllExpectedRackGroups"
 	Forge_FindExpectedRackGroupIds_FullMethodName                           = "/forge.Forge/FindExpectedRackGroupIds"
 	Forge_FindExpectedRackGroupsByIds_FullMethodName                        = "/forge.Forge/FindExpectedRackGroupsByIds"
 	Forge_ReplaceAllExpectedRackGroups_FullMethodName                       = "/forge.Forge/ReplaceAllExpectedRackGroups"
@@ -863,6 +867,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -925,6 +934,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -1024,6 +1035,8 @@ type ForgeClient interface {
 	// Replace the full record, including both lists and metadata.
 	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
+	// Return all declarations ordered by rack group ID; an empty site returns an empty list.
+	GetAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
 	FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
@@ -3313,6 +3326,26 @@ func (c *forgeClient) ListHostsWaitingForReprovisioning(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *forgeClient) TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_TriggerManagedHostReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ManagedHostResetListResponse)
+	err := c.cc.Invoke(ctx, Forge_ListManagedHostsWaitingForReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) TriggerBmcCredentialRotation(ctx context.Context, in *BmcCredentialRotationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3537,6 +3570,16 @@ func (c *forgeClient) UpdateAgentReportedInventory(ctx context.Context, in *DpuA
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateAgentReportedInventory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReportLldpNeighbors_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3997,6 +4040,16 @@ func (c *forgeClient) GetExpectedRackGroup(ctx context.Context, in *ExpectedRack
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectedRackGroup)
 	err := c.cc.Invoke(ctx, Forge_GetExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ExpectedRackGroupList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupList)
+	err := c.cc.Invoke(ctx, Forge_GetAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6897,6 +6950,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -6959,6 +7017,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -7058,6 +7118,8 @@ type ForgeServer interface {
 	// Replace the full record, including both lists and metadata.
 	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
 	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
+	// Return all declarations ordered by rack group ID; an empty site returns an empty list.
+	GetAllExpectedRackGroups(context.Context, *emptypb.Empty) (*ExpectedRackGroupList, error)
 	FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error)
 	FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error)
 	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
@@ -8065,6 +8127,12 @@ func (UnimplementedForgeServer) TriggerHostReprovisioning(context.Context, *Host
 func (UnimplementedForgeServer) ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostsWaitingForReprovisioning not implemented")
 }
+func (UnimplementedForgeServer) TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerManagedHostReset not implemented")
+}
+func (UnimplementedForgeServer) ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListManagedHostsWaitingForReset not implemented")
+}
 func (UnimplementedForgeServer) TriggerBmcCredentialRotation(context.Context, *BmcCredentialRotationRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerBmcCredentialRotation not implemented")
 }
@@ -8133,6 +8201,9 @@ func (UnimplementedForgeServer) ReplaceRouteServers(context.Context, *RouteServe
 }
 func (UnimplementedForgeServer) UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateAgentReportedInventory not implemented")
+}
+func (UnimplementedForgeServer) ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportLldpNeighbors not implemented")
 }
 func (UnimplementedForgeServer) UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstancePhoneHomeLastContact not implemented")
@@ -8271,6 +8342,9 @@ func (UnimplementedForgeServer) UpdateExpectedRackGroup(context.Context, *Expect
 }
 func (UnimplementedForgeServer) GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) GetAllExpectedRackGroups(context.Context, *emptypb.Empty) (*ExpectedRackGroupList, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAllExpectedRackGroups not implemented")
 }
 func (UnimplementedForgeServer) FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupIds not implemented")
@@ -12336,6 +12410,42 @@ func _Forge_ListHostsWaitingForReprovisioning_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_TriggerManagedHostReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_TriggerManagedHostReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, req.(*ManagedHostResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ListManagedHostsWaitingForReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ListManagedHostsWaitingForReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, req.(*ManagedHostResetListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_TriggerBmcCredentialRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BmcCredentialRotationRequest)
 	if err := dec(in); err != nil {
@@ -12746,6 +12856,24 @@ func _Forge_UpdateAgentReportedInventory_Handler(srv interface{}, ctx context.Co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateAgentReportedInventory(ctx, req.(*DpuAgentInventoryReport))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReportLldpNeighbors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LldpNeighborReport)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReportLldpNeighbors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, req.(*LldpNeighborReport))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -13574,6 +13702,24 @@ func _Forge_GetExpectedRackGroup_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetAllExpectedRackGroups(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18911,6 +19057,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_ListHostsWaitingForReprovisioning_Handler,
 		},
 		{
+			MethodName: "TriggerManagedHostReset",
+			Handler:    _Forge_TriggerManagedHostReset_Handler,
+		},
+		{
+			MethodName: "ListManagedHostsWaitingForReset",
+			Handler:    _Forge_ListManagedHostsWaitingForReset_Handler,
+		},
+		{
 			MethodName: "TriggerBmcCredentialRotation",
 			Handler:    _Forge_TriggerBmcCredentialRotation_Handler,
 		},
@@ -19001,6 +19155,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateAgentReportedInventory",
 			Handler:    _Forge_UpdateAgentReportedInventory_Handler,
+		},
+		{
+			MethodName: "ReportLldpNeighbors",
+			Handler:    _Forge_ReportLldpNeighbors_Handler,
 		},
 		{
 			MethodName: "UpdateInstancePhoneHomeLastContact",
@@ -19185,6 +19343,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetExpectedRackGroup",
 			Handler:    _Forge_GetExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "GetAllExpectedRackGroups",
+			Handler:    _Forge_GetAllExpectedRackGroups_Handler,
 		},
 		{
 			MethodName: "FindExpectedRackGroupIds",

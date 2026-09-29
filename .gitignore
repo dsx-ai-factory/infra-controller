@@ -38,7 +38,6 @@ ssh-console/legacy/ssh-console
 
 dev/mac-local-dev/carbide-api-config-*.toml
 crates/dpf/doca-platform
-helm-prereqs/.dpf-src/
 helm-prereqs/values/nico-core.yaml.dpf.bak
 
 /helm/Chart.lock
@@ -65,9 +64,6 @@ devenv.local.yaml
 
 # direnv
 .direnv
-
-# pre-commit
-.pre-commit-config.yaml
 
 # Trust anchor the dpu-agent mirrors for key-less consumers (issue #355). The
 # agent tests point `[forge-system] root-ca` at dev/certs/forge_root.pem, so

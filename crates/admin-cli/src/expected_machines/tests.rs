@@ -394,8 +394,6 @@ fn parse_erase() {
     assert!(matches!(cmd, Cmd::Erase(_)));
 }
 
-// Every malformed invocation is rejected at parse time -- a missing required
-// argument, one half of a paired credential, or a flag left without its value.
 #[test]
 fn invalid_invocations_are_rejected() {
     scenarios!(
@@ -406,28 +404,6 @@ fn invalid_invocations_are_rejected() {
         };
         "add without its required arguments" {
             &["expected-machine", "add"][..] => Fails,
-        }
-
-        "patch with a username but no password" {
-            &[
-                "expected-machine",
-                "patch",
-                "--bmc-mac-address",
-                "00:00:00:00:00:00",
-                "--bmc-username",
-                "admin",
-            ][..] => Fails,
-        }
-
-        "patch with a password but no username" {
-            &[
-                "expected-machine",
-                "patch",
-                "--bmc-mac-address",
-                "00:00:00:00:00:00",
-                "--bmc-password",
-                "secret",
-            ][..] => Fails,
         }
 
         "update without --filename" {
@@ -522,6 +498,32 @@ fn has_duplicate_dpu_serials_flags_repeats() {
                 "--chassis-serial-number",
                 "SN12345",
             ][..] => Yields(false),
+        }
+    );
+}
+
+#[test]
+fn standalone_boolean_patches_preserve_explicit_false() {
+    scenarios!(
+        run = |(flag, field): (&str, &str)| -> Result<Option<bool>, ErrorKind> {
+            let matches = parse_leaf::<Cmd>(
+                &[
+                    "expected-machine",
+                    "patch",
+                    "--bmc-mac-address",
+                    "00:11:22:33:44:55",
+                    flag,
+                    "false",
+                ],
+                &["patch"],
+            )
+            .map_err(|error| error.kind())?;
+            Ok(matches.get_one::<bool>(field).copied())
+        };
+        "each boolean is a complete patch" {
+            ("--bmc-retain-credentials", "bmc_retain_credentials") => Yields(Some(false)),
+            ("--default_pause_ingestion_and_poweron", "default_pause_ingestion_and_poweron") => Yields(Some(false)),
+            ("--disable-lockdown", "disable_lockdown") => Yields(Some(false)),
         }
     );
 }
@@ -714,9 +716,6 @@ fn parse_add_rejects_invalid_dpu_policy() {
     );
 }
 
-// `patch --dpu-policy nic`
-// alone (no other patchable fields) satisfies clap's ArgGroup and the
-// `Args::validate()` "at least one field" check.
 #[test]
 fn validate_patch_with_dpu_policy_only() {
     let cmd = Cmd::try_parse_from([
@@ -883,9 +882,6 @@ fn parse_add_rejects_invalid_bmc_ip_allocation() {
     );
 }
 
-// `patch --bmc-ip-allocation retained` alone (no other patchable fields) must
-// satisfy clap's ArgGroup and `Args::validate()`'s "at least one field" check.
-// A patch that sets only this field.
 #[test]
 fn validate_patch_with_bmc_ip_allocation_only() {
     let cmd = Cmd::try_parse_from([

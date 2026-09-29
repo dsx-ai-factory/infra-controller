@@ -15,12 +15,21 @@
  * limitations under the License.
  */
 
+//! Database operations for SitePrefixes.
+//!
+//! Explicit result columns keep this table's queries working across column
+//! additions. Cached wildcard statements otherwise fail with PostgreSQL's
+//! "cached plan must not change result type".
+
 use std::collections::HashMap;
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::VpcPrefixId;
+use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::site_prefix::{
     NewSitePrefix, NewTenantManagedSitePrefix, PrefixMatch, RetireTenantManagedSitePrefix,
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
@@ -30,7 +39,8 @@ use model::tenant::TenantOrganizationId;
 use sqlx::{PgConnection, QueryBuilder};
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::machine::MachineNetworkConfigNotCurrent;
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 const TENANT_PREFIX_EXCLUSION: &str = "site_prefixes_tenant_prefix_excl";
 const TENANT_ADMISSION_CHECK: &str = "site_prefixes_tenant_admission_check";
@@ -162,7 +172,8 @@ async fn insert(value: NewSitePrefix, txn: &mut PgConnection) -> DatabaseResult<
             version
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
 
     let site_prefix: SitePrefix = sqlx::query_as(query)
@@ -337,7 +348,9 @@ pub async fn reconcile_configured(
     configured_prefixes.sort_by_cached_key(ToString::to_string);
     configured_prefixes.dedup();
 
-    let find_query = "SELECT * FROM site_prefixes WHERE authority = $1 FOR UPDATE";
+    let find_query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE authority = $1 FOR UPDATE";
     let stored: Vec<SitePrefix> = sqlx::query_as(find_query)
         .bind(SitePrefixAuthority::OperatorManaged)
         .fetch_all(&mut *txn)
@@ -438,7 +451,9 @@ pub async fn find_by_id_for_update(
     txn: &mut PgConnection,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = $1 FOR UPDATE";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = $1 FOR UPDATE";
     sqlx::query_as(query)
         .bind(site_prefix_id)
         .fetch_optional(txn)
@@ -455,7 +470,9 @@ pub async fn find_by_id_for_vpc_prefix_attachment(
     txn: &mut PgConnection,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = $1 FOR SHARE";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = $1 FOR SHARE";
     sqlx::query_as(query)
         .bind(site_prefix_id)
         .fetch_optional(txn)
@@ -474,7 +491,8 @@ pub async fn find_legacy_operator_managed_for_vpc_prefix_attachment(
     prefix: IpNetwork,
 ) -> DatabaseResult<Vec<SitePrefix>> {
     let query = r#"
-        SELECT *
+        SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
         FROM site_prefixes
         WHERE authority = $1
           AND prefix >>= $2
@@ -500,7 +518,8 @@ pub async fn find_containing_tenant_managed_for_vpc_prefix_attachment(
     tenant_organization_id: &str,
 ) -> DatabaseResult<Vec<SitePrefix>> {
     let query = r#"
-        SELECT *
+        SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
         FROM site_prefixes
         WHERE authority = $1
           AND prefix >>= $2
@@ -753,6 +772,18 @@ pub async fn count_tenant_managed(
         .map_err(|_| DatabaseError::internal(format!("invalid SitePrefix count {used}")))
 }
 
+/// Returns distinct retained tenant prefixes in every lifecycle state.
+/// Deleting roots remain protected until their lifecycle finishes removal.
+/// Order is unspecified; callers that need stable output must sort or compact it.
+pub async fn find_tenant_prefixes(db: impl DbReader<'_>) -> DatabaseResult<Vec<IpNetwork>> {
+    let query = "SELECT DISTINCT prefix FROM site_prefixes WHERE authority = $1";
+    sqlx::query_scalar(query)
+        .bind(SitePrefixAuthority::TenantManaged)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Returns tenant quota use for the owners present in one inventory response.
 pub async fn count_tenant_managed_by_organizations(
     db: impl DbReader<'_>,
@@ -811,7 +842,8 @@ pub async fn update_tenant_metadata(
           AND authority = $7
           AND lifecycle_state <> $8
           AND version = $9
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
     sqlx::query_as(query)
         .bind(&value.metadata.name)
@@ -870,7 +902,8 @@ pub async fn retire_tenant_managed(
           AND tenant_organization_id = $4
           AND authority = $5
           AND version = $6
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
     let site_prefix: SitePrefix = sqlx::query_as(query)
         .bind(SitePrefixLifecycleState::Deleting)
@@ -960,7 +993,9 @@ pub async fn find_by_ids(
     db: impl DbReader<'_>,
     site_prefix_ids: &[SitePrefixId],
 ) -> DatabaseResult<Vec<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = ANY($1) ORDER BY id";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = ANY($1) ORDER BY id";
     sqlx::query_as(query)
         .bind(site_prefix_ids)
         .fetch_all(db)
@@ -968,11 +1003,150 @@ pub async fn find_by_ids(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `find_isolation_hosts` selects hosts using
+/// [`ManagedHostStateSnapshot::needs_site_prefix_isolation`].
+/// When the caller's site policy does not require isolation, no hosts are selected.
+pub async fn find_isolation_hosts(
+    txn: &mut PgConnection,
+    isolation_required: bool,
+) -> DatabaseResult<Vec<ManagedHostStateSnapshot>> {
+    if !isolation_required {
+        return Ok(Vec::new());
+    }
+
+    let mut hosts = crate::managed_host::load_all(txn, LoadSnapshotOptions::default())
+        .await?
+        .into_iter()
+        .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
+        .collect::<Vec<_>>();
+    // Use the same machine lock order for every prefix's initial request.
+    hosts.sort_unstable_by_key(|host| host.host_snapshot.id);
+    Ok(hosts)
+}
+
+/// Returns the initial protection request time, or None for an unrequested or
+/// missing root. Once recorded, this time does not change during readiness.
+pub async fn isolation_requested_at(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+) -> DatabaseResult<Option<DateTime<Utc>>> {
+    let query = "SELECT isolation_requested_at FROM site_prefixes WHERE id = $1";
+    sqlx::query_scalar(query)
+        .bind(site_prefix_id)
+        .fetch_optional(txn)
+        .await
+        .map(Option::flatten)
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `request_isolation` requests the complete protection configuration once for
+/// a tenant SitePrefix. The caller holds the routing lock and the SitePrefix
+/// row lock, and commits the host/DPU version changes with the returned request
+/// time. Repeated calls return that time without generating more versions.
+/// `isolation_required` is the caller's site policy decision; false records the
+/// request with no receivers, allowing the normal readiness transition.
+///
+/// `NotApplied` means a host disappeared or changed network version. The
+/// caller must roll back all writes and retry from fresh snapshots.
+pub async fn request_isolation(
+    txn: &mut PgConnection,
+    site_prefix: &SitePrefix,
+    isolation_required: bool,
+) -> DatabaseResult<ConditionalWrite<DateTime<Utc>, MachineNetworkConfigNotCurrent>> {
+    if site_prefix.status.authority != SitePrefixAuthority::TenantManaged
+        || site_prefix.status.lifecycle_state != SitePrefixLifecycleState::Provisioning
+    {
+        return Err(DatabaseError::FailedPrecondition(
+            "only a provisioning tenant SitePrefix can request isolation".to_string(),
+        ));
+    }
+
+    if let Some(requested_at) = isolation_requested_at(txn, site_prefix.id).await? {
+        return Ok(ConditionalWrite::Applied(requested_at));
+    }
+
+    for host in find_isolation_hosts(txn, isolation_required).await? {
+        if let ConditionalWrite::NotApplied(reason) = crate::machine::try_update_network_config(
+            txn,
+            &host.host_snapshot.id,
+            host.host_snapshot.network_config.version,
+            &host.host_snapshot.network_config.value,
+        )
+        .await?
+        {
+            return Ok(ConditionalWrite::NotApplied(reason));
+        }
+    }
+
+    // This is progress within Provisioning, not a public lifecycle or metadata
+    // change. Its transaction includes every group update, so a restart can
+    // resume the acknowledgement wait without resetting any host's target.
+    // Use request completion time, not the transaction's earlier start time.
+    let query = "UPDATE site_prefixes SET isolation_requested_at = clock_timestamp() \
+        WHERE id = $1 RETURNING isolation_requested_at";
+    let requested_at = sqlx::query_scalar(query)
+        .bind(site_prefix.id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(ConditionalWrite::Applied(requested_at))
+}
+
+/// `try_mark_ready` applies a controller readiness decision only while the same
+/// tenant root is still Provisioning and its initial protection request exists.
+/// Missing, retired, or concurrently changed roots return `NotApplied`.
+pub async fn try_mark_ready(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+    old_version: ConfigVersion,
+    new_version: ConfigVersion,
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
+    let query = r#"
+        UPDATE site_prefixes
+        SET lifecycle_state = $1, version = $2, updated_at = now()
+        WHERE id = $3 AND version = $4 AND authority = $5
+          AND lifecycle_state = $6 AND isolation_requested_at IS NOT NULL
+    "#;
+    let result = sqlx::query(query)
+        .bind(SitePrefixLifecycleState::Ready)
+        .bind(new_version)
+        .bind(site_prefix_id)
+        .bind(old_version)
+        .bind(SitePrefixAuthority::TenantManaged)
+        .bind(SitePrefixLifecycleState::Provisioning)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(if result.rows_affected() == 1 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(ControllerStateNotCurrent)
+    })
+}
+
+/// `update_controller_state_outcome` stores the last readiness handler result
+/// without changing the SitePrefix's public lifecycle or optimistic version.
+pub async fn update_controller_state_outcome(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+    outcome: PersistentStateHandlerOutcome,
+) -> DatabaseResult<()> {
+    let query = "UPDATE site_prefixes SET controller_state_outcome = $1 WHERE id = $2";
+    sqlx::query(query)
+        .bind(sqlx::types::Json(outcome))
+        .bind(site_prefix_id)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 
     use model::metadata::Metadata;
     use model::site_prefix::NewTenantManagedSitePrefix;
+    use sqlx::Connection;
 
     use super::*;
 
@@ -1029,6 +1203,137 @@ mod tests {
             &site_prefix_id,
         )
         .await
+    }
+
+    #[crate::sqlx_test]
+    async fn site_prefix_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+        let mut api_connection = pool.acquire().await?;
+        exercise_site_prefix_queries(&mut api_connection, "10.72.0.0/24".parse()?).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        let mut migration_connection = pool.acquire().await?;
+        let mut migration = migration_connection.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE site_prefixes
+                 ADD COLUMN test_added_timestamp timestamptz,
+                 ADD COLUMN test_added_outcome jsonb;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_site_prefix_queries(&mut api_connection, "10.73.0.0/24".parse()?).await?;
+        Ok(())
+    }
+
+    async fn exercise_site_prefix_queries(
+        connection: &mut PgConnection,
+        prefix: IpNetwork,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        reconcile_configured(&mut txn, &[prefix]).await?;
+        let [operator]: [SitePrefix; 1] =
+            find_legacy_operator_managed_for_vpc_prefix_attachment(&mut txn, prefix)
+                .await?
+                .try_into()
+                .expect("one containing operator prefix");
+        assert_eq!(operator.config.prefix, prefix);
+        assert_eq!(operator.config.tenant_organization_id, None);
+        assert_eq!(
+            operator.status.authority,
+            SitePrefixAuthority::OperatorManaged
+        );
+        assert_eq!(
+            operator.status.lifecycle_state,
+            SitePrefixLifecycleState::Ready
+        );
+
+        // The first pass retires its tenant root, which still counts toward quota.
+        let created =
+            create_tenant_managed(tenant_managed(&prefix.to_string(), "tenant-a"), 2, &mut txn)
+                .await?
+                .site_prefix;
+        assert_eq!(created.config.prefix, prefix);
+        assert_eq!(
+            created.config.tenant_organization_id,
+            Some("tenant-a".parse()?)
+        );
+        assert_eq!(created.status.authority, SitePrefixAuthority::TenantManaged);
+        assert_eq!(
+            created.status.lifecycle_state,
+            SitePrefixLifecycleState::Provisioning
+        );
+
+        let metadata = Metadata {
+            name: "updated cached prefix".to_string(),
+            description: "cached SitePrefix query".to_string(),
+            labels: HashMap::from([("test".to_string(), "column addition".to_string())]),
+        };
+        let updated = update_tenant_metadata(
+            &UpdateSitePrefixMetadata {
+                id: created.id,
+                tenant_organization_id: "tenant-a".parse()?,
+                metadata: metadata.clone(),
+                if_version_match: Some(created.version),
+            },
+            created.version,
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(updated.metadata, metadata);
+
+        for (name, rows) in [
+            (
+                "find_by_id_for_update",
+                vec![
+                    find_by_id_for_update(&mut txn, created.id)
+                        .await?
+                        .expect("created tenant prefix"),
+                ],
+            ),
+            (
+                "find_by_id_for_vpc_prefix_attachment",
+                vec![
+                    find_by_id_for_vpc_prefix_attachment(&mut txn, created.id)
+                        .await?
+                        .expect("created tenant prefix"),
+                ],
+            ),
+            (
+                "find_containing_tenant_managed_for_vpc_prefix_attachment",
+                find_containing_tenant_managed_for_vpc_prefix_attachment(
+                    &mut txn, prefix, "tenant-a",
+                )
+                .await?,
+            ),
+            ("find_by_ids", find_by_ids(&mut *txn, &[created.id]).await?),
+        ] {
+            assert_eq!(rows.as_slice(), std::slice::from_ref(&updated), "{name}");
+        }
+
+        let retired = retire_tenant_managed(
+            &RetireTenantManagedSitePrefix {
+                id: created.id,
+                tenant_organization_id: "tenant-a".parse()?,
+            },
+            &updated,
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(
+            retired.status.lifecycle_state,
+            SitePrefixLifecycleState::Deleting
+        );
+        assert_eq!(retired.config, updated.config);
+        assert_eq!(retired.metadata, metadata);
+        txn.commit().await?;
+
+        assert_eq!(find_by_ids(connection, &[created.id]).await?, vec![retired]);
+        Ok(())
     }
 
     #[crate::sqlx_test]

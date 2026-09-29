@@ -768,10 +768,9 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 		rejectsCredentials   bool
 	}{
 		{
-			name: "credential values reach Core through encrypted transport",
+			name: "password-only update reaches Core through encrypted transport",
 			id:   testEPS.ID.String(),
 			requestBody: model.APIExpectedPowerShelfUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr("patch-admin"),
 				DefaultBmcPassword: cutil.GetPtr("patch-secret"),
 			},
 			setupContext: func(c echo.Context) {
@@ -780,7 +779,21 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testEPS.ID.String())
 			},
 			expectedStatus: http.StatusOK,
-			expectedPaths:  []string{"bmc_username", "bmc_password"},
+			expectedPaths:  []string{"bmc_password"},
+		},
+		{
+			name: "username-only update reaches Core through encrypted transport",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr("patch-admin"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"bmc_username"},
 		},
 		{
 			name: "metadata update excludes null BMC credentials",
@@ -798,10 +811,10 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 			expectedPaths:  []string{"metadata.labels", "shelf_serial_number"},
 		},
 		{
-			name: "partial BMC pair rejects accompanying metadata before dispatch",
+			name: "empty BMC username rejects accompanying metadata before dispatch",
 			id:   testEPS.ID.String(),
 			requestBody: model.APIExpectedPowerShelfUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr("incomplete"),
+				DefaultBmcUsername: cutil.GetPtr(""),
 				Labels:             map[string]string{"env": "must-not-change"},
 			},
 			setupContext: func(c echo.Context) {
@@ -810,7 +823,7 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testEPS.ID.String())
 			},
 			expectedStatus:     http.StatusBadRequest,
-			expectedErrorMsg:   "defaultBmcPassword",
+			expectedErrorMsg:   "defaultBmcUsername",
 			expectNoWorkflow:   true,
 			rejectsCredentials: true,
 		},
@@ -904,14 +917,21 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				require.NotNil(t, capturedPatch)
 				require.NotNil(t, capturedPatch.UpdateMask)
 				assert.Equal(t, tt.expectedPaths, capturedPatch.UpdateMask.Paths)
-				if tt.requestBody.DefaultBmcPassword != nil {
+				if tt.requestBody.DefaultBmcUsername != nil {
 					assert.Equal(t, *tt.requestBody.DefaultBmcUsername, capturedPatch.ExpectedPowerShelf.BmcUsername)
+					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcUsername)
+					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcUsername)
+				} else {
+					assert.Empty(t, capturedPatch.ExpectedPowerShelf.BmcUsername)
+				}
+				if tt.requestBody.DefaultBmcPassword != nil {
 					assert.Equal(t, *tt.requestBody.DefaultBmcPassword, capturedPatch.ExpectedPowerShelf.BmcPassword)
 					testExpectedComponentPatchSecrets(t, capturedProxy, *tt.requestBody.DefaultBmcPassword)
 					assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcPassword)
 				} else {
-					assert.Empty(t, capturedPatch.ExpectedPowerShelf.BmcUsername)
 					assert.Empty(t, capturedPatch.ExpectedPowerShelf.BmcPassword)
+				}
+				if tt.requestBody.DefaultBmcUsername == nil && tt.requestBody.DefaultBmcPassword == nil {
 					assert.Empty(t, capturedProxy.EncryptedSecrets)
 				}
 			}

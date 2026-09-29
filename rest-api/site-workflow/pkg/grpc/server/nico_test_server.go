@@ -305,12 +305,16 @@ func (f *NICoServerImpl) CreateNetworkSegment(c context.Context, req *corev1.Net
 	}
 
 	nns := &corev1.NetworkSegment{
-		Id:          &corev1.NetworkSegmentId{Value: nid},
-		Name:        req.Name,
-		VpcId:       req.VpcId,
-		SubdomainId: req.SubdomainId,
-		Mtu:         req.Mtu,
-		Prefixes:    req.Prefixes,
+		Id:       &corev1.NetworkSegmentId{Value: nid},
+		Metadata: &corev1.Metadata{Name: req.Name},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId:                    req.VpcId,
+			SubdomainId:              req.SubdomainId,
+			Mtu:                      req.Mtu,
+			Prefixes:                 req.Prefixes,
+			SegmentType:              req.SegmentType,
+			InferSlaacEui64Addresses: req.InferSlaacEui64Addresses,
+		},
 	}
 	f.ns[nid] = nns
 

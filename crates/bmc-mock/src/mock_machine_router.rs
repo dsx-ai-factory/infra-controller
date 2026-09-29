@@ -57,16 +57,6 @@ pub struct MachineRouterOptions {
     pub bmc_reset_duration: Option<std::time::Duration>,
 }
 
-pub type SetSystemPowerResult = Result<(), SetSystemPowerError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum SetSystemPowerError {
-    #[error("mock BMC reported bad request when setting system power: {0}")]
-    BadRequest(String),
-    #[error("mock BMC failed to send power command: {0}")]
-    CommandSendError(String),
-}
-
 trait AddRoutes {
     fn add_routes(self, f: impl FnOnce(Self) -> Self) -> Self
     where

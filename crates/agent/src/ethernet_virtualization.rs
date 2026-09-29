@@ -153,6 +153,18 @@ fn split_addresses_by_family(addresses: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Ad
         })
 }
 
+/// Converts the presence-bearing Core value without collapsing explicit zero
+/// into the legacy omitted-field behavior.
+fn dhcpv6_server_preference(
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+) -> eyre::Result<Option<u8>> {
+    network_config
+        .dhcpv6_server_preference
+        .map(u8::try_from)
+        .transpose()
+        .wrap_err("DHCPv6 server preference must be between 0 and 255")
+}
+
 /// Resolve site-configured DHCPv4 NTP and DNS-discovered DHCPv6 NTP options.
 fn build_dhcp_ntp_servers(
     nc: &rpc::ManagedHostNetworkConfigResponse,
@@ -363,6 +375,53 @@ fn site_isolation_prefixes_for_rendering(
     }
 }
 
+/// Builds tenant RA inputs from Core's mode-specific allocation without
+/// confusing the stateful tenant `/128` with its containing `/127` linknet.
+fn tenant_ipv6_router_advertisement(
+    interface: &FlatInterfaceConfig,
+    rdnss_servers: &[Ipv6Addr],
+) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
+    let address = interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))?;
+    let IpNet::V6(prefix) = address.prefix.parse().ok()? else {
+        return None;
+    };
+    let IpNet::V6(interface_prefix) = address.interface_prefix.parse().ok()? else {
+        return None;
+    };
+    let mode = if address.ip.is_empty() {
+        // VPC-level SLAAC is explicit only when Core supplies the allocated /64.
+        if prefix.prefix_len() != 64
+            || interface_prefix.prefix_len() != 64
+            || interface_prefix.network() != prefix.network()
+        {
+            return None;
+        }
+        nvue::Ipv6RouterAdvertisementMode::Slaac
+    } else {
+        // Stateful FNN persists the second /127 endpoint as a tenant /128;
+        // the first endpoint remains the DPU address derived from the linknet.
+        let host_address = address.ip.parse::<Ipv6Addr>().ok()?;
+        if prefix.prefix_len() != 127
+            || interface_prefix.prefix_len() != 128
+            || interface_prefix.network() != host_address
+            || !prefix.contains(&host_address)
+            || host_address == prefix.network()
+        {
+            return None;
+        }
+        nvue::Ipv6RouterAdvertisementMode::Stateful
+    };
+
+    Some(nvue::Ipv6RouterAdvertisementConfig {
+        prefix: prefix.to_string(),
+        mode,
+        rdnss_servers: rdnss_servers.to_vec(),
+    })
+}
+
 /// Update the NVUE network config, returning whether NVUE applied a change.
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
@@ -373,6 +432,7 @@ pub(super) async fn update_nvue(
     vpc_virtualization_type: VpcVirtualizationType,
     update_flavor: NvueUpdateFlavor<'_>,
     nc: &rpc::ManagedHostNetworkConfigResponse,
+    service_addrs: &ServiceAddresses,
     hbn_device_names: HBNDeviceNames,
     supplemental_config: Option<&str>,
 ) -> eyre::Result<bool> {
@@ -434,6 +494,7 @@ pub(super) async fn update_nvue(
     let tenancy_enabled = !nc.use_admin_network || nc.is_primary_dpu;
 
     let physical_name = hbn_device_names.reps[0].to_string();
+    let (_, rdnss_servers) = split_addresses_by_family(&service_addrs.nameservers);
     let networks = if nc.use_admin_network {
         if nc.is_primary_dpu {
             let admin_interface = nc
@@ -472,6 +533,7 @@ pub(super) async fn update_nvue(
                     nvue::Ipv6PortConfig {
                         gateway_cidr: v6.interface_prefix.clone(),
                         svi_ip: v6.svi_ip.clone(),
+                        router_advertisement: None,
                     }
                 }),
                 vpc_prefixes: admin_interface.vpc_prefixes.clone(),
@@ -517,10 +579,9 @@ pub(super) async fn update_nvue(
                 }
             };
 
-            // For stateful FNN interfaces with IPv6, the address configured on
-            // the DPU is the network address of the /127 linknet (the ::0 end).
-            // The ::1 end is the host. SLAAC instead carries the selected /64
-            // without a concrete host address.
+            // Core owns the IPv6 link prefix. The DPU address is its first
+            // address, while stateful DHCPv6 assigns the second /127 endpoint
+            // carried independently as the tenant /128.
             ifs.push(nvue::PortConfig {
                 interface_name: name,
                 is_phy: net.function_type == rpc::InterfaceFunctionType::Physical as i32,
@@ -536,9 +597,32 @@ pub(super) async fn update_nvue(
                 l3_vni: Some(net.vpc_vni),
                 gateway_cidr: net.gateway.clone().unwrap_or_default(),
                 ipv6_port_config: net.ipv6_interface_config.as_ref().map(|v6| {
+                    // New configs derive the DPU address from Core's one
+                    // authoritative prefix. Only configs without a V6 entry
+                    // retain the legacy sidecar mapping during upgrades.
+                    let gateway_cidr =
+                        match net.addresses.iter().find(|address| {
+                            address.address_family == i32::from(rpc::AddressFamily::V6)
+                        }) {
+                            Some(address) => match address.prefix.parse::<IpNet>() {
+                                Ok(IpNet::V6(prefix)) => {
+                                    format!("{}/{}", prefix.network(), prefix.prefix_len())
+                                }
+                                _ => String::new(),
+                            },
+                            None => v6.interface_prefix.clone(),
+                        };
                     nvue::Ipv6PortConfig {
-                        gateway_cidr: v6.interface_prefix.clone(),
+                        gateway_cidr,
                         svi_ip: v6.svi_ip.clone(),
+                        router_advertisement: if vpc_virtualization_type
+                            == VpcVirtualizationType::Fnn
+                            && !net.is_l2_segment
+                        {
+                            tenant_ipv6_router_advertisement(net, &rdnss_servers)
+                        } else {
+                            None
+                        },
                     }
                 }),
                 vpc_prefixes: net.vpc_prefixes.clone(),
@@ -1040,6 +1124,7 @@ async fn update_dhcp_via_grpc(
     dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
     dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
     dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
+    dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference(network_config)?;
     let mut host_config = carbide_rpc_utils::dhcp::HostConfig::try_from(
         network_config.clone(),
         hbn_device_names.reps[0],
@@ -1474,6 +1559,7 @@ fn write_dhcp_v4_server_config(
         nameservers_v4,
         nameservers_v6,
         loopback_ip,
+        dhcpv6_server_preference(nc)?,
     )?;
     match write(
         next_contents,
@@ -1906,6 +1992,21 @@ mod tests {
         InterfaceState, ServiceAddresses, needed_interface_state,
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
+
+    /// Supplies stable service discovery results to NVUE tests so RDNSS and
+    /// DHCPv6 can be compared against one agent-local source.
+    fn test_service_addresses() -> ServiceAddresses {
+        ServiceAddresses {
+            pxe_ips: vec!["192.0.2.10".parse().unwrap()],
+            ntpservers: vec![],
+            nameservers: vec![
+                "192.0.2.53".parse().unwrap(),
+                "2001:db8::53".parse().unwrap(),
+                "2001:db8::54".parse().unwrap(),
+            ],
+        }
+    }
+
     /// Verifies managed-host loopbacks preserve optional IPv6 and reject invalid families.
     ///
     /// This keeps family validation at the NVUE rendering boundary.
@@ -2088,6 +2189,7 @@ mod tests {
                         skip_post,
                     },
                     &network_config,
+                    &test_service_addresses(),
                     HBNDeviceNames::hbn_23(),
                     None,
                 )
@@ -2243,6 +2345,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2294,6 +2397,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2345,6 +2449,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2405,6 +2510,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2418,6 +2524,73 @@ esac
         let expected = include_str!("../templates/tests/nvue_startup_fnn_with_leaks.yaml.expected");
         compare_diffed(hbn_root.join(nvue::PATH), expected)?;
 
+        Ok(())
+    }
+
+    /// Verifies one segment prefix drives both the DPU address and RA PIO while
+    /// the stateful tenant `/128` remains a separate host route.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn stateful_tenant_ipv6_renders_dpu_address_and_ra_from_segment_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        let interface = &mut network_config.tenant_interfaces[1];
+        interface.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            svi_ip: None,
+        });
+        interface.addresses.push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            prefix: "2001:db8::/127".to_string(),
+            ..Default::default()
+        });
+
+        // Render through the full Core-response-to-NVUE wiring boundary.
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+        super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )
+        .await?;
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let interface =
+            &docs.as_sequence().expect("two YAML documents")[1]["set"]["interface"]["pf0hpf_if"];
+        let ip = &interface["ip"];
+
+        // The DPU derives ::0/127 from the prefix; ::1/128 remains the tenant route.
+        assert!(!ip["address"]["2001:db8::/127"].is_null());
+        assert!(ip["address"]["2001:db8::1/128"].is_null());
+        let frr_snippet = docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]
+            ["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("stateful tenant should render an FRR snippet");
+        assert!(
+            frr_snippet.contains("interface pf0hpf_if vrf vpc_1025186")
+                && frr_snippet.contains("ipv6 nd prefix 2001:db8::/127 no-autoconfig")
+                && frr_snippet.contains("ipv6 nd managed-config-flag")
+        );
         Ok(())
     }
 
@@ -2445,6 +2618,7 @@ esac
                 virtualization_type,
                 update_flavor,
                 &network_config,
+                &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
             )
@@ -2485,6 +2659,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2540,6 +2715,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2598,6 +2774,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2665,6 +2842,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2722,6 +2900,7 @@ esac
             virtualization_type,
             update_flavor,
             &network_config,
+            &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
         )
@@ -2790,6 +2969,7 @@ esac
                     skip_post: true,
                 },
                 &network_config,
+                &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
             )
@@ -3222,6 +3402,7 @@ esac
             // yes it's in there twice I dunno either
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(255),
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -3520,6 +3701,123 @@ esac
         );
     }
 
+    /// Verifies the Core-to-agent response preserves Preference presence and
+    /// rejects values outside the shared DHCP model before either delivery path.
+    #[test]
+    fn dhcpv6_server_preference_validates_network_response() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |preference| {
+                dhcpv6_server_preference(&rpc::ManagedHostNetworkConfigResponse {
+                    dhcpv6_server_preference: preference,
+                    ..Default::default()
+                })
+                .map_err(drop)
+            };
+            "legacy omission" {
+                // An older Core keeps the option absent instead of acquiring NICo's new default.
+                None => Yields(None),
+            }
+            "configured values" {
+                // Explicit zero remains distinguishable from legacy omission.
+                Some(0) => Yields(Some(0)),
+                // The one-octet maximum survives the widened protobuf field.
+                Some(255) => Yields(Some(255)),
+            }
+            "invalid widened value" {
+                // A corrupt or future value cannot be silently truncated on delivery.
+                Some(256) => Fails,
+            }
+        );
+    }
+
+    /// Verifies tenant RA consumes the family-neutral V6 entry, preserves the
+    /// explicit addressing mode, and never broadens an allocated prefix.
+    #[test]
+    fn tenant_ipv6_router_advertisement_requires_mode_specific_prefix() {
+        use carbide_test_support::value_scenarios;
+
+        let v4 = rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V4.into(),
+            ip: "192.0.2.10".to_string(),
+            interface_prefix: "192.0.2.10/32".to_string(),
+            prefix: "192.0.2.0/24".to_string(),
+            ..Default::default()
+        };
+        let resolvers = vec![
+            "2001:db8::53".parse().unwrap(),
+            "2001:db8::54".parse().unwrap(),
+        ];
+
+        value_scenarios!(run = |addresses| {
+                let interface = rpc::FlatInterfaceConfig {
+                    addresses,
+                    ..Default::default()
+                };
+                tenant_ipv6_router_advertisement(&interface, &resolvers).map(|advertisement| {
+                    (
+                        advertisement.mode,
+                        advertisement.prefix,
+                        advertisement.rdnss_servers,
+                    )
+                })
+            };
+            "stateful allocated /127" {
+                // A tenant /128 at the second endpoint selects stateful RA for its /127.
+                vec![v4, rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8::1".to_string(),
+                    interface_prefix: "2001:db8::1/128".to_string(),
+                    prefix: "2001:db8::/127".to_string(),
+                    ..Default::default()
+                }] => Some((
+                    nvue::Ipv6RouterAdvertisementMode::Stateful,
+                    "2001:db8::/127".to_string(),
+                    resolvers.clone(),
+                )),
+            }
+            "explicit SLAAC prefix" {
+                // Prefix-only host configuration selects SLAAC without manufacturing an address.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: String::new(),
+                    interface_prefix: "2001:db8:1::/64".to_string(),
+                    prefix: "2001:db8:1::/64".to_string(),
+                    ..Default::default()
+                }] => Some((
+                    nvue::Ipv6RouterAdvertisementMode::Slaac,
+                    "2001:db8:1::/64".to_string(),
+                    resolvers.clone(),
+                )),
+            }
+            "invalid or ambiguous mode inputs" {
+                // Routing-only data does not establish either tenant address mode.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    prefix: "2001:db8:2::/64".to_string(),
+                    ..Default::default()
+                }] => None,
+                // The first /127 address belongs to the DPU interface, not the tenant binding.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:3::".to_string(),
+                    interface_prefix: "2001:db8:3::/128".to_string(),
+                    prefix: "2001:db8:3::/127".to_string(),
+                    ..Default::default()
+                }] => None,
+                // A concrete address does not turn a SLAAC-sized prefix into stateful allocation.
+                vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:4::1".to_string(),
+                    interface_prefix: "2001:db8:4::/64".to_string(),
+                    prefix: "2001:db8:4::/64".to_string(),
+                    ..Default::default()
+                }] => None,
+            }
+        );
+    }
+
     fn validate_dhcp_config(received: DhcpConfig, expected: DhcpConfig) {
         assert_eq!(received.lease_time_secs, expected.lease_time_secs);
         assert_eq!(received.renewal_time_secs, expected.renewal_time_secs);
@@ -3551,6 +3849,10 @@ esac
         assert_eq!(
             received.dhcpv6_valid_lifetime_secs,
             expected.dhcpv6_valid_lifetime_secs
+        );
+        assert_eq!(
+            received.dhcpv6_server_preference,
+            expected.dhcpv6_server_preference
         );
     }
 
@@ -3692,7 +3994,13 @@ esac
                 ipv6_interface_config: None,
                 vpc_routing_profile: None,
                 interface_routing_profile: None,
-                addresses: vec![],
+                addresses: vec![rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:185::1".to_string(),
+                    interface_prefix: "2001:db8:185::1/128".to_string(),
+                    prefix: "2001:db8:185::/127".to_string(),
+                    ..Default::default()
+                }],
             },
         ];
 
@@ -3725,6 +4033,7 @@ esac
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
             dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
 
@@ -3765,6 +4074,7 @@ esac
             // yes it's in there twice I dunno either
             dhcp_servers: vec!["10.217.5.197".to_string(), "10.217.5.197".to_string()],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(0),
             vni_device: "vxlan48".to_string(),
 
             managed_host_config: Some(netconf),
@@ -3893,7 +4203,7 @@ esac
         let service_addrs = ServiceAddresses {
             pxe_ips: vec![IpAddr::from([10, 0, 0, 1])],
             ntpservers: vec![],
-            nameservers: vec![IpAddr::from([10, 1, 1, 1])],
+            nameservers: vec![IpAddr::from([10, 1, 1, 1]), "2001:db8::53".parse().unwrap()],
         };
         match super::write_dhcp_v4_server_config(
             &fp,
@@ -3927,6 +4237,8 @@ esac
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
             dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
             dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
+            carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
+            dhcpv6_server_preference: Some(0),
             ..Default::default()
         };
         let dhcp_contents = super::read_limited(g.path())?;
@@ -3938,6 +4250,17 @@ esac
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
         let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        assert!(
+            dhcp_host_config
+                .host_ip_addresses
+                .values()
+                .any(|interface| {
+                    interface.ipv6.as_ref().is_some_and(|ipv6| {
+                        ipv6.address == Some("2001:db8:185::1".parse().unwrap())
+                            && ipv6.prefix == "2001:db8:185::1/128"
+                    })
+                })
+        );
         validate_host_config(
             dhcp_host_config,
             HostConfig::try_from(network_config, "pf0hpf_sf", "pf0vf", "_sf", true)?,
@@ -3971,6 +4294,7 @@ esac
             routing_profile: None,
             dhcp_servers: vec![],
             ntp_servers: vec![],
+            dhcpv6_server_preference: Some(255),
             vni_device: "vxlan48".to_string(),
             managed_host_config: Some(netconf),
             managed_host_config_version: "V1-T1".to_string(),

@@ -427,12 +427,15 @@ fi
 # --------------------------------------------------------------------------
 section "NICo Pods"
 _check_deployment  "${NICO_NS}" nico-api
+_check_deployment  "${NICO_NS}" nico-bmc-proxy
 _check_deployment  "${NICO_NS}" nico-dhcp
 _check_statefulset "${NICO_NS}" nico-dns
+_check_deployment  "${NICO_NS}" nico-hardware-health
 _check_deployment  "${NICO_NS}" nico-pxe
+_check_deployment  "${NICO_NS}" nico-ssh-console-rs
 
 # Optional pods: warn if the deployment doesn't exist, fail if it exists but isn't ready
-for _OPT_DEP in nico-hardware-health nico-ssh-console-rs nico-dsx-exchange-consumer; do
+for _OPT_DEP in nico-dsx-exchange-consumer; do
   if kc get deployment -n "${NICO_NS}" "${_OPT_DEP}" &>/dev/null; then
     _check_deployment "${NICO_NS}" "${_OPT_DEP}"
   else
@@ -442,14 +445,18 @@ done
 
 section "NICo Flow"
 FLOW_NS="${FLOW_NS:-flow}"
+REST_NS="${REST_NS:-nico-rest}"
 if kc get ns "${FLOW_NS}" &>/dev/null; then
   _check_deployment "${FLOW_NS}" flow
   for _S in flow.nico.nico-pg-cluster.credentials \
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
+# Key "REST installed" on its deployment: setup.sh 7a pre-creates the namespace.
+elif kc get deployment -n "${REST_NS}" nico-rest-api &>/dev/null; then
+  fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
-  skip "flow namespace not present — flow disabled or not yet deployed"
+  skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
 fi
 
 section "RMS (Rack Manager Service)"
@@ -590,12 +597,17 @@ done < <(kc get externalsecret -A --no-headers \
 section "External Service VIPs (LoadBalancer)"
 while IFS= read -r _SVC; do
   [[ -z "${_SVC}" ]] && continue
-  _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+    -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
   _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
     -o jsonpath='{.spec.ports[0].port}')
-  if [[ -n "${_IP}" && "${_IP}" != "pending" ]]; then
-    pass "svc/${_SVC}: ${_IP}:${_PORT}"
+  if [[ -n "${_IPS}" ]]; then
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      pass "svc/${_SVC}: ${_ADDRESS}:${_PORT}"
+    done <<< "${_IPS}"
   else
     fail "svc/${_SVC}: no external IP (still pending)"
   fi
@@ -623,15 +635,15 @@ elif ! _pod_has_command "${METALLB_NS}" "${_SPEAKER}" speaker nc; then
 else
   while IFS= read -r _SVC; do
     [[ -z "${_SVC}" ]] && continue
-    _IP=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
-      -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    _IPS=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
+      -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}')
     _PORT=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].port}')
     _PROTO=$(kc get svc -n "${NICO_NS}" "${_SVC}" \
       -o jsonpath='{.spec.ports[0].protocol}')
 
     # Skip if no IP assigned yet
-    [[ -z "${_IP}" || "${_IP}" == "pending" ]] && continue
+    [[ -z "${_IPS}" ]] && continue
 
     # UDP-only services cannot be tested with TCP nc; DNS UDP is covered by the
     # DNS section, NTP has no reliable probe, DHCP requires a full handshake.
@@ -639,12 +651,19 @@ else
     [[ "${_PROTO}" == "UDP" ]] && continue
     printf '%s' "${_SVC}" | grep -q "udp" && continue
 
-    if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
-        nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
-      pass "svc/${_SVC}: ${_IP}:${_PORT} reachable from host network"
-    else
-      fail "svc/${_SVC}: ${_IP}:${_PORT} not reachable (BGP route missing or service not listening)"
-    fi
+    # One reachable VIP does not prove the other family works on a dual-stack Service.
+    while IFS= read -r _IP; do
+      [[ -z "${_IP}" ]] && continue
+      # Brackets are for display; nc takes the bare IP as its host argument.
+      _ADDRESS="${_IP}"
+      [[ "${_IP}" == *:* ]] && _ADDRESS="[${_IP}]"
+      if kubectl exec -n "${METALLB_NS}" "${_SPEAKER}" -c speaker -- \
+          nc -zw2 "${_IP}" "${_PORT}" &>/dev/null; then
+        pass "svc/${_SVC}: ${_ADDRESS}:${_PORT} reachable from host network"
+      else
+        fail "svc/${_SVC}: ${_ADDRESS}:${_PORT} not reachable (BGP route missing or service not listening)"
+      fi
+    done <<< "${_IPS}"
   done < <(kc get svc -n "${NICO_NS}" --no-headers 2>/dev/null | \
     awk '$2=="LoadBalancer"{print $1}')
 fi

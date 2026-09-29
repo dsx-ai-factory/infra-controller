@@ -167,3 +167,30 @@ func TestIpamService(t *testing.T) {
 		}
 	})
 }
+
+func TestIPAMService_PrefixUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		length       uint8
+		availableIPs uint64
+	}{
+		{name: "reservation fits", length: 126, availableIPs: 1},
+		{name: "reservation exceeds prefix size", length: 127, availableIPs: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ipamer := goipam.New(ctx)
+			root, err := ipamer.NewPrefix(ctx, "2001:db8::/120")
+			require.NoError(t, err)
+			allocation, err := ipamer.AcquireChildPrefix(ctx, root.Cidr, 122)
+			require.NoError(t, err)
+			subnet, err := ipamer.AcquireChildPrefix(ctx, allocation.Cidr, tc.length)
+			require.NoError(t, err)
+
+			service := New(slog.Default(), ipamer)
+			response, err := service.PrefixUsage(ctx, connect.NewRequest(&v1.PrefixUsageRequest{Cidr: subnet.Cidr}))
+			require.NoError(t, err)
+			assert.Equal(t, tc.availableIPs, response.Msg.AvailableIps)
+		})
+	}
+}

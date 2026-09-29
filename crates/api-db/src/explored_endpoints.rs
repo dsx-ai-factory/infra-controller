@@ -835,6 +835,23 @@ pub async fn insert(
     Ok(())
 }
 
+/// `lock_by_address` locks an existing endpoint until the caller's transaction
+/// completes. The connection must be in a transaction. It returns whether the
+/// row was locked; `false` does not prevent a later insert. Query failures
+/// propagate to the caller.
+pub async fn lock_by_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT address FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let address: Option<IpAddr> = sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(address.is_some())
+}
+
 pub async fn delete(txn: &mut PgConnection, address: IpAddr) -> Result<(), DatabaseError> {
     let query = r#"DELETE FROM explored_endpoints WHERE address=$1"#;
     sqlx::query(query)

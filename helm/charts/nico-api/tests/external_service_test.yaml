@@ -1,0 +1,48 @@
+suite: External API Service address families
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps cluster defaults when family settings are omitted
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - notExists:
+          path: spec.ipFamilyPolicy
+      - notExists:
+          path: spec.ipFamilies
+
+  - it: selects IPv6 for an IPv6 external address
+    set:
+      externalService:
+        enabled: true
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
+        annotations:
+          metallb.io/loadBalancerIPs: "2001:db8::1"
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+      - equal:
+          path: metadata.annotations["metallb.io/loadBalancerIPs"]
+          value: "2001:db8::1"
+
+  - it: preserves the requested primary family for dual-stack allocation
+    set:
+      externalService:
+        enabled: true
+        ipFamilyPolicy: RequireDualStack
+        ipFamilies: [IPv6, IPv4]
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: RequireDualStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6, IPv4]

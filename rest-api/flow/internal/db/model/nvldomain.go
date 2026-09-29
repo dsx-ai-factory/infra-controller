@@ -67,6 +67,10 @@ func GetListOfNVLDomains(
 	conf := &dbquery.Config{
 		IDB:   idb,
 		Model: &domains,
+		DefaultOrderBy: []dbquery.OrderBy{
+			{Column: "name", Direction: dbquery.OrderAscending},
+			{Column: "id", Direction: dbquery.OrderAscending},
+		},
 	}
 
 	if pagination != nil {

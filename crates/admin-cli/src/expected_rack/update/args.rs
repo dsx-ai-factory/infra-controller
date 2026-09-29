@@ -25,20 +25,13 @@ use crate::errors::CarbideCliError;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Update an expected rack's rack profile:
-    $ nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 \
-    --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789
-
 Update an expected rack's metadata name:
-    $ nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 \
-    --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01
+    $ nico-admin-cli expected-rack update rack-01 --meta-name rack-01
 
 ")]
 pub(crate) struct Args {
     #[clap(help = "Rack ID of the expected rack")]
     rack_id: RackId,
-    #[clap(long, help = "Rack profile ID of the expected rack")]
-    rack_profile_id: Option<String>,
 
     #[clap(
         long = "meta-name",
@@ -67,13 +60,9 @@ impl TryFrom<Args> for rpc::forge::ExpectedRack {
     type Error = CarbideCliError;
 
     fn try_from(args: Args) -> Result<Self, Self::Error> {
-        // rack_profile_id is required for update.
-        let rack_profile_id = args.rack_profile_id.ok_or_else(|| {
-            CarbideCliError::GenericError("rack_profile_id is required".to_string())
-        })?;
         Ok(rpc::forge::ExpectedRack {
             rack_id: Some(args.rack_id),
-            rack_profile_id: Some(rack_profile_id.into()),
+            rack_profile_id: None,
             metadata: Some(rpc::forge::Metadata {
                 name: args.meta_name.unwrap_or_default(),
                 description: args.meta_description.unwrap_or_default(),

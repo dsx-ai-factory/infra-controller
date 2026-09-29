@@ -90,6 +90,60 @@ func computeSpec(mfr, serial, mac string) expectedComponentSpec {
 
 // --- rack mirror ----------------------------------------------------------
 
+func TestMirrorExpectedRacks_ProfileID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existing   bool
+		adopt      bool
+		oldProfile *string
+		profile    string
+	}{
+		{name: "insert", profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "populate predecessor rack", existing: true, adopt: true, profile: "GB200_NVL72R1_C2G4_LENOVO"},
+		{name: "replace old profile", existing: true, oldProfile: strPtr("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"), profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "absent profile clears value", existing: true, oldProfile: strPtr("old-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			core := coreRack("rack-01", "NVIDIA", "SN-01")
+			core.RackProfileID = test.profile
+			var original model.Rack
+			if test.existing {
+				original = model.Rack{Name: core.Name, Manufacturer: "NVIDIA", SerialNumber: "SN-01", RackProfileID: test.oldProfile}
+				if !test.adopt {
+					original.ExternalID = strPtr(core.RackID)
+				}
+				require.NoError(t, original.Create(ctx, pool.DB))
+			}
+			result := mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			if test.existing {
+				assert.Equal(t, 1, result.updated)
+			} else {
+				assert.Equal(t, 1, result.inserted)
+			}
+			var stored model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&stored).Where("external_id = ?", core.RackID).Scan(ctx))
+			if test.existing {
+				assert.Equal(t, original.ID, stored.ID)
+			}
+			if test.profile == "" {
+				assert.Nil(t, stored.RackProfileID)
+			} else {
+				require.NotNil(t, stored.RackProfileID)
+				assert.Equal(t, test.profile, *stored.RackProfileID)
+			}
+			result = mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			assert.Zero(t, result.updated, "identical snapshots do not rewrite the rack")
+			patch := (&model.Rack{Name: "renamed"}).BuildPatch(&stored)
+			require.NotNil(t, patch)
+			require.NoError(t, patch.Patch(ctx, pool.DB))
+			var renamed model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&renamed).Where("id = ?", stored.ID).Scan(ctx))
+			assert.Equal(t, stored.RackProfileID, renamed.RackProfileID, "metadata patches preserve the synchronized profile")
+		})
+	}
+}
+
 // A successful but empty Core response soft-deletes both mirror-adopted and
 // legacy racks because no remaining row can be adopted from this snapshot.
 func TestMirrorRacks_EmptyCoreDeletesAllRows(t *testing.T) {
@@ -684,6 +738,116 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	require.NotNil(t, got.PowerState)
 	assert.Equal(t, nicoapi.PowerStateOn, *got.PowerState, "power_state is runtime-owned, must survive")
 	assert.Equal(t, "9.9.9", got.FirmwareVersion, "firmware_version is runtime-owned, must survive")
+}
+
+func TestMirrorComponents_PositionPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		labels      map[string]string
+		preexisting bool
+		wantSlot    int
+		wantTray    int
+		wantHostID  int
+	}{
+		{
+			name:        "missing labels clear stale position to unknown",
+			labels:      map[string]string{},
+			preexisting: true,
+			wantSlot:    unknownPositionValue,
+			wantTray:    unknownPositionValue,
+			wantHostID:  unknownPositionValue,
+		},
+		{
+			name: "explicit zero remains valid",
+			labels: map[string]string{
+				labelComponentSlotID:  "0",
+				labelComponentTrayIdx: "0",
+				labelComponentHostID:  "0",
+			},
+			preexisting: true,
+			wantSlot:    0,
+			wantTray:    0,
+			wantHostID:  0,
+		},
+		{
+			name:       "fresh missing labels insert unknown",
+			labels:     map[string]string{},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "fresh malformed labels insert unknown",
+			labels: map[string]string{
+				labelComponentSlotID:  "not-a-slot",
+				labelComponentTrayIdx: "not-a-tray",
+				labelComponentHostID:  "not-a-host",
+			},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "negative labels preserve existing position",
+			labels: map[string]string{
+				labelComponentSlotID:  "-2",
+				labelComponentTrayIdx: "-3",
+				labelComponentHostID:  "-4",
+			},
+			preexisting: true,
+			wantSlot:    7,
+			wantTray:    8,
+			wantHostID:  9,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			const mac = "aa:bb:cc:dd:ee:11"
+			var componentID uuid.UUID
+			if tc.preexisting {
+				component := model.Component{
+					Type:         compType(),
+					Manufacturer: "Mfg",
+					SerialNumber: "POSITION-1",
+					SlotID:       7,
+					TrayIndex:    8,
+					HostID:       9,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				componentID = component.ID
+				_, err := pool.DB.NewInsert().Model(&model.BMC{
+					MacAddress:  mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			detail := nicoapi.ExpectedMachineDetail{
+				BMCMACAddress:       mac,
+				ChassisSerialNumber: "POSITION-1",
+				Labels:              tc.labels,
+			}
+			mirrorExpectedComponents(
+				ctx,
+				pool,
+				compType(),
+				[]expectedComponentSpec{machineDetailToSpec(detail)},
+				map[string]uuid.UUID{},
+			)
+
+			if componentID == uuid.Nil {
+				var bmc model.BMC
+				require.NoError(t, pool.DB.NewSelect().Model(&bmc).Where("mac_address = ?", mac).Scan(ctx))
+				componentID = bmc.ComponentID
+			}
+			got, err := (&model.Component{ID: componentID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSlot, got.SlotID)
+			assert.Equal(t, tc.wantTray, got.TrayIndex)
+			assert.Equal(t, tc.wantHostID, got.HostID)
+		})
+	}
 }
 
 // #6: a host BMC insert whose MAC collides with an existing non-host (DPU) BMC

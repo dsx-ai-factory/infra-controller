@@ -4,6 +4,7 @@
 ## Table of Contents
 
 - [flow.proto](#flow-proto)
+    - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
     - [AddComponentRequest](#v1-AddComponentRequest)
     - [AddComponentResponse](#v1-AddComponentResponse)
     - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
@@ -210,6 +211,7 @@
     - [EventRuleSeverity](#v1-EventRuleSeverity)
     - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
     - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
     - [LeakStatus](#v1-LeakStatus)
     - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
     - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
@@ -238,6 +240,25 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## flow.proto
+
+
+
+<a name="v1-ACPowerCycleRackRequest"></a>
+
+### ACPowerCycleRackRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  | Target racks or NVLink domains with an optional type filter, or specific components |
+| description | [string](#string) |  | optional task description |
+| queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
+| rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+
+
+
 
 
 
@@ -525,6 +546,7 @@ An empty list means no conflicts were detected.
 | nvl_domain_id | [UUID](#v1-UUID) |  | NVLink Domain containing this component&#39;s rack; omitted when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
+| leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
 
 
 
@@ -2693,6 +2715,7 @@ PatchComponent - update a single component&#39;s fields
 | description | [string](#string) | optional | Update description (JSON string) |
 | rack_id | [UUID](#v1-UUID) | optional | Re-assign to a different rack |
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
+| update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
 
 
@@ -3695,6 +3718,23 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 
 
 
+<a name="v1-LeakHandlingStatus"></a>
+
+### LeakHandlingStatus
+LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
+component. It describes handling progress, not the component&#39;s current leak
+or power state.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LEAK_HANDLING_STATUS_UNKNOWN | 0 | Flow could not determine the status. |
+| LEAK_HANDLING_STATUS_NONE | 1 | No supported leakage-handling Task targets this component. |
+| LEAK_HANDLING_STATUS_SHUTTING_DOWN | 2 | A forced-shutdown Task is waiting, pending, or running. |
+| LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
+| LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
+
+
+
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
@@ -3834,7 +3874,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is Flow&#39;s coarse operability bucket.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3999,6 +4041,7 @@ RackOrderByField represents the supported order by field types for rack queries
 | PowerOnRack | [PowerOnRackRequest](#v1-PowerOnRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

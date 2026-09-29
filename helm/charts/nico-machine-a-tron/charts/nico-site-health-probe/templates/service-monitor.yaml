@@ -9,11 +9,13 @@ metadata:
   namespace: {{ include "nico-site-health-probe.namespace" . }}
   labels:
     {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: nico-site-health-probe
     prometheus: nico-monitoring
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/metrics: {{ $name }}
+      app.kubernetes.io/metrics: nico-site-health-probe
+      {{- include "nico-site-health-probe.selectorLabels" . | nindent 6 }}
   namespaceSelector:
     matchNames:
       - {{ include "nico-site-health-probe.namespace" . }}

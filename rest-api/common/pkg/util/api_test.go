@@ -145,3 +145,25 @@ func TestDefaultHTTPErrorHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIError_Send(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		apiErr *APIError
+		body   string
+	}{
+		{"unclassified body unchanged", NewAPIError(400, "rejected", nil), `{"source":"nico","message":"rejected","data":null}`},
+		{"retry permitted", NewAPIError(400, "rejected", nil).WithRetryable(true), `{"source":"nico","message":"rejected","data":null,"retryable":true}`},
+		{"conflict", NewAPIError(400, "rejected", nil).WithRetryable(false), `{"source":"nico","message":"rejected","data":null,"retryable":false}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			c.Set(APINameContextKey, "nico")
+			assert.NoError(t, tt.apiErr.Send(c))
+			assert.Equal(t, tt.apiErr.Code, rec.Code)
+			assert.Equal(t, tt.body+"\n", rec.Body.String())
+			assert.Empty(t, tt.apiErr.Source, "sending must not mutate the original error")
+		})
+	}
+}

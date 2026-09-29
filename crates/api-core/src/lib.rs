@@ -75,6 +75,7 @@ mod node_auth;
 mod scout_stream;
 pub mod secrets;
 mod setup;
+mod site_prefix_controller;
 mod storage;
 
 #[cfg(any(test, feature = "test-support"))]

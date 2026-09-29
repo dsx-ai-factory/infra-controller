@@ -106,11 +106,12 @@ func (dm DpuExtensionServiceManager) Create(ctx context.Context, request DpuExte
 	ctx = WithLogger(ctx, dm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
+	// Select the string alternative required by the REST handler.
 	apiReq := standard.DpuExtensionServiceCreateRequest{
 		Name:        request.Name,
 		ServiceType: request.ServiceType,
 		SiteId:      dm.client.apiMetadata.SiteID,
-		Data:        request.Data,
+		Data:        standard.StringAsDpuExtensionServiceCreateRequestData(&request.Data),
 	}
 	if request.Description != nil {
 		apiReq.Description.Set(request.Description)
@@ -197,7 +198,9 @@ func (dm DpuExtensionServiceManager) Update(ctx context.Context, id string, requ
 		apiReq.Description.Set(request.Description)
 	}
 	if request.Data != nil {
-		apiReq.Data.Set(request.Data)
+		// Keep updates serialized as strings despite the documentation's object alternative.
+		data := standard.StringAsDpuExtensionServiceUpdateRequestData(request.Data)
+		apiReq.Data.Set(&data)
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.UpdateDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).
 		DpuExtensionServiceUpdateRequest(apiReq).Execute()

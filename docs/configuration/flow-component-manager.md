@@ -1,6 +1,6 @@
 # Flow Component Managers
 
-This page configures Flow’s component-manager implementations and API providers. Configure Core’s downstream hardware backends separately in [Component Manager RMS Backends](component-manager-rms.md).
+This page configures Flow’s component-manager implementations and API providers. Configure Core’s downstream hardware backends separately in [RMS Configuration](rms.md).
 
 ## Overview
 

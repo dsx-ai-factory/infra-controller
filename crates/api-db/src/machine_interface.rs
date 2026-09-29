@@ -554,12 +554,13 @@ where
     .into_group_map())
 }
 
-/// `find_by_machine_id_for_update` locks one host's non-BMC interface rows in
+/// `find_by_machine_id_for_update` locks one machine's non-BMC interface rows in
 /// ID order and returns their current snapshots.
 ///
-/// Primary-interface writers call this after taking the network-segment
-/// advisory locks. The stable row order keeps concurrent interface mutations
-/// from acquiring the same set of row locks in different orders.
+/// Callers must acquire any network-segment advisory locks their transaction
+/// needs before taking these row locks. The stable row order keeps concurrent
+/// interface mutations from acquiring the same set of row locks in different
+/// orders.
 pub async fn find_by_machine_id_for_update(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -3865,18 +3866,6 @@ pub async fn record_deletion(txn: &mut PgConnection) -> Result<(), DatabaseError
         .await
         .map(|_| ())
         .map_err(|error| DatabaseError::query(QUERY, error))
-}
-
-pub async fn delete_by_ip(txn: &mut PgConnection, ip: IpAddr) -> Result<Option<()>, DatabaseError> {
-    let interface = find_by_ip(&mut *txn, ip).await?;
-
-    let Some(interface) = interface else {
-        return Ok(None);
-    };
-
-    delete(&interface.id, txn).await?;
-
-    Ok(Some(()))
 }
 
 /// Find all machine interface IDs associated with a switch.

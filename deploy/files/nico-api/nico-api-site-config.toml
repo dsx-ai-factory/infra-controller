@@ -30,12 +30,13 @@ max_concurrent_machine_updates = 20
 # List all tenant overlays here
 site_fabric_prefixes = ["SITE_FABRIC_PREFIX_1"]
 
-# FNN null routes inherit site_fabric_prefixes when this is omitted; removed
-# operator roots remain covered while they contain VpcPrefixes or VPC-attached
-# direct NetworkPrefixes, and inherited roots are collapsed. Explicit lists
-# preserve distinct prefix boundaries; set an explicit empty list to install no
-# site-fabric null routes. Do not combine a /0 null route with same-family
-# default-route leakage.
+# Omission combines site_fabric_prefixes with all retained tenant SitePrefixes.
+# Removed operator roots remain covered while they contain VpcPrefixes or
+# VPC-attached direct NetworkPrefixes. Inherited roots are collapsed. Explicit
+# lists preserve distinct prefix boundaries. Under mutual isolation they must
+# cover every retained tenant root, so [] cannot support tenant roots. Open
+# isolation installs no null routes and does not require coverage. Do not combine
+# a /0 null route with same-family default-route leakage.
 # site_fabric_null_routes = []
 
 # Site infrastructure prefixes instances are not allowed to talk to.

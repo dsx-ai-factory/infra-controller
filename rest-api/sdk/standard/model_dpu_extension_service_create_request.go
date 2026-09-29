@@ -33,9 +33,8 @@ type DpuExtensionServiceCreateRequest struct {
 	// Required for DpfHelmChart services and unsupported for KubernetesPod services
 	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// ID for the Site the DPU Extension Service belongs to
-	SiteId string `json:"siteId"`
-	// Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
-	Data string `json:"data"`
+	SiteId string                               `json:"siteId"`
+	Data   DpuExtensionServiceCreateRequestData `json:"data"`
 	// Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
 	Credentials *DpuExtensionServiceCredentials `json:"credentials,omitempty"`
 	// Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
@@ -48,7 +47,7 @@ type _DpuExtensionServiceCreateRequest DpuExtensionServiceCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceCreateRequest(name string, serviceType string, siteId string, data string) *DpuExtensionServiceCreateRequest {
+func NewDpuExtensionServiceCreateRequest(name string, serviceType string, siteId string, data DpuExtensionServiceCreateRequestData) *DpuExtensionServiceCreateRequest {
 	this := DpuExtensionServiceCreateRequest{}
 	this.Name = name
 	this.ServiceType = serviceType
@@ -224,9 +223,9 @@ func (o *DpuExtensionServiceCreateRequest) SetSiteId(v string) {
 }
 
 // GetData returns the Data field value
-func (o *DpuExtensionServiceCreateRequest) GetData() string {
+func (o *DpuExtensionServiceCreateRequest) GetData() DpuExtensionServiceCreateRequestData {
 	if o == nil {
-		var ret string
+		var ret DpuExtensionServiceCreateRequestData
 		return ret
 	}
 
@@ -235,7 +234,7 @@ func (o *DpuExtensionServiceCreateRequest) GetData() string {
 
 // GetDataOk returns a tuple with the Data field value
 // and a boolean to check if the value has been set.
-func (o *DpuExtensionServiceCreateRequest) GetDataOk() (*string, bool) {
+func (o *DpuExtensionServiceCreateRequest) GetDataOk() (*DpuExtensionServiceCreateRequestData, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -243,7 +242,7 @@ func (o *DpuExtensionServiceCreateRequest) GetDataOk() (*string, bool) {
 }
 
 // SetData sets field value
-func (o *DpuExtensionServiceCreateRequest) SetData(v string) {
+func (o *DpuExtensionServiceCreateRequest) SetData(v DpuExtensionServiceCreateRequestData) {
 	o.Data = v
 }
 

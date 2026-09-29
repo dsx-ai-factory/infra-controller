@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
 use crate::crds::dpudeployments_generated::DPUDeployment;
-use crate::crds::dpuflavors_generated::DPUFlavor;
+use crate::crds::dpuflavors_generated::{DPUFlavor, DpuFlavorServiceReadinessGate};
 use crate::crds::dpuflavortemplates_generated::DPUFlavorTemplate;
 use crate::crds::dpus_generated::{DPU, DpuStatusPhase};
 use crate::crds::dpuserviceconfigurations_generated::DPUServiceConfiguration;
@@ -929,6 +929,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("astra-flavor")
             .services(services)
             .deployment_scoped_service_interfaces(true)
+            .enable_delay_host_init(true)
             .deployment_type(DpuDeploymentType::Bf4Astra)
             .build()
             .expect("scoped Astra test configuration must be valid"),
@@ -1326,6 +1327,21 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .iter()
             .any(|parameter| parameter == &expected_astra_pf_total_sf_parameter)
     );
+    assert!(
+        astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
+            .parameters
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|parameter| parameter == "DELAY_HOST_OS_INIT=0x3")
+    );
+    assert!(matches!(
+        astra_flavor
+            .spec
+            .service_readiness
+            .and_then(|readiness| readiness.gate),
+        Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady)
+    ));
     assert!(
         !astra_flavor
             .spec

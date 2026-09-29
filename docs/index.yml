@@ -73,6 +73,10 @@ navigation:
         - page: NICo Flow
           path: architecture/flow.md
           slug: flow
+        - section: Backends
+          contents:
+            - page: RMS
+              path: architecture/backends/rms.md
         - section: Redfish
           contents:
             - page: Redfish Workflow
@@ -118,6 +122,8 @@ navigation:
       contents:
         - page: IP and Network Configuration
           path: provisioning/ip-and-network-configuration.md
+        - page: Deploy DHCPv6
+          path: provisioning/dhcpv6-deployment.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
@@ -153,6 +159,8 @@ navigation:
           path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
+        - page: Templated iPXE Operating Systems
+          path: configuration/templated-ipxe-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity
@@ -168,8 +176,8 @@ navigation:
         - page: Flow Component Managers
           path: configuration/flow-component-manager.md
           slug: flow-component-managers
-        - page: Component Manager RMS Backends
-          path: configuration/component-manager-rms.md
+        - page: RMS Configuration
+          path: configuration/rms.md
 
     - section: Operations (Day 2)
       contents:
@@ -378,6 +386,8 @@ navigation:
               path: development/build-guide.md
             - page: Machine-a-tron Deployment
               path: development/machine-a-tron-deployment.md
+            - page: Machine-a-tron RMS Mock
+              path: development/machine-a-tron-rms-mock.md
         - page: Glossary
           path: glossary.md
 

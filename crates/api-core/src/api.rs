@@ -35,6 +35,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
@@ -656,6 +657,13 @@ impl Forge for Api {
         request: Request<rpc::DpuAgentInventoryReport>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::dpu::update_agent_reported_inventory(self, request).await
+    }
+
+    async fn report_lldp_neighbors(
+        &self,
+        request: Request<rpc::LldpNeighborReport>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::lldp::report_lldp_neighbors(self, request).await
     }
 
     async fn record_dpu_network_status(
@@ -1471,6 +1479,21 @@ impl Forge for Api {
         crate::handlers::host_reprovisioning::trigger_host_reprovisioning(self, request).await
     }
 
+    async fn trigger_managed_host_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::managed_host_reset::trigger_managed_host_reset(self, request).await
+    }
+
+    async fn list_managed_hosts_waiting_for_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetListRequest>,
+    ) -> Result<Response<rpc::ManagedHostResetListResponse>, Status> {
+        crate::handlers::managed_host_reset::list_managed_hosts_waiting_for_reset(self, request)
+            .await
+    }
+
     async fn trigger_bmc_credential_rotation(
         &self,
         request: Request<rpc::BmcCredentialRotationRequest>,
@@ -2045,6 +2068,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedRackGroupRequest>,
     ) -> Result<Response<rpc::ExpectedRackGroup>, Status> {
         crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
+    }
+
+    async fn get_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::get_all_expected_rack_groups(self, request).await
     }
 
     async fn find_expected_rack_group_ids(
@@ -3939,6 +3969,8 @@ impl Api {
     /// credential counts as configured only when a non-empty password is stored.
     /// Secrets-backend errors are logged and treated as configured, so a
     /// transient Vault outage does not surface a misleading "not set" warning.
+    /// An authoritative local BMC root that is absent is a known missing
+    /// credential rather than a backend error, so it remains in the result.
     ///
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
@@ -3957,6 +3989,12 @@ impl Api {
                     _display_name: default_credential_display_name(&key),
                     _key: key.to_key_str().into_owned(),
                 }),
+                Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+                    missing.push(DefaultCredential {
+                        _display_name: default_credential_display_name(&key),
+                        _key: key.to_key_str().into_owned(),
+                    });
+                }
                 Err(err) => {
                     // A backend error is distinct from a genuinely-unset credential;
                     // don't raise the "not set" warning on a transient secrets failure.

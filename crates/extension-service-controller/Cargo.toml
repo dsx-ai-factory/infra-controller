@@ -34,6 +34,7 @@ state-controller = { path = "../state-controller" }
 
 async-trait = { workspace = true }
 kube = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }

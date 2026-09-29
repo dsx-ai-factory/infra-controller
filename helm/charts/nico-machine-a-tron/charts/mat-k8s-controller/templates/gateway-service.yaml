@@ -1,0 +1,23 @@
+{{- if and .Values.enabled .Values.gateway.enabled }}
+{{/*
+Static chart resource, not one of the per-BMC Services the controller
+reconciles: it carries the Helm labels only, so the controller's stale-Service
+cleanup never selects it.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mat-k8s-controller.gateway.fullname" . }}
+  namespace: {{ include "mat-k8s-controller.namespace" . }}
+  labels:
+    {{- include "mat-k8s-controller.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mat-k8s-controller.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ufm
+      port: {{ .Values.gateway.port }}
+      targetPort: ufm
+      protocol: TCP
+{{- end }}

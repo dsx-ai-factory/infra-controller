@@ -32,10 +32,15 @@ Delete an expected switch by ID:
 
 ")]
 pub(crate) struct Args {
-    #[clap(help = "BMC MAC address of expected switch to delete.")]
+    #[clap(
+        help = "BMC MAC address of the expected switch to delete. Provide exactly one of this address or --id."
+    )]
     bmc_mac_address: Option<MacAddress>,
 
-    #[clap(long, help = "ID (UUID) of the expected switch to delete.")]
+    #[clap(
+        long,
+        help = "ID (UUID) of the expected switch to delete. Provide exactly one of this ID or the BMC MAC address."
+    )]
     id: Option<Uuid>,
 }
 

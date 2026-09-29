@@ -23,6 +23,35 @@ mod replace_all;
 mod show;
 mod update;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cfg::cli_options::{CliCommand, CliOptions};
+
+    #[test]
+    fn mutations_omit_profile() {
+        for args in [
+            vec!["add", "rack-01"],
+            vec!["update", "rack-01", "--meta-name", "rack-01"],
+        ] {
+            let options = CliOptions::try_parse_from(
+                ["nico-admin-cli", "expected-rack"].into_iter().chain(args),
+            )
+            .unwrap();
+            let request: rpc::forge::ExpectedRack = match options.commands.unwrap() {
+                CliCommand::ExpectedRack(Cmd::Add(args)) => args.into(),
+                CliCommand::ExpectedRack(Cmd::Update(args)) => args.try_into().unwrap(),
+                _ => panic!("expected rack mutation"),
+            };
+            assert_eq!(request.rack_id.unwrap().as_str(), "rack-01");
+            assert!(request.rack_profile_id.is_none());
+        }
+        let imported: common::ExpectedRackJson =
+            serde_json::from_str(r#"{"rack_id":"rack-01"}"#).unwrap();
+        assert_eq!(imported.rack_id.as_str(), "rack-01");
+    }
+}
+
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
