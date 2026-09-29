@@ -57,9 +57,11 @@ Read the complete alert message before applying physical remediation:
   physical-link checks for the interface named by the alert.
 
 The number of ToR sessions required for general health comes from
-`min_dpu_functioning_links`. A value of `1` allows either established session
-to satisfy that minimum, but `p0` remains separately required for normal PXE.
-Do not require both `p0` and `p1` unless the configured minimum is `2`.
+`min_dpu_functioning_links`. When the field is unset, its effective default is
+`2`, which requires both sessions for a clean report. A value of `1` allows
+either established session to satisfy that minimum, but `p0` remains separately
+required for normal PXE. Do not require both `p0` and `p1` unless the configured
+or effective minimum is `2`.
 
 ## Check the Physical Links
 

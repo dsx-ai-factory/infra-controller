@@ -6,6 +6,8 @@ instead of the Ethernet interfaces that NICo expects.
 
 ## Symptoms
 
+### Check the NICo Machine State
+
 Inspect the machine event history:
 
 ```bash
@@ -14,7 +16,7 @@ nico-admin-cli -f json machine show <host-machine-id> \
   | tail -20
 ```
 
-The most recent event remains similar to this output:
+The most recent event is similar to this output:
 
 ```json
 {
@@ -29,6 +31,8 @@ The most recent event remains similar to this output:
 }
 ```
 
+### Check the DPU BMC Port Names
+
 Set `BMC_IP` to the DPU BMC address and set `BMC_USER` and `BMC_PASS` to
 credentials for that BMC. Query its Redfish network-port collection:
 
@@ -42,6 +46,8 @@ curl --silent --show-error --insecure \
 
 On an affected DPU, the member paths end in `ib0` and `ib1` instead of `eth0`
 and `eth1`.
+
+### Check the DPU OS Interface Names
 
 Log in to the DPU Arm OS and inspect its interfaces:
 
