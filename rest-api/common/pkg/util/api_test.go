@@ -154,7 +154,6 @@ func TestAPIError_Send(t *testing.T) {
 	}{
 		{"unclassified body unchanged", NewAPIError(400, "rejected", nil), `{"source":"nico","message":"rejected","data":null}`},
 		{"retry permitted", NewAPIError(400, "rejected", nil).WithRetryable(true), `{"source":"nico","message":"rejected","data":null,"retryable":true}`},
-		{"retry delay", &APIError{Code: 400, Message: "rejected", Retryable: GetPtr(true), RetryAfterSeconds: GetPtr(int32(5))}, `{"source":"nico","message":"rejected","data":null,"retryable":true,"retryAfterSeconds":5}`},
 		{"conflict", NewAPIError(400, "rejected", nil).WithRetryable(false), `{"source":"nico","message":"rejected","data":null,"retryable":false}`},
 		{"uncertain outcome", NewAPIError(500, "unknown", nil).WithReconciliation(), `{"source":"nico","message":"unknown","data":null,"retryable":false,"recoveryAction":"Reconcile"}`},
 	} {

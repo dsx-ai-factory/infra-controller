@@ -4059,7 +4059,6 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, tt.args.respRetryable, response.Retryable)
 				assert.Equal(t, tt.args.respRecoveryAction, response.RecoveryAction)
-				assert.Nil(t, response.RetryAfterSeconds)
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return

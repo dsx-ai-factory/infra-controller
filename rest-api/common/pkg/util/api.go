@@ -42,9 +42,8 @@ type APIError struct {
 	Message string `json:"message"`
 	Data    error  `json:"data"`
 	// Omit unclassified recovery metadata to preserve existing error bodies.
-	Retryable         *bool  `json:"retryable,omitempty"`
-	RetryAfterSeconds *int32 `json:"retryAfterSeconds,omitempty"`
-	RecoveryAction    string `json:"recoveryAction,omitempty"`
+	Retryable      *bool  `json:"retryable,omitempty"`
+	RecoveryAction string `json:"recoveryAction,omitempty"`
 }
 
 // Error implements the error interface so *APIError can flow through error
@@ -82,9 +81,6 @@ func NewAPIError(code int, message string, data error) *APIError {
 // it does not promise availability or eventual success.
 func (a *APIError) WithRetryable(retryable bool) *APIError {
 	a.Retryable = &retryable
-	if !retryable {
-		a.RetryAfterSeconds = nil
-	}
 	a.RecoveryAction = ""
 	return a
 }

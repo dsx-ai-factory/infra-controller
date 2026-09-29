@@ -30,8 +30,6 @@ type NICoAPIError struct {
 	Data map[string]interface{} `json:"data,omitempty"`
 	// True permits bounded retries with backoff, without guaranteeing success. False prohibits automatic retries. Omission means unclassified.
 	Retryable *bool `json:"retryable,omitempty"`
-	// Minimum delay before retrying, present only with retryable true. When omitted, use bounded client backoff.
-	RetryAfterSeconds *int32 `json:"retryAfterSeconds,omitempty"`
 	// Reconcile requires checking the original operation's outcome before another mutation. retryable is false. Omission means no action specified.
 	RecoveryAction *string `json:"recoveryAction,omitempty"`
 }
@@ -181,38 +179,6 @@ func (o *NICoAPIError) SetRetryable(v bool) {
 	o.Retryable = &v
 }
 
-// GetRetryAfterSeconds returns the RetryAfterSeconds field value if set, zero value otherwise.
-func (o *NICoAPIError) GetRetryAfterSeconds() int32 {
-	if o == nil || IsNil(o.RetryAfterSeconds) {
-		var ret int32
-		return ret
-	}
-	return *o.RetryAfterSeconds
-}
-
-// GetRetryAfterSecondsOk returns a tuple with the RetryAfterSeconds field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *NICoAPIError) GetRetryAfterSecondsOk() (*int32, bool) {
-	if o == nil || IsNil(o.RetryAfterSeconds) {
-		return nil, false
-	}
-	return o.RetryAfterSeconds, true
-}
-
-// HasRetryAfterSeconds returns a boolean if a field has been set.
-func (o *NICoAPIError) HasRetryAfterSeconds() bool {
-	if o != nil && !IsNil(o.RetryAfterSeconds) {
-		return true
-	}
-
-	return false
-}
-
-// SetRetryAfterSeconds gets a reference to the given int32 and assigns it to the RetryAfterSeconds field.
-func (o *NICoAPIError) SetRetryAfterSeconds(v int32) {
-	o.RetryAfterSeconds = &v
-}
-
 // GetRecoveryAction returns the RecoveryAction field value if set, zero value otherwise.
 func (o *NICoAPIError) GetRecoveryAction() string {
 	if o == nil || IsNil(o.RecoveryAction) {
@@ -266,9 +232,6 @@ func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Retryable) {
 		toSerialize["retryable"] = o.Retryable
-	}
-	if !IsNil(o.RetryAfterSeconds) {
-		toSerialize["retryAfterSeconds"] = o.RetryAfterSeconds
 	}
 	if !IsNil(o.RecoveryAction) {
 		toSerialize["recoveryAction"] = o.RecoveryAction

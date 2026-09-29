@@ -32321,13 +32321,6 @@ components:
           description: |-
             True permits bounded retries with backoff, without guaranteeing success.
             False prohibits automatic retries. Omission means unclassified.
-        retryAfterSeconds:
-          type: integer
-          format: int32
-          minimum: 1
-          description: |-
-            Minimum delay before retrying, present only with retryable true.
-            When omitted, use bounded client backoff.
         recoveryAction:
           type: string
           enum:
