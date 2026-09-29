@@ -39,7 +39,6 @@ const (
 	controllerMachineStatePrefixPostAssignedMeasuring = "PostAssignedMeasuring"
 	controllerMachineStatePrefixHostReprovisioning    = "HostReprovisioning"
 	controllerMachineStatePrefixReprovisioning        = "Reprovisioning"
-	controllerMachineStatePrefixReady                 = "Ready"
 	controllerMachineStatePrefixFailed                = "Failed"
 	controllerMachineStatePrefixCreated               = "Created"
 	controllerMachineStatePrefixForceDeletion         = "ForceDeletion"
@@ -1163,7 +1162,7 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
 			statusMessage = "Machine is being used by an Instance"
-		case controllerMachineStatePrefixReady:
+		case cdbm.ControllerMachineStateReady:
 			machineStatus = cdbm.MachineStatusReady
 			statusMessage = "Machine is ready for assignment"
 		case controllerMachineStatePrefixForceDeletion:

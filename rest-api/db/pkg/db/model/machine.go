@@ -74,6 +74,10 @@ var (
 	}
 )
 
+// ControllerMachineStateReady identifies Core's Ready lifecycle state.
+// It is separate from the REST status, which also accounts for assignment and health.
+const ControllerMachineStateReady = "Ready"
+
 // A light wrapper around the protobuf so
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
@@ -211,7 +215,7 @@ func (m *Machine) StatusForAssignment(assigned bool) string {
 	if assigned && m.Status == MachineStatusReady {
 		return MachineStatusInUse
 	}
-	if m.IsAssigned && !assigned && m.Status == MachineStatusInUse && m.Metadata.GetNormalizedState() == "Ready" {
+	if m.IsAssigned && !assigned && m.Status == MachineStatusInUse && m.Metadata.GetNormalizedState() == ControllerMachineStateReady {
 		return MachineStatusReady
 	}
 	return m.Status

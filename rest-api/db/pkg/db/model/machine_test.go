@@ -2554,11 +2554,11 @@ func TestMachine_StatusForAssignment(t *testing.T) {
 	}{
 		{"claim Ready", MachineStatusReady, false, true, "", MachineStatusInUse},
 		{"unassigned Ready", MachineStatusReady, false, false, "", MachineStatusReady},
-		{"release observed Ready", MachineStatusInUse, true, false, "Ready", MachineStatusReady},
+		{"release observed Ready", MachineStatusInUse, true, false, ControllerMachineStateReady, MachineStatusReady},
 		{"release before Core readiness", MachineStatusInUse, true, false, "Assigned/Ready", MachineStatusInUse},
 		{"release without inventory", MachineStatusInUse, true, false, "", MachineStatusInUse},
-		{"assigned error", MachineStatusError, false, true, "Ready", MachineStatusError},
-		{"release during maintenance", MachineStatusMaintenance, true, false, "Ready", MachineStatusMaintenance},
+		{"assigned error", MachineStatusError, false, true, ControllerMachineStateReady, MachineStatusError},
+		{"release during maintenance", MachineStatusMaintenance, true, false, ControllerMachineStateReady, MachineStatusMaintenance},
 		{"assigned cleanup", MachineStatusInitializing, true, true, "WaitingForCleanup", MachineStatusInitializing},
 	}
 	for _, tc := range cases {

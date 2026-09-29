@@ -583,7 +583,7 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusInUse)
 	_, metadataErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
 		MachineID: machine.ID,
-		Metadata:  &cdbm.SiteControllerMachine{Machine: &corev1.Machine{State: "Ready"}},
+		Metadata:  &cdbm.SiteControllerMachine{Machine: &corev1.Machine{State: cdbm.ControllerMachineStateReady}},
 	})
 	require.NoError(t, metadataErr)
 	allocation := util.TestBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
