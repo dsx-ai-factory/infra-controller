@@ -240,8 +240,10 @@ receivers:
       paging:
 
   punt_stats:
-    file_path: /cumulus/nl2docad/run/stats/punt
-    container_name: doca-hbn
+    # Written by the punt-stats-helper sidecar (see daemonset.yaml), which is
+    # the only container with containerd-socket/crictl exec access. Must
+    # match puntStatsHelper.dstPath in values.yaml.
+    file_path: /var/run/punt-stats/punt
     # 5m hits Prometheus staleness limit, causing a discontinuity in the
     # graphed time series.
     scrape_interval: 4m

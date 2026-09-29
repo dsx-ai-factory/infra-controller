@@ -103,9 +103,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /dl
 
-# crictl: lets the punt_stats receiver exec into the doca-hbn container over
-# the containerd socket (mounted at runtime) to read punt stats, since
-# doca-hbn's stats file is not reachable any other way from this container.
+# crictl: used only by punt-stats-helper (see below) to exec into the
+# doca-hbn container over the containerd socket (mounted at runtime, and
+# only into that sidecar) and read punt stats, since doca-hbn's stats file
+# is not reachable any other way from the host.
 RUN curl -fsSL --retry 5 --retry-connrefused --max-time 300 \
         "https://github.com/kubernetes-sigs/cri-tools/releases/download/v${CRICTL_VERSION}/crictl-v${CRICTL_VERSION}-linux-arm64.tar.gz" \
         -o crictl.tar.gz \
@@ -121,6 +122,7 @@ FROM debian:12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    jq \
     libudev1 \
     systemd \
     && rm -rf /var/lib/apt/lists/*
@@ -135,9 +137,15 @@ COPY --from=builder /lib/aarch64-linux-gnu/libudev.so.1 /lib/aarch64-linux-gnu/l
 COPY bluefield/otel/otelcol-wrapper /etc/otelcol-contrib/otelcol-wrapper
 COPY bluefield/otel/otelcol-wrapper-imports-dpf /etc/otelcol-contrib/otelcol-wrapper-imports
 COPY bluefield/otel/otelcol-wrapper-validate /etc/otelcol-contrib/otelcol-wrapper-validate
+# punt-stats-helper is the only entrypoint in this image that uses crictl; it
+# runs as a separate sidecar container with the containerd-socket mount so
+# otelcol-contrib itself never needs CRI exec access (see nico-otelcol
+# daemonset.yaml).
+COPY bluefield/otel/punt-stats-helper /etc/otelcol-contrib/punt-stats-helper
 RUN chmod +x /etc/otelcol-contrib/otelcol-wrapper \
              /etc/otelcol-contrib/otelcol-wrapper-imports \
-             /etc/otelcol-contrib/otelcol-wrapper-validate
+             /etc/otelcol-contrib/otelcol-wrapper-validate \
+             /etc/otelcol-contrib/punt-stats-helper
 
 # Config fragments directory
 RUN mkdir -p /etc/otelcol-contrib/config-fragments \
