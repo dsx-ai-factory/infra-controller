@@ -1589,8 +1589,19 @@ mod tests {
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use tokio::sync::oneshot;
 
     use super::*;
+
+    struct TaskDropNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for TaskDropNotifier {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum InstrumentationCase {
@@ -1952,5 +1963,23 @@ mod tests {
         assert_eq!(parse_plugin_parameters("").unwrap(), serde_json::json!({}));
         assert!(parse_plugin_parameters("[]").is_err());
         assert!(parse_plugin_parameters("not-json").is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_plugin_log_task_guard_aborts_the_log_task() {
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (stopped_sender, stopped_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _notifier = TaskDropNotifier(Some(stopped_sender));
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+        });
+
+        started_receiver.await.expect("log task started");
+        drop(PluginLogTaskGuard::new(task));
+        tokio::time::timeout(std::time::Duration::from_secs(1), stopped_receiver)
+            .await
+            .expect("dropping the guard aborts the log task")
+            .expect("log task drop notifies test");
     }
 }
