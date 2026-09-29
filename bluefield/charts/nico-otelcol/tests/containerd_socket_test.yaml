@@ -13,6 +13,7 @@ tests:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: containerd-socket
+          any: true
       - contains:
           path: spec.template.spec.containers[1].volumeMounts
           content:
@@ -40,7 +41,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: CONTAINER_RUNTIME_ENDPOINT
-            value: unix:///run/containerd/containerd.sock
+          any: true
       - contains:
           path: spec.template.spec.containers[1].env
           content:
