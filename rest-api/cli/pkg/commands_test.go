@@ -66,6 +66,23 @@ func TestToKebab(t *testing.T) {
 	}
 }
 
+func TestCollectOperations(t *testing.T) {
+	spec := &Spec{Paths: map[string]PathItem{
+		"/preferred": {
+			Put: &Operation{OperationID: "replace-all-resource"},
+		},
+		"/legacy": {
+			Put: &Operation{OperationID: "replace-all-resource-legacy", Deprecated: true},
+		},
+	}}
+
+	operations := collectOperations(spec)
+
+	require.Len(t, operations, 1)
+	assert.Equal(t, "replace-all-resource", operations[0].op.OperationID)
+	assert.Equal(t, "/preferred", operations[0].path)
+}
+
 func TestClientFromContextExplicitTokenCommandOverridesCachedConfigToken(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &ConfigFile{
@@ -435,6 +452,14 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 			operationID,
 		)
 	}
+	for operationID, path := range commandPathReplacements {
+		assert.Equalf(t,
+			operationID,
+			operations[strings.Join(path, " ")],
+			"replacement command path for %q does not identify the same operation",
+			operationID,
+		)
+	}
 	for operationID, paths := range additionalCommandPathAliases {
 		for _, path := range paths {
 			assert.Equalf(t,
@@ -445,6 +470,41 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestGeneratedCommandInfos_ExpectedInventoryReplaceAllPaths(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	operations := make(map[string]GeneratedCommandInfo)
+	for _, info := range GeneratedCommandInfos(spec) {
+		operations[info.OperationID] = info
+	}
+
+	tests := []struct {
+		operationID string
+		path        string
+	}{
+		{
+			operationID: "replace-all-expected-rack",
+			path:        "/v2/org/{org}/nico/expected-rack/all",
+		},
+		{
+			operationID: "replace-all-expected-rack-group",
+			path:        "/v2/org/{org}/nico/expected-rack-group/all",
+		},
+	}
+	for _, tt := range tests {
+		operation, ok := operations[tt.operationID]
+		require.True(t, ok, "missing %s", tt.operationID)
+		assert.Equal(t, http.MethodPut, operation.Method)
+		assert.Equal(t, tt.path, operation.Path)
+	}
+
+	_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
+	assert.False(t, hasRackLegacy)
+	_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
+	assert.False(t, hasRackGroupLegacy)
 }
 
 func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
@@ -1084,6 +1144,11 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
 		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
 		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
+		{name: "machine BMC reset", path: []string{"machine", "bmc", "reset"}},
+		{name: "machine DPU reprovision", path: []string{"machine", "dpu", "reprovision"}},
+		{name: "machine validation results", path: []string{"machine", "validation", "results", "list"}},
+		{name: "machine validation runs", path: []string{"machine", "validation", "runs", "list"}},
+		{name: "machine validation start", path: []string{"machine", "validation", "start"}},
 		{name: "rack health report delete", path: []string{"rack", "health-report", "delete"}},
 		{name: "rack health report list", path: []string{"rack", "health-report", "list"}},
 		{name: "rack health report update", path: []string{"rack", "health-report", "update"}},
@@ -1109,6 +1174,23 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 			}
 			require.NotNilf(t, command.Action, "command path %q must be executable", strings.Join(test.path, " "))
 		})
+	}
+}
+
+func TestCollectOperations_MachineScopedOperationsUseMachineTag(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	for _, operation := range collectOperations(spec) {
+		if !strings.Contains(operation.path, "/machine/{machineId}/") {
+			continue
+		}
+		assert.Equalf(t,
+			"Machine",
+			operation.tag,
+			"machine-scoped operation %q must remain under the Machine API",
+			operation.op.OperationID,
+		)
 	}
 }
 
@@ -1189,18 +1271,30 @@ func TestBuildCommands_AllocationConstraintIsUpdateOnly(t *testing.T) {
 			"removed from the OpenAPI spec because the server never registered those routes (NVBug 6232163)")
 }
 
-func TestNewApp_MachineValidationStartCommandSurface(t *testing.T) {
+func TestNewApp_MachineValidationCommandSurface(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 
-	var machineValidation *cli.Command
+	var machine, machineValidation *cli.Command
 	for _, command := range app.Commands {
-		if command.Name == "machine-validation" {
+		assert.NotEqual(t, "machine-validation", command.Name, "Machine validation must not be a top-level resource")
+		if command.Name == "machine" {
+			machine = command
+		}
+	}
+	require.NotNil(t, machine, "Machine must be exposed by the embedded OpenAPI spec")
+	for _, command := range machine.Subcommands {
+		assert.NotContains(t,
+			[]string{"reprovision-machine-dpu", "reset-machine-bmc", "validation-results", "validation-runs"},
+			command.Name,
+			"Machine must not expose a synthetic command path alongside its reviewed resource path",
+		)
+		if command.Name == "validation" {
 			machineValidation = command
 			break
 		}
 	}
-	require.NotNil(t, machineValidation, "Machine validation must be exposed by the embedded OpenAPI spec")
+	require.NotNil(t, machineValidation, "Machine must expose validation operations")
 
 	var start *cli.Command
 	for _, command := range machineValidation.Subcommands {
@@ -1210,7 +1304,7 @@ func TestNewApp_MachineValidationStartCommandSurface(t *testing.T) {
 		}
 	}
 	require.NotNil(t, start, "Machine validation must expose a start command")
-	assert.Equal(t, "nicocli machine-validation start [command options] <machineId>", start.UsageText)
+	assert.Equal(t, "nicocli machine validation start [command options] <machineId>", start.UsageText)
 
 	for _, resourceName := range []string{"results", "runs"} {
 		var resource *cli.Command
@@ -1258,7 +1352,7 @@ func TestNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
 		"--org", "test-org",
 		"--api-name", "nico",
 		"--token", "test-token",
-		"machine-validation", "start",
+		"machine", "validation", "start",
 		"--data", `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`,
 		"machine-1",
 	})
@@ -1319,7 +1413,7 @@ func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 				"--org", "test-org",
 				"--api-name", "nico",
 				"--token", "test-token",
-				"machine-validation", tt.resource, "list",
+				"machine", "validation", tt.resource, "list",
 				"machine-1",
 			})
 			require.NoError(t, err)

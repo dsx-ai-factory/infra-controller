@@ -832,6 +832,16 @@ impl ApiClient {
         Ok(self.0.find_domain(request).await?)
     }
 
+    pub(crate) async fn update_domain(
+        &self,
+        domain: ::rpc::protos::dns::Domain,
+    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
+        let request = ::rpc::protos::dns::UpdateDomainRequest {
+            domain: Some(domain),
+        };
+        Ok(self.0.update_domain(request).await?)
+    }
+
     pub(crate) async fn machine_insert_health_report_override(
         &self,
         id: &MachineId,
@@ -1044,6 +1054,39 @@ impl ApiClient {
             .await?;
 
         Ok(all.devices)
+    }
+
+    /// List every parked address reservation matching the filter, listing the
+    /// address ids first and then fetching their full rows in bounded,
+    /// concurrently-buffered chunks -- the same paged pattern as the other
+    /// `get_all_*` listings. An empty id list short-circuits before any
+    /// `*ByIds` call.
+    pub(crate) async fn get_all_reserved_addresses(
+        &self,
+        page_size: usize,
+        reserved_by_mac: Option<String>,
+        ip_address: Option<String>,
+    ) -> CarbideCliResult<Vec<::rpc::forge::ReservedAddress>> {
+        let ids = self
+            .0
+            .admin_find_reserved_address_ids(::rpc::forge::AdminFindReservedAddressesRequest {
+                reserved_by_mac,
+                ip_address,
+            })
+            .await?
+            .ip_addresses;
+
+        let mut all = Vec::with_capacity(ids.len());
+        stream::iter(ids.chunks(self.effective_chunk_size(page_size).await?))
+            .map(|chunk| self.0.admin_find_reserved_addresses_by_ids(chunk.to_vec()))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|resp| {
+                all.extend(resp.reserved_addresses);
+                futures::future::ok(())
+            })
+            .await?;
+
+        Ok(all)
     }
 
     pub(crate) async fn get_machines_by_ids(

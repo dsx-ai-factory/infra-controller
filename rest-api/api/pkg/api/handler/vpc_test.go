@@ -618,8 +618,9 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			wantErr:          false,
 			expectNoMutation: true,
 		},
+		// The create path must accept and retain the highest 24-bit requested VNI.
 		{
-			name: "test VPC create API endpoint success",
+			name: "test VPC create API endpoint accepts maximum explicit VNI",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -633,7 +634,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 					SlaacEnabled:              cutil.GetPtr(true),
 					NetworkSecurityGroupID:    &nsgTenant1Site1.ID,
-					Vni:                       cutil.GetPtr(555),
+					Vni:                       cutil.GetPtr(16777215),
 					Labels: map[string]string{
 						"vpc-dpu-zone": "east1",
 						"vpc-gpu-zone": "west1",
@@ -1613,6 +1614,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(rst.ID), nil)
 			require.NoError(t, gerr)
 			assert.Equal(t, expectedSlaacEnabled, persistedVpc.SlaacEnabled)
+			if tt.args.reqData.Vni != nil {
+				require.NotNil(t, persistedVpc.Vni)
+				assert.Equal(t, *tt.args.reqData.Vni, *persistedVpc.Vni)
+			} else {
+				assert.Nil(t, persistedVpc.Vni)
+			}
 			require.NotNil(t, persistedVpc.NetworkVirtualizationType)
 			assert.Equal(t, expectedVirtualizationType, *persistedVpc.NetworkVirtualizationType)
 			if expectedRoutingProfile != nil {
@@ -1632,6 +1639,13 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 			assert.True(t, tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
 				if req == nil {
+					return false
+				}
+				if tt.args.reqData.Vni != nil {
+					if req.Vni == nil || *req.Vni != uint32(*tt.args.reqData.Vni) {
+						return false
+					}
+				} else if req.Vni != nil {
 					return false
 				}
 				if !proto.Equal(req.RoutingProfileOverrides, tt.args.reqData.RoutingProfileOverrides.ToDB().ToProto()) {

@@ -130,6 +130,13 @@ poll_interval = {{ required "nico-api.credentials.file.pollInterval is required 
 [machine_state_controller]
 failure_retry_time = "90m"
 
+{{- $maxConcurrency := .Values.machineStateController.maxConcurrency }}
+{{- if or (ne (printf "%v" $maxConcurrency) (printf "%d" ($maxConcurrency | int))) (lt ($maxConcurrency | int) 1) }}
+{{- fail "nico-api.machineStateController.maxConcurrency must be a positive integer" }}
+{{- end }}
+[machine_state_controller.controller]
+max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
+
 [vpc_prefix_state_controller]
 vpc_prefix_drain_time = "5m"
 

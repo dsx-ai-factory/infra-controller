@@ -811,6 +811,138 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
     Ok(())
 }
 
+/// `create_machines` must skip a host whose BMCs all belong to machines unless
+/// the host was explored this run or a BMC lost its machine. The DPU OOB
+/// interface is the witness: only the per-host steady-state transaction
+/// re-links it.
+#[sqlx_test]
+async fn test_site_explorer_skips_ingested_hosts_not_explored_this_run(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let hosts = [ManagedHostConfig::default(), ManagedHostConfig::default()].map(|host| {
+        let serial_number = host.serial.clone();
+        host.with_expected_machine_data(ExpectedMachineData {
+            serial_number,
+            ..Default::default()
+        })
+    });
+    let [host_a, host_b] = &hosts;
+    let oob_mac_a = host_a.get_and_assert_single_dpu().oob_mac_address;
+    let oob_mac_b = host_b.get_and_assert_single_dpu().oob_mac_address;
+
+    let mut fixtures = Vec::new();
+    for host in &hosts {
+        // The OOB interface exists before creation, so creation links it.
+        let dpu = host.get_and_assert_single_dpu();
+        dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, dpu.oob_mac_address).await;
+        fixtures.push(explored_host_fixture(&env, host).await);
+    }
+
+    let mut endpoints = Vec::new();
+    let mut txn = env.pool.begin().await?;
+    for (host, fixture) in hosts.iter().zip(&fixtures) {
+        db::expected_machine::create(txn.as_mut(), expected_machine(host)).await?;
+        endpoints.push((fixture.host.host_bmc_ip, fixture.host_report.clone()));
+        for dpu in &fixture.host.dpus {
+            endpoints.push((dpu.bmc_ip, (*dpu.report).clone()));
+        }
+    }
+    for (ip, report) in &endpoints {
+        db::explored_endpoints::insert(*ip, report, false, txn.as_mut()).await?;
+        db::explored_endpoints::set_preingestion_complete(*ip, txn.as_mut()).await?;
+    }
+    txn.commit().await?;
+
+    // Nothing is explored unless requested, so `explored_this_run` holds
+    // exactly the requested hosts.
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(true.into()),
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+
+    // Neither host has a machine yet, so both enter the transaction.
+    explorer.run_single_iteration().await?;
+    assert!(interface_machine_id(&env.pool, oob_mac_a).await?.is_some());
+    assert!(interface_machine_id(&env.pool, oob_mac_b).await?.is_some());
+
+    unlink_machine_interface(&env.pool, oob_mac_a).await?;
+    unlink_machine_interface(&env.pool, oob_mac_b).await?;
+    let host_a_bmc_ip = fixtures[0].host.host_bmc_ip;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[host_a_bmc_ip], txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.ip_address)
+            .collect::<Vec<_>>(),
+        vec![host_a_bmc_ip],
+        "only the requested host BMC must be explored"
+    );
+    assert!(
+        interface_machine_id(&env.pool, oob_mac_a).await?.is_some(),
+        "a host explored this run must re-enter the steady-state transaction"
+    );
+    assert!(
+        interface_machine_id(&env.pool, oob_mac_b).await?.is_none(),
+        "a host with every BMC linked to a machine and not explored this run must be skipped"
+    );
+
+    // A BMC without a machine readmits the host without an exploration.
+    unlink_machine_interface(
+        &env.pool,
+        host_b.get_and_assert_single_dpu().bmc_mac_address,
+    )
+    .await?;
+    explorer.run_single_iteration().await?;
+    assert!(
+        interface_machine_id(&env.pool, oob_mac_b).await?.is_some(),
+        "a host whose DPU BMC lost its machine must enter the transaction unexplored"
+    );
+
+    Ok(())
+}
+
+async fn interface_machine_id(
+    pool: &PgPool,
+    mac_address: MacAddress,
+) -> Result<Option<MachineId>, Box<dyn std::error::Error>> {
+    let interfaces = db::machine_interface::find_by_mac_address(pool, mac_address).await?;
+    let [interface] = interfaces.as_slice() else {
+        panic!("expected one interface for {mac_address}, got {interfaces:#?}");
+    };
+    Ok(interface.machine_id)
+}
+
+/// Detaches an interface from its machine, as if it had never been linked.
+async fn unlink_machine_interface(
+    pool: &PgPool,
+    mac_address: MacAddress,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "UPDATE machine_interfaces
+         SET machine_id = NULL, attached_dpu_machine_id = NULL, association_type = 'None'
+         WHERE mac_address = $1",
+    )
+    .bind(mac_address)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_machine_creator_rejects_partial_dpu_machine_set(
     pool: PgPool,

@@ -10,7 +10,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -815,6 +814,24 @@ func (rs *FlowServerImpl) PowerResetRack(
 	)
 }
 
+// ACPowerCycleRack triggers a cold AC power cycle for the selected targets.
+func (rs *FlowServerImpl) ACPowerCycleRack(
+	ctx context.Context,
+	req *pb.ACPowerCycleRackRequest,
+) (*pb.SubmitTaskResponse, error) {
+	return rs.handlePowerControlTask(
+		ctx,
+		req.GetTargetSpec(),
+		req.GetDescription(),
+		req.GetQueueOptions(),
+		req.GetRuleId(),
+		&operations.PowerControlTaskInfo{
+			Operation:              operations.PowerOperationColdReset,
+			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		},
+	)
+}
+
 func (rs *FlowServerImpl) BringUpRack(
 	ctx context.Context,
 	req *pb.BringUpRackRequest,
@@ -1189,10 +1206,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 	ctx context.Context,
 	req *pb.CreateOperationRuleRequest,
 ) (*pb.CreateOperationRuleResponse, error) {
-	// Parse rule definition from JSON
-	var ruleDef operationrules.RuleDefinition
-	if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-		return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+	// Parse the rule definition through the version-aware decoder so every
+	// accepted definition can also be decoded after it is persisted.
+	ruleDef, err := operationrules.UnmarshalRuleDefinition(
+		[]byte(req.GetRuleDefinitionJson()),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 	}
 
 	// Create rule object
@@ -1202,13 +1222,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 		Description:    req.GetDescription(),
 		OperationType:  protobuf.OperationTypeFromProto(req.GetOperationType()),
 		OperationCode:  req.GetOperationCode(),
-		RuleDefinition: ruleDef,
+		RuleDefinition: *ruleDef,
 		IsDefault:      req.GetIsDefault(),
 	}
 
 	// Validate rule
 	if err := rule.Validate(); err != nil {
-		return nil, fmt.Errorf("rule validation failed: %w", err)
+		return nil, status.Errorf(codes.InvalidArgument, "rule validation failed: %v", err)
 	}
 
 	// Store in database
@@ -1241,15 +1261,17 @@ func (rs *FlowServerImpl) UpdateOperationRule(
 		updates["description"] = req.GetDescription()
 	}
 	if req.RuleDefinitionJson != nil {
-		var ruleDef operationrules.RuleDefinition
-		if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-			return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+		ruleDef, err := operationrules.UnmarshalRuleDefinition(
+			[]byte(req.GetRuleDefinitionJson()),
+		)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 		}
 		// Validate the rule definition
 		if err := ruleDef.Validate(); err != nil {
-			return nil, fmt.Errorf("rule definition validation failed: %w", err)
+			return nil, status.Errorf(codes.InvalidArgument, "rule definition validation failed: %v", err)
 		}
-		updates["rule_definition"] = ruleDef
+		updates["rule_definition"] = *ruleDef
 	}
 	// Note: is_default is NOT updatable via UpdateRule - use SetRuleAsDefault instead
 
@@ -1652,11 +1674,9 @@ func (rs *FlowServerImpl) GetComponents(
 			componentTypes,
 		)
 
-		// Apply ordering
-		if orderBy != nil {
-			if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", err)
-			}
+		// Apply ordering before pagination, using the default when omitted.
+		if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", err)
 		}
 
 		// Apply pagination
@@ -1780,6 +1800,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	targetSpec := req.GetTargetSpec()
 
 	var storeDrifts []inventorymanager.ComponentDrift
+	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
@@ -1795,16 +1816,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 			components = rs.applyComponentFilters(components, *infoFilter, manufacturerFilter, modelFilter, componentTypes)
 		}
 
-		// Apply ordering
-		if orderBy != nil {
-			if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", sortErr)
-			}
+		// Apply ordering, including the default, before deriving drift order.
+		if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", sortErr)
 		}
 
 		filteredComponentCount = int32(len(components))
 
-		componentIDs := make([]uuid.UUID, 0, len(components))
+		componentIDs = make([]uuid.UUID, 0, len(components))
 		for _, comp := range components {
 			componentIDs = append(componentIDs, comp.Info.ID)
 		}
@@ -1817,6 +1836,29 @@ func (rs *FlowServerImpl) ValidateComponents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get drifts: %w", err)
 	}
+
+	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
+	if targetSpec != nil {
+		for index, componentID := range componentIDs {
+			componentOrder[componentID] = index
+		}
+	}
+	sort.Slice(storeDrifts, func(i, j int) bool {
+		left, right := storeDrifts[i], storeDrifts[j]
+		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+			leftIndex, leftFound := componentOrder[*left.ComponentID]
+			rightIndex, rightFound := componentOrder[*right.ComponentID]
+			if leftFound && rightFound && leftIndex != rightIndex {
+				return leftIndex < rightIndex
+			}
+		}
+		leftKey := componentDriftSortKey(left)
+		rightKey := componentDriftSortKey(right)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return left.ID.String() < right.ID.String()
+	})
 
 	// Convert store drifts to proto response
 	var diffs []*pb.ComponentDiff
@@ -1903,6 +1945,21 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentDriftSortKey(drift inventorymanager.ComponentDrift) string {
+	if drift.ComponentID != nil {
+		return "component/" + drift.ComponentID.String() + "/" + drift.DriftType
+	}
+	componentType := ""
+	if drift.ComponentType != nil {
+		componentType = *drift.ComponentType
+	}
+	externalID := ""
+	if drift.ExternalID != nil {
+		externalID = *drift.ExternalID
+	}
+	return "external/" + componentType + "/" + externalID + "/" + drift.DriftType
 }
 
 func componentBMCMAC(comp *component.Component) string {
@@ -2053,44 +2110,45 @@ func (rs *FlowServerImpl) matchesWildcard(value, pattern string) bool {
 
 // sortComponents sorts components according to the OrderBy specification.
 func (rs *FlowServerImpl) sortComponents(components []*component.Component, orderBy *dbquery.OrderBy) error {
-	if orderBy == nil {
-		return nil
+	effectiveOrderBy := dbquery.OrderBy{
+		Column:    "name",
+		Direction: dbquery.OrderAscending,
+	}
+	if orderBy != nil {
+		effectiveOrderBy = *orderBy
+	}
+	less := func(i, j int, left, right string) bool {
+		if left == right {
+			return components[i].Info.ID.String() < components[j].Info.ID.String()
+		}
+		if effectiveOrderBy.Direction == dbquery.OrderAscending {
+			return left < right
+		}
+		return left > right
 	}
 
 	// Support sorting by common fields
-	switch orderBy.Column {
+	switch effectiveOrderBy.Column {
 	case "name":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Name < components[j].Info.Name
-			}
-			return components[i].Info.Name > components[j].Info.Name
+			return less(i, j, components[i].Info.Name, components[j].Info.Name)
 		})
 	case "manufacturer":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Manufacturer < components[j].Info.Manufacturer
-			}
-			return components[i].Info.Manufacturer > components[j].Info.Manufacturer
+			return less(i, j, components[i].Info.Manufacturer, components[j].Info.Manufacturer)
 		})
 	case "model":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Model < components[j].Info.Model
-			}
-			return components[i].Info.Model > components[j].Info.Model
+			return less(i, j, components[i].Info.Model, components[j].Info.Model)
 		})
 	case "type":
 		sort.Slice(components, func(i, j int) bool {
 			typeI := devicetypes.ComponentTypeToString(components[i].Type)
 			typeJ := devicetypes.ComponentTypeToString(components[j].Type)
-			if orderBy.Direction == dbquery.OrderAscending {
-				return typeI < typeJ
-			}
-			return typeI > typeJ
+			return less(i, j, typeI, typeJ)
 		})
 	default:
-		return fmt.Errorf("unsupported order by column: %s", orderBy.Column)
+		return fmt.Errorf("unsupported order by column: %s", effectiveOrderBy.Column)
 	}
 
 	return nil

@@ -45,6 +45,8 @@ import (
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1449,20 +1451,24 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		reqNVLinkMachineCapabilities *cdbm.MachineCapability
 		respCode                     int
 		respMessage                  string
+		checkRecovery                bool
+		respRetryable                *bool
+		respRecoveryGuidance         bool
 		respUserDataContains         *string
 		respUserData                 *string
 		// prepareReq runs before the handler (e.g. insert a Machine and set req.MachineID) so cases stay self-contained.
 		prepareReq func(t *testing.T, req *model.APIInstanceCreateRequest)
 	}
 
-	tests := []struct {
+	type testCase struct {
 		name                     string
 		fields                   fields
 		args                     args
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
 		verifyChildSpanner       bool
-	}{
+	}
+	tests := []testCase{
 		{
 			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
 			fields: fields{
@@ -3549,11 +3555,14 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						"GPUType": "H100",
 					},
 				},
-				reqMachine:  mc10,
-				reqOrg:      tnOrg7,
-				reqUser:     tnu7,
-				respCode:    http.StatusInternalServerError,
-				respMessage: "",
+				reqMachine:           mc10,
+				reqOrg:               tnOrg7,
+				reqUser:              tnu7,
+				respCode:             http.StatusInternalServerError,
+				respMessage:          "",
+				checkRecovery:        true,
+				respRetryable:        cutil.GetPtr(false),
+				respRecoveryGuidance: true,
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
@@ -3888,6 +3897,123 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 	}
+
+	for _, gate := range []struct {
+		name           string
+		assigned       bool
+		allowUnhealthy bool
+	}{
+		{"release at assignment gate", true, false},
+		{"release at status gate", false, false},
+		{"release at status gate allowing unhealthy", false, true},
+	} {
+		tests = append(tests, testCase{
+			name:   gate.name,
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name: "retry-release", TenantID: tn1.ID.String(), VpcID: vpc1.ID.String(),
+					IpxeScript:            cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces:            []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
+					AllowUnhealthyMachine: cutil.GetPtr(gate.allowUnhealthy),
+				},
+				reqOrg: tnOrg, reqUser: tnu1, respCode: http.StatusBadRequest,
+				checkRecovery: true, respRetryable: cutil.GetPtr(true),
+				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					machine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(gate.assigned), nil)
+					_, updateErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, Status: cutil.GetPtr(cdbm.MachineStatusInUse)})
+					require.NoError(t, updateErr)
+					testInstanceBuildInstance(t, dbSession, uuid.NewString(), tn1.ID, ip.ID, st1.ID, nil, vpc1.ID, &machine.ID, nil, nil, cdbm.InstanceStatusTerminating)
+					req.MachineID = &machine.ID
+				},
+			},
+		})
+	}
+
+	workflowFailure := func(cause error) error {
+		var suite testsuite.WorkflowTestSuite
+		env := suite.NewTestWorkflowEnvironment()
+		env.ExecuteWorkflow(func(workflow.Context) error { return cause })
+		return env.GetWorkflowError()
+	}
+
+	for _, failure := range []struct {
+		name           string
+		startError     error
+		resultError    error
+		terminateError error
+		failCommit     bool
+		responseCode   int
+		knownRejection bool
+	}{
+		{name: "timeout termination failure", resultError: context.DeadlineExceeded, terminateError: errors.New("termination unavailable")},
+		{name: "lost workflow start acknowledgement", startError: context.DeadlineExceeded},
+		{name: "lost workflow result read", resultError: errors.New("history unavailable")},
+		{name: "REST commit failure after allocation", failCommit: true},
+		{name: "workflow failed after Core transport error", resultError: workflowFailure(tp.NewNonRetryableApplicationError("Core reply unavailable", swe.ErrTypeNICoUnavailable, nil)), responseCode: http.StatusServiceUnavailable},
+		{name: "workflow failed with definite validation error", resultError: workflowFailure(tp.NewNonRetryableApplicationError("invalid request", swe.ErrTypeNICoInvalidArgument, nil)), responseCode: http.StatusBadRequest, knownRejection: true},
+	} {
+		responseCode := failure.responseCode
+		if responseCode == 0 {
+			responseCode = http.StatusInternalServerError
+		}
+		var retryable *bool
+		if !failure.knownRejection {
+			retryable = cutil.GetPtr(false)
+		}
+		tests = append(tests, testCase{
+			name:   failure.name,
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name: "reconcile-commit-failure", TenantID: tn7.ID.String(),
+					InstanceTypeID: cutil.GetPtr(ist10.ID.String()), VpcID: vpc10.ID.String(),
+					OperatingSystemID: cutil.GetPtr(os10.ID.String()),
+					IpxeScript:        cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces:        []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet10.ID.String())}},
+				},
+				reqOrg: tnOrg7, reqUser: tnu7, respCode: responseCode,
+				checkRecovery: true, respRetryable: retryable, respRecoveryGuidance: !failure.knownRejection,
+				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					original := scp.IDClientMap[st7.ID.String()]
+					t.Cleanup(func() { scp.IDClientMap[st7.ID.String()] = original })
+					client := &tmocks.Client{}
+					if failure.startError != nil {
+						client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2", mock.Anything).Return(nil, failure.startError)
+					} else {
+						run := &tmocks.WorkflowRun{}
+						run.On("GetID").Return("uncertain-create")
+						run.On("Get", mock.Anything, mock.Anything).Return(failure.resultError)
+						client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2", mock.Anything).Return(run, nil)
+						t.Cleanup(func() { run.AssertExpectations(t) })
+					}
+					if failure.terminateError != nil {
+						client.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(failure.terminateError)
+					}
+					scp.IDClientMap[st7.ID.String()] = client
+					t.Cleanup(func() { client.AssertExpectations(t) })
+					if failure.failCommit {
+						_, setupErr := dbSession.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_instance_commit_5939() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END; $$ LANGUAGE plpgsql`)
+						require.NoError(t, setupErr)
+						t.Cleanup(func() {
+							_, cleanupErr := dbSession.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS fail_instance_commit_5939 ON instance`)
+							assert.NoError(t, cleanupErr)
+							_, cleanupErr = dbSession.DB.ExecContext(ctx, `DROP FUNCTION fail_instance_commit_5939()`)
+							assert.NoError(t, cleanupErr)
+							count, countErr := cdbm.NewInstanceDAO(dbSession).GetCount(ctx, nil, cdbm.InstanceFilterInput{Names: []string{req.Name}})
+							assert.NoError(t, countErr)
+							assert.Zero(t, count, "REST transaction must have rolled back")
+						})
+						_, setupErr = dbSession.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS fail_instance_commit_5939 ON instance`)
+						require.NoError(t, setupErr)
+						_, setupErr = dbSession.DB.ExecContext(ctx, `CREATE CONSTRAINT TRIGGER fail_instance_commit_5939 AFTER INSERT ON instance DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.name = 'reconcile-commit-failure') EXECUTE FUNCTION fail_instance_commit_5939()`)
+						require.NoError(t, setupErr)
+					}
+				},
+			},
+		})
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			csh := CreateInstanceHandler{
@@ -3927,6 +4053,21 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			require.Equal(t, tt.args.respCode, rec.Code)
 			if tt.args.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
+			}
+			if tt.args.checkRecovery {
+				var body map[string]interface{}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.NotContains(t, body, "recoveryAction")
+				var response cutil.APIError
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tt.args.respRetryable, response.Retryable)
+				if tt.args.respRecoveryGuidance {
+					assert.Contains(t, response.Message, "Do not retry automatically.")
+					assert.Contains(t, response.Message, "in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-")
+					assert.Contains(t, response.Message, "before creating again.")
+				} else {
+					assert.NotContains(t, response.Message, "Do not retry automatically.")
+				}
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return
@@ -11546,4 +11687,88 @@ func buildOperatingSystemSiteAssociationWithStatus(t *testing.T, dbSession *cdb.
 	}
 	_, err := dbSession.DB.NewInsert().Model(ossa).Exec(context.Background())
 	require.NoError(t, err)
+}
+
+func TestCreateInstanceHandler_machineUnavailableError(t *testing.T) {
+	ctx := context.Background()
+	session := testInstanceInitDB(t)
+	defer session.Close()
+	testInstanceSetupSchema(t, session)
+	user := testInstanceBuildUser(t, session, "retry-user", "retry-org", nil)
+	provider := testInstanceSiteBuildInfrastructureProvider(t, session, "retry-provider", "retry-provider-org", user)
+	site := testInstanceBuildSite(t, session, provider, "retry-site", cdbm.SiteStatusRegistered, true, user)
+	tenant := testInstanceBuildTenant(t, session, "retry-tenant", "retry-org", user)
+	other := testInstanceBuildTenant(t, session, "other-tenant", "other-org", user)
+	vpc := testInstanceBuildVPC(t, session, "retry-vpc", provider, tenant, site, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, user)
+
+	for _, tt := range []struct {
+		name    string
+		owner   uuid.UUID
+		status  string
+		deleted bool
+		second  bool
+		want    *bool
+	}{
+		{"own release", tenant.ID, cdbm.InstanceStatusTerminating, false, false, cutil.GetPtr(true)},
+		{"own live operation", tenant.ID, cdbm.InstanceStatusProvisioning, false, false, cutil.GetPtr(false)},
+		{"other tenant live", other.ID, cdbm.InstanceStatusReady, false, false, cutil.GetPtr(false)},
+		{"other tenant release", other.ID, cdbm.InstanceStatusTerminating, false, false, cutil.GetPtr(false)},
+		{"missing association", uuid.Nil, "", false, false, nil},
+		{"historical release is not current", tenant.ID, cdbm.InstanceStatusTerminating, true, false, nil},
+		{"ambiguous associations", tenant.ID, cdbm.InstanceStatusTerminating, false, true, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := testInstanceBuildMachine(t, session, provider.ID, site.ID, cutil.GetPtr(true), nil)
+			if tt.owner != uuid.Nil {
+				occupant := testInstanceBuildInstance(t, session, uuid.NewString(), tt.owner, provider.ID, site.ID, nil, vpc.ID, &machine.ID, nil, nil, tt.status)
+				if tt.deleted {
+					_, err := session.DB.NewDelete().Model(occupant).WherePK().Exec(ctx)
+					require.NoError(t, err)
+				}
+			}
+			if tt.second {
+				testInstanceBuildInstance(t, session, uuid.NewString(), other.ID, provider.ID, site.ID, nil, vpc.ID, &machine.ID, nil, nil, cdbm.InstanceStatusReady)
+			}
+			cih := CreateInstanceHandler{dbSession: session}
+			err := cdb.WithTx(ctx, session, func(tx *cdb.Tx) error {
+				lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machine.ID), nil)
+				require.NoError(t, lockErr)
+				locked, getErr := cdbm.NewMachineDAO(session).GetByID(ctx, tx, machine.ID, nil, true)
+				require.NoError(t, getErr)
+				apiErr := cih.machineUnavailableError(ctx, tx, zerolog.Nop(), locked, tenant.ID, "unavailable")
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Equal(t, tt.want, apiErr.Retryable)
+				assert.Equal(t, "unavailable", apiErr.Message)
+				return nil
+			})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestInstanceCreateUncertainError(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		instanceID  uuid.UUID
+		siteID      uuid.UUID
+		wantMessage string
+	}{
+		{
+			name:        "uncertain outcome overrides retry permission and identifies operator lookups",
+			instanceID:  uuid.MustParse("497f6eca-6276-4993-bfeb-53cbbbba6f08"),
+			siteID:      uuid.MustParse("60189e9c-7d12-438c-b9ca-6998d9c364b1"),
+			wantMessage: "Create outcome unknown. Do not retry automatically. Check Instance 497f6eca-6276-4993-bfeb-53cbbbba6f08 on Site 60189e9c-7d12-438c-b9ca-6998d9c364b1 in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-497f6eca-6276-4993-bfeb-53cbbbba6f08 before creating again.",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			instance := &cdbm.Instance{ID: tt.instanceID, SiteID: tt.siteID}
+			cause := errors.New("lost reply")
+			apiErr := cutil.NewAPIError(http.StatusServiceUnavailable, "Create outcome unknown", cause).WithRetryable(true)
+			got := instanceCreateUncertainError(apiErr, instance)
+			assert.Equal(t, http.StatusServiceUnavailable, got.Code)
+			assert.ErrorIs(t, got, cause)
+			assert.Equal(t, cutil.GetPtr(false), got.Retryable)
+			assert.Equal(t, tt.wantMessage, got.Message)
+		})
+	}
 }

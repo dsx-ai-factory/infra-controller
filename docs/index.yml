@@ -344,8 +344,11 @@ navigation:
       contents:
         - page: Hardware Compatibility List
           path: hcl.md
-        - page: Release and QA Process
-          path: development/release_and_qa_process.md
+        - page: Release Policy
+          path: ../RELEASE.md
+        - page: QA Process
+          path: development/qa_process.md
+          slug: qa-process
         - page: FAQs
           path: faq.md
         - section: Development
@@ -410,3 +413,93 @@ navigation:
       icon: bell
     - api: API Reference
       tag-description-pages: true
+      layout:
+        - serviceAccount
+        - infrastructureProvider
+        - tenant
+        - tenantAccount
+        - site
+        - bmcCredential
+        - uefiCredential
+        - measuredBootTrustedMachine
+        - measuredBootTrustedProfile
+        - credentialRotation
+        - siteExplorer
+        - allocation
+        - ipBlock
+        - vpc
+        - vpcPeering
+        - vpcPrefix
+        - subnet
+        - expectedMachine
+        - expectedPowerShelf
+        - expectedRack
+        - expectedRackGroup
+        - expectedSwitch
+        - sku
+        - infiniBandPartition
+        - spectrumXPartition
+        - nvLinkLogicalPartition
+        - instanceType
+        - instance
+        - operatingSystem
+        - machine:
+            contents:
+              - section: Inventory
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine
+                  - GET /v2/org/{org}/nico/machine/label/key
+                  - GET /v2/org/{org}/nico/machine/label/key/{key}/value
+                  - GET /v2/org/{org}/nico/machine/{machineId}
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}
+                  - GET /v2/org/{org}/nico/machine-capability
+              - section: Power and Lifecycle
+                skip-slug: true
+                contents:
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/power
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/bmc/reset
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/chassis/{chassisId}/reset
+                  - POST /v2/org/{org}/nico/machine/{machineId}/decommission
+              - section: DPU
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/dpu
+                  - PATCH /v2/org/{org}/nico/machine/{machineId}/dpu/reprovision
+              - section: Health and Status
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - PUT /v2/org/{org}/nico/machine/{machineId}/health-report
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}/health-report/{source}
+                  - GET /v2/org/{org}/nico/machine/{machineId}/status-history
+              - section: Validation
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - POST /v2/org/{org}/nico/machine/{machineId}/validation/run
+                  - GET /v2/org/{org}/nico/machine/{machineId}/validation/result
+              - section: Statistics
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/gpu/stats
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats/summary
+                  - GET /v2/org/{org}/nico/machine/instance-type/stats
+        - dpuMachine
+        - domain
+        - rack
+        - tray
+        - rule
+        - task
+        - taskRun
+        - iPxeTemplate
+        - networkSecurityGroup
+        - dpuExtensionService
+        - sshKeyGroup
+        - sshKey
+        - user
+        - metadata
+        - audit
+        - hostFirmwareConfig
+        - tenantIdentity

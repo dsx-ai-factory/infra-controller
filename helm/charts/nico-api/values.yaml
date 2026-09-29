@@ -489,6 +489,14 @@ auth:
   ## for the ForgeAdminCLI path unless bypass_rbac is enabled.
   adminRootCafilePath: "/etc/forge/carbide-api/site/admin_root_cert_pem"
 
+## Machine state controller. maxConcurrency caps how many machine handlers run
+## at the same time. It must be a positive integer, and the chart default
+## matches the binary default. Raising it shortens the per-machine pipeline,
+## but too high a value slows the whole ingestion through admin segment lock
+## contention, so tune it against measured time to ready.
+machineStateController:
+  maxConcurrency: 10
+
 ## Config files -- can be overridden with custom content
 configFiles:
   nicoApiConfig: ""  # If empty, uses the default from files/

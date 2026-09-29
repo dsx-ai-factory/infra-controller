@@ -339,14 +339,15 @@ spec:
         - name: vault
           image: hashicorp/vault:1.20.2
           imagePullPolicy: IfNotPresent
+          # Vault's IPv6 wildcard serves IPv6 probes and IPv4 bootstrap requests.
           args:
             - server
             - -dev
-            - -dev-listen-address=0.0.0.0:8200
+            - -dev-listen-address=[::]:8200
             - -dev-root-token-id=${VAULT_TOKEN}
           env:
             - name: VAULT_DEV_LISTEN_ADDRESS
-              value: 0.0.0.0:8200
+              value: "[::]:8200"
           ports:
             - containerPort: 8200
               name: http

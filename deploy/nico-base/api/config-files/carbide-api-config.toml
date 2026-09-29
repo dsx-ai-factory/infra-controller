@@ -122,13 +122,20 @@ test_selection_mode = "EnableAll"
 
 # Optional per-site mTLS certificate bindings:
 # - [switch_state_controller].switch_mtls_services applies to switch state
-#   controller operations and direct ComponentConfigureSwitchCertificate RPC
-#   calls. It defaults to all four SwitchMtlsService values.
+#   controller and direct ComponentConfigureSwitchCertificate operations. Switch
+#   controller operations omit primary-only cluster apps on non-primary switches;
+#   direct RPC operations are unchanged.
+#   Rack ConfigureNmxCluster uses the effective service list for primary
+#   nmx-telemetry, but requires an explicit entry for gNMI.
+#   Switch and direct operations default to all four SwitchMtlsService values.
 # - [rack_state_controller].nmx_cluster_switch_mtls_services is accepted and
-#   ignored. Rack ConfigureNmxCluster uses the fixed nvue_api and
-#   scale_up_fabric_manager bindings.
-# A non-empty switch_mtls_services list replaces its default. An omitted or
-# empty list uses the default.
-# Service selection does not enable the underlying service. See
+#   ignored. Rack ConfigureNmxCluster uses a fixed nvue_api binding before RMS
+#   V2 selects the primary and binds NMX-C on that switch. NICo binds
+#   nmx-telemetry afterward when selected by the effective service list.
+# A non-empty switch_mtls_services list replaces the switch/direct default.
+# Omission or an empty list uses that default, including primary nmx-telemetry
+# but excluding rack-wide gNMI.
+# Cluster application bindings can enable cluster state on the target switch.
+# See
 # docs/architecture/state_machines/switch_configure_certificate.md for service
 # values and workflow scope.

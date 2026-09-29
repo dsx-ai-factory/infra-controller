@@ -3661,24 +3661,12 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Deprecated. Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed
-    /// `nvue_api` binding before RMS V2 selects and configures the primary switch.
-    /// Per-switch certificate configuration uses
-    /// `[switch_state_controller].switch_mtls_services`.
+    /// Deprecated and ignored. Rack `ConfigureNmxCluster` binds `nvue_api`
+    /// before RMS V2; RMS V2 binds NMX-C on the selected primary. gNMI requires
+    /// an explicit `[switch_state_controller].switch_mtls_services` entry, while
+    /// primary nmx-telemetry uses the effective service list.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
-}
-
-impl RackStateControllerConfig {
-    /// Returns configured NMX cluster switch mTLS services, or the ScaleUpFabric
-    /// defaults when the field was omitted or left empty in config.
-    pub fn effective_nmx_cluster_switch_mtls_services_as_i32(&self) -> Vec<i32> {
-        component_manager::config::switch_mtls_services_as_i32(
-            &component_manager::config::effective_nmx_cluster_switch_mtls_services(
-                &self.nmx_cluster_switch_mtls_services,
-            ),
-        )
-    }
 }
 
 /// SwitchStateController related config
@@ -3692,6 +3680,10 @@ pub struct SwitchStateControllerConfig {
     /// Switch services that receive installed mTLS certificates during RMS
     /// `configure_switch_certificate` calls initiated by the switch state
     /// machine or the direct `ComponentConfigureSwitchCertificate` RPC path.
+    /// The switch state machine omits primary-only cluster applications on
+    /// non-primary switches; the direct RPC is unchanged. Rack
+    /// `ConfigureNmxCluster` uses the effective list for the primary NMX-T
+    /// binding, but applies gNMI only when explicitly listed.
     ///
     /// When this field is omitted or empty, all supported services are used.
     ///
@@ -6391,6 +6383,10 @@ path = "credentials.yaml"
                 "false",
             ),
             ("{{ .Values.service.perObjectStateMetrics.port }}", "9091"),
+            (
+                "{{ .Values.machineStateController.maxConcurrency | int }}",
+                "10",
+            ),
             (
                 "{{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}",
                 "[]",

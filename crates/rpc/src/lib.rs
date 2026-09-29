@@ -1218,6 +1218,7 @@ mod tests {
         let domain = Domain {
             id: Some(uuid),
             name: "MyDomain".to_string(),
+            default_ttl: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

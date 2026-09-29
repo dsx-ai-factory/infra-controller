@@ -812,7 +812,7 @@ func NewReplaceAllExpectedRackGroupsHandler(dbSession *cdb.Session, scp *sc.Clie
 // @Param org path string true "Name of NGC organization"
 // @Param message body model.APIReplaceAllExpectedRackGroupsRequest true "ExpectedRackGroup replace-all request"
 // @Success 200 {object} []model.APIExpectedRackGroup
-// @Router /v2/org/{org}/nico/expected-rack-group [put]
+// @Router /v2/org/{org}/nico/expected-rack-group/all [put]
 func (raerh ReplaceAllExpectedRackGroupsHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRackGroup", "ReplaceAll", c, raerh.tracerSpan)
 	if handlerSpan != nil {

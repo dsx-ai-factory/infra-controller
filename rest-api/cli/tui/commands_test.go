@@ -1575,10 +1575,10 @@ func TestPrintTaskIDs_HandlesEmptyTaskIDs(t *testing.T) {
 	assert.Contains(t, out, `"taskIds"`)
 }
 
-func TestPowerStateChoices_MatchOpenAPI(t *testing.T) {
-	expected := []string{"on", "off", "cycle", "forceoff", "forcecycle"}
+func TestPowerStateChoices_UseCanonicalValues(t *testing.T) {
+	expected := []string{"On", "Off", "Cycle", "ForceOff", "ForceCycle", "ACPowerCycle"}
 	assert.Equal(t, expected, powerStateChoices,
-		"powerStateChoices must match UpdatePowerStateRequest.state enum from openapi/spec.yaml")
+		"interactive choices must prefer the canonical power states over compatibility aliases")
 }
 
 func TestAllCommands_HasLifecycleAndTaskCommands(t *testing.T) {

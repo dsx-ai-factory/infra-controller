@@ -20,16 +20,16 @@ use std::io;
 use std::sync::Arc;
 
 mod acl;
-mod bmc_proxy;
 mod config;
 mod metrics;
 mod net;
+mod proxy;
 mod setup;
 mod span_isolation;
 
-use bmc_proxy::{BmcProxyError, BmcProxyParams};
 use clap::Parser;
 use config::{Config, ConfigError};
+use proxy::{BmcProxyError, BmcProxyParams};
 use setup::{SetupError, setup_logging, setup_metrics};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Error> {
     .map_err(Error::Metrics)?;
 
     // Run the BMC proxy
-    bmc_proxy::start(
+    proxy::start(
         BmcProxyParams {
             config: Arc::new(config),
         },

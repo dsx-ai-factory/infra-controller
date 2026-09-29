@@ -54,6 +54,10 @@ pub struct BmcState<C: Callbacks> {
     /// so the service root omits the `Systems` link and the collection endpoint
     /// returns 404.
     pub(crate) exposes_computer_systems: bool,
+    /// What this BMC says it can attest, or `None` for one that advertises no
+    /// `ComponentIntegrity` collection: the service root omits the link and
+    /// both the collection and its members return 404.
+    pub(crate) component_integrities: Option<Vec<redfish::component_integrity::ComponentIntegrity>>,
 }
 
 impl<C: Callbacks> Clone for BmcState<C> {
@@ -75,6 +79,7 @@ impl<C: Callbacks> Clone for BmcState<C> {
             event_sequence: self.event_sequence.clone(),
             callbacks: self.callbacks.clone(),
             exposes_computer_systems: self.exposes_computer_systems,
+            component_integrities: self.component_integrities.clone(),
         }
     }
 }

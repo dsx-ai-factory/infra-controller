@@ -189,8 +189,6 @@ var commandPathAliases = map[string][]string{
 	"power-control-trays":                               {"tray", "power-all"},
 	"release-vpc-inactive-vni":                          {"vpc", "routing-profile", "release-inactive-vni"},
 	"replace-all-expected-rack":                         {"expected-rack", "replace-all"},
-	"reprovision-machine-dpu":                           {"machine", "dpu", "reprovision"},
-	"reset-machine-bmc":                                 {"machine", "bmc", "reset"},
 	"create-measured-boot-trusted-machine":              {"measured-boot", "machine", "approve"},
 	"create-measured-boot-trusted-profile":              {"measured-boot", "profile", "approve"},
 	"delete-measured-boot-trusted-machine":              {"measured-boot", "machine", "remove"},
@@ -199,6 +197,18 @@ var commandPathAliases = map[string][]string{
 	"validate-racks":                                    {"rack", "validate-all"},
 	"validate-tray":                                     {"tray", "validate"},
 	"validate-trays":                                    {"tray", "validate-all"},
+}
+
+// commandPathReplacements moves operations to reviewed resource paths without
+// retaining the generated path. Use this when an operation changes tag so its
+// old top-level resource and the synthetic path under the new tag both need to
+// disappear.
+var commandPathReplacements = map[string][]string{
+	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
+	"get-all-machine-validation-runs":    {"machine", "validation", "runs", "list"},
+	"reprovision-machine-dpu":            {"machine", "dpu", "reprovision"},
+	"reset-machine-bmc":                  {"machine", "bmc", "reset"},
+	"start-machine-validation":           {"machine", "validation", "start"},
 }
 
 // additionalCommandPathAliases preserves established command paths when an
@@ -276,6 +286,10 @@ func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string)
 
 func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
 	ops := collectOperations(spec)
+	ops = slices.DeleteFunc(ops, func(op resolvedOp) bool {
+		_, replaced := commandPathReplacements[op.op.OperationID]
+		return replaced
+	})
 	grouped := groupByTag(ops)
 
 	tagDescriptions := make(map[string]string)
@@ -324,6 +338,9 @@ func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
 	for operationID, path := range commandPathAliases {
 		addAlias(operationID, path)
 	}
+	for operationID, path := range commandPathReplacements {
+		addAlias(operationID, path)
+	}
 	for operationID, paths := range additionalCommandPathAliases {
 		for _, path := range paths {
 			addAlias(operationID, path)
@@ -347,7 +364,7 @@ func collectOperations(spec *Spec) []resolvedOp {
 			{"DELETE", item.Delete},
 		}
 		for _, me := range methods {
-			if me.op == nil {
+			if me.op == nil || me.op.Deprecated {
 				continue
 			}
 			tag := "other"

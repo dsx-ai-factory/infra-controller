@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
+	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
@@ -774,6 +775,43 @@ func TestGetComponents_TargetSpecWithPagination(t *testing.T) {
 	assert.Equal(t, 2, len(resp.Components))
 }
 
+func TestFlowServerImpl_sortComponents(t *testing.T) {
+	lowID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	highID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	tests := []struct {
+		name    string
+		orderBy *dbquery.OrderBy
+		wantIDs []uuid.UUID
+	}{
+		{
+			name:    "default name order uses ID tie breaker",
+			wantIDs: []uuid.UUID{lowID, highID},
+		},
+		{
+			name: "descending requested order still uses ascending ID tie breaker",
+			orderBy: &dbquery.OrderBy{
+				Column: "manufacturer", Direction: dbquery.OrderDescending,
+			},
+			wantIDs: []uuid.UUID{lowID, highID},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			components := []*component.Component{
+				{Info: deviceinfo.DeviceInfo{ID: highID, Name: "same", Manufacturer: "same"}},
+				{Info: deviceinfo.DeviceInfo{ID: lowID, Name: "same", Manufacturer: "same"}},
+			}
+
+			err := (&FlowServerImpl{}).sortComponents(components, test.orderBy)
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantIDs, []uuid.UUID{components[0].Info.ID, components[1].Info.ID})
+		})
+	}
+}
+
 func TestGetComponents_NVLinkDomainTarget(t *testing.T) {
 	mgr := newMockManager()
 	rackID, _ := setupValidateTestData(mgr)
@@ -1051,6 +1089,38 @@ func TestValidateComponents_WithPagination(t *testing.T) {
 	require.NotNil(t, resp2)
 	assert.Equal(t, int32(3), resp2.TotalDiffs) // total is still 3
 	assert.Equal(t, 1, len(resp2.Diffs))        // only 1 remaining
+}
+
+func TestValidateComponents_StableDriftOrderBeforePagination(t *testing.T) {
+	mgr := newMockManager()
+	server := &FlowServerImpl{inventoryManager: mgr}
+	driftIDs := []uuid.UUID{
+		uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+	}
+	externalIDs := []string{"tray-1", "tray-2", "tray-3"}
+	mgr.drifts = []inventorystore.ComponentDrift{
+		{ID: driftIDs[2], ExternalID: &externalIDs[2], DriftType: "missing_in_expected"},
+		{ID: driftIDs[0], ExternalID: &externalIDs[0], DriftType: "missing_in_expected"},
+		{ID: driftIDs[1], ExternalID: &externalIDs[1], DriftType: "missing_in_expected"},
+	}
+
+	first, err := server.ValidateComponents(t.Context(), &pb.ValidateComponentsRequest{
+		Pagination: &pb.Pagination{Offset: 0, Limit: 2},
+	})
+	require.NoError(t, err)
+	second, err := server.ValidateComponents(t.Context(), &pb.ValidateComponentsRequest{
+		Pagination: &pb.Pagination{Offset: 2, Limit: 2},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, first.Diffs, 2)
+	require.Len(t, second.Diffs, 1)
+	assert.Equal(t, []string{"tray-1", "tray-2"}, []string{
+		first.Diffs[0].GetComponentId(), first.Diffs[1].GetComponentId(),
+	})
+	assert.Equal(t, "tray-3", second.Diffs[0].GetComponentId())
 }
 
 func TestValidateComponents_NoTargetSpec_GetAllDrifts(t *testing.T) {

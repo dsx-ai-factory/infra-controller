@@ -1305,6 +1305,32 @@ impl Forge for Api {
         crate::handlers::machine::admin_force_delete_machine(self, request).await
     }
 
+    async fn admin_find_reserved_address_ids(
+        &self,
+        request: Request<rpc::AdminFindReservedAddressesRequest>,
+    ) -> Result<Response<rpc::AdminReservedAddressIdList>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_address_ids(self, request)
+            .await
+    }
+
+    async fn admin_find_reserved_addresses_by_ids(
+        &self,
+        request: Request<rpc::AdminReservedAddressesByIdsRequest>,
+    ) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_addresses_by_ids(
+            self, request,
+        )
+        .await
+    }
+
+    async fn admin_release_reserved_addresses(
+        &self,
+        request: Request<rpc::AdminReleaseReservedAddressesRequest>,
+    ) -> Result<Response<rpc::AdminReleaseReservedAddressesResponse>, Status> {
+        crate::handlers::machine_interface_address::admin_release_reserved_addresses(self, request)
+            .await
+    }
+
     async fn decommission_managed_host(
         &self,
         request: Request<rpc::DecommissionManagedHostRequest>,
@@ -3465,6 +3491,48 @@ impl Forge for Api {
         request: tonic::Request<MachineId>,
     ) -> Result<Response<rpc::SpdmGetAttestationMachineResponse>, Status> {
         crate::handlers::attestation::get_attestation_machine(self, request).await
+    }
+
+    async fn create_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::CreateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::create(self, request).await
+    }
+
+    async fn update_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::UpdateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::update(self, request).await
+    }
+
+    async fn delete_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::DeleteAttestationProfileRequest>,
+    ) -> Result<Response<rpc::DeleteAttestationProfileResponse>, Status> {
+        crate::handlers::attestation_profile::delete(self, request).await
+    }
+
+    async fn get_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::GetAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::get(self, request).await
+    }
+
+    async fn list_attestation_profiles(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::ListAttestationProfilesResponse>, Status> {
+        crate::handlers::attestation_profile::list(self).await
+    }
+
+    async fn get_attestation_coverage(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::GetAttestationCoverageResponse>, Status> {
+        crate::handlers::attestation_profile::coverage(self).await
     }
 
     async fn sign_machine_identity(

@@ -311,6 +311,9 @@ impl InternalRBACRules {
         x.perm("FindExploredMlxDeviceHostIds", vec![ForgeAdminCLI]);
         x.perm("FindExploredMlxDevicesByIds", vec![ForgeAdminCLI]);
         x.perm("AdminForceDeleteMachine", vec![ForgeAdminCLI, Machineatron]);
+        x.perm("AdminFindReservedAddressIds", vec![ForgeAdminCLI]);
+        x.perm("AdminFindReservedAddressesByIds", vec![ForgeAdminCLI]);
+        x.perm("AdminReleaseReservedAddresses", vec![ForgeAdminCLI]);
         x.perm(
             "DecommissionManagedHost",
             vec![ForgeAdminCLI, Machineatron, Flow],
@@ -757,6 +760,12 @@ impl InternalRBACRules {
         x.perm("CancelMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm("FindPowerShelfIds", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
