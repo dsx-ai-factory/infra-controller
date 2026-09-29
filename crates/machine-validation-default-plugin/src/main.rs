@@ -97,7 +97,24 @@ fn run(input_path: &Path, output_path: &Path) -> Result<(), String> {
     };
     let mut findings = Vec::new();
     for check in checks {
-        if let Some(finding) = run_check(&check)? {
+        let check_result = match run_check(&check) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("{error}");
+                return write_result(
+                    output_path,
+                    &ResultFile {
+                        contract_version: "v1",
+                        kind: "MachineValidationPluginResult",
+                        outcome: "error",
+                        severity: "unknown",
+                        summary: "basic check execution failed".to_owned(),
+                        findings: Vec::new(),
+                    },
+                );
+            }
+        };
+        if let Some(finding) = check_result {
             findings.push(finding);
         }
     }
@@ -178,6 +195,37 @@ mod tests {
         };
         write_result(&output, &result).unwrap();
         assert!(output.is_file());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_an_error_result_for_a_handled_check_error() {
+        let directory =
+            std::env::temp_dir().join(format!("nico-basic-plugin-error-{}", std::process::id()));
+        let input = directory.join("input.json");
+        let output = directory.join("result.json");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            &input,
+            r#"{
+                "contractVersion": "v1",
+                "kind": "MachineValidationPluginInput",
+                "parameters": {
+                    "checks": [{
+                        "name": "dcgm-diagnostic",
+                        "parameters": { "dcgmiPath": "/missing/dcgmi" }
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        run(&input, &output).expect("handled check error publishes a result");
+
+        let result: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(result["outcome"], "error");
+        assert_eq!(result["severity"], "unknown");
+        assert_eq!(result["summary"], "basic check execution failed");
         std::fs::remove_dir_all(directory).unwrap();
     }
 
