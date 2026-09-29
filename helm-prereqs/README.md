@@ -983,7 +983,7 @@ load it. It succeeds when the Site Agent logs that its Temporal worker started.
 `--dry-run` reports the certificate expiry and Site Manager bootstrap state
 without changing anything, and `--yes` skips the confirmation prompt. Set
 `REST_NS` to skip namespace detection, for example when more than one namespace
-runs a Site Agent. It needs `kubectl`, `curl`, and `python3`.
+runs a Site Agent. It needs `kubectl`, `curl`, `openssl`, and `python3`.
 
 ## Teardown
 

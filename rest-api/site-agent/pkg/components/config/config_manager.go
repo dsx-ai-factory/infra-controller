@@ -260,6 +260,8 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	}
 	if conf.BootstrapSecretName == "" {
 		conf.BootstrapSecretName = DefaultBootstrapSecretName
+		log.Warn().Msgf("BOOTSTRAP_SECRET_NAME is not set, rotated OTPs will be written to the %s Secret",
+			DefaultBootstrapSecretName)
 	}
 
 	// Site ID

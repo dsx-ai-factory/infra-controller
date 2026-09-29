@@ -38,10 +38,7 @@ site_manager() {
     curl -sSf --cacert "${tmp}/ca.crt" --connect-to "${sm_hostport}:127.0.0.1:${local_port}" \
         "https://${sm_hostport}/v1/site$1" "${@:2}"
 }
-expiry() {
-    base64 -d <<<"$1" | python3 -c 'import ssl; print(ssl._ssl._test_decode_cert("/dev/stdin")["notAfter"])' \
-        2>/dev/null || echo unknown
-}
+expiry() { base64 -d <<<"$1" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || echo unknown; }
 can_i() {
     [[ "$(kubectl auth can-i -n "${REST_NS}" "$1" "$2" 2>/dev/null)" == yes ]] ||
         die "the current context cannot $1 $2"
