@@ -463,9 +463,8 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(
+	flowResp, apiErr := common.ExecuteFirmwareUpdateWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -479,11 +478,8 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domain",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -596,9 +592,8 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(
+	flowResp, apiErr := common.ExecuteFirmwareUpdateWorkflow(
 		ctx,
-		c,
 		logger,
 		stc,
 		model.NVLinkDomainTargetSpec(identity.NVLinkDomainIDs),
@@ -612,11 +607,8 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domains",
 	)
-	if err != nil {
-		return err
-	}
-	if c.Response().Committed {
-		return nil
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

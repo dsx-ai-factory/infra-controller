@@ -35,6 +35,8 @@ import (
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -1590,6 +1592,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		trayID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
@@ -1612,6 +1615,17 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - Flow rejects authentication data without a cipher",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"nvswitch":"tray-token"}},"overrideVersionCheck":true}`, site.ID.String()),
+			mockResultErr:  status.Error(codes.FailedPrecondition, "data encryption cipher is not configured (type: Error, retryable: true)"),
+			expectedAuth:   "tray-token",
+			expectedError:  "data encryption cipher is not configured",
+			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
 			name:           "failure - unknown per-component authentication field",
@@ -1645,7 +1659,11 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1653,7 +1671,12 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					}
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
-					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					perComponent := flowReq.GetAuthenticationData().GetPerComponent()
+					if perComponent != nil {
+						assert.Equal(t, tt.expectedAuth, perComponent.GetNvswitch())
+					} else {
+						assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					}
 					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
@@ -1682,7 +1705,14 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			require.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != http.StatusOK {
 				assert.Contains(t, rec.Body.String(), tt.expectedError)
-				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				if tt.mockResultErr != nil {
+					var apiErr cutil.APIError
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+					assert.NotContains(t, rec.Body.String(), "taskIds")
+					mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				} else {
+					mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				}
 				return
 			}
 
@@ -1722,6 +1752,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
@@ -1742,6 +1773,16 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"%s"},"version":"24.11.0"}`, site.ID.String(), fwRackID),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - Flow rejects authentication data without a cipher",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"shared":"tray-token"}}`, site.ID.String()),
+			mockResultErr:  status.Error(codes.FailedPrecondition, "data encryption cipher is not configured (type: Error, retryable: true)"),
+			expectedAuth:   "tray-token",
+			expectedError:  "data encryption cipher is not configured",
+			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
 			name:           "failure - unknown per-component authentication field",
@@ -1772,7 +1813,11 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1808,7 +1853,14 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			require.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != http.StatusOK {
 				assert.Contains(t, rec.Body.String(), tt.expectedError)
-				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				if tt.mockResultErr != nil {
+					var apiErr cutil.APIError
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+					assert.NotContains(t, rec.Body.String(), "taskIds")
+					mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				} else {
+					mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				}
 				return
 			}
 

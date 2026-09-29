@@ -2222,7 +2222,8 @@ func ExecuteBringUpRackWorkflow(
 }
 
 // ExecuteFirmwareUpdateWorkflow builds an UpgradeFirmwareRequest, proxies it to
-// Flow's UpgradeFirmware, and returns the raw SubmitTaskResponse.
+// Flow's UpgradeFirmware, and returns the raw SubmitTaskResponse. The caller
+// owns rendering a returned APIError so the HTTP response is written once.
 //
 // targets, when non-empty, restricts the upgrade to the listed firmware
 // sub-parts within each targeted tray (e.g. ["bmc", "nvos"] for switch
@@ -2235,7 +2236,6 @@ func ExecuteBringUpRackWorkflow(
 // Operation Rule.
 func ExecuteFirmwareUpdateWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2248,7 +2248,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
 		TargetSpec:             targetSpec,
 		TargetVersion:          version,
@@ -2282,7 +2282,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		siteID, "authenticationData",
 	)
 	if proxyErr != nil {
-		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+		return nil, proxyErr
 	}
 
 	return &flowResponse, nil

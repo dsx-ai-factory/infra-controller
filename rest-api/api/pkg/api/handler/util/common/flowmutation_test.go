@@ -182,7 +182,11 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
+				got, apiErr := ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
+				if apiErr != nil {
+					return nil, apiErr
+				}
+				return got, nil
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
 			wantWorkflowID: workflowID + "-override-version-check",
@@ -245,15 +249,13 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 		AuthenticationData: authenticationData,
 	}
 	temporalClient, call := newMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
-	echoCtx, _ := newProxyEchoContext()
-
-	got, err := ExecuteFirmwareUpdateWorkflow(
-		context.Background(), echoCtx, zerolog.Nop(), temporalClient,
+	got, apiErr := ExecuteFirmwareUpdateWorkflow(
+		context.Background(), zerolog.Nop(), temporalClient,
 		mutationTargetSpec(rackID), nil, nil, authenticationData, siteID, nil, false, false,
 		workflowID, "rack r1",
 	)
 
-	require.NoError(t, err)
+	require.Nil(t, apiErr)
 	require.NotNil(t, got)
 	assert.True(t, strings.HasPrefix(call.options.ID, workflowID+"-"))
 	assert.NotContains(t, call.options.ID, token)
@@ -263,8 +265,8 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 	require.NotEmpty(t, call.request.EncryptedSecrets)
 
 	secretsJSON := cutil.DecryptData(call.request.EncryptedSecrets, siteID)
-	restoredJSON, err := grpcproxy.MergeSecrets(call.request.RequestJSON, secretsJSON)
-	require.NoError(t, err)
+	restoredJSON, mergeErr := grpcproxy.MergeSecrets(call.request.RequestJSON, secretsJSON)
+	require.NoError(t, mergeErr)
 	gotRequest := &flowv1.UpgradeFirmwareRequest{}
 	require.NoError(t, protojson.Unmarshal(restoredJSON, gotRequest))
 	assert.True(t, proto.Equal(wantRequest, gotRequest), "want %v, got %v", wantRequest, gotRequest)
