@@ -811,6 +811,114 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
     Ok(())
 }
 
+/// Site Explorer claims each DPU's operator-declared IPv4 and IPv6 loopback
+/// reservations, selecting them by the DPU pairing serial on a multi-DPU host so
+/// every DPU receives its own reserved pair rather than an auto-assigned one.
+#[sqlx_test]
+async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::hardware_info::HardwareInfo;
+    use model::machine::machine_id::from_hardware_info;
+
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+
+    let dpu_a = DpuConfig::with_serial("SER-DPU-A".to_string());
+    let dpu_b = DpuConfig::with_serial("SER-DPU-B".to_string());
+    let mock_host = ManagedHostConfig::default().with_dpus(vec![dpu_a.clone(), dpu_b.clone()]);
+    let mut fixture = explored_host_fixture(&env, &mock_host).await;
+
+    // Reservable (non-auto-assign) addresses, one IPv4 + one IPv6 per DPU.
+    let a_v4 = Ipv4Addr::new(172, 30, 0, 10);
+    let a_v6: Ipv6Addr = "2001:db8:1::a".parse()?;
+    let b_v4 = Ipv4Addr::new(172, 30, 0, 11);
+    let b_v6: Ipv6Addr = "2001:db8:1::b".parse()?;
+    let common_pools = env.api().common_pools();
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(a_v4), IpAddr::V4(b_v4)],
+        false,
+    )
+    .await?;
+    db::resource_pool::populate(
+        common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
+        &mut txn,
+        vec![a_v6, b_v6],
+        false,
+    )
+    .await?;
+
+    // Persist the host expected machine with a reservation per DPU serial. Site
+    // Explorer resolves them from the database, not the passed-in snapshot.
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: mock_host.bmc_mac_address,
+            data: ExpectedMachineData {
+                dpu_loopback_reservations: Some(vec![
+                    DpuLoopbackReservation {
+                        dpu_serial_number: "SER-DPU-A".to_string(),
+                        loopback_ipv4: Some(a_v4),
+                        loopback_ipv6: Some(a_v6),
+                    },
+                    DpuLoopbackReservation {
+                        dpu_serial_number: "SER-DPU-B".to_string(),
+                        loopback_ipv4: Some(b_v4),
+                        loopback_ipv6: Some(b_v6),
+                    },
+                ]),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    assert!(
+        creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&mock_host)),
+                &env.pool,
+            )
+            .await?
+    );
+
+    // Each DPU machine, identified by its own serial, holds its reserved pair.
+    let search = MachineSearchConfig {
+        include_dpus: true,
+        ..Default::default()
+    };
+    for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
+        let dpu_id = from_hardware_info(&HardwareInfo::from(dpu))?;
+        let machine = db::machine::find_one(&env.pool, &dpu_id, search.clone())
+            .await?
+            .unwrap_or_else(|| panic!("DPU {} must exist", dpu.serial));
+        assert_eq!(
+            machine.network_config.loopback_ip,
+            Some(IpAddr::V4(expected_v4)),
+            "DPU {} must receive its reserved IPv4 loopback",
+            dpu.serial,
+        );
+        assert_eq!(
+            machine.network_config.loopback_ip_v6,
+            Some(expected_v6),
+            "DPU {} must receive its reserved IPv6 loopback",
+            dpu.serial,
+        );
+    }
+
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_machine_creator_rejects_partial_dpu_machine_set(
     pool: PgPool,

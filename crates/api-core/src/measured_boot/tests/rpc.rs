@@ -2155,6 +2155,7 @@ mod tests {
             ManagedHostState::Ready,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            None,
         )
         .await
         .unwrap();

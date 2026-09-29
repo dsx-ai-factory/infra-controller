@@ -909,6 +909,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    dpu_loopback_reservations: None,
                 },
             },
         )
@@ -1005,6 +1006,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    dpu_loopback_reservations: None,
                 },
             },
         )
@@ -1076,6 +1078,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    dpu_loopback_reservations: None,
                 },
             },
         )
@@ -1164,6 +1167,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    dpu_loopback_reservations: None,
                 },
             },
         )
@@ -1647,6 +1651,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    dpu_loopback_reservations: None,
                 },
             },
         )

@@ -660,6 +660,239 @@ async fn test_discover_dpu_by_source_ip(
     Ok(())
 }
 
+/// Define the IPv6 loopback pool as a small auto-assign prefix so DPU discovery
+/// can allocate an IPv6 underlay loopback alongside the default IPv4 pool.
+async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
+    let mut txn = env.pool.begin().await.unwrap();
+    db::resource_pool::define(
+        &mut txn,
+        model::resource_pool::common::LOOPBACK_IP_V6,
+        &ResourcePoolDef {
+            pool_type: ResourcePoolType::Ipv6,
+            prefix: Some("2001:db8::/125".to_string()),
+            ranges: vec![],
+            delegate_prefix_len: None,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// Create a host expected machine carrying one DPU loopback reservation. Direct
+/// discovery resolves the reservation globally by DPU serial, so only the child
+/// row and its foreign-key parent need to exist.
+async fn seed_reservation_host(
+    env: &common::api_fixtures::TestEnv,
+    host_bmc_mac: MacAddress,
+    reservation: model::expected_machine::DpuLoopbackReservation,
+) {
+    use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+
+    let mut txn = env.pool.begin().await.unwrap();
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host_bmc_mac,
+            data: ExpectedMachineData {
+                dpu_loopback_reservations: Some(vec![reservation]),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// Directly discover a DPU by its DHCP source IP, returning the created machine.
+async fn discover_dpu_by_source_ip(
+    env: &common::api_fixtures::TestEnv,
+    dpu: &model::test_support::DpuConfig,
+    hardware_info: HardwareInfo,
+) -> model::machine::Machine<carbide_uuid::machine::MachineId> {
+    let dhcp_response = env
+        .api
+        .discover_dhcp(Request::new(rpc::forge::DhcpDiscovery {
+            mac_address: dpu.oob_mac_address.to_string(),
+            relay_address: FIXTURE_DHCP_RELAY_ADDRESS.to_string(),
+            vendor_string: None,
+            link_address: None,
+            circuit_id: None,
+            remote_id: None,
+            desired_address: None,
+            address_family: None,
+            message_kind: None,
+            duid: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut req = Request::new(rpc::MachineDiscoveryInfo {
+        machine_interface_id: None,
+        discovery_data: Some(rpc::DiscoveryData::Info(
+            rpc::DiscoveryInfo::try_from(hardware_info).unwrap(),
+        )),
+        create_machine: true,
+        ..Default::default()
+    });
+    let dhcp_address: IpAddr = dhcp_response.address.parse().unwrap();
+    req.extensions_mut()
+        .insert::<Arc<ConnectionAttributes>>(Arc::new(ConnectionAttributes {
+            peer_address: SocketAddr::from((dhcp_address, 0)),
+            peer_certificates: vec![],
+        }));
+
+    let dpu_machine_id = env
+        .api
+        .discover_machine(req)
+        .await
+        .unwrap()
+        .into_inner()
+        .machine_id
+        .expect("DPU should be created");
+    db::machine::find_one(&env.pool, &dpu_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .expect("DPU should exist")
+}
+
+/// Direct discovery claims the operator's reserved IPv4 and IPv6 loopbacks for a
+/// DPU matched by its product serial, instead of auto-assigning from the pool.
+#[crate::sqlx_test]
+async fn test_direct_discovery_applies_dpu_loopback_reservation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    define_loopback_ipv6_pool(&env).await;
+
+    // Reservable (non-auto-assign) addresses the operator pins to this DPU.
+    let reserved_v4 = Ipv4Addr::new(172, 30, 0, 10);
+    let reserved_v6: Ipv6Addr = "2001:db8:1::10".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(reserved_v4)],
+        false,
+    )
+    .await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
+        &mut txn,
+        vec![reserved_v6],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    seed_reservation_host(
+        &env,
+        "aa:bb:cc:dd:ee:10".parse()?,
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_serial_number: dpu.serial.clone(),
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: Some(reserved_v6),
+        },
+    )
+    .await;
+
+    let dpu_machine = discover_dpu_by_source_ip(&env, dpu, HardwareInfo::from(dpu)).await;
+    assert_eq!(
+        dpu_machine.network_config.loopback_ip,
+        Some(IpAddr::V4(reserved_v4))
+    );
+    assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    Ok(())
+}
+
+/// Scout reports shared `Unspecified...` placeholders for a BlueField's board
+/// and chassis serials. A reservation keyed by that placeholder must not be
+/// applied to an unrelated DPU: only the product serial selects a reservation,
+/// so this DPU auto-assigns from the pool instead.
+#[crate::sqlx_test]
+async fn test_direct_discovery_ignores_placeholder_board_and_chassis_serials(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::Ipv4Addr;
+
+    const PLACEHOLDER_SERIAL: &str = "Unspecified System Serial Number";
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+
+    // A reservation another DPU would own, keyed by the shared placeholder.
+    let reserved_v4 = Ipv4Addr::new(172, 30, 0, 20);
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(reserved_v4)],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    seed_reservation_host(
+        &env,
+        "aa:bb:cc:dd:ee:20".parse()?,
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_serial_number: PLACEHOLDER_SERIAL.to_string(),
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: None,
+        },
+    )
+    .await;
+
+    // This DPU has a distinct product serial but reports the placeholder for its
+    // board and chassis serials, matching what Scout emits for BlueFields.
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    let mut hardware_info = HardwareInfo::from(dpu);
+    let dmi = hardware_info
+        .dmi_data
+        .as_mut()
+        .expect("DPU fixture must contain DMI data");
+    assert_ne!(dmi.product_serial, PLACEHOLDER_SERIAL);
+    dmi.board_serial = PLACEHOLDER_SERIAL.to_string();
+    dmi.chassis_serial = PLACEHOLDER_SERIAL.to_string();
+
+    let dpu_machine = discover_dpu_by_source_ip(&env, dpu, hardware_info).await;
+    let loopback = dpu_machine
+        .network_config
+        .loopback_ip
+        .expect("DPU should still receive an automatic loopback");
+    assert_ne!(
+        loopback,
+        IpAddr::V4(reserved_v4),
+        "a placeholder board/chassis serial must not select another DPU's reservation"
+    );
+    // The automatic address comes from the default auto-assign pool prefix
+    // (172.20.0.0/24), not the reservable range the reservation targeted.
+    let IpAddr::V4(v4) = loopback else {
+        panic!("the IPv4 loopback pool must hand out an IPv4 address");
+    };
+    let [a, b, c, _] = v4.octets();
+    assert_eq!(
+        [a, b, c],
+        [172, 20, 0],
+        "the automatic loopback must come from the default auto-assign pool"
+    );
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_discover_dpu_not_create_machine(
     pool: sqlx::PgPool,

@@ -200,6 +200,13 @@ pub(crate) struct Args {
         help = "If true, do not lock down the server as part of lifecycle management within the state machine. If unset or false, preserve the default behavior of locking down the server after configuring the BIOS."
     )]
     disable_lockdown: Option<bool>,
+
+    #[clap(
+        long = "dpu-loopback-reservations",
+        value_name = "DPU_LOOPBACK_RESERVATIONS",
+        help = "Deterministic DPU underlay loopback reservations as a JSON array of objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6). Each reservation is keyed by the trimmed DPU pairing serial number and requires at least one address. Each address must be a value from the site's non-auto-assignable lo-ip / lo-ip-v6 pool that is not already reserved for or allocated to another DPU. Example: '[{\"dpu_serial_number\":\"MT2000X00001\",\"loopback_ipv4\":\"192.0.2.10\"}]'."
+    )]
+    dpu_loopback_reservations: Option<String>,
 }
 
 impl Args {
@@ -231,6 +238,12 @@ impl TryFrom<Args> for rpc::forge::ExpectedMachine {
             .transpose()?
             .unwrap_or_default();
 
+        let dpu_loopback_reservations = value
+            .dpu_loopback_reservations
+            .as_deref()
+            .map(crate::expected_machines::common::parse_dpu_loopback_reservations_flag)
+            .transpose()?;
+
         Ok(rpc::forge::ExpectedMachine {
             bmc_mac_address: value.bmc_mac_address.to_string(),
             bmc_username: value.bmc_username,
@@ -258,6 +271,7 @@ impl TryFrom<Args> for rpc::forge::ExpectedMachine {
                     disable_lockdown: Some(dl),
                 }
             }),
+            dpu_loopback_reservations,
         })
     }
 }

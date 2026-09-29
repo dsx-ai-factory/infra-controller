@@ -18,7 +18,8 @@ nico-admin-cli expected-machine add
 [--default_pause_ingestion_and_poweron] [--dpf-enabled]
 [--extended] [--bmc-ip-address]
 [--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--disable-lockdown] [--sort-by]
+[--bmc-ip-allocation] [--disable-lockdown]
+[--dpu-loopback-reservations] [--sort-by]
 [-h|--help]
 ```
 
@@ -193,6 +194,16 @@ behavior of locking down the server after configuring the BIOS.
 > - true
 >
 > - false
+
+`--dpu-loopback-reservations <DPU_LOOPBACK_RESERVATIONS>`
+
+Deterministic DPU underlay loopback reservations as a JSON array of
+objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6). Each
+reservation is keyed by the trimmed DPU pairing serial number and
+requires at least one address. Each address must be a value from the
+sites non-auto-assignable lo-ip / lo-ip-v6 pool that is not already
+reserved for or allocated to another DPU. Example:
+[{"dpu_serial_number":"MT2000X00001","loopback_ipv4":"192.0.2.10"}].
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
