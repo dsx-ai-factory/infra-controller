@@ -62,11 +62,29 @@ pub async fn find_by_machine_ids(
 }
 
 /// An empty slice clears the LLDP neighbors.
+///
+/// Fails with [`DatabaseError::NotFoundError`] when `machine_id` is unknown.
 pub async fn replace_all(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     neighbors: &[LldpNeighbor],
 ) -> DatabaseResult<()> {
+    // Serialize replacements per machine. Under READ COMMITTED the DELETE below only locks
+    // rows that exist now, so two overlapping reports for the same machine (a scout retry
+    // racing the original) could both delete and then the later INSERT would fail with a
+    // primary-key violation once the first commits. Holding the parent row makes the second
+    // report wait and then replace the first one's committed rows.
+    let lock = "SELECT 1 FROM machines WHERE id = $1 FOR UPDATE";
+    sqlx::query(lock)
+        .bind(machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(lock, e))?
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "machine",
+            id: machine_id.to_string(),
+        })?;
+
     let delete = "DELETE FROM machine_lldp_neighbors WHERE machine_id = $1";
     sqlx::query(delete)
         .bind(machine_id)
