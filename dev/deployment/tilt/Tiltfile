@@ -1085,6 +1085,7 @@ helm_chart(
     port_forwards=[port_forward(1266, 1266)],
     links=[link('https://localhost:1266/', 'Machine-A-Tron UI')],
     manual=True,
+    timeout='10m',
 )
 
 ssh_console_values = component_values(core_global, all_values['nico-ssh-console-rs'])

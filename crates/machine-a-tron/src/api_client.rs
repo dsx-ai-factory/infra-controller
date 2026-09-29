@@ -25,10 +25,12 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
+use model::expected_rack_group::ExpectedRackGroup as RackGroupModel;
 use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
-    ExpectedRackRequest, ExpectedSwitch, MachinesByIdsRequest, SetDynamicConfigRequest,
+    ExpectedRackGroup, ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch,
+    MachinesByIdsRequest, SetDynamicConfigRequest,
 };
 use rpc::protos::forge_api_client::ForgeApiClient;
 
@@ -70,6 +72,7 @@ impl From<ForgeApiClient> for ApiClient {
 /// One expected inventory record that machine-a-tron registers at startup.
 #[derive(Clone, Debug)]
 pub(crate) enum ExpectedRecord {
+    RackGroup(RackGroupModel),
     Rack {
         rack_id: RackId,
         rack_profile_id: RackProfileId,
@@ -99,6 +102,7 @@ impl ExpectedRecord {
     /// Human-readable identity used in logs and the registration summary.
     pub(crate) fn identifier(&self) -> String {
         let (kind, serial, bmc_mac_address) = match self {
+            Self::RackGroup(group) => return format!("rack group {}", group.rack_group_id),
             Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
             Self::Machine {
                 chassis_serial_number,
@@ -421,6 +425,7 @@ impl ApiClient {
     /// Registers one expected inventory record of any supported kind.
     pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
         match record {
+            ExpectedRecord::RackGroup(group) => self.ensure_expected_rack_group(group).await,
             ExpectedRecord::Rack {
                 rack_id,
                 rack_profile_id,
@@ -465,6 +470,30 @@ impl ApiClient {
                 self.add_expected_power_shelf(bmc_mac_address, shelf_serial_number, rack_id)
                     .await
             }
+        }
+    }
+
+    async fn ensure_expected_rack_group(&self, group: RackGroupModel) -> ClientApiResult<()> {
+        let rack_group_id = group.rack_group_id.to_string();
+        let group: ExpectedRackGroup = group.into();
+        match self.0.add_expected_rack_group(group.clone()).await {
+            Ok(()) => Ok(()),
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                let existing = self
+                    .0
+                    .get_expected_rack_group(ExpectedRackGroupRequest { rack_group_id })
+                    .await
+                    .map_err(ClientApiError::InvocationError)?;
+                if existing == group {
+                    Ok(())
+                } else {
+                    self.0
+                        .update_expected_rack_group(group)
+                        .await
+                        .map_err(ClientApiError::InvocationError)
+                }
+            }
+            Err(status) => Err(ClientApiError::InvocationError(status)),
         }
     }
 

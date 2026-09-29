@@ -178,14 +178,10 @@ test_selection_mode = "EnableAll"
 # rack. Each count is the minimum number of devices required to exit Created
 # (present) and Discovering (ready).
 #
-# Profile ids name the platform (NVL72 / NVL72_GB300), not a single OEM —
-# inventory references stay stable as vendors change. The vendor fields below
-# are the currently qualified defaults (e.g. Lenovo compute on GB300); they are
-# per-OEM facts, not properties of the topology. Figment merges site-config
-# over this file per-key, so a site with different hardware overrides only
-# rack_capabilities.<role>.vendor (or adds a new profile id for test / custom
-# racks) without forking the platform id. New production-supported platforms
-# land here through the normal qualification / PR process.
+# NVL72 and NVL72_GB300 remain platform-level profiles. Machine-a-tron uses
+# the vendor-qualified IDs below because the expected-rack-group API derives
+# profile IDs from group topology and member manufacturers. Figment merges
+# site-config over this file per-key, including capability vendor overrides.
 [rack_profiles.NVL72]
 product_family = "gb200"
 rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
@@ -202,6 +198,22 @@ count = 9
 vendor = "LiteOn"
 count = 8
 
+[rack_profiles.GB200_NVL72_WIWYNN]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+
+[rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.compute]
+vendor = "NVIDIA"
+count = 18
+
+[rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.switch]
+vendor = "NVIDIA"
+count = 9
+
+[rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.power_shelf]
+vendor = "LiteOn"
+count = 8
+
 [rack_profiles.NVL72_GB300]
 product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
@@ -215,6 +227,22 @@ vendor = "NVIDIA"
 count = 9
 
 [rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
+vendor = "LiteOn"
+count = 6
+
+[rack_profiles.GB300_NVL72_LENOVO]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+
+[rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.compute]
+vendor = "Lenovo"
+count = 18
+
+[rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.switch]
+vendor = "NVIDIA"
+count = 9
+
+[rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.power_shelf]
 vendor = "LiteOn"
 count = 6
 

@@ -1188,7 +1188,7 @@ scout_run_interval = "5s"
             "default".to_string(),
             RackConfig {
                 ids: vec![RackId::new("rack-002"), RackId::new("rack-001")],
-                rack_profile_id: RackProfileId::new("NVL72"),
+                rack_profile_id: RackProfileId::new("GB200_NVL72_WIWYNN"),
                 model: RackModelConfig::WiwynnGb200Nvl72 {
                     simulation: wiwynn_gb200_rack_from_machine(&template),
                 },
@@ -1205,7 +1205,7 @@ scout_run_interval = "5s"
             "default".to_string(),
             RackConfig {
                 ids: vec![RackId::new("rack-002"), RackId::new("rack-001")],
-                rack_profile_id: RackProfileId::new("NVL72_GB300"),
+                rack_profile_id: RackProfileId::new("GB300_NVL72_LENOVO"),
                 model: RackModelConfig::LenovoGb300Nvl72 {
                     simulation: lenovo_gb300_rack_from_machine(&template),
                 },
@@ -1237,7 +1237,7 @@ scout_run_interval = "5s"
                     input: (
                         gb200_rack_config(),
                         "type = \"wiwynn_gb200_nvl72\"",
-                        "rack_profile_id = \"NVL72\"",
+                        "rack_profile_id = \"GB200_NVL72_WIWYNN\"",
                     ),
                     expect: Yields(()),
                 },
@@ -1246,7 +1246,7 @@ scout_run_interval = "5s"
                     input: (
                         gb300_rack_config(),
                         "type = \"lenovo_gb300_nvl72\"",
-                        "rack_profile_id = \"NVL72_GB300\"",
+                        "rack_profile_id = \"GB300_NVL72_LENOVO\"",
                     ),
                     expect: Yields(()),
                 },
@@ -1290,7 +1290,7 @@ scout_run_interval = "5s"
                     scenario: "WIWYNN GB200 rack",
                     input: ExpectedExpansion {
                         config: gb200_rack_config(),
-                        rack_profile_id: "NVL72",
+                        rack_profile_id: "GB200_NVL72_WIWYNN",
                         rack_type: RackType::WiwynnGb200Nvl72,
                         member_count: 35,
                         compute_type: HardwareType::WiwynnGB200Nvl,
@@ -1306,7 +1306,7 @@ scout_run_interval = "5s"
                     scenario: "Lenovo GB300 rack",
                     input: ExpectedExpansion {
                         config: gb300_rack_config(),
-                        rack_profile_id: "NVL72_GB300",
+                        rack_profile_id: "GB300_NVL72_LENOVO",
                         rack_type: RackType::LenovoGb300Nvl72,
                         member_count: 33,
                         compute_type: HardwareType::LenovoGB300Nvl,

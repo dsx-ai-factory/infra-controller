@@ -33,9 +33,6 @@ use machine_a_tron::{
     BmcMockRegistry, DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronConfig, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
 };
-use model::expected_rack_group::{
-    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
-};
 use model::rack_type::RackCapabilityType;
 use tokio_util::sync::CancellationToken;
 
@@ -110,40 +107,6 @@ async fn run_machine_a_tron_racks_test(
 ) -> eyre::Result<()> {
     let gb200_rack_id = RackId::new("machine-a-tron-gb200-nvl72");
     let gb300_rack_id = RackId::new("machine-a-tron-gb300-nvl72");
-    let mut txn = test_env.db_pool.begin().await?;
-    for (rack_id, topology, compute_manufacturer, power_shelf_count) in [
-        (&gb200_rack_id, "gb200_nvl72", "WiWynn", 8),
-        (&gb300_rack_id, "gb300_nvl72", "Lenovo", 6),
-    ] {
-        let members = [
-            (RackCapabilityType::Compute, compute_manufacturer, 18),
-            (RackCapabilityType::Switch, "NVIDIA", 9),
-            (RackCapabilityType::PowerShelf, "LiteOn", power_shelf_count),
-        ]
-        .into_iter()
-        .flat_map(|(device_type, manufacturer, count)| {
-            (0..count).map(move |index| ExpectedRackGroupMember {
-                id: format!("{rack_id}-{device_type}-{index}"),
-                device_type: device_type.clone(),
-                manufacturer: manufacturer.into(),
-            })
-        })
-        .collect();
-        db::expected_rack_group::create(
-            &mut txn,
-            &ExpectedRackGroup {
-                rack_group_id: RackGroupId::new(format!("group-{rack_id}")),
-                topology: RackGroupTopology::new(topology),
-                racks: vec![ExpectedRackGroupRack {
-                    rack_id: rack_id.clone(),
-                    members,
-                }],
-                metadata: Default::default(),
-            },
-        )
-        .await?;
-    }
-    txn.commit().await?;
     let api_addr = test_env
         .carbide_api_addrs
         .first()
@@ -272,6 +235,37 @@ async fn run_machine_a_tron_racks_test(
 
     let assertion_result = async {
         assert_eq!(provisionable_handles.len(), 36);
+        let mut connection = test_env.db_pool.acquire().await?;
+        for (rack_id, topology, power_shelf_count) in [
+            (&gb200_rack_id, "gb200_nvl72", 8),
+            (&gb300_rack_id, "gb300_nvl72", 6),
+        ] {
+            let group = db::expected_rack_group::find_by_rack_group_id(
+                &mut connection,
+                &RackGroupId::new(format!("mat-{rack_id}")),
+            )
+            .await?
+            .expect("machine-a-tron must register its rack group");
+            assert_eq!(group.topology.as_str(), topology);
+            assert_eq!(group.racks.len(), 1);
+            assert_eq!(&group.racks[0].rack_id, rack_id);
+            for (kind, count) in [
+                (RackCapabilityType::Compute, 18),
+                (RackCapabilityType::Switch, 9),
+                (RackCapabilityType::PowerShelf, power_shelf_count),
+            ] {
+                assert_eq!(
+                    group.racks[0]
+                        .members
+                        .iter()
+                        .filter(|member| member.device_type == kind)
+                        .count(),
+                    count,
+                    "rack {rack_id} {kind} members"
+                );
+            }
+        }
+        drop(connection);
         let machine_ids = join_all(
             provisionable_handles
                 .iter()

@@ -18,8 +18,14 @@ use std::sync::Arc;
 
 use bmc_mock::HostMachineInfo;
 use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
+use carbide_uuid::rack::RackGroupId;
 use futures::future::try_join_all;
 use model::expected_machine::HostDpuPolicy;
+use model::expected_rack::derive_rack_profile_id;
+use model::expected_rack_group::{
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+};
+use model::rack_type::RackCapabilityType;
 use rpc::forge::{ExpectedInterface, NetworkSegmentType};
 use tokio::sync::mpsc;
 
@@ -66,6 +72,104 @@ fn expected_interfaces(
             primary: Some(index == 0),
             network_segment_type: Some(NetworkSegmentType::HostInband as i32),
             ..Default::default()
+        })
+        .collect()
+}
+
+fn expected_rack_groups(
+    config: &crate::MachineATronConfig,
+    racks: &[crate::rack::RackRegistration],
+    devices: &[DeviceSimulator],
+) -> eyre::Result<Vec<ExpectedRecord>> {
+    config
+        .racks
+        .iter()
+        .map(|(name, configured)| {
+            let mut group_racks = Vec::with_capacity(configured.ids.len());
+            let (topology, compute_manufacturer) = match &configured.model {
+                crate::RackModelConfig::WiwynnGb200Nvl72 { .. } => ("gb200_nvl72", "WiWynn"),
+                crate::RackModelConfig::LenovoGb300Nvl72 { .. } => ("gb300_nvl72", "Lenovo"),
+            };
+            for rack_id in &configured.ids {
+                let rack = racks.iter().find(|rack| &rack.rack_id == rack_id).ok_or_else(|| {
+                    eyre::eyre!("configured rack {rack_id} has no registration")
+                })?;
+                let members = rack
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let device = devices
+                            .iter()
+                            .find(|device| {
+                                device.handle().machine_config_section()
+                                    == member.machine_config_section
+                            })
+                            .ok_or_else(|| {
+                                eyre::eyre!(
+                                    "rack {rack_id} unit {} has no simulator",
+                                    member.placement.position()
+                                )
+                            })?;
+                        let info = device.handle().host_info();
+                        let (device_type, manufacturer, id) =
+                            match DeviceKind::from(member.hardware_type) {
+                                DeviceKind::Machine => (
+                                    RackCapabilityType::Compute,
+                                    compute_manufacturer,
+                                    info.serial.clone(),
+                                ),
+                                DeviceKind::Switch => (
+                                    RackCapabilityType::Switch,
+                                    "NVIDIA",
+                                    info.switch_serial_number
+                                        .clone()
+                                        .unwrap_or_else(|| info.serial.clone()),
+                                ),
+                                DeviceKind::PowerShelf => (
+                                    RackCapabilityType::PowerShelf,
+                                    "LiteOn",
+                                    info.serial.clone(),
+                                ),
+                                DeviceKind::Dpu => unreachable!("rack units cannot be DPUs"),
+                            };
+                        Ok(ExpectedRackGroupMember {
+                            device_type,
+                            manufacturer: manufacturer.into(),
+                            id,
+                        })
+                    })
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                group_racks.push(ExpectedRackGroupRack {
+                    rack_id: rack_id.clone(),
+                    members,
+                });
+            }
+            // The smallest rack ID keeps this identity stable when IDs are
+            // reordered and distinguishes equally named sections in other pods.
+            let rack_group_id = RackGroupId::new(format!(
+                "mat-{}",
+                configured.ids.iter().min().expect("rack config was validated")
+            ));
+            eyre::ensure!(
+                rack_group_id.as_str().chars().count() <= 128,
+                "rack group ID {rack_group_id} exceeds the API's 128-character limit"
+            );
+            let group = ExpectedRackGroup {
+                rack_group_id,
+                topology: RackGroupTopology::new(topology),
+                racks: group_racks,
+                metadata: Default::default(),
+            };
+            for rack_id in &configured.ids {
+                let derived = derive_rack_profile_id(&group, rack_id)
+                    .map_err(|error| eyre::eyre!(error))?;
+                eyre::ensure!(
+                    derived == configured.rack_profile_id,
+                    "rack {rack_id} derives profile {derived} from group {name}, but is configured with {}",
+                    configured.rack_profile_id
+                );
+            }
+            Ok(ExpectedRecord::RackGroup(group))
         })
         .collect()
 }
@@ -259,6 +363,22 @@ impl MachineATron {
         };
 
         if self.app_context.app_config.register_expected_machines {
+            let groups = expected_rack_groups(
+                &self.app_context.app_config,
+                &resolved_configs.racks,
+                &devices,
+            )?;
+            let api_client = self.app_context.api_client();
+            let failed = register_all(groups, CONCURRENCY, |record| {
+                let api_client = api_client.clone();
+                async move { api_client.add_expected_record(record).await }
+            })
+            .await
+            .failed_identifiers;
+            if !failed.is_empty() {
+                eyre::bail!("failed to register expected {}", failed.join(", "));
+            }
+
             let racks = resolved_configs
                 .racks
                 .iter()

@@ -77,7 +77,7 @@ enable_ipmi_simulation = false
 #
 # [racks.default]
 # type = "lenovo_gb300_nvl72"
-# rack_profile_id = "NVL72_GB300"
+# rack_profile_id = "GB300_NVL72_LENOVO"
 # ids = ["rack-001", "rack-002"]
 # dpu_reboot_delay = 20
 # host_reboot_delay = 10
