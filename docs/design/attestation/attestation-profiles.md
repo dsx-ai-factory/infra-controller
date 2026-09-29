@@ -1131,8 +1131,10 @@ struct AttestationScheduled {
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 values and `profile_source` a two-variant
-one, so both are safe as labels, and they are the only two. `profile_source`
+`outcome` is a fixed enum of the §5.3 values, and `profile_source` a three-value
+enum: the class's own profile, the `any` fallback, or neither, which keeps
+`ClassNotRecorded` and `NoProfile` from reading as a profile an operator never
+wrote. Both are safe as labels, and they are the only two. `profile_source`
 earns its place because a class re-keyed by changed BMC reporting (§5.2) drops
 onto the `any` fallback and keeps reporting `Scheduled`, so the outcome alone
 cannot tell a machine attesting what its operator asked for from one attesting

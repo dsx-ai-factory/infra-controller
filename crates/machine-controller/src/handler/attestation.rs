@@ -78,14 +78,20 @@ enum ProfileSource {
     Class,
     /// Its class had none, so the reserved `any` profile applied.
     AnyFallback,
+    /// Neither lookup yielded one, so no policy was selected.
+    Unprofiled,
 }
 
 impl ProfileSource {
-    fn of(used_any_fallback: bool) -> Self {
-        if used_any_fallback {
-            Self::AnyFallback
-        } else {
-            Self::Class
+    /// `used_any_fallback` is false both when the class supplied the profile
+    /// and when nothing did, so it cannot separate the three on its own.
+    /// `profile_version` can: every path that applies a profile records the
+    /// revision that decided.
+    fn of(result: &SchedulingResult) -> Self {
+        match (&result.profile_version, result.used_any_fallback) {
+            (None, _) => Self::Unprofiled,
+            (Some(_), true) => Self::AnyFallback,
+            (Some(_), false) => Self::Class,
         }
     }
 }
@@ -181,7 +187,7 @@ pub async fn trigger_attestation(
     carbide_instrument::emit(AttestationScheduled {
         outcome: result.outcome,
         machine_id: *machine_id,
-        profile_source: ProfileSource::of(result.used_any_fallback),
+        profile_source: ProfileSource::of(&result),
         hardware_class: result.hardware_class.clone(),
         profile_version: result.profile_version.clone(),
         devices_scheduled: result.devices_scheduled,
@@ -655,6 +661,42 @@ mod test {
                 "unknown" => true,
                 "N/A" => true,
                 "" => true,
+            }
+        );
+    }
+
+    /// `used_any_fallback` is false both when the class supplied the profile
+    /// and when nothing did, so reading it alone labelled `ClassNotRecorded`
+    /// and `NoProfile` as a class profile an operator never wrote. Only the
+    /// recorded version separates the three.
+    #[test]
+    fn an_outcome_that_selected_no_policy_is_not_labelled_as_a_class_profile() {
+        value_scenarios!(
+            run = |(profile_version, used_any_fallback): (Option<&str>, bool)| {
+                // `of` reads only these two fields; the rest carry no meaning
+                // here.
+                ProfileSource::of(&SchedulingResult {
+                    outcome: SchedulingOutcome::Scheduled,
+                    hardware_class: String::new(),
+                    used_any_fallback,
+                    profile_version: profile_version.map(str::to_string),
+                    started_at: None,
+                    devices_scheduled: 0,
+                })
+            };
+
+            "a profile keyed to the machine's own class" {
+                (Some("3"), false) => ProfileSource::Class,
+            }
+
+            "the reserved any profile" {
+                (Some("3"), true) => ProfileSource::AnyFallback,
+            }
+
+            // ClassNotRecorded and NoProfile both return through
+            // SchedulingResult::unprofiled, which records no version.
+            "neither lookup yielded a profile" {
+                (None, false) => ProfileSource::Unprofiled,
             }
         );
     }
