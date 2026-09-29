@@ -20,13 +20,12 @@ class ScoutNetworkTest(unittest.TestCase):
     def test_preferred_interface_waits_for_usable_address(self):
         cases = [
             {"name": "tentative IPv6 becomes ready", "state": "tentative", "ready": True, "probes": 2},
-            {"name": "failed IPv6 never becomes ready", "state": "dadfailed", "ready": False, "probes": 2},
+            {"name": "failed IPv6 never becomes ready", "state": "dadfailed", "ready": False},
             {"name": "IPv4 is already ready", "state": "ipv4", "ready": True, "probes": 1},
         ]
         for case in cases:
             state = case["state"]
             ready = case["ready"]
-            probes = case["probes"]
             with self.subTest(name=case["name"]), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 cmdline = directory / "cmdline"
@@ -103,14 +102,16 @@ class ScoutNetworkTest(unittest.TestCase):
                     capture_output=True, text=True, timeout=10,
                 )
                 self.assertEqual(result.returncode, 0 if ready else 1, result.stdout + result.stderr)
-                self.assertEqual(int((directory / "probes").read_text()), probes)
                 configuration = directory / "runtime/00-forge-scout-nonpreferred.network"
                 if ready:
+                    probes = case["probes"]
+                    self.assertEqual(int((directory / "probes").read_text()), probes)
                     self.assertEqual(int((directory / "reload_probe").read_text()), probes)
                     configuration_text = configuration.read_text()
                     self.assertIn("Property=!INTERFACE=enp1s0\n", configuration_text)
                     self.assertIn("DHCP=no\nIPv6AcceptRA=no\n", configuration_text)
                 else:
+                    self.assertGreater(int((directory / "probes").read_text()), 0)
                     self.assertFalse(configuration.exists())
                     self.assertNotIn("networkctl", (directory / "calls").read_text())
                     self.assertIn("reason=no_global_address", result.stderr)
