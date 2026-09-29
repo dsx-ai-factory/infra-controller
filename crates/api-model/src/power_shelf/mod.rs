@@ -299,6 +299,9 @@ pub enum PowerShelfDecommissioningState {
     SuppressingBmcDhcp,
     /// Issues the BMC factory reset.
     FactoryResetBmc,
+    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device credentials are being removed after factory reset.
     DeletingManagedCredentials,
     /// Terminal substate: the power shelf has been removed from managed service.
@@ -351,6 +354,10 @@ pub fn state_sla(state: &PowerShelfControllerState, state_version: &ConfigVersio
             ),
             PowerShelfDecommissioningState::FactoryResetBmc => StateSla::with_sla(
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC),
+                time_in_state,
+            ),
+            PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK),
                 time_in_state,
             ),
             PowerShelfDecommissioningState::DeletingManagedCredentials => StateSla::with_sla(
@@ -522,6 +529,20 @@ mod tests {
                         .to_string(),
                     PowerShelfControllerState::Decommissioning {
                         decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
+                    },
+                )),
+            }
+
+            "decommissioning: waiting for BMC DHCP acknowledgement" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                } => Yields((
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingforbmcdhcpacknowledgement"}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Decommissioning {
+                        decommissioning_state:
+                            PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
                     },
                 )),
             }
@@ -941,6 +962,13 @@ mod tests {
                 PowerShelfControllerState::Decommissioning {
                     decommissioning_state: PowerShelfDecommissioningState::FactoryResetBmc,
                 } => (secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC), true),
+            }
+
+            "decommissioning waiting-for-bmc-dhcp-ack has an SLA" {
+                PowerShelfControllerState::Decommissioning {
+                    decommissioning_state:
+                        PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                } => (secs(slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK), true),
             }
 
             "decommissioning deleting-managed-credentials has an SLA" {

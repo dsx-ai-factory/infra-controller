@@ -187,6 +187,9 @@ impl StateControllerIO for PowerShelfStateControllerIO {
                     model::power_shelf::PowerShelfDecommissioningState::FactoryResetBmc => {
                         "factoryresetbmc"
                     }
+                    model::power_shelf::PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
+                        "waitingforbmcdhcpacknowledgement"
+                    }
                     model::power_shelf::PowerShelfDecommissioningState::DeletingManagedCredentials => {
                         "deletingmanagedcredentials"
                     }

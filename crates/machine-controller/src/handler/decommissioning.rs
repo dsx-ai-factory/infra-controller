@@ -624,6 +624,34 @@ pub(super) async fn handle_deconfiguring_dpus(
     }
 }
 
+async fn unacknowledged_dhcp_suppression_macs(
+    mac_addresses: impl IntoIterator<Item = mac_address::MacAddress>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
+    let mut pending = Vec::new();
+    for mac_address in mac_addresses {
+        if db::bmc_suppression::dhcp_acknowledgement_not_required(
+            &ctx.services.db_pool,
+            mac_address,
+        )
+        .await?
+        {
+            continue;
+        }
+        let suppression = db::bmc_suppression::find(
+            &ctx.services.db_pool,
+            mac_address,
+            BmcSuppressionSubsystem::Dhcp,
+            BmcSuppressionSource::Decommissioning,
+        )
+        .await?;
+        if suppression.is_none_or(|suppression| suppression.acknowledged_at.is_none()) {
+            pending.push(mac_address);
+        }
+    }
+    Ok(pending)
+}
+
 fn bmc_mac_addresses(
     state: &ManagedHostStateSnapshot,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
@@ -767,7 +795,7 @@ pub(super) async fn handle_powering_on_host(
     match power_state {
         PowerState::On => Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
-                decommissioning_state: DecommissioningState::SuppressingBmcDhcp,
+                decommissioning_state: DecommissioningState::WaitingForOobDhcpAcknowledgement,
             },
         )),
         PowerState::PoweringOff => Ok(StateHandlerOutcome::wait(format!(
@@ -797,6 +825,29 @@ pub(super) async fn handle_powering_on_host(
             )))
         }
     }
+}
+
+pub(super) async fn handle_waiting_for_oob_dhcp_acknowledgement(
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let oob_mac_addresses = all_oob_interface_mac_addresses(state, ctx).await?;
+    let pending_macs = unacknowledged_dhcp_suppression_macs(oob_mac_addresses, ctx).await?;
+    if pending_macs.is_empty() {
+        return Ok(StateHandlerOutcome::transition(
+            ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::SuppressingBmcDhcp,
+            },
+        ));
+    }
+    Ok(StateHandlerOutcome::wait(format!(
+        "waiting for OOB DHCP suppression acknowledgement: {}",
+        pending_macs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 pub(super) async fn handle_suppressing_bmc_dhcp(
@@ -848,7 +899,7 @@ pub(super) async fn handle_factory_resetting_bmcs(
     } else {
         return Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
-                decommissioning_state: DecommissioningState::DeletingManagedCredentials,
+                decommissioning_state: DecommissioningState::WaitingForBmcDhcpAcknowledgement,
             },
         ));
     };
@@ -878,6 +929,28 @@ async fn factory_reset_bmc(
             ))
         })?;
     Ok(machine.id.into())
+}
+
+pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let pending_macs = unacknowledged_dhcp_suppression_macs(bmc_mac_addresses(state)?, ctx).await?;
+    if pending_macs.is_empty() {
+        return Ok(StateHandlerOutcome::transition(
+            ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::DeletingManagedCredentials,
+            },
+        ));
+    }
+    Ok(StateHandlerOutcome::wait(format!(
+        "waiting for BMC DHCP suppression acknowledgement after factory reset: {}",
+        pending_macs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 pub(super) async fn handle_deleting_managed_credentials(
