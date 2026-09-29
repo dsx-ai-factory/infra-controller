@@ -13,6 +13,11 @@ bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
 > **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
+The canonical GitHub repository is
+[dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller/).
+Use this organization for links to the repository, its files, issues, and pull
+requests.
+
 ### Key Responsibilities
 
 - Hardware inventory management and orchestration
