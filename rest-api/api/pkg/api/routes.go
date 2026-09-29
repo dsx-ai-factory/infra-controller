@@ -743,6 +743,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetDpuMachineHandler(dbSession, scp),
 		},
 		{
+			Path:    apiPathPrefix + "/dpu/:id/power",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewDpuPowerControlHandler(dbSession, scp),
+		},
+		{
 			Path:    apiPathPrefix + "/machine",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllMachineHandler(dbSession, tc, cfg),

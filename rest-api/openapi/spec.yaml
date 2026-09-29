@@ -12234,6 +12234,58 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+  '/v2/org/{org}/nico/dpu/{dpuMachineId}/power':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: dpuMachineId
+        in: path
+        required: true
+        description: ID of the DPU Machine
+    patch:
+      operationId: power-control-dpu-machine
+      summary: Gracefully restart a DPU Machine
+      description: |
+        Accept a site-scoped `GracefulRestart` for a DPU Machine. The caller must have a `PROVIDER_ADMIN` role on the org that owns the Site. When the DPU's associated host has an attached Instance, `acknowledgeAttachedInstance` must be true.
+
+        HTTP 202 means that NICo accepted the operation, not that the DPU has restarted. Callers must observe the DPU going down and returning to service. A timeout or 5xx response may be ambiguous after dispatch, so callers must not retry automatically.
+      tags:
+        - DPU Machine
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          required: true
+          description: ID of the Site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DpuPowerControlRequest'
+      responses:
+        '202':
+          description: Operation accepted; completion must be observed separately
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
   '/v2/org/{org}/nico/machine/{machineId}/dpu':
     parameters:
       - schema:
@@ -19375,6 +19427,24 @@ components:
       examples:
         - action: ForceRestart
           acknowledgeAttachedInstance: true
+    DpuPowerControlRequest:
+      type: object
+      title: DpuPowerControlRequest
+      description: Guarded request to gracefully restart a DPU Machine
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          description: The only DPU power action approved for break-fix automation.
+          enum:
+            - GracefulRestart
+        acknowledgeAttachedInstance:
+          type: boolean
+          description: Acknowledges that the associated host has an attached Instance and the DPU restart may disrupt Tenant workload.
+      example:
+        action: GracefulRestart
+        acknowledgeAttachedInstance: true
     MachineValidationRunCreateRequest:
       type: object
       title: MachineValidationRunCreateRequest
