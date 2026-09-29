@@ -1,23 +1,29 @@
-# `nico-admin-cli domain`
+# `nico-admin-cli domain update`
 
-*[Network commands](../../network.md) › **domain***
+*[Network commands](../../network.md) › [domain](./domain.md) › **update***
 
 ## NAME
 
-nico-admin-cli-domain - Domain related handling
+nico-admin-cli-domain-update - Update domain default TTL
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain [--extended] [--sort-by]
-[-h|--help] <subcommands>
+nico-admin-cli domain update <--default-ttl>
+[--extended] [--sort-by] [-h|--help]
+<DomainId>
 ```
 
 ## DESCRIPTION
 
-Domain related handling
+Update domain default TTL
 
 ## OPTIONS
+
+`--default-ttl <SECONDS>`
+
+Default TTL for the zones records, 30 to 86400 seconds. Once set it
+cannot be cleared back to the site default
 
 `--extended`
 
@@ -41,12 +47,15 @@ Sort output by specified field
 
 Print help (see a summary with -h)
 
-## Subcommands
+`<DomainId>`
 
-| Subcommand | Description |
-|---|---|
-| [`show`](./domain-show.md) | Display Domain information |
-| [`update`](./domain-update.md) | Update domain default TTL |
+ID of the domain to update
+
+## Examples
+
+```sh
+nico-admin-cli domain update 12345678-1234-5678-90ab-cdef01234567 --default-ttl 600
+```
 
 ---
 
