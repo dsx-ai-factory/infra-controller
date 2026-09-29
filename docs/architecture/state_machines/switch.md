@@ -62,7 +62,7 @@ stateDiagram-v2
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
 | **BomValidating** | BOM (Bill of Materials) validation. Sub-state: `BomValidationComplete`. |
-| **Ready** | Switch is ready for use. Can be deleted, enter operator maintenance, or enter rack-level reprovisioning. |
+| **Ready** | Switch is ready for use. Can be deleted, enter decommissioning, enter operator maintenance, or enter rack-level reprovisioning. |
 | **Decommissioning** | Switch is being removed from managed service. NICo suppresses discovery and DHCP, factory-resets NVOS and the BMC, and deletes managed credentials. Ends in terminal sub-state `Decommissioned`. |
 | **Maintenance** | Operator-requested maintenance in progress. Operation is carried in `operation`: `PowerOn`, `PowerOff`, `Reset`, or `ReconfigureCertificate`. Certificate reconfiguration uses `configure_certificate` sub-states (`Start` → `WaitForComplete { job_id }`). |
 | **ReProvisioning** | Rack-driven maintenance in progress. Sub-states: `WaitingForRackFirmwareUpgrade`, `WaitingForNVOSUpgrade`, `WaitingForNMXCConfigure`. The rack state machine sets per-switch status fields and clears `switch_reprovisioning_requested` when the cycle completes. |
