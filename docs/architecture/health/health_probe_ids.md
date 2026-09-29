@@ -101,9 +101,10 @@ Configured leak processing can derive tray-level and rack-level alerts with the
 
 ### `NvueLeakage`
 
-Reports leakage sensor state from the NVUE API on a switch. The target identifies
-the sensor. A reported leak uses the `Leak` classification; unavailable,
-missing, or unrecognized sensor state uses `SensorFailure`.
+Reports leakage sensor state from the NVUE API on a switch. For per-sensor
+observations, the target identifies the sensor; an endpoint-wide unavailable
+response has no target. A reported leak uses the `Leak` classification;
+unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 
 ## BMS leak health probe identifiers
 
@@ -184,7 +185,8 @@ Indicates issues regarding the start of the DHCP server on the DPU
 ### `Ifreload`
 
 Indicates that the HBN container's `ifreload --all --syntax-check` command
-failed or produced diagnostic output.
+failed to execute, returned a nonzero exit code, or produced non-empty standard
+output.
 
 ### `FileExists`
 
