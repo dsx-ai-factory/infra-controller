@@ -5,10 +5,11 @@ package model
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
-	"github.com/google/uuid"
 
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -108,46 +109,44 @@ func (r *APIBatchNVLinkDomainFirmwareUpdateRequest) Validate() error {
 func validateNVLinkDomainIDs(value any) error {
 	nvLinkDomainIDs := value.([]string)
 	errs := validation.Errors{}
-	seen := make(map[uuid.UUID]struct{}, len(nvLinkDomainIDs))
+	seen := make(map[string]struct{}, len(nvLinkDomainIDs))
 	for i, nvLinkDomainID := range nvLinkDomainIDs {
-		parsed, err := uuid.Parse(nvLinkDomainID)
-		if err != nil || parsed == uuid.Nil {
+		if strings.TrimSpace(nvLinkDomainID) == "" {
 			errs[fmt.Sprintf("%d", i)] = validation.NewError(
 				"validation_domain_id",
-				"NVLink Domain ID must be a non-zero UUID",
+				"NVLink Domain ID must not be blank",
 			)
 			continue
 		}
-		if _, exists := seen[parsed]; exists {
+		if _, exists := seen[nvLinkDomainID]; exists {
 			errs[fmt.Sprintf("%d", i)] = validation.NewError(
 				"validation_duplicate_domain_id",
 				fmt.Sprintf("duplicates NVLink Domain ID %s", nvLinkDomainID),
 			)
 			continue
 		}
-		seen[parsed] = struct{}{}
+		seen[nvLinkDomainID] = struct{}{}
 	}
 
 	return errs.Filter()
 }
 
-// ValidateNVLinkDomainID requires one non-zero NVLink Domain UUID.
+// ValidateNVLinkDomainID requires a nonblank NVLink Domain ID.
 func ValidateNVLinkDomainID(nvLinkDomainID string) error {
-	parsed, err := uuid.Parse(nvLinkDomainID)
-	if err != nil || parsed == uuid.Nil {
-		return fmt.Errorf("NVLink Domain ID must be a non-zero UUID")
+	if strings.TrimSpace(nvLinkDomainID) == "" {
+		return fmt.Errorf("NVLink Domain ID must not be blank")
 	}
 
 	return nil
 }
 
-// NVLinkDomainTargetSpec builds a Flow operation target spec from NVLink Domain UUIDs.
+// NVLinkDomainTargetSpec builds a Flow operation target spec from NVLink Domain IDs.
 func NVLinkDomainTargetSpec(nvLinkDomainIDs []string) *flowv1.OperationTargetSpec {
 	targets := make([]*flowv1.NVLDomainTarget, 0, len(nvLinkDomainIDs))
 	for _, nvLinkDomainID := range nvLinkDomainIDs {
 		targets = append(targets, &flowv1.NVLDomainTarget{
-			Identifier: &flowv1.NVLDomainTarget_Id{
-				Id: &flowv1.UUID{Id: nvLinkDomainID},
+			Identifier: &flowv1.NVLDomainTarget_ExternalId{
+				ExternalId: nvLinkDomainID,
 			},
 		})
 	}
@@ -157,4 +156,84 @@ func NVLinkDomainTargetSpec(nvLinkDomainIDs []string) *flowv1.OperationTargetSpe
 			NvlDomains: &flowv1.NVLDomainTargets{Targets: targets},
 		},
 	}
+}
+
+// APINVLinkDomainGetRequest selects the Site for a domain read.
+type APINVLinkDomainGetRequest struct {
+	SiteID            string `query:"siteId"`
+	IncludeComponents bool   `query:"includeComponents"`
+}
+
+func (r *APINVLinkDomainGetRequest) Validate() error {
+	return validation.ValidateStruct(r, validation.Field(&r.SiteID, validation.Required, validationis.UUID))
+}
+
+type APINVLinkDomainGetAllRequest struct {
+	IncludeComponents bool     `query:"includeComponents"`
+	SiteID            string   `query:"siteId"`
+	Name              []string `query:"name"`
+	PageNumber        string   `query:"pageNumber"`
+	PageSize          string   `query:"pageSize"`
+	OrderBy           string   `query:"orderBy"`
+}
+
+func (r *APINVLinkDomainGetAllRequest) Validate() error {
+	return validation.ValidateStruct(r, validation.Field(&r.SiteID, validation.Required, validationis.UUID))
+}
+
+func (r *APINVLinkDomainGetAllRequest) ToQueryInfo() *flowv1.StringQueryInfo {
+	if len(r.Name) == 0 {
+		return nil
+	}
+	return &flowv1.StringQueryInfo{Patterns: r.Name, UseOr: len(r.Name) > 1}
+}
+
+func (r *APINVLinkDomainGetAllRequest) QueryValues() url.Values {
+	v := url.Values{"siteId": {r.SiteID}, "pageNumber": {r.PageNumber}, "pageSize": {r.PageSize}, "orderBy": {r.OrderBy}}
+	if r.IncludeComponents {
+		v.Set("includeComponents", "true")
+	}
+	for _, name := range r.Name {
+		v.Add("name", name)
+	}
+	return v
+}
+
+// APINVLinkDomain is the NVLink domain inventory response.
+type APINVLinkDomain struct {
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	Topology        *string             `json:"topology"`
+	OperationStatus string              `json:"operationStatus"`
+	Components      []*APIRackComponent `json:"components"`
+}
+
+// FromProto converts Flow domain inventory into the REST response.
+func (d *APINVLinkDomain) FromProto(r *flowv1.NVLinkDomain, includeComponents bool) {
+	if r == nil {
+		return
+	}
+	d.ID = r.GetId()
+	d.Name = r.GetName()
+	d.Topology = r.Topology
+	d.OperationStatus = enumOr(ProtoToAPIPhaseName, r.GetOperationStatus(), "Unknown")
+	d.Components = nil
+	if includeComponents {
+		d.Components = make([]*APIRackComponent, 0, len(r.GetComponents()))
+		for _, component := range r.GetComponents() {
+			converted := &APIRackComponent{}
+			converted.FromProto(component)
+			d.Components = append(d.Components, converted)
+		}
+	}
+}
+
+// NewAPINVLinkDomain creates an API domain from Flow domain inventory.
+func NewAPINVLinkDomain(r *flowv1.NVLinkDomain, includeComponents bool) *APINVLinkDomain {
+	if r == nil {
+		return nil
+	}
+	d := &APINVLinkDomain{}
+	d.FromProto(r, includeComponents)
+	return d
 }
