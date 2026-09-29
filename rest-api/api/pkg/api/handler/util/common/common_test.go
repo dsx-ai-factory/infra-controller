@@ -3515,7 +3515,7 @@ func TestHandleTxError(t *testing.T) {
 	}{
 		{"wrapped classification", fmt.Errorf("rollback: %w", cutil.NewAPIError(400, "unavailable", nil).WithRetryable(true)), `{"source":"nico","message":"unavailable","data":null,"retryable":true}`},
 		{"unclassified error unchanged", cutil.NewAPIError(400, "invalid", nil), `{"source":"nico","message":"invalid","data":null}`},
-		{"unknown outcome", cutil.NewAPIError(500, "unknown", nil).WithReconciliation(), `{"source":"nico","message":"unknown","data":null,"retryable":false,"recoveryAction":"Reconcile"}`},
+		{"unknown outcome", cutil.NewAPIError(500, "Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.", nil).WithRetryable(false), `{"source":"nico","message":"Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.","data":null,"retryable":false}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

@@ -8502,7 +8502,23 @@ paths:
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: Invalid request or unavailable Machine. Only classified release-pending errors permit retries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                release-pending:
+                  value:
+                    source: nico
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    data: null
+                    retryable: true
+                validation-error:
+                  value:
+                    source: nico
+                    message: Error validating request data
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -8510,6 +8526,30 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: Server error. An uncertain create outcome includes retryable false and recovery instructions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                uncertain-create-outcome:
+                  value:
+                    source: nico
+                    message: Instance allocation completed but REST transaction failed. Do not retry automatically. Check Instance 497f6eca-6276-4993-bfeb-53cbbbba6f08 on Site 60189e9c-7d12-438c-b9ca-6998d9c364b1 in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-497f6eca-6276-4993-bfeb-53cbbbba6f08 before creating again.
+                    data: null
+                    retryable: false
+                generic-server-error:
+                  value:
+                    source: nico
+                    message: Failed to retrieve Machine Instance association
+                    data: null
+        '503':
+          description: Site communication unavailable. An uncertain outcome includes retryable false and recovery instructions.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Site communication timed out. An uncertain outcome includes retryable false and recovery instructions.
+          $ref: '#/components/responses/GenericHttpError'
       description: |
         Create an Instance for Tenant.
 
@@ -8520,10 +8560,11 @@ paths:
         retryable. Missing or ambiguous associations remain unclassified. No retry
         delay is estimated for release-pending errors.
 
-        Uncertain create outcomes return `recoveryAction: Reconcile`, including
-        workflow and post-allocation commit failures. Check the original operation
-        and ownership before another create. An empty REST result does not rule out
-        a Site allocation. Also reconcile after a lost HTTP response.
+        Uncertain create outcomes return `retryable: false` and recovery instructions
+        in `message`. Check the identified Instance and Site in REST. If the Instance
+        is absent or its outcome is unclear, ask the Site operator to verify the Core
+        allocation and workflow before creating again. An empty REST result does not
+        rule out a Site allocation. Follow the same checks after a lost HTTP response.
       requestBody:
         content:
           application/json:
@@ -32321,13 +32362,6 @@ components:
           description: |-
             True permits bounded retries with backoff, without guaranteeing success.
             False prohibits automatic retries. Omission means unclassified.
-        recoveryAction:
-          type: string
-          enum:
-            - Reconcile
-          description: |-
-            Reconcile requires checking the original operation's outcome before
-            another mutation. retryable is false. Omission means no action specified.
       example:
         source: nico
         message: Machine is assigned to an Instance, cannot be used for new Instance

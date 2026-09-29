@@ -1453,7 +1453,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		respMessage                  string
 		checkRecovery                bool
 		respRetryable                *bool
-		respRecoveryAction           string
+		respRecoveryGuidance         bool
 		respUserDataContains         *string
 		respUserData                 *string
 		// prepareReq runs before the handler (e.g. insert a Machine and set req.MachineID) so cases stay self-contained.
@@ -3555,14 +3555,14 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						"GPUType": "H100",
 					},
 				},
-				reqMachine:         mc10,
-				reqOrg:             tnOrg7,
-				reqUser:            tnu7,
-				respCode:           http.StatusInternalServerError,
-				respMessage:        "",
-				checkRecovery:      true,
-				respRetryable:      cutil.GetPtr(false),
-				respRecoveryAction: cutil.APIErrorRecoveryActionReconcile,
+				reqMachine:           mc10,
+				reqOrg:               tnOrg7,
+				reqUser:              tnu7,
+				respCode:             http.StatusInternalServerError,
+				respMessage:          "",
+				checkRecovery:        true,
+				respRetryable:        cutil.GetPtr(false),
+				respRecoveryGuidance: true,
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
@@ -3958,10 +3958,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			responseCode = http.StatusInternalServerError
 		}
 		var retryable *bool
-		recoveryAction := ""
 		if !failure.knownRejection {
 			retryable = cutil.GetPtr(false)
-			recoveryAction = cutil.APIErrorRecoveryActionReconcile
 		}
 		tests = append(tests, testCase{
 			name:   failure.name,
@@ -3975,7 +3973,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					Interfaces:        []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet10.ID.String())}},
 				},
 				reqOrg: tnOrg7, reqUser: tnu7, respCode: responseCode,
-				checkRecovery: true, respRetryable: retryable, respRecoveryAction: recoveryAction,
+				checkRecovery: true, respRetryable: retryable, respRecoveryGuidance: !failure.knownRejection,
 				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
 					original := scp.IDClientMap[st7.ID.String()]
 					t.Cleanup(func() { scp.IDClientMap[st7.ID.String()] = original })
@@ -3995,7 +3993,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					scp.IDClientMap[st7.ID.String()] = client
 					t.Cleanup(func() { client.AssertExpectations(t) })
 					if failure.failCommit {
-						_, setupErr := dbSession.DB.ExecContext(ctx, `CREATE FUNCTION fail_instance_commit_5939() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END; $$ LANGUAGE plpgsql`)
+						_, setupErr := dbSession.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_instance_commit_5939() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END; $$ LANGUAGE plpgsql`)
 						require.NoError(t, setupErr)
 						t.Cleanup(func() {
 							_, cleanupErr := dbSession.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS fail_instance_commit_5939 ON instance`)
@@ -4006,6 +4004,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							assert.NoError(t, countErr)
 							assert.Zero(t, count, "REST transaction must have rolled back")
 						})
+						_, setupErr = dbSession.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS fail_instance_commit_5939 ON instance`)
+						require.NoError(t, setupErr)
 						_, setupErr = dbSession.DB.ExecContext(ctx, `CREATE CONSTRAINT TRIGGER fail_instance_commit_5939 AFTER INSERT ON instance DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.name = 'reconcile-commit-failure') EXECUTE FUNCTION fail_instance_commit_5939()`)
 						require.NoError(t, setupErr)
 					}
@@ -4055,10 +4055,19 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
 			}
 			if tt.args.checkRecovery {
+				var body map[string]interface{}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.NotContains(t, body, "recoveryAction")
 				var response cutil.APIError
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, tt.args.respRetryable, response.Retryable)
-				assert.Equal(t, tt.args.respRecoveryAction, response.RecoveryAction)
+				if tt.args.respRecoveryGuidance {
+					assert.Contains(t, response.Message, "Do not retry automatically.")
+					assert.Contains(t, response.Message, "in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-")
+					assert.Contains(t, response.Message, "before creating again.")
+				} else {
+					assert.NotContains(t, response.Message, "Do not retry automatically.")
+				}
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return
@@ -11729,10 +11738,37 @@ func TestCreateInstanceHandler_machineUnavailableError(t *testing.T) {
 				apiErr := cih.machineUnavailableError(ctx, tx, zerolog.Nop(), locked, tenant.ID, "unavailable")
 				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 				assert.Equal(t, tt.want, apiErr.Retryable)
-				assert.Empty(t, apiErr.RecoveryAction)
+				assert.Equal(t, "unavailable", apiErr.Message)
 				return nil
 			})
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestInstanceCreateUncertainError(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		instanceID  uuid.UUID
+		siteID      uuid.UUID
+		wantMessage string
+	}{
+		{
+			name:        "uncertain outcome overrides retry permission and identifies operator lookups",
+			instanceID:  uuid.MustParse("497f6eca-6276-4993-bfeb-53cbbbba6f08"),
+			siteID:      uuid.MustParse("60189e9c-7d12-438c-b9ca-6998d9c364b1"),
+			wantMessage: "Create outcome unknown. Do not retry automatically. Check Instance 497f6eca-6276-4993-bfeb-53cbbbba6f08 on Site 60189e9c-7d12-438c-b9ca-6998d9c364b1 in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-497f6eca-6276-4993-bfeb-53cbbbba6f08 before creating again.",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			instance := &cdbm.Instance{ID: tt.instanceID, SiteID: tt.siteID}
+			cause := errors.New("lost reply")
+			apiErr := cutil.NewAPIError(http.StatusServiceUnavailable, "Create outcome unknown", cause).WithRetryable(true)
+			got := instanceCreateUncertainError(apiErr, instance)
+			assert.Equal(t, http.StatusServiceUnavailable, got.Code)
+			assert.ErrorIs(t, got, cause)
+			assert.Equal(t, cutil.GetPtr(false), got.Retryable)
+			assert.Equal(t, tt.wantMessage, got.Message)
 		})
 	}
 }

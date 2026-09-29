@@ -30,8 +30,6 @@ type NICoAPIError struct {
 	Data map[string]interface{} `json:"data,omitempty"`
 	// True permits bounded retries with backoff, without guaranteeing success. False prohibits automatic retries. Omission means unclassified.
 	Retryable *bool `json:"retryable,omitempty"`
-	// Reconcile requires checking the original operation's outcome before another mutation. retryable is false. Omission means no action specified.
-	RecoveryAction *string `json:"recoveryAction,omitempty"`
 }
 
 // NewNICoAPIError instantiates a new NICoAPIError object
@@ -179,38 +177,6 @@ func (o *NICoAPIError) SetRetryable(v bool) {
 	o.Retryable = &v
 }
 
-// GetRecoveryAction returns the RecoveryAction field value if set, zero value otherwise.
-func (o *NICoAPIError) GetRecoveryAction() string {
-	if o == nil || IsNil(o.RecoveryAction) {
-		var ret string
-		return ret
-	}
-	return *o.RecoveryAction
-}
-
-// GetRecoveryActionOk returns a tuple with the RecoveryAction field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *NICoAPIError) GetRecoveryActionOk() (*string, bool) {
-	if o == nil || IsNil(o.RecoveryAction) {
-		return nil, false
-	}
-	return o.RecoveryAction, true
-}
-
-// HasRecoveryAction returns a boolean if a field has been set.
-func (o *NICoAPIError) HasRecoveryAction() bool {
-	if o != nil && !IsNil(o.RecoveryAction) {
-		return true
-	}
-
-	return false
-}
-
-// SetRecoveryAction gets a reference to the given string and assigns it to the RecoveryAction field.
-func (o *NICoAPIError) SetRecoveryAction(v string) {
-	o.RecoveryAction = &v
-}
-
 func (o NICoAPIError) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -232,9 +198,6 @@ func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Retryable) {
 		toSerialize["retryable"] = o.Retryable
-	}
-	if !IsNil(o.RecoveryAction) {
-		toSerialize["recoveryAction"] = o.RecoveryAction
 	}
 	return toSerialize, nil
 }

@@ -31,10 +31,6 @@ var (
 	ErrInternal = echo.ErrInternalServerError
 )
 
-// APIErrorRecoveryActionReconcile requires checking the outcome of an earlier
-// mutation before issuing another one.
-const APIErrorRecoveryActionReconcile = "Reconcile"
-
 // APIError represents a structured API error
 type APIError struct {
 	Code    int    `json:"-"`
@@ -42,8 +38,7 @@ type APIError struct {
 	Message string `json:"message"`
 	Data    error  `json:"data"`
 	// Omit unclassified recovery metadata to preserve existing error bodies.
-	Retryable      *bool  `json:"retryable,omitempty"`
-	RecoveryAction string `json:"recoveryAction,omitempty"`
+	Retryable *bool `json:"retryable,omitempty"`
 }
 
 // Error implements the error interface so *APIError can flow through error
@@ -81,14 +76,6 @@ func NewAPIError(code int, message string, data error) *APIError {
 // it does not promise availability or eventual success.
 func (a *APIError) WithRetryable(retryable bool) *APIError {
 	a.Retryable = &retryable
-	a.RecoveryAction = ""
-	return a
-}
-
-// WithReconciliation marks an uncertain mutation outcome, not permission to retry.
-func (a *APIError) WithReconciliation() *APIError {
-	a = a.WithRetryable(false)
-	a.RecoveryAction = APIErrorRecoveryActionReconcile
 	return a
 }
 

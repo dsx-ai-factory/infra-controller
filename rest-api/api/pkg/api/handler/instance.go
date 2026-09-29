@@ -2069,7 +2069,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to create Instance")
 			// A failed start acknowledgement does not prove the workflow never started.
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil).WithReconciliation()
+			return instanceCreateUncertainError(cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil), instance)
 		}
 
 		wid := we.GetID()
@@ -2083,7 +2083,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				logger.Error().Err(err).Msg("failed to create Instance, timeout occurred executing workflow on Site.")
 				timeoutCause := err
 				timeoutResp = func() error {
-					return common.TerminateWorkflowOnTimeOutError(logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2").WithReconciliation().Send(c)
+					return instanceCreateUncertainError(common.TerminateWorkflowOnTimeOutError(logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2"), instance).Send(c)
 				}
 				return cutil.NewAPIError(http.StatusInternalServerError, "Instance create workflow timed out", nil)
 			}
@@ -2096,7 +2096,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to create Instance")
 			apiErr := cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create Instance on Site: %s", err), nil)
 			if outcomeUnknown {
-				return apiErr.WithReconciliation()
+				return instanceCreateUncertainError(apiErr, instance)
 			}
 			return apiErr
 		}
@@ -2121,7 +2121,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if allocationCompleted {
 				logger.Error().Err(err).Msg("Instance allocation completed but REST transaction failed")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Instance allocation completed but REST transaction failed; reconcile before creating again", nil).WithReconciliation().Send(c)
+				return instanceCreateUncertainError(cutil.NewAPIError(http.StatusInternalServerError, "Instance allocation completed but REST transaction failed", nil), instance).Send(c)
 			}
 			return common.HandleTxError(c, logger, err, "Failed to create Instance, DB transaction error")
 		}
@@ -2144,6 +2144,13 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, apiInstance)
+}
+
+// instanceCreateUncertainError prevents blind retries when REST rollback cannot
+// establish whether the Site allocated the Instance. Include IDs for operator lookup.
+func instanceCreateUncertainError(apiErr *cutil.APIError, instance *cdbm.Instance) *cutil.APIError {
+	apiErr.Message += fmt.Sprintf(". Do not retry automatically. Check Instance %s on Site %s in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-%s before creating again.", instance.ID, instance.SiteID, instance.ID)
+	return apiErr.WithRetryable(false)
 }
 
 // machineUnavailableError classifies only an unambiguous current association.

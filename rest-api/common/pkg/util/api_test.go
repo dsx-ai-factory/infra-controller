@@ -155,7 +155,6 @@ func TestAPIError_Send(t *testing.T) {
 		{"unclassified body unchanged", NewAPIError(400, "rejected", nil), `{"source":"nico","message":"rejected","data":null}`},
 		{"retry permitted", NewAPIError(400, "rejected", nil).WithRetryable(true), `{"source":"nico","message":"rejected","data":null,"retryable":true}`},
 		{"conflict", NewAPIError(400, "rejected", nil).WithRetryable(false), `{"source":"nico","message":"rejected","data":null,"retryable":false}`},
-		{"uncertain outcome", NewAPIError(500, "unknown", nil).WithReconciliation(), `{"source":"nico","message":"unknown","data":null,"retryable":false,"recoveryAction":"Reconcile"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
