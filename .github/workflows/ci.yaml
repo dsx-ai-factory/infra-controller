@@ -2221,6 +2221,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-yaml jq
           /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_resolve_host.py
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
 
   build-push-bluefield-helm-charts:
