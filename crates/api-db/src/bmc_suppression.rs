@@ -142,7 +142,7 @@ pub async fn is_dhcp_acknowledgement_pending(
                 ) OR EXISTS (
                     SELECT 1 FROM expected_machines,
                         LATERAL jsonb_array_elements(host_nics) AS interface
-                    WHERE (interface->>'mac_address')::macaddr = $1
+                    WHERE interface->>'mac_address' = $4
                         AND interface->>'fixed_ip' IS NOT NULL
                 ) OR EXISTS (
                     SELECT 1 FROM expected_switches
@@ -159,6 +159,7 @@ pub async fn is_dhcp_acknowledgement_pending(
         .bind(mac_address)
         .bind(BmcSuppressionSubsystem::Dhcp)
         .bind(BmcSuppressionSource::Decommissioning)
+        .bind(mac_address.to_string())
         .fetch_one(db)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
@@ -369,13 +370,18 @@ mod tests {
                 (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address, host_nics)
             VALUES
                 ('static-machine', '02:00:00:00:00:01', 'root', 'password', '192.0.2.1',
-                 '[{"mac_address":"02:00:00:00:00:02","fixed_ip":"192.0.2.2"},
-                   {"mac_address":"02:00:00:00:00:0c","fixed_ip":null}]'),
+                 $1),
                 ('dynamic-machine', '02:00:00:00:00:06', 'root', 'password', NULL, '[]'),
                 ('missing-interface', '02:00:00:00:00:07', 'root', 'password', '192.0.2.7', '[]'),
                 ('observed-dhcp', '02:00:00:00:00:08', 'root', 'password', '192.0.2.8', '[]'),
                 ('mixed-history', '02:00:00:00:00:09', 'root', 'password', '192.0.2.9', '[]')"#,
         )
+        .bind(sqlx::types::Json(serde_json::json!([
+            {"mac_address": mac(2), "fixed_ip": "192.0.2.2"},
+            {"mac_address": mac(12), "fixed_ip": null},
+            {"mac_address": mac(14), "fixed_ip": "192.0.2.14"},
+            {"mac_address": "invalid-mac", "fixed_ip": "192.0.2.99"},
+        ])))
         .execute(txn.as_mut())
         .await
         .unwrap();
@@ -407,7 +413,7 @@ mod tests {
         .fetch_one(txn.as_mut())
         .await
         .unwrap();
-        for last in [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12] {
+        for last in [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14] {
             sqlx::query(
                 "INSERT INTO machine_interfaces
                     (segment_id, mac_address, primary_interface, hostname, last_dhcp)
@@ -442,6 +448,7 @@ mod tests {
         for (scenario, last, bypass) in [
             ("expected machine BMC", 1, true),
             ("expected machine interface", 2, true),
+            ("serialized MAC with hex letters", 14, true),
             ("expected switch BMC", 3, true),
             ("expected switch NVOS", 4, true),
             ("expected power shelf BMC", 5, true),
