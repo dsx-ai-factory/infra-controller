@@ -293,10 +293,15 @@ sequenceDiagram
     Validator->>NICo: Start external-validation attempt
     NICo-->>Validator: request_id
     Validator->>NICo: Create targeted instance (allowUnhealthyMachine)
-    NICo-->>Tenant: Validation instance available
-    Validator->>NICo: Complete attempt with request_id and instance ID
-    Validator->>NICo: Release validation instance
-    NICo->>Health: Clear matching hold after cleanup
+    alt instance created
+        NICo-->>Tenant: Validation instance available
+        Validator->>NICo: Complete attempt with request_id and instance ID
+        Validator->>NICo: Release validation instance
+        NICo->>Health: Clear matching hold after cleanup
+    else definite creation failure
+        Validator->>NICo: Cancel attempt with request_id
+        NICo->>Health: Keep hold pending
+    end
     Normal->>NICo: Allocate machine normally
 ```
 
@@ -311,10 +316,14 @@ workflow is:
    already-open attempt is not opened again.
 3. Create a targeted validation instance for that exact machine using the
    configured validation tenant and `allowUnhealthyMachine: true`.
-4. Run its own validation or repair work in that instance.
-5. Call `CompleteExternalValidation` with the `request_id`, validation instance
+4. If targeted instance creation definitively fails before an instance exists,
+   call `CancelExternalValidation` with the `request_id`. For an ambiguous
+   create result, reconcile the active hold first; do not cancel an instance
+   that may have been created.
+5. Run its own validation or repair work in that instance.
+6. Call `CompleteExternalValidation` with the `request_id`, validation instance
    ID, and `Passed`, `Failed`, or `Cancelled` outcome.
-6. On `Passed`, release the validation instance. NICo clears the matching hold
+7. On `Passed`, release the validation instance. NICo clears the matching hold
    only after normal cleanup returns the machine to `Ready`.
 
 NICo provides these workflow APIs:
@@ -323,14 +332,15 @@ NICo provides these workflow APIs:
 | :--- | :--- |
 | `ListExternalValidationHolds()` | Returns all active holds and their current attempt status. This is the authoritative discovery and recovery API. |
 | `StartExternalValidation(machine_id, caller_idempotency_key)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
+| `CancelExternalValidation(request_id, details)` | Closes an active attempt before a validation instance has been created. It is idempotent and leaves the hold in place. |
 | `CompleteExternalValidation(request_id, outcome, details, validation_instance_id)` | Records a result only for the matching active attempt. Replaying the same completion is idempotent; an old or closed `request_id` is rejected. |
 | `RemoveExternalValidationHold(machine_id, reason)` | Audited break-glass recovery; not the normal completion path. |
 
 ### **3.3.1 Phase 1 API Contract**
 
 The configured external-validation service is the only non-NICo caller of
-`ListExternalValidationHolds`, `StartExternalValidation`, and
-`CompleteExternalValidation`. Its identity is authorized for its configured
+`ListExternalValidationHolds`, `StartExternalValidation`,
+`CancelExternalValidation`, and `CompleteExternalValidation`. Its identity is authorized for its configured
 site and validation tenant only. It cannot create, modify, or clear the NICo
 health override. `RemoveExternalValidationHold` is an administrator-only,
 audited break-glass operation.
@@ -416,8 +426,11 @@ behalf. The service calls the existing targeted-instance creation API with the
 held `machine_id`, requests placement in `validation_tenant_id`, and sets
 `allowUnhealthyMachine: true`. `StartExternalValidation` does not allocate the
 machine and does not remove the hold. If targeted instance creation cannot
-proceed, the service reports `Cancelled` or allows the attempt timeout to close
-it; the hold remains in place.
+proceed before an instance exists, the service calls
+`CancelExternalValidation`; the hold remains in place. If creation has an
+ambiguous result, the service reconciles the hold rather than cancelling. It
+may rely on `attempt_timeout` only when it cannot determine whether an
+instance was created.
 
 The resulting instance belongs to `validation_tenant_id`; that tenant is the
 execution environment for the external team's validation or repair work. The
@@ -455,6 +468,26 @@ keeps the hold and enters recovery rather than treating the attempt as success.
 
 `Failed`, `Cancelled`, a timeout, or a failed cleanup leaves the hold in place.
 NICo never treats a missing result or a deleted validation instance as success.
+
+#### **CancelExternalValidation**
+
+Request:
+
+```text
+request_id
+details                     // bounded reason for pre-allocation cancellation
+```
+
+This API represents a definite targeted-instance creation failure before a
+`validation_instance_id` exists. NICo verifies that the request is active,
+belongs to the caller's site and validation tenant, and has no associated
+validation instance. It atomically records `Cancelled`, closes the attempt,
+and keeps the hold in `Pending`. Replaying the same cancellation is idempotent;
+an old request, a different caller, or an attempt with an instance is rejected.
+
+The service must not use this API after an ambiguous create result. It first
+reconciles the hold and either resumes the discovered instance or waits for the
+attempt timeout, so it cannot cancel an attempt that may already own a machine.
 
 ## **3.4 Plugin Failure Handoff**
 
@@ -504,6 +537,7 @@ Pending
       → Pending      (Failed or Cancelled result and successful cleanup)
 
 AttemptOpen → Pending       (TimedOut with no live validation instance)
+AttemptOpen → Pending       (Cancelled before validation-instance creation)
 AwaitingCleanup → Recovery  (instance loss, cleanup failure, or cleanup timeout)
 ```
 
