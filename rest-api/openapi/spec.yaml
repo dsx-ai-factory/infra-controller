@@ -31599,7 +31599,7 @@ components:
     NetworkSecurityGroupRule:
       title: NetworkSecurityGroupRule
       type: object
-      description: Aggregation of Network Security Group rules
+      description: A Network Security Group rule matching either IPv4 or IPv6 traffic. Each rule must use the same IP version for its source and destination prefixes. A group can contain both IPv4 and IPv6 rules.
       properties:
         name:
           type:
@@ -31627,7 +31627,7 @@ components:
           example: 80-81
         protocol:
           type: string
-          description: 'Network protocol matched by the rule'
+          description: 'Network protocol matched by the rule. ICMP requires IPv4 prefixes; ICMP6 requires IPv6 prefixes. TCP, UDP, and ANY support either IP version.'
           enum:
             - TCP
             - UDP
@@ -31649,11 +31649,11 @@ components:
           description: 'Rule priority used to order evaluation'
         sourcePrefix:
           type: string
-          description: 'Source CIDR prefix matched by the rule'
+          description: 'Source IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as destinationPrefix.'
           example: 10.5.44.0/24
         destinationPrefix:
           type: string
-          description: 'Destination CIDR prefix matched by the rule'
+          description: 'Destination IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as sourcePrefix.'
           example: 10.5.44.0/24
       required:
         - direction

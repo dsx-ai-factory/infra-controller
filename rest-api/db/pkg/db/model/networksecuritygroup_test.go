@@ -117,7 +117,7 @@ func TestNetworkSecurityGroupSQLDAO_Create(t *testing.T) {
 			Protocol:       corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY,
 			Action:         corev1.NetworkSecurityGroupRuleAction_NSG_RULE_ACTION_DENY,
 			Priority:       55,
-			Ipv6:           false, // We have support for it in ACLs but pretty much nowhere else, so we hide this for now.
+			Ipv6:           false,
 			SrcPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(55)),
 			SrcPortEnd:     getIntPtrToUint32Ptr(cutil.GetPtr(56)),
 			DstPortStart:   getIntPtrToUint32Ptr(cutil.GetPtr(57)),
