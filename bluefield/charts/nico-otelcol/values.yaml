@@ -66,8 +66,9 @@ transceiverExporter:
 puntStatsHelper:
   containerName: doca-hbn
   srcPath: /cumulus/nl2docad/run/stats/punt
-  # Shared path both containers mount; must match punt_stats.file_path in
-  # otel_config.yaml.
+  # Shared path both containers mount. The chart also renders it into
+  # punt_stats.file_path in otel_config.yaml. It must stay under the
+  # /var/run/punt-stats emptyDir mount.
   dstPath: /var/run/punt-stats/punt
   intervalSeconds: 60
   resources: {}

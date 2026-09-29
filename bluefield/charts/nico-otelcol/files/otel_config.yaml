@@ -241,8 +241,8 @@ receivers:
 
   punt_stats:
     # Written by the punt-stats-helper sidecar (see daemonset.yaml), which is
-    # the only container with containerd-socket/crictl exec access. Must
-    # match puntStatsHelper.dstPath in values.yaml.
+    # the only container with containerd-socket/crictl exec access. The
+    # chart replaces this path with puntStatsHelper.dstPath.
     file_path: /var/run/punt-stats/punt
     # 5m hits Prometheus staleness limit, causing a discontinuity in the
     # graphed time series.
