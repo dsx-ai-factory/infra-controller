@@ -37,6 +37,8 @@ while true; do
       | jq -r --arg name "${PUNT_STATS_CONTAINER_NAME}" \
           'first(.containers[] | select(.metadata.name == $name) | .id)'); then
     echo "WARN: failed to look up container ${PUNT_STATS_CONTAINER_NAME}" >&2
+    # Drop the published snapshot so stale stats aren't served as current.
+    rm -f "${PUNT_STATS_DST_PATH}"
     sleep "${PUNT_STATS_INTERVAL_SECONDS}"
     continue
   fi
@@ -49,9 +51,11 @@ while true; do
       mv "${PUNT_STATS_DST_PATH}.tmp" "${PUNT_STATS_DST_PATH}"
     else
       echo "WARN: failed to read ${PUNT_STATS_SRC_PATH} from container ${PUNT_STATS_CONTAINER_NAME}" >&2
+      rm -f "${PUNT_STATS_DST_PATH}.tmp" "${PUNT_STATS_DST_PATH}"
     fi
   else
     echo "WARN: container ${PUNT_STATS_CONTAINER_NAME} not found" >&2
+    rm -f "${PUNT_STATS_DST_PATH}"
   fi
 
   sleep "${PUNT_STATS_INTERVAL_SECONDS}"
