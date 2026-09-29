@@ -50,7 +50,7 @@ func (m *MockBoostrap) RegisterSubscriber() error {
 }
 
 func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	secretInterface := client.CoreV1().Secrets("default")
 	otpHandler := &OTPHandler{
 		SecretInterface: secretInterface,
@@ -66,7 +66,8 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		},
 		Conf: &Manager.ManagerConf{
 			EB: &conftypes.Config{
-				TemporalSecret: "temporal-cert",
+				BootstrapSecretName: "site-registration",
+				TemporalSecret:      "temporal-cert",
 				Temporal: conftypes.TemporalConfig{
 					ClusterID: siteID,
 				},
@@ -90,13 +91,13 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		},
 	}
 
-	// Create a mock bootstrap-info secret
+	// Create a mock bootstrap secret under the configured name
 	mockOtp := "mockOtp"
 	mockOtpB64 := base64.StdEncoding.EncodeToString([]byte(mockOtp))
 
 	mockSecret := &coreV1Types.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "bootstrap-info",
+			Name:      ManagerAccess.Conf.EB.BootstrapSecretName,
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
@@ -104,6 +105,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		},
 	}
 	_, err := client.CoreV1().Secrets("default").Create(context.TODO(), mockSecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	// Generate CA private key
 	caPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -125,7 +127,9 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 
 	// Self-sign the CA certificate
 	caCertBytes, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caPrivateKey.PublicKey, caPrivateKey)
+	assert.NoError(t, err)
 	caCert, err := x509.ParseCertificate(caCertBytes)
+	assert.NoError(t, err)
 
 	// Generate keypair for test server/client
 	privatekey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -165,6 +169,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		},
 	}
 	_, err = client.CoreV1().Secrets("default").Create(context.TODO(), mockTemporalSecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	// Test with a valid OTP
 	encryptedOtp := cutils.EncryptData([]byte(mockOtp), ManagerAccess.Conf.EB.Temporal.ClusterID)
@@ -178,4 +183,8 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
+
+	bootstrapSecret, err := client.CoreV1().Secrets("default").Get(context.TODO(), ManagerAccess.Conf.EB.BootstrapSecretName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, mockOtp, string(bootstrapSecret.Data["otp"]))
 }
