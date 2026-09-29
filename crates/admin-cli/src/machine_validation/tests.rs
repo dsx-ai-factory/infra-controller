@@ -181,6 +181,52 @@ fn parse_results_show_filters() {
     );
 }
 
+#[test]
+fn parse_logs_selectors_and_reject_incomplete_selection() {
+    let attempt_id = "12345678-1234-5678-90ab-cdef01234567";
+    let validation_id = MachineValidationId::new();
+    scenarios!(
+        run = |argv| {
+            let action = argv[2];
+            let matches = parse_leaf::<Cmd>(argv, &["logs", action]).map_err(drop)?;
+            Ok::<_, ()>((
+                raw_value(&matches, "attempt_id").is_some(),
+                raw_value(&matches, "validation_id").is_some(),
+                raw_value(&matches, "test_id").is_some(),
+                matches.get_flag("stderr_only"),
+                matches.get_flag("raw"),
+            ))
+        };
+        "show selects an attempt" {
+            &[
+                "machine-validation", "logs", "show", "--attempt-id", attempt_id,
+            ][..] => Yields((true, false, false, false, false)),
+        }
+        "follow selects a test in a run" {
+            &[
+                "machine-validation", "logs", "follow", "--validation-id",
+                validation_id.to_string().as_str(), "--test-id", "basic-machine-validation",
+                "--stderr-only", "--raw",
+            ][..] => Yields((false, true, true, true, true)),
+        }
+        "missing selector" {
+            &["machine-validation", "logs", "show"][..] => Fails,
+        }
+        "run without test ID" {
+            &[
+                "machine-validation", "logs", "follow", "--validation-id",
+                validation_id.to_string().as_str(),
+            ][..] => Fails,
+        }
+        "both stream filters" {
+            &[
+                "machine-validation", "logs", "show", "--attempt-id", attempt_id,
+                "--stdout-only", "--stderr-only",
+            ][..] => Fails,
+        }
+    );
+}
+
 // tests parses to the Tests variant: `show` leaves test-id unset, `verify`
 // carries test-id/version, and `add` carries name/command/args.
 #[test]

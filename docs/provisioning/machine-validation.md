@@ -473,16 +473,44 @@ nico-admin-cli machine-validation results show \
   --test-name <test_name>
 ```
 
+## Viewing Plugin Attempt Logs
+
+Plugin stdout and stderr are available while an attempt runs when site attempt-log
+storage is enabled. Find the run ID with `runs show`, then follow the current
+attempt for a test:
+
+```sh
+nico-admin-cli machine-validation runs show --machine <machine_id>
+nico-admin-cli machine-validation logs follow \
+  --validation-id <validation_id> --test-id <test_id>
+```
+
+`follow` prints stored chunks first, polls once per second, and exits when the
+attempt finishes. To inspect a specific attempt, including one from an earlier
+retry, use its UUID:
+
+```sh
+nico-admin-cli machine-validation logs show --attempt-id <attempt_id>
+nico-admin-cli machine-validation logs follow --attempt-id <attempt_id>
+```
+
+Both commands show the server timestamp, source stream, and sequence before each
+chunk. Use `--raw` to print only chunk content, or `--stdout-only` or
+`--stderr-only` to filter by stream. The run-and-test selector resolves the
+test's current attempt; use an attempt ID for earlier attempts. Logs are best
+effort: a full Scout buffer or the site's per-attempt storage limit may omit
+some output.
+
 ## Interpreting Results
 
 Each test result records the command execution outcome, timing, exit code, and
 captured output. A non-zero exit code indicates failure unless the test command
 implements a documented skip or pre-condition behavior.
 
-Scout captures stdout and stderr after the command exits. Captured output is
-bounded, so tests should print useful progress and final diagnostic information
-without producing unbounded logs. Live log streaming should not be assumed unless
-the deployment has additional logging integration.
+Scout captures bounded stdout and stderr for the final result. Container plugin
+attempts also stream bounded output while running when attempt-log storage is
+enabled. Built-in tests do not use this plugin log stream. Tests should print
+useful progress and final diagnostic information without unbounded output.
 
 When a validation run fails, review:
 

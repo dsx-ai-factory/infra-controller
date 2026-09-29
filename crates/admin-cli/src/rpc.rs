@@ -2511,6 +2511,65 @@ impl ApiClient {
         Ok(self.0.get_machine_validation_runs(request).await?)
     }
 
+    pub(crate) async fn find_machine_validation_run_items(
+        &self,
+        validation_id: MachineValidationId,
+    ) -> CarbideCliResult<Vec<rpc::MachineValidationRunItem>> {
+        let ids = self
+            .0
+            .find_machine_validation_run_item_ids(rpc::MachineValidationRunItemSearchFilter {
+                validation_id: Some(validation_id),
+            })
+            .await?
+            .run_item_ids;
+        let mut items = Vec::new();
+        // Sites can configure a small find-by-IDs limit; one ID is always valid.
+        for id in ids {
+            items.extend(
+                self.0
+                    .find_machine_validation_run_items_by_ids(
+                        rpc::MachineValidationRunItemsByIdsRequest {
+                            run_item_ids: vec![id],
+                        },
+                    )
+                    .await?
+                    .run_items,
+            );
+        }
+        Ok(items)
+    }
+
+    pub(crate) async fn get_machine_validation_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> CarbideCliResult<rpc::MachineValidationAttempt> {
+        Ok(self
+            .0
+            .get_machine_validation_attempt(rpc::MachineValidationAttemptGetRequest {
+                attempt_id: Some(::rpc::common::Uuid {
+                    value: attempt_id.to_owned(),
+                }),
+            })
+            .await?)
+    }
+
+    pub(crate) async fn get_machine_validation_attempt_logs(
+        &self,
+        attempt_id: &str,
+        after_sequence: u32,
+    ) -> CarbideCliResult<rpc::MachineValidationAttemptLogList> {
+        Ok(self
+            .0
+            .get_machine_validation_attempt_logs(rpc::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(::rpc::common::Uuid {
+                    value: attempt_id.to_owned(),
+                }),
+                after_sequence,
+                limit: 100,
+            })
+            .await?)
+    }
+
     pub(crate) async fn on_demand_machine_validation(
         &self,
         machine_id: MachineId,
