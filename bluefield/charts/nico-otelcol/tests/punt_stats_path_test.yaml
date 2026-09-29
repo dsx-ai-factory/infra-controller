@@ -17,3 +17,10 @@ tests:
           path: data["config.yaml"]
           pattern: 'file_path: /var/run/punt-stats/custom\n'
         template: configmap.yaml
+
+  - it: rejects a puntStatsHelper.dstPath outside the shared mount
+    set:
+      puntStatsHelper.dstPath: /tmp/punt
+    asserts:
+      - failedTemplate:
+          errorPattern: dstPath
