@@ -27834,6 +27834,7 @@ components:
           description: 'If the Machine is in maintenance mode, this message will typically describe the reason and how long it is expected to be in maintenance'
         status:
           $ref: '#/components/schemas/MachineStatus'
+          description: 'Status represents the status of the machine'
           readOnly: true
     MachineHealthIssue:
       title: MachineHealthIssue
