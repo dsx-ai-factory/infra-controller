@@ -80,25 +80,6 @@ async fn suppress_dhcp(
     Ok(txn)
 }
 
-async fn dhcp_suppression_acknowledged_or_not_required(
-    mac_address: MacAddress,
-    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    if db::bmc_suppression::dhcp_acknowledgement_not_required(&ctx.services.db_pool, mac_address)
-        .await?
-    {
-        return Ok(true);
-    }
-    Ok(db::bmc_suppression::find(
-        &ctx.services.db_pool,
-        mac_address,
-        BmcSuppressionSubsystem::Dhcp,
-        BmcSuppressionSource::Decommissioning,
-    )
-    .await?
-    .is_some_and(|suppression| suppression.acknowledged_at.is_some()))
-}
-
 pub(super) async fn handle_decommissioning(
     switch_id: &SwitchId,
     switch: &Switch,
@@ -308,7 +289,8 @@ async fn handle_waiting_for_nvos_dhcp_acknowledgement(
         .next()
         .and_then(|row| row.nvos_mac)
         .ok_or_else(|| missing_data(switch_id, "nvos_mac"))?;
-    if !dhcp_suppression_acknowledged_or_not_required(nvos_mac, ctx).await? {
+    if db::bmc_suppression::is_dhcp_acknowledgement_pending(&ctx.services.db_pool, nvos_mac).await?
+    {
         return Ok(StateHandlerOutcome::wait(
             "waiting for NVOS DHCP suppression acknowledgement".to_string(),
         ));
@@ -385,7 +367,9 @@ async fn handle_waiting_for_bmc_dhcp_acknowledgement(
         .and_then(|bmc_info| bmc_info.mac)
         .or(switch.bmc_mac_address)
         .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-    if !dhcp_suppression_acknowledged_or_not_required(bmc_mac_address, ctx).await? {
+    if db::bmc_suppression::is_dhcp_acknowledgement_pending(&ctx.services.db_pool, bmc_mac_address)
+        .await?
+    {
         return Ok(StateHandlerOutcome::wait(
             "waiting for BMC DHCP suppression acknowledgement".to_string(),
         ));
