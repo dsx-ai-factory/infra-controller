@@ -432,7 +432,7 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  mc.ID,
 				IsAssigned: cutil.GetPtr(true),
-				Status:     cutil.GetPtr(umc.StatusForAssignment(true)),
+				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
 			}
 
 			// return the updated machine

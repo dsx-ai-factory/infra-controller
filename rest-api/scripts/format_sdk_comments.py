@@ -18,10 +18,10 @@ def wrap_comment(match: re.Match[str]) -> str:
 
 for filename in sys.argv[1:]:
     path = Path(filename)
-    source = path.read_text()
+    source = path.read_text(encoding="utf-8")
     formatted = re.sub(
         r"^// ((\w+) [^\n]+)(?=\ntype \2 \w+\n)",
         wrap_comment, source, flags=re.MULTILINE,
     )
     if formatted != source:
-        path.write_text(formatted)
+        path.write_text(formatted, encoding="utf-8")
