@@ -292,6 +292,8 @@ impl ApiClient {
                 allow_delete_with_orphaned_dpf_crds: false,
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
+                allow_delete_with_instance_type: false,
+                allow_delete_with_instance: true,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -595,5 +597,106 @@ impl ApiClient {
             }
             Err(status) => Err(ClientApiError::InvocationError(status)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http2;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use prost::Message;
+    use rpc::forge::{AdminForceDeleteMachineRequest, AdminForceDeleteMachineResponse, BuildInfo};
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_authorizes_deleting_the_simulated_attached_instance() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock Core listener binds");
+        let address = listener.local_addr().expect("mock listener has an address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("mock accepts the client");
+            http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), service_fn(mock_force_delete))
+                .await
+                .expect("mock serves the cleanup RPC");
+        });
+
+        let client_config = ForgeClientConfig::default();
+        let client = ForgeApiClient::new(&ApiConfig::new(
+            &format!("http://{address}"),
+            &client_config,
+        ));
+        let result = ApiClient(client)
+            .force_delete_machine("simulated-machine".to_string())
+            .await;
+
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("mock remains available")
+                .is_cancelled(),
+            "mock cleanup server must only be stopped by the test"
+        );
+        result.expect("explicit cleanup deletes its simulated Machine and attached Instance");
+    }
+
+    async fn mock_force_delete(
+        request: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, Infallible> {
+        if request.uri().path() == rpc::service_path!("Version") {
+            return Ok(grpc_response(BuildInfo::default()));
+        }
+        assert_eq!(
+            request.uri().path(),
+            rpc::service_path!("AdminForceDeleteMachine")
+        );
+        let body = request
+            .into_body()
+            .collect()
+            .await
+            .expect("cleanup request body is readable")
+            .to_bytes();
+        let request = AdminForceDeleteMachineRequest::decode(
+            body.get(5..).expect("cleanup request has a gRPC frame"),
+        )
+        .expect("cleanup request decodes");
+
+        if request.allow_delete_with_instance {
+            Ok(grpc_response(AdminForceDeleteMachineResponse::default()))
+        } else {
+            Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "9")
+                .header(
+                    "grpc-message",
+                    "attached instance requires explicit deletion authorization",
+                )
+                .body(Full::new(Bytes::new()))
+                .expect("rejection response is valid"))
+        }
+    }
+
+    fn grpc_response(message: impl Message) -> Response<Full<Bytes>> {
+        let mut data = Vec::with_capacity(5 + message.encoded_len());
+        data.push(0);
+        data.extend_from_slice(&(message.encoded_len() as u32).to_be_bytes());
+        message.encode(&mut data).expect("mock response encodes");
+        Response::builder()
+            .header("content-type", "application/grpc")
+            .header("grpc-status", "0")
+            .body(Full::new(Bytes::from(data)))
+            .expect("success response is valid")
     }
 }

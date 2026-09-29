@@ -88,7 +88,7 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 	})
 
 	if err != nil {
-		log.Panic().Err(err).Str("Temporal Namespace", siteID.String()).
+		log.Error().Err(err).Str("Temporal Namespace", siteID.String()).
 			Msg("failed to create Temporal client for site")
 		return nil, err
 	}

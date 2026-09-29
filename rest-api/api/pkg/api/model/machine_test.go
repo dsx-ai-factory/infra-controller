@@ -961,3 +961,51 @@ func TestAPIMachineUpdateRequest_ToRemoveHealthReportProto(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIMachineDeleteRequest_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		request   APIMachineDeleteRequest
+		wantError bool
+	}{
+		{name: "regular deletion"},
+		{name: "Instance Type override requires force", request: APIMachineDeleteRequest{AllowDeleteWithInstanceType: true}, wantError: true},
+		{name: "Instance override requires force", request: APIMachineDeleteRequest{AllowDeleteWithInstance: true}, wantError: true},
+		{name: "Allocation override requires force", request: APIMachineDeleteRequest{AllowDeleteWithAllocation: true}, wantError: true},
+		{name: "force permits independent overrides", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstanceType: true, AllowDeleteWithInstance: true, AllowDeleteWithAllocation: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.request.Validate()
+			if tc.wantError {
+				require.ErrorContains(t, err, "requires force=true")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestAPIMachineDeleteRequest_ToProto(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		request      APIMachineDeleteRequest
+		wantType     bool
+		wantInstance bool
+	}{
+		{name: "force alone grants no override", request: APIMachineDeleteRequest{Force: true}},
+		{name: "Instance Type override", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstanceType: true}, wantType: true},
+		{name: "Instance implies Instance Type despite explicit false", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstance: true}, wantType: true, wantInstance: true},
+		{name: "Allocation acknowledgment grants no Core override", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithAllocation: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.request.ToProto("host-machine")
+			require.Equal(t, &corev1.AdminForceDeleteMachineRequest{
+				HostQuery:                   "host-machine",
+				DeleteInterfaces:            true,
+				DeleteBmcInterfaces:         true,
+				AllowDeleteWithInstanceType: tc.wantType,
+				AllowDeleteWithInstance:     tc.wantInstance,
+			}, got)
+		})
+	}
+}

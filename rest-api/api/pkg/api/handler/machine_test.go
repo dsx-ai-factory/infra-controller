@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -42,10 +43,20 @@ import (
 	tsdkConverter "go.temporal.io/sdk/converter"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
+
+type failingSiteTemporalClientPool struct {
+	err error
+}
+
+func (f failingSiteTemporalClientPool) GetClientByID(uuid.UUID) (temporalClient.Client, error) {
+	return nil, f.err
+}
 
 func testMachineInitDB(t *testing.T) *cdb.Session {
 	dbSession := cdbu.GetTestDBSession(t, false)
@@ -676,6 +687,7 @@ func TestMachineHandler_Get(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 func TestMachineHandler_GetAll(t *testing.T) {
@@ -3092,10 +3104,10 @@ func TestMachineHandler_Delete(t *testing.T) {
 	require.NoError(t, err)
 
 	// M4 is missing on site, but it won't be missing long enough
-	m4 := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, true, false, cdbm.MachineStatusError)
+	m4 := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, false, true, cdbm.MachineStatusError)
 
 	// Make m4 missing on site for less than 24 hours
-	sd = testMachineBuildStatusDetail(t, dbSession, m3.ID, cdbm.MachineStatusError, cutil.GetPtr("Machine is missing on Site"))
+	sd = testMachineBuildStatusDetail(t, dbSession, m4.ID, cdbm.MachineStatusError, cutil.GetPtr("Machine is missing on Site"))
 	_, err = dbSession.DB.Exec("UPDATE status_detail SET created = NOW() - INTERVAL '6 HOUR' WHERE id = ?", sd.ID.String())
 	require.NoError(t, err)
 
@@ -3143,9 +3155,6 @@ func TestMachineHandler_Delete(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	cfg := common.GetTestConfig()
-	tempClient := &tmocks.Client{}
-
 	// OTEL Spanner configuration
 	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
 
@@ -3155,6 +3164,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		user               *cdbm.User
 		mID                string
 		expectedStatus     int
+		wantMessage        string
 		verifyChildSpanner bool
 	}{
 		{
@@ -3207,6 +3217,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 			user:           ipu,
 			mID:            m4.ID,
 			expectedStatus: http.StatusBadRequest,
+			wantMessage:    "Machine missing on site less than 24 hour(s)",
 		},
 	}
 	for _, tc := range tests {
@@ -3234,13 +3245,15 @@ func TestMachineHandler_Delete(t *testing.T) {
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := DeleteMachineHandler{
-				dbSession: dbSession,
-				tc:        tempClient,
-				cfg:       cfg,
+				dbSession:  dbSession,
+				tracerSpan: cutil.NewTracerSpan(),
 			}
 			err := mh.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedStatus, rec.Code, tc.mID, rec.Body.String())
+			if tc.wantMessage != "" {
+				assert.Contains(t, rec.Body.String(), tc.wantMessage)
+			}
 
 			if tc.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
@@ -3248,6 +3261,314 @@ func TestMachineHandler_Delete(t *testing.T) {
 			}
 		})
 	}
+
+	forceTests := []struct {
+		name                string
+		query               string
+		isAssigned          bool
+		isMissingOnSite     bool
+		missingFor          time.Duration
+		hasAttachedInstance bool
+		siteStatus          string
+		siteClientError     bool
+		coreError           error
+		corePending         bool
+		retainRecords       bool
+		noInstanceType      bool
+		allocationCount     int
+		spareMachine        bool
+		allowInstance       bool
+		wantCoreCall        bool
+		wantStatus          int
+		wantMessage         string
+	}{
+		{name: "recently missing Machine can be force deleted", query: "/?force=true&allowDeleteWithInstanceType=true", isMissingOnSite: true, missingFor: time.Hour, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "missing Machine without status history can be force deleted", query: "/?force=true&allowDeleteWithInstanceType=true", isMissingOnSite: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "long missing Machine can be force deleted", query: "/?force=true&allowDeleteWithInstanceType=true", isMissingOnSite: true, missingFor: 25 * time.Hour, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "missing Machine with overrides retains Instance and Allocation records", query: "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithInstance=true&allowDeleteWithAllocation=true", isMissingOnSite: true, missingFor: time.Hour, hasAttachedInstance: true, allocationCount: 1, allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "false force uses regular deletion", query: "/?force=false", wantStatus: http.StatusBadRequest, wantMessage: "Machine exists on Site and cannot be deleted"},
+		{name: "empty force uses regular deletion", query: "/?force=", wantStatus: http.StatusBadRequest, wantMessage: "Machine exists on Site and cannot be deleted"},
+		{name: "unassociated Machine needs only force", query: "/?force=true", noInstanceType: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "both acknowledgments retain Instance and Allocation records", query: "/?force=true&allowDeleteWithInstance=true&allowDeleteWithInstanceType=false&allowDeleteWithAllocation=true", hasAttachedInstance: true, allocationCount: 1, allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "force alone does not override Instance Type", query: "/?force=true", wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithInstanceType=true"},
+		{name: "Instance override deletes on Core and retains tenant records", query: "/?force=true&allowDeleteWithInstance=true", hasAttachedInstance: true, isAssigned: true, allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "Instance override retains records even when REST attachment is absent", query: "/?force=true&allowDeleteWithInstance=true", allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "Instance retry retains records after Core not found", query: "/?force=true&allowDeleteWithInstance=true", hasAttachedInstance: true, allowInstance: true, retainRecords: true, coreError: status.Error(codes.NotFound, "Machine not found"), wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "allocation shortfall requires acknowledgment", query: "/?force=true&allowDeleteWithInstanceType=true", allocationCount: 1, wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithAllocation=true"},
+		{name: "allocation override retains accounting records", query: "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithAllocation=true", allocationCount: 1, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "allocation retry retains accounting records after Core not found", query: "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithAllocation=true", allocationCount: 1, retainRecords: true, coreError: status.Error(codes.NotFound, "Machine not found"), wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "spare capacity permits REST cleanup", query: "/?force=true&allowDeleteWithInstanceType=true", allocationCount: 1, spareMachine: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "Instance override does not acknowledge allocation shortfall", query: "/?force=true&allowDeleteWithInstance=true", hasAttachedInstance: true, allocationCount: 1, allowInstance: true, wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithAllocation=true"},
+		{name: "pending Core cleanup retains records", query: "/?force=true&allowDeleteWithInstanceType=true", corePending: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "override without force is rejected", query: "/?allowDeleteWithInstance=true", wantStatus: http.StatusBadRequest, wantMessage: "requires force=true"},
+		{name: "true proxies the complete force-delete request", query: "/?force=true&allowDeleteWithInstanceType=true", wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "older Core target not found completes compatibility cleanup", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: status.Error(codes.NotFound, "Machine not found"), wantCoreCall: true, wantStatus: http.StatusAccepted},
+		{name: "assigned Machine is rejected without cleanup", query: "/?force=true&allowDeleteWithInstanceType=true", isAssigned: true, wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithInstance=true"},
+		{name: "attached Instance is rejected when assignment flag is stale", query: "/?force=true&allowDeleteWithInstanceType=true", hasAttachedInstance: true, wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithInstance=true"},
+		{name: "Site must be Registered", query: "/?force=true&allowDeleteWithInstanceType=true", siteStatus: cdbm.SiteStatusPending, wantStatus: http.StatusBadRequest, wantMessage: "Site specified in request data is not in Registered state"},
+		{name: "Site client lookup failure retains local records", query: "/?force=true&allowDeleteWithInstanceType=true", siteClientError: true, wantStatus: http.StatusInternalServerError, wantMessage: "Failed to retrieve workflow client for Site"},
+		{name: "Core failed precondition retains local records", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: status.Error(codes.FailedPrecondition, "Core Machine has an attached Instance"), wantCoreCall: true, wantStatus: http.StatusPreconditionFailed, wantMessage: "Core Machine has an attached Instance"},
+		{name: "Core resource exhaustion retains local records", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: status.Error(codes.ResourceExhausted, "Core admission capacity exhausted"), wantCoreCall: true, wantStatus: http.StatusTooManyRequests, wantMessage: "Core admission capacity exhausted"},
+		{name: "Core unavailable retains local records", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: status.Error(codes.Unavailable, "Core unavailable"), wantCoreCall: true, wantStatus: http.StatusServiceUnavailable, wantMessage: "Core unavailable"},
+		{name: "Core proxy timeout retains local records", query: "/?force=true&allowDeleteWithInstanceType=true", coreError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_UNSPECIFIED, nil, nil), wantCoreCall: true, wantStatus: http.StatusGatewayTimeout, wantMessage: "Core proxy request timed out"},
+		{name: "invalid value is rejected before deletion", query: "/?force=definitely", wantStatus: http.StatusBadRequest, wantMessage: "Invalid Machine deletion options"},
+	}
+	for _, tc := range forceTests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: !tc.corePending})
+			var siteClientPool common.SiteTemporalClientPool = fixture.SiteClientPool
+			if tc.siteClientError {
+				siteClientPool = failingSiteTemporalClientPool{err: fmt.Errorf("test Site client lookup failure")}
+			}
+			handler := NewDeleteMachineHandler(fixture.DBSession, siteClientPool)
+			var linkedInstanceID uuid.UUID
+			var linkedMachineInstanceTypeID uuid.UUID
+			var allocationConstraintID uuid.UUID
+
+			if tc.coreError != nil {
+				tsc := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+				tsc.ExpectedCalls = nil
+				wrun := &tmocks.WorkflowRun{}
+				wrun.On("Get", mock.Anything, mock.Anything).Return(tc.coreError)
+				tsc.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.Anything,
+					mock.Anything,
+					mock.MatchedBy(func(req grpcproxy.Request) bool {
+						*fixture.ProxiedReq = req
+						return true
+					}),
+				).Return(wrun, nil)
+			}
+
+			if strings.Contains(tc.query, "force=true") {
+				machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(
+					context.Background(),
+					nil,
+					fixture.MachineID,
+					[]string{cdbm.InfrastructureProviderRelationName, cdbm.SiteRelationName, cdbm.InstanceTypeRelationName},
+					false,
+				)
+				require.NoError(t, err)
+				if tc.noInstanceType {
+					_, err = cdbm.NewMachineDAO(fixture.DBSession).Clear(context.Background(), nil, cdbm.MachineClearInput{MachineID: machine.ID, InstanceTypeID: true})
+					require.NoError(t, err)
+				} else {
+					machineInstanceType := common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+					linkedMachineInstanceTypeID = machineInstanceType.ID
+				}
+				common.TestBuildMachineCapability(t, fixture.DBSession, &machine.ID, nil, cdbm.MachineCapabilityTypeCPU, "force-delete-cpu", nil, nil, nil, nil, nil, nil)
+				_, err = cdbm.NewMachineInterfaceDAO(fixture.DBSession).Create(context.Background(), nil, cdbm.MachineInterfaceCreateInput{
+					MachineID:             machine.ID,
+					ControllerInterfaceID: cutil.GetPtr(uuid.New()),
+					ControllerSegmentID:   cutil.GetPtr(uuid.New()),
+					IsPrimary:             true,
+					MacAddress:            cutil.GetPtr("00:00:00:00:00:01"),
+					IpAddresses:           []string{},
+				})
+				require.NoError(t, err)
+
+				if tc.siteStatus != "" {
+					_, err = cdbm.NewSiteDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{
+						SiteID: machine.SiteID,
+						Status: &tc.siteStatus,
+					})
+					require.NoError(t, err)
+				}
+
+				if tc.isAssigned {
+					isAssigned := true
+					_, err = cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+						MachineID:  fixture.MachineID,
+						IsAssigned: &isAssigned,
+					})
+					require.NoError(t, err)
+				}
+
+				if tc.spareMachine {
+					spare := common.TestBuildMachine(t, fixture.DBSession, machine.InfrastructureProvider, machine.Site, machine.InstanceTypeID, nil, cdbm.MachineStatusReady)
+					common.TestBuildMachineInstanceType(t, fixture.DBSession, spare, machine.InstanceType)
+				}
+				if tc.allocationCount > 0 {
+					user := fixture.User.(*cdbm.User)
+					tenant := common.TestBuildTenant(t, fixture.DBSession, "allocation-tenant", "allocation-tenant-org", user)
+					allocation := common.TestBuildAllocation(t, fixture.DBSession, machine.Site, tenant, "force-delete-allocation", user)
+					constraint := common.TestBuildAllocationConstraint(t, fixture.DBSession, allocation, machine.InstanceType, nil, tc.allocationCount, user)
+					allocationConstraintID = constraint.ID
+				}
+
+				if tc.hasAttachedInstance {
+					user := fixture.User.(*cdbm.User)
+					tenant := common.TestBuildTenant(t, fixture.DBSession, "force-delete-tenant", "force-delete-tenant-org", user)
+					vpc := common.TestBuildVPC(t, fixture.DBSession, "force-delete-vpc", machine.InfrastructureProvider, tenant, machine.Site, nil, nil, nil, cdbm.VpcStatusReady, user)
+					operatingSystem := common.TestBuildOperatingSystem(t, fixture.DBSession, "force-delete-os", tenant, cdbm.OperatingSystemStatusReady, user)
+					instance := common.TestBuildInstance(t, fixture.DBSession, "force-delete-instance", tenant.ID, machine.InfrastructureProviderID, machine.SiteID, *machine.InstanceTypeID, vpc.ID, &machine.ID, operatingSystem.ID)
+					linkedInstanceID = instance.ID
+					common.TestBuildInterface(t, fixture.DBSession, instance.ID, nil, nil, true, nil, nil, nil, nil, user)
+				}
+			}
+
+			_, err := cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+				MachineID: fixture.MachineID, IsUsableByTenant: cutil.GetPtr(true), IsMissingOnSite: &tc.isMissingOnSite,
+			})
+			require.NoError(t, err)
+			if tc.missingFor > 0 {
+				missingStatus := testMachineBuildStatusDetail(t, fixture.DBSession, fixture.MachineID, cdbm.MachineStatusError, cutil.GetPtr("Machine is missing on Site"))
+				_, err = fixture.DBSession.DB.Exec("UPDATE status_detail SET created = ? WHERE id = ?", time.Now().Add(-tc.missingFor), missingStatus.ID)
+				require.NoError(t, err)
+			}
+
+			rec := fixture.Request(t, handler.Handle, http.MethodDelete, tc.query, nil, "")
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			if tc.wantCoreCall {
+				require.Equal(t, corev1.Forge_AdminForceDeleteMachine_FullMethodName, fixture.ProxiedReq.FullMethod)
+			} else {
+				require.Empty(t, fixture.ProxiedReq.FullMethod)
+			}
+			if tc.wantStatus != http.StatusAccepted {
+				require.Contains(t, rec.Body.String(), tc.wantMessage)
+			}
+			if tc.wantCoreCall {
+				var coreReq corev1.AdminForceDeleteMachineRequest
+				require.NoError(t, protojson.Unmarshal(fixture.ProxiedReq.RequestJSON, &coreReq))
+				require.Equal(t, fixture.MachineID, coreReq.GetHostQuery())
+				require.True(t, coreReq.GetDeleteInterfaces())
+				require.True(t, coreReq.GetDeleteBmcInterfaces())
+				require.Equal(t, !tc.noInstanceType, coreReq.GetAllowDeleteWithInstanceType())
+				require.Equal(t, tc.allowInstance, coreReq.GetAllowDeleteWithInstance())
+			}
+			if tc.wantStatus == http.StatusAccepted {
+				require.JSONEq(t, `{"message":"Deletion request was accepted"}`, rec.Body.String())
+			}
+			if allocationConstraintID != uuid.Nil {
+				constraint, err := cdbm.NewAllocationConstraintDAO(fixture.DBSession).GetByID(context.Background(), nil, allocationConstraintID, nil)
+				require.NoError(t, err)
+				require.Equal(t, tc.allocationCount, constraint.ConstraintValue)
+			}
+			if tc.wantStatus != http.StatusAccepted || tc.retainRecords {
+				machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
+				require.NoError(t, err)
+				require.Equal(t, !tc.retainRecords, machine.IsUsableByTenant)
+				require.Equal(t, tc.isMissingOnSite, machine.IsMissingOnSite)
+				if tc.retainRecords {
+					require.NotNil(t, machine.InstanceTypeID)
+				}
+				if linkedMachineInstanceTypeID != uuid.Nil {
+					_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(context.Background(), nil, linkedMachineInstanceTypeID, nil)
+					require.NoError(t, err)
+					caps, _, err := cdbm.NewMachineCapabilityDAO(fixture.DBSession).GetAll(context.Background(), nil, []string{fixture.MachineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+					require.NoError(t, err)
+					require.NotEmpty(t, caps)
+					machineInterfaces, _, err := cdbm.NewMachineInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{fixture.MachineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+					require.NoError(t, err)
+					require.NotEmpty(t, machineInterfaces)
+				}
+				if tc.hasAttachedInstance {
+					_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(context.Background(), nil, linkedInstanceID, nil)
+					require.NoError(t, err)
+					interfaces, _, err := cdbm.NewInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{linkedInstanceID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+					require.NoError(t, err)
+					require.NotEmpty(t, interfaces)
+				}
+				return
+			}
+
+			_, err = cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(context.Background(), nil, linkedMachineInstanceTypeID, nil)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			caps, _, err := cdbm.NewMachineCapabilityDAO(fixture.DBSession).GetAll(context.Background(), nil, []string{fixture.MachineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+			require.NoError(t, err)
+			require.Empty(t, caps)
+			machineInterfaces, _, err := cdbm.NewMachineInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{fixture.MachineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+			require.NoError(t, err)
+			require.Empty(t, machineInterfaces)
+		})
+	}
+
+	t.Run("cleanup failure rolls back before compatibility retry", func(t *testing.T) {
+		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})
+		handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+		machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(
+			context.Background(),
+			nil,
+			fixture.MachineID,
+			[]string{cdbm.InfrastructureProviderRelationName, cdbm.SiteRelationName, cdbm.InstanceTypeRelationName},
+			false,
+		)
+		require.NoError(t, err)
+		machineInstanceType := common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+		common.TestBuildMachineCapability(t, fixture.DBSession, &machine.ID, nil, cdbm.MachineCapabilityTypeCPU, "force-delete-rollback-cpu", nil, nil, nil, nil, nil, nil)
+		_, err = cdbm.NewMachineInterfaceDAO(fixture.DBSession).Create(context.Background(), nil, cdbm.MachineInterfaceCreateInput{
+			MachineID:             machine.ID,
+			ControllerInterfaceID: cutil.GetPtr(uuid.New()),
+			ControllerSegmentID:   cutil.GetPtr(uuid.New()),
+			IsPrimary:             true,
+			MacAddress:            cutil.GetPtr("00:00:00:00:00:02"),
+			IpAddresses:           []string{},
+		})
+		require.NoError(t, err)
+
+		const (
+			addConstraintSQL  = "ALTER TABLE machine ADD CONSTRAINT machine_force_delete_deleted_null_test CHECK (deleted IS NULL)"
+			dropConstraintSQL = "ALTER TABLE machine DROP CONSTRAINT machine_force_delete_deleted_null_test"
+		)
+		_, err = fixture.DBSession.DB.Exec(addConstraintSQL)
+		require.NoError(t, err)
+		constraintActive := true
+		t.Cleanup(func() {
+			if constraintActive {
+				_, cleanupErr := fixture.DBSession.DB.Exec(dropConstraintSQL)
+				require.NoError(t, cleanupErr)
+			}
+		})
+
+		first := fixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstanceType=true", nil, "")
+		require.Equal(t, http.StatusInternalServerError, first.Code, first.Body.String())
+		require.Contains(t, first.Body.String(), "Failed to clean up force-deleted Machine")
+		_, err = cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
+		require.NoError(t, err)
+		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(context.Background(), nil, machineInstanceType.ID, nil)
+		require.NoError(t, err)
+		caps, _, err := cdbm.NewMachineCapabilityDAO(fixture.DBSession).GetAll(context.Background(), nil, []string{fixture.MachineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, caps)
+		machineInterfaces, _, err := cdbm.NewMachineInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{fixture.MachineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, machineInterfaces)
+
+		_, err = fixture.DBSession.DB.Exec(dropConstraintSQL)
+		require.NoError(t, err)
+		constraintActive = false
+		tsc := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+		tsc.ExpectedCalls = nil
+		wrun := &tmocks.WorkflowRun{}
+		wrun.On("Get", mock.Anything, mock.Anything).Return(status.Error(codes.NotFound, "Machine not found"))
+		tsc.On(
+			"ExecuteWorkflow",
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+			mock.MatchedBy(func(req grpcproxy.Request) bool {
+				*fixture.ProxiedReq = req
+				return true
+			}),
+		).Return(wrun, nil)
+
+		retry := fixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstanceType=true", nil, "")
+		require.Equal(t, http.StatusAccepted, retry.Code, retry.Body.String())
+		_, err = cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(context.Background(), nil, machineInstanceType.ID, nil)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		caps, _, err = cdbm.NewMachineCapabilityDAO(fixture.DBSession).GetAll(context.Background(), nil, []string{fixture.MachineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+		require.NoError(t, err)
+		require.Empty(t, caps)
+		machineInterfaces, _, err = cdbm.NewMachineInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{fixture.MachineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		require.Empty(t, machineInterfaces)
+	})
 }
 
 func TestGetDpuMachinesLegacyTemporalPayload(t *testing.T) {

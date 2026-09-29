@@ -120,6 +120,11 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 	if err != nil {
 		return err
 	}
+	var proceed bool
+	flagArgs, proceed, err = addMachineDeleteForceFlag(info, flagArgs, positionalArgs)
+	if err != nil || !proceed {
+		return err
+	}
 
 	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs)
 	if err != nil {
@@ -151,6 +156,40 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 		s.Cache.InvalidateAll()
 	}
 	return nil
+}
+
+func addMachineDeleteForceFlag(
+	info appcli.GeneratedCommandInfo,
+	args []string,
+	positionalArgs []string,
+) ([]string, bool, error) {
+	if info.OperationID != "delete-machine" {
+		return args, true, nil
+	}
+
+	forceProvided := hasGeneratedOption(info, args, "force")
+	if forceProvided && !generatedBoolOptionEnabled(info, args, "force") {
+		return args, true, nil
+	}
+
+	machineID := "the selected Machine"
+	if len(positionalArgs) > 0 {
+		machineID = positionalArgs[0]
+	}
+	force, err := PromptConfirm(fmt.Sprintf(
+		"Force delete Machine %s? This deletes the Machine and its host, DPU, and BMC interfaces on the Site. Machines marked missing on Site can be force deleted without waiting 24 hours. Attached Instances require --allow-delete-with-instance, assigned Instance Types require --allow-delete-with-instance-type, and insufficient Allocation capacity requires --allow-delete-with-allocation. The Instance override also permits Instance Type removal and removes the Instance on the Site without a graceful workload shutdown; cleanup may forcibly restart the host. REST records are retained when Instance deletion is requested, Allocation capacity would be insufficient, or Site cleanup is incomplete. Retained missing Machines and Instances move to Error for deliberate cleanup by their owners.",
+		machineID,
+	))
+	if err != nil {
+		return args, false, err
+	}
+	if !force {
+		return args, !forceProvided, nil
+	}
+	if forceProvided {
+		return args, true, nil
+	}
+	return append(args, "--force=true"), true, nil
 }
 
 func splitGeneratedArguments(info appcli.GeneratedCommandInfo, args []string) ([]string, []string, error) {

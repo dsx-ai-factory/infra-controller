@@ -53,6 +53,8 @@ async fn test_health_of_nonexisting_machine(pool: sqlx::PgPool) {
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            allow_delete_with_instance_type: false,
+            allow_delete_with_instance: false,
         }))
         .await
         .unwrap()
