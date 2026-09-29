@@ -30,10 +30,15 @@ while true; do
   # Match on the JSON name field, not crictl ps --name (substring match), so
   # a container whose name merely contains PUNT_STATS_CONTAINER_NAME isn't
   # picked.
-  container_id=$(crictl ps -o json \
+  # A failed crictl/jq pipeline (pipefail) is distinct from a successful
+  # lookup that finds nothing; log it and retry after the usual interval.
+  if ! container_id=$(crictl ps -o json \
       | jq -r --arg name "${PUNT_STATS_CONTAINER_NAME}" \
-          '.containers[] | select(.metadata.name == $name) | .id' \
-      | head -n1)
+          'first(.containers[] | select(.metadata.name == $name) | .id)'); then
+    echo "WARN: failed to look up container ${PUNT_STATS_CONTAINER_NAME}" >&2
+    sleep "${PUNT_STATS_INTERVAL_SECONDS}"
+    continue
+  fi
 
   if [[ -n "${container_id}" ]]; then
     if crictl exec "${container_id}" cat "${PUNT_STATS_SRC_PATH}" > "${PUNT_STATS_DST_PATH}.tmp" 2>/dev/null; then
