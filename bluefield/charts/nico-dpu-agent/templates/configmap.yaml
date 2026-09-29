@@ -1,5 +1,6 @@
 {{- $supplementalCmName := default "" (get (default (dict) .Values.supplementalNetworkConfig) "name") -}}
-{{- if or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort }}
+{{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
+{{- if or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,8 +17,13 @@ data:
     [network]
     supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"
     {{- end }}
-    {{- with .Values.metricsPort }}
+    {{- if or .Values.metricsPort $prometheusDisabled }}
     [telemetry]
+    {{- with .Values.metricsPort }}
     metrics-address = "0.0.0.0:{{ . }}"
+    {{- end }}
+    {{- if $prometheusDisabled }}
+    prometheus-enabled = false
+    {{- end }}
     {{- end }}
 {{- end }}

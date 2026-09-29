@@ -144,12 +144,16 @@ pub(super) async fn setup_and_run(
         health_controller.set_ready(false);
     }
 
-    match agent_config
-        .telemetry
-        .metrics_address
-        .parse::<std::net::SocketAddr>()
-    {
-        Ok(metrics_address) => {
+    match agent_config.telemetry.prometheus_enabled.then(|| {
+        agent_config
+            .telemetry
+            .metrics_address
+            .parse::<std::net::SocketAddr>()
+    }) {
+        None => {
+            tracing::info!("Prometheus /metrics and /ready endpoint disabled by config");
+        }
+        Some(Ok(metrics_address)) => {
             tracing::info!(
                 metrics_address = %metrics_address,
                 "Starting Prometheus /metrics endpoint"
@@ -169,7 +173,7 @@ pub(super) async fn setup_and_run(
                 }
             });
         }
-        Err(e) => {
+        Some(Err(e)) => {
             tracing::warn!(
                 error = format!("{e:#}"),
                 "Failed to start Prometheus /metrics endpoint"
