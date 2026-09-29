@@ -36,8 +36,7 @@ type MachineSummary struct {
 	ProductName NullableString `json:"productName,omitempty"`
 	// If the Machine is in maintenance mode, this message will typically describe the reason and how long it is expected to be in maintenance
 	MaintenanceMessage NullableString `json:"maintenanceMessage,omitempty"`
-	// Status represents the status of the machine
-	Status *MachineStatus `json:"status,omitempty"`
+	Status             *MachineStatus `json:"status,omitempty"`
 }
 
 // NewMachineSummary instantiates a new MachineSummary object

@@ -10873,11 +10873,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11005,11 +11005,11 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11126,8 +11126,8 @@ paths:
                         message: Machine has one or more health alerts that prevent allocation
                         created: '2019-08-28T14:15:22Z'
                         updated: '2019-08-28T14:15:22Z'
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11233,11 +11233,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -27743,7 +27743,6 @@ components:
           description: 'User-specified Machine labels'
         status:
           $ref: '#/components/schemas/MachineStatus'
-          description: 'Status represents the status of the machine'
           readOnly: true
         isUsableByTenant:
           type: boolean
@@ -27835,7 +27834,6 @@ components:
           description: 'If the Machine is in maintenance mode, this message will typically describe the reason and how long it is expected to be in maintenance'
         status:
           $ref: '#/components/schemas/MachineStatus'
-          description: 'Status represents the status of the machine'
           readOnly: true
     MachineHealthIssue:
       title: MachineHealthIssue
