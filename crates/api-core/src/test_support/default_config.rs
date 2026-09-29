@@ -318,7 +318,10 @@ pub fn get() -> CarbideConfig {
         bom_validation: BomValidationConfig::default(),
         listen_mode: ListenMode::Tls,
         listen_only: false,
-        nvlink_config: Some(NvLinkConfig::default()),
+        nvlink_config: Some(NvLinkConfig {
+            enabled: false,
+            ..NvLinkConfig::default()
+        }),
         ewethers_config: Some(EwEthersConfig {
             enabled: true,
             svpc_enabled: true,

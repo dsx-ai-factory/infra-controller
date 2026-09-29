@@ -512,13 +512,22 @@ shipped configuration selects a plaintext mode.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NvLink partitioning. |
+| `enabled` | `bool` | `true` | Enables NvLink partitioning. Also `true` when `nvlink_config` is omitted. |
 | `monitor_run_interval` | `Duration` | `60s` | NvLink monitor polling interval. |
 | `nmx_c_tls_ca_cert_path` | `Option<String>` | — | Extra CA bundle for verifying the NMX-C server over HTTPS. |
 | `nmx_c_tls_client_cert_path` | `Option<String>` | — | Client certificate for mTLS to NMX-C. |
 | `nmx_c_tls_client_key_path` | `Option<String>` | — | Client private key for mTLS to NMX-C. |
 | `nmx_c_tls_authority` | `Option<String>` | — | TLS server name used for SNI and certificate verification. |
 | `allow_insecure` | `bool` | `false` | Skip TLS verification for NMX-C. |
+
+When `enabled` is `true`, `allow_insecure` is `false`, and none of the four
+`nmx_c_tls_*` keys is set, `nico-api` checks at startup for
+`/var/run/secrets/nvswitch-client/tls.crt` and `tls.key` (the Helm chart's
+`nvSwitchTls.nicoClient` mount). If both exist, it uses them as the client
+certificate, uses `ca.crt` from the same directory or else
+`/var/run/secrets/nico-roots/ca.crt` as the CA bundle, and sets
+`nmx_c_tls_authority` to `initial_domain_name`. Setting any `nmx_c_tls_*` key
+disables these defaults, and unset keys keep their documented behavior.
 | `nmx_c_endpoint_port` | `Option<u16>` | — | TCP port for NMX-C endpoints derived from switch NVOS IP. Unset uses the production NMX-C port. |
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) processed concurrently per monitor iteration. Bounds DB pool usage and gRPC fan-out. Must be ≥ 1. |

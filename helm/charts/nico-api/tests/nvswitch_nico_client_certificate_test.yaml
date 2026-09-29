@@ -4,18 +4,14 @@ templates:
 release:
   namespace: nico-system
 tests:
-  - it: is absent by default
+  - it: is absent when disabled
+    set:
+      nvSwitchTls.nicoClient.enabled: false
     asserts:
       - hasDocuments:
           count: 0
 
-  - it: renders the NMX-C client identity when enabled
-    set:
-      nvSwitchTls:
-        nicoClient:
-          enabled: true
-          uris:
-            - spiffe://switch.local/nico-system/sa/nico-nmxc
+  - it: renders the NMX-C client identity by default
     asserts:
       - equal:
           path: spec.secretName
@@ -28,7 +24,7 @@ tests:
       - equal:
           path: spec.uris
           value:
-            - spiffe://switch.local/nico-system/sa/nico-nmxc
+            - spiffe://nico.local/nico-system/sa/nico-nmxc
       - equal:
           path: spec.privateKey
           value:
@@ -42,9 +38,23 @@ tests:
             name: vault-nico-issuer
             group: cert-manager.io
 
-  - it: rejects a missing client URI SAN
+  - it: derives the default identity from the trust domain and namespace
+    release:
+      namespace: forge-system
     set:
-      nvSwitchTls.nicoClient.enabled: true
+      global.spiffe.trustDomain: example.local
     asserts:
-      - failedTemplate:
-          errorMessage: "nico-api: nvSwitchTls.nicoClient.uris must contain at least one URI SAN"
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://example.local/forge-system/sa/nico-nmxc
+
+  - it: uses explicit client URI SANs
+    set:
+      nvSwitchTls.nicoClient.uris:
+        - spiffe://switch.local/nico-system/sa/nico-nmxc
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://switch.local/nico-system/sa/nico-nmxc

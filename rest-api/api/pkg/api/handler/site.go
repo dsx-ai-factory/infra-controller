@@ -173,6 +173,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 				NativeNetworking:     true,
 				NetworkSecurityGroup: true,
 				Flow:                 true,
+				NVLinkPartition:      true,
 			},
 		}
 		if apiRequest.Location != nil {

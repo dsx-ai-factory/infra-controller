@@ -314,8 +314,9 @@ spec:
 ### Use the NICo Helm Chart
 
 The `nico-api` Helm chart can create the NICo client certificate, mount its
-Secret read-only, and optionally create an operator-owned server Secret. Both
-certificate profiles and the monitor are disabled by default and are enabled
+Secret read-only, and optionally create an operator-owned server Secret. The
+client certificate profile is enabled by default. The server certificate
+profile and the certificate monitor are disabled by default and are enabled
 independently.
 
 Merge the following values into your existing values file. Do not
@@ -380,9 +381,14 @@ mount that server trust bundle separately and set `nmx_c_tls_ca_cert_path` to
 its file instead. The current `nvSwitchTls` values do not add a custom CA
 volume; provide that mount through the surrounding deployment mechanism.
 
-Enabling `nicoClient` creates and mounts the client Secret, but does not set
-the TOML paths or start the certificate monitor. The `siteConfig` settings do
-that separately. If RMS owns the server private key, leave
+`nicoClient` creates and mounts the client Secret, but does not start the
+certificate monitor. If the site configuration sets none of the
+`nvlink_config.nmx_c_tls_*` keys and `nicoClient.mountPath` keeps its default,
+`nico-api` uses the mounted client certificate at startup. It uses `ca.crt`
+from the client Secret or else `/var/run/secrets/nico-roots/ca.crt` as the CA
+bundle, and sets `nmx_c_tls_authority` to `initial_domain_name`. Setting any
+`nmx_c_tls_*` key disables these defaults, so set all the TLS keys you need
+explicitly, as in the example above. If RMS owns the server private key, leave
 `switchServer.enabled = false` and create that certificate through the RMS
 deployment instead.
 
@@ -483,10 +489,10 @@ The following table describes the certificate rotation settings:
 `rotate_before_expiry`.
 
 <Note>
-Set `nvlink_config.enabled` according to whether the site uses automated NVLink
-partition reconciliation. The certificate monitor needs only its nested
-`enabled` setting, so an alert-only deployment can leave
-`nvlink_config.enabled = false`.
+`nvlink_config.enabled` defaults to `true`, including when `[nvlink_config]` is
+omitted. Set it to `false` on sites that do not use automated NVLink partition
+reconciliation. The certificate monitor needs only its nested `enabled`
+setting, so an alert-only deployment can set `nvlink_config.enabled = false`.
 </Note>
 
 Set the server certificate's renewal time comfortably earlier than the NICo
