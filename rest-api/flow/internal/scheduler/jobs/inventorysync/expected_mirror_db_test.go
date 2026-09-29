@@ -90,6 +90,60 @@ func computeSpec(mfr, serial, mac string) expectedComponentSpec {
 
 // --- rack mirror ----------------------------------------------------------
 
+func TestMirrorExpectedRacks_ProfileID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existing   bool
+		adopt      bool
+		oldProfile *string
+		profile    string
+	}{
+		{name: "insert", profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "populate predecessor rack", existing: true, adopt: true, profile: "GB200_NVL72R1_C2G4_LENOVO"},
+		{name: "replace old profile", existing: true, oldProfile: strPtr("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"), profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "absent profile clears value", existing: true, oldProfile: strPtr("old-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			core := coreRack("rack-01", "NVIDIA", "SN-01")
+			core.RackProfileID = test.profile
+			var original model.Rack
+			if test.existing {
+				original = model.Rack{Name: core.Name, Manufacturer: "NVIDIA", SerialNumber: "SN-01", RackProfileID: test.oldProfile}
+				if !test.adopt {
+					original.ExternalID = strPtr(core.RackID)
+				}
+				require.NoError(t, original.Create(ctx, pool.DB))
+			}
+			result := mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			if test.existing {
+				assert.Equal(t, 1, result.updated)
+			} else {
+				assert.Equal(t, 1, result.inserted)
+			}
+			var stored model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&stored).Where("external_id = ?", core.RackID).Scan(ctx))
+			if test.existing {
+				assert.Equal(t, original.ID, stored.ID)
+			}
+			if test.profile == "" {
+				assert.Nil(t, stored.RackProfileID)
+			} else {
+				require.NotNil(t, stored.RackProfileID)
+				assert.Equal(t, test.profile, *stored.RackProfileID)
+			}
+			result = mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			assert.Zero(t, result.updated, "identical snapshots do not rewrite the rack")
+			patch := (&model.Rack{Name: "renamed"}).BuildPatch(&stored)
+			require.NotNil(t, patch)
+			require.NoError(t, patch.Patch(ctx, pool.DB))
+			var renamed model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&renamed).Where("id = ?", stored.ID).Scan(ctx))
+			assert.Equal(t, stored.RackProfileID, renamed.RackProfileID, "metadata patches preserve the synchronized profile")
+		})
+	}
+}
+
 // A successful but empty Core response soft-deletes both mirror-adopted and
 // legacy racks because no remaining row can be adopted from this snapshot.
 func TestMirrorRacks_EmptyCoreDeletesAllRows(t *testing.T) {

@@ -46,14 +46,15 @@ type Rack struct {
 	// (ExpectedRack.rack_id, e.g. "a12") populated by the expected-inventory
 	// mirror. NULL on racks that the mirror has never adopted (e.g. legacy
 	// ingestion-gRPC rows on first run).
-	ExternalID *string     `bun:"external_id"`
-	Status     RackStatus  `bun:"status,type:varchar(16),default:'new'"`
-	CreatedAt  time.Time   `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt  time.Time   `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
-	IngestedAt *time.Time  `bun:"ingested_at"`
-	DeletedAt  *time.Time  `bun:"deleted_at,soft_delete"`
-	Components []Component `bun:"rel:has-many,join:id=rack_id"`
-	NVLDomain  *NVLDomain  `bun:"rel:belongs-to,join:nvldomain_id=id"`
+	ExternalID    *string     `bun:"external_id"`
+	RackProfileID *string     `bun:"rack_profile_id"`
+	Status        RackStatus  `bun:"status,type:varchar(16),default:'new'"`
+	CreatedAt     time.Time   `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt     time.Time   `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	IngestedAt    *time.Time  `bun:"ingested_at"`
+	DeletedAt     *time.Time  `bun:"deleted_at,soft_delete"`
+	Components    []Component `bun:"rel:has-many,join:id=rack_id"`
+	NVLDomain     *NVLDomain  `bun:"rel:belongs-to,join:nvldomain_id=id"`
 }
 
 type RackStatus string
