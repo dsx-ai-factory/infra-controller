@@ -18,7 +18,13 @@ import (
 	"fmt"
 )
 
-// MachineStatus Machine status combines the observed Core lifecycle with REST Instance assignment. A Ready Machine becomes InUse when REST assigns it, and remains InUse if Core reports Ready while the REST assignment still exists. Error, Maintenance, Initializing, and other non-Ready states retain precedence. When Instance deletion clears the assignment, InUse returns to Ready only if the retained Core snapshot reports Ready; otherwise fresh Machine inventory establishes the next status. Ready is not a reservation and does not guarantee that a subsequent Instance creation will succeed.
+// MachineStatus Machine status combines the observed Core lifecycle with REST Instance assignment.
+// A Ready Machine becomes InUse when REST assigns it, and remains InUse if Core reports Ready while
+// the REST assignment still exists. Error, Maintenance, Initializing, and other non-Ready states
+// retain precedence. When Instance deletion clears the assignment, InUse returns to Ready only if
+// the retained Core snapshot reports Ready; otherwise fresh Machine inventory establishes the next
+// status. Ready is not a reservation and does not guarantee that a subsequent Instance creation
+// will succeed.
 type MachineStatus string
 
 // List of MachineStatus
