@@ -3,6 +3,8 @@
 
 package managerapi
 
+import "context"
+
 // OrchestratorExpansion - Orchestrator Expansion
 type OrchestratorExpansion interface{}
 
@@ -12,6 +14,8 @@ type OrchestratorInterface interface {
 	Init()
 	Start()
 	GetState() []string
+	CheckLiveness() error
+	CheckReadiness(ctx context.Context) error
 
 	OrchestratorExpansion
 }

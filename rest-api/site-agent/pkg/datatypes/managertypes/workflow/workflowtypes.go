@@ -24,6 +24,51 @@ type State struct {
 	err string
 	// ConnectionTime time when attempted to connect
 	connectionTime string
+	// worker is the Temporal worker the latest connection attempt started. It is
+	// nil before the first attempt and while an attempt is in progress.
+	worker *WorkerStatus
+}
+
+// SetWorker records the Temporal worker the latest connection attempt started.
+func (s *State) SetWorker(worker *WorkerStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.worker = worker
+}
+
+// Worker returns the Temporal worker the latest connection attempt started.
+func (s *State) Worker() *WorkerStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.worker
+}
+
+// WorkerStatus is the outcome of one attempt to start the Temporal worker.
+type WorkerStatus struct {
+	// Clients are the Temporal clients the worker was started with, kept here so
+	// health checks can use them while a reload replaces the Temporal clients.
+	Clients []client.Client
+	mu      sync.RWMutex
+	err     error
+}
+
+// NewWorkerStatus returns the status of a worker started with the given clients.
+func NewWorkerStatus(clients ...client.Client) *WorkerStatus {
+	return &WorkerStatus{Clients: clients}
+}
+
+// SetErr records why the worker failed to start or stopped.
+func (w *WorkerStatus) SetErr(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = err
+}
+
+// Err returns why the worker failed to start or stopped, or nil while it runs.
+func (w *WorkerStatus) Err() error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.err
 }
 
 // SetErr records the last Temporal connection error.

@@ -207,5 +207,6 @@ func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
 	mux := newMetricsServeMux()
-	http.ListenAndServe(port, mux)
+	err := http.ListenAndServe(port, mux)
+	log.Error().Err(err).Msg("Managers: metrics server stopped")
 }

@@ -4,6 +4,8 @@
 package managerapi
 
 import (
+	"context"
+
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
@@ -21,5 +23,6 @@ type CoreGrpcInterface interface {
 	UpdateGrpcClientState(err error)
 	GetState() []string
 	GetGrpcClientVersion() int64
+	CheckReadiness(ctx context.Context) error
 	CoreGrpcExpansion
 }

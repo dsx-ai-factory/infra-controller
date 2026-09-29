@@ -19,6 +19,8 @@ func TestNewStatusServeMux(t *testing.T) {
 		computils.SubnetStatus,
 		computils.InstanceStatus,
 		computils.MachineStatus,
+		computils.LivenessStatus,
+		computils.ReadinessStatus,
 	}
 	mux := newStatusServeMux()
 	for _, path := range statusPaths {

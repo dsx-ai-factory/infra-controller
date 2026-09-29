@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/rs/zerolog/log"
+
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 )
 
@@ -68,6 +70,9 @@ func newStatusServeMux() *http.ServeMux {
 	mux.HandleFunc(computils.SubnetStatus, handleSubnetStatusRequest)
 	mux.HandleFunc(computils.InstanceStatus, handleInstanceStatusRequest)
 	mux.HandleFunc(computils.MachineStatus, handleMachineStatusRequest)
+	probes := newProbes()
+	mux.HandleFunc(computils.LivenessStatus, probes.handleLiveness)
+	mux.HandleFunc(computils.ReadinessStatus, probes.handleReadiness)
 	return mux
 }
 
@@ -75,5 +80,8 @@ func newStatusServeMux() *http.ServeMux {
 func StartHTTPServer() {
 	port := ":" + os.Getenv("ESA_PORT")
 	mux := newStatusServeMux()
-	go http.ListenAndServe(port, mux)
+	go func() {
+		err := http.ListenAndServe(port, mux)
+		log.Error().Err(err).Msg("Managers: status and probe server stopped")
+	}()
 }

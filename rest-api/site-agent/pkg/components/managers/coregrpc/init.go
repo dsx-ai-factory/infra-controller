@@ -4,9 +4,11 @@
 package coregrpc
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,7 +52,7 @@ func (coregrpc *API) Start() {
 			break
 		}
 		if time.Since(start) >= client.CoreGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Core gRPC: failed to create gRPC client within %s: %w", client.CoreGrpcConnectionRetryTimeout, err))
+			panic(fmt.Errorf("core gRPC: failed to create gRPC client within %s: %w", client.CoreGrpcConnectionRetryTimeout, err))
 		}
 		ManagerAccess.Data.EB.Log.Error().Err(err).Dur("RetryIn", backoff).Msg("Core gRPC: failed to create gRPC client, retrying")
 		time.Sleep(backoff)
@@ -71,6 +73,17 @@ func (coregrpc *API) GetState() []string {
 	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err))
 
 	return strs
+}
+
+// CheckReadiness calls Core's Version RPC to confirm the Core gRPC connection works.
+// Without DisplayConfig, Version only returns build information.
+func (coregrpc *API) CheckReadiness(ctx context.Context) error {
+	grpcClient := ManagerAccess.Data.EB.Managers.CoreGrpc.GetClient()
+	if grpcClient == nil {
+		return client.ErrCoreGrpcClientNotConnected
+	}
+	_, err := grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{})
+	return err
 }
 
 // GetGrpcClientVersion returns the current version of the Core gRPC client

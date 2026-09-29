@@ -7,7 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -39,6 +39,10 @@ const (
 	InfiniBandPartitionStatus = "/status-infinibandpartition"
 	// SSHKeyGroupStatus path is status-sshkeygroup"
 	SSHKeyGroupStatus = "/status-sshkeygroup"
+	// LivenessStatus path is healthz
+	LivenessStatus = "/healthz"
+	// ReadinessStatus path is readyz
+	ReadinessStatus = "/readyz"
 	// ParamName in URI
 	ParamName = "name"
 )
@@ -104,7 +108,7 @@ func RetryWithExponentialBackoff(client *http.Client, req *http.Request,
 			if !httpIsRetryable(resp) {
 				return nil, badStatus
 			}
-			req.Body = ioutil.NopCloser(bytes.NewReader(reqBody))
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
 			sleepTime := float64(delayMs) * math.Pow(backoff, float64(i+1))
 			log.Info().Msgf("sleeping for %v", sleepTime)
 			time.Sleep(time.Duration(sleepTime) * time.Millisecond)
