@@ -30,6 +30,7 @@ use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use rpc::forge_api_client::ForgeApiClient;
 use trace_propagation::is_propagated_header;
 
+use crate::class::DEFAULT_UPSTREAM_TIMEOUT;
 use crate::metrics::{MethodLabel, UpstreamRequestCompleted, UpstreamStatus};
 use crate::proxy::credentials::{
     BmcCredentials, CredentialCache, REDFISH_AUTH_TOKEN_HEADER, get_bmc_credentials,
@@ -43,13 +44,9 @@ use crate::span_isolation::SpanIsolationMiddleware;
 /// old 8 MiB hard cap did. (8 MiB matches nginx ingress controller defaults.)
 pub(super) const MAX_BUFFERED_BODY_SIZE: usize = 8 * 1024 * 1024;
 
-/// Total-request budget for ordinary exchanges; the shared client's default
-/// and the base that streamed-upload timeouts build on.
-const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Floor transfer rate used to scale a streamed upload's timeout from its
-/// declared size, mirroring libredfish's firmware-upload heuristic. The
-/// shared client's 60-second default would abort any large image mid-push.
+/// declared size, mirroring libredfish's firmware-upload heuristic. A class's
+/// budget, at most 30 minutes, would abort a large image mid-push.
 const MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC: u64 = 10_000;
 
 /// Ceiling on a streamed upload's scaled timeout. The declared length is
@@ -101,15 +98,18 @@ impl UpstreamBody {
         matches!(self, Self::None | Self::Buffered(_))
     }
 
-    /// Attaches the body to `request`. A streamed body is handed over on the
-    /// first call; a later call finds it consumed and fails.
+    /// Attaches the body to `request` with the exchange's budget: `timeout`
+    /// for a body sent whole, or one scaled to a streamed body's declared
+    /// size. A streamed body is handed over on the first call; a later call
+    /// finds it consumed and fails.
     fn attach(
         &mut self,
         request: reqwest_middleware::RequestBuilder,
+        timeout: Duration,
     ) -> Result<reqwest_middleware::RequestBuilder, ProxyError> {
         match self {
-            Self::None => Ok(request),
-            Self::Buffered(bytes) => Ok(request.body(bytes.clone())),
+            Self::None => Ok(request.timeout(timeout)),
+            Self::Buffered(bytes) => Ok(request.timeout(timeout).body(bytes.clone())),
             Self::Streamed {
                 body,
                 declared_length,
@@ -136,13 +136,15 @@ impl UpstreamBody {
 
 /// One forwarding attempt: resolve credentials for `target_ip` (cached or
 /// freshly minted), build the upstream request from the caller's `parts`,
-/// attach the body, and send. Records the per-attempt upstream metric.
+/// attach the body with the exchange's budget (see [`UpstreamBody::attach`]),
+/// and send. Records the per-attempt upstream metric.
 pub(super) async fn send_upstream(
     state: &BmcProxyState,
     target_ip: IpAddr,
     parts: &http::request::Parts,
     path_and_query: http::uri::PathAndQuery,
     upstream_body: &mut UpstreamBody,
+    timeout: Duration,
 ) -> Result<UpstreamResponse, Response<Body>> {
     let mut bmc_client_info = create_client(
         target_ip,
@@ -174,7 +176,7 @@ pub(super) async fn send_upstream(
             error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
         })?;
     let upstream_request = upstream_body
-        .attach(upstream_request)
+        .attach(upstream_request, timeout)
         .map_err(error_response)?;
 
     let started = Instant::now();
@@ -216,11 +218,12 @@ pub(super) fn method_supports_body(method: &Method) -> bool {
     !matches!(*method, Method::GET | Method::HEAD)
 }
 
-/// Time allowed for a streamed upload of `length` bytes: the ordinary
-/// request budget plus the transfer itself at worst-case OOB bandwidth,
+/// Time allowed for a streamed upload of `length` bytes, whatever its class:
+/// [`DEFAULT_UPSTREAM_TIMEOUT`] plus the transfer itself at worst-case OOB
+/// bandwidth,
 /// bounded by [`MAX_UPLOAD_TIMEOUT`] because `length` is caller-supplied.
 fn sized_upload_timeout(length: u64) -> Duration {
-    (UPSTREAM_REQUEST_TIMEOUT + Duration::from_secs(length / MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC))
+    (DEFAULT_UPSTREAM_TIMEOUT + Duration::from_secs(length / MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC))
         .min(MAX_UPLOAD_TIMEOUT)
 }
 
@@ -329,7 +332,8 @@ pub(super) fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddle
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
-        .timeout(UPSTREAM_REQUEST_TIMEOUT) // Limit the overall request; uploads override per request
+        // A backstop: every request sets its own budget when its body is attached.
+        .timeout(DEFAULT_UPSTREAM_TIMEOUT)
         .pool_max_idle_per_host(4)
         .build()
         .map_err(|err| {
@@ -772,6 +776,9 @@ mod tests {
         timeout_secs: Option<u64>,
     }
 
+    /// The budget of the class the test requests belong to.
+    const CLASS_BUDGET: Duration = Duration::from_secs(45);
+
     async fn observe_attached_body(
         declared_length: Option<u64>,
     ) -> Result<AttachedBodySummary, String> {
@@ -787,7 +794,10 @@ mod tests {
         let request = UpstreamBody::prepare(&headers, Body::from("payload"))
             .await
             .map_err(|e| e.to_string())?
-            .attach(client.post("https://bmc.invalid/redfish/v1/UpdateService"))
+            .attach(
+                client.post("https://bmc.invalid/redfish/v1/UpdateService"),
+                CLASS_BUDGET,
+            )
             .map_err(|e| e.message)?
             .build()
             .map_err(|e| e.to_string())?;
@@ -806,7 +816,7 @@ mod tests {
     // exactly what they always did; only a body declared larger than the
     // buffer bound streams, with its length forwarded (hyper would otherwise
     // switch to chunked transfer, which BMC firmwares commonly reject) and a
-    // timeout scaled to the transfer instead of the 60-second default.
+    // timeout scaled to the transfer instead of its class's budget.
     #[tokio::test]
     async fn request_bodies_buffer_small_and_stream_large() {
         let large = (MAX_BUFFERED_BODY_SIZE as u64) + 1;
@@ -818,7 +828,7 @@ mod tests {
                     expect: Yields(AttachedBodySummary {
                         buffered: true,
                         explicit_content_length: None,
-                        timeout_secs: None,
+                        timeout_secs: Some(CLASS_BUDGET.as_secs()),
                     }),
                 },
                 Case {
@@ -827,7 +837,7 @@ mod tests {
                     expect: Yields(AttachedBodySummary {
                         buffered: true,
                         explicit_content_length: None,
-                        timeout_secs: None,
+                        timeout_secs: Some(CLASS_BUDGET.as_secs()),
                     }),
                 },
                 Case {
@@ -836,7 +846,7 @@ mod tests {
                     expect: Yields(AttachedBodySummary {
                         buffered: true,
                         explicit_content_length: None,
-                        timeout_secs: None,
+                        timeout_secs: Some(CLASS_BUDGET.as_secs()),
                     }),
                 },
                 Case {
@@ -891,18 +901,18 @@ mod tests {
 
         let mut none = UpstreamBody::None;
         assert!(none.is_replayable());
-        let _ = none.attach(post()).expect("first attach");
+        let _ = none.attach(post(), CLASS_BUDGET).expect("first attach");
         let _ = none
-            .attach(post())
+            .attach(post(), CLASS_BUDGET)
             .expect("bodyless requests replay freely");
 
         let mut buffered = UpstreamBody::prepare(&HeaderMap::new(), Body::from("payload"))
             .await
             .expect("small bodies buffer");
         assert!(buffered.is_replayable());
-        let _ = buffered.attach(post()).expect("first attach");
+        let _ = buffered.attach(post(), CLASS_BUDGET).expect("first attach");
         let _ = buffered
-            .attach(post())
+            .attach(post(), CLASS_BUDGET)
             .expect("a buffered body replays for the credential-refresh retry");
 
         let mut headers = HeaderMap::new();
@@ -918,9 +928,9 @@ mod tests {
             "a streamed body must never be replayed"
         );
         let _ = streamed
-            .attach(post())
+            .attach(post(), CLASS_BUDGET)
             .expect("first attach consumes the stream");
-        let Err(err) = streamed.attach(post()) else {
+        let Err(err) = streamed.attach(post(), CLASS_BUDGET) else {
             panic!("a consumed stream cannot be attached again");
         };
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);

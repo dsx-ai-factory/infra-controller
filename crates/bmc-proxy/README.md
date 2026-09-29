@@ -29,6 +29,8 @@ Important configuration fields:
 - `auth.acls`: per-principal ACL rules for HTTP method and path authorization
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
 - `bmc_proxy`: optional upstream override for dev/test chaining
+- `class`: optional request classes that set how long the proxy waits on the
+  BMC; see [`class`](#class)
 
 Example shape:
 
@@ -117,6 +119,50 @@ Examples:
 
 If you are translating endpoint docs into ACLs, replace templated path components such as
 `{id}`, `{session_id}`, or `{policy_id}` with `*`.
+
+### `class`
+
+Each `[[class]]` table groups proxied requests that share an upstream budget:
+
+```toml
+[[class]]
+name = "inventory"
+match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
+upstream_timeout = "3m"
+
+[[class]]
+name = "default"
+upstream_timeout = "90s"
+```
+
+- `name`: the class's name on the request's trace span, as `bmc_proxy.class`.
+  A lowercase letter followed by lowercase letters, digits, or `_`, at most
+  32 characters in all, and unique across the tables.
+- `match`: an array of the requests the class takes, each written like an ACL
+  entry without a leading `!`: optional comma-separated methods (`GET`,
+  `HEAD`, `POST`, `PUT`, `PATCH`, or `DELETE`, in any case), then a path in
+  the syntax above. Required for every class but `default`.
+- `upstream_timeout`: how long one exchange with the BMC may take, as a
+  duration string such as `"500ms"`, `"45s"`, or `"5m"`, above zero and at
+  most 30 minutes. A class that omits it gets 60 seconds, not the `default`
+  class's budget.
+
+The budget runs from connecting to the BMC until the proxy has read the last
+byte of the BMC's response body, redirects the proxy follows included. Most
+bodies are passed on to the caller as they are read, so a slow caller spends
+the budget too. When the budget runs out before the BMC answers, the caller
+gets `502`; when it runs out while the body is being passed on, the body is
+cut off. A request the proxy replays with fresh credentials gets a budget of
+its own. A streamed upload (a body over 8 MiB that declares its length)
+ignores its class's budget and scales its own from its declared size: 60
+seconds plus the transfer at 10 kB/s, at most four hours.
+
+A request belongs to the first class, in file order, with a matching pattern.
+A request no class matches belongs to `default`, whose budget is 60 seconds;
+declare `default`, without `match`, only to change that. A budget longer than
+the caller's own deadline does not help that caller. A `[[class]]` table that
+breaks these rules, or has a key not listed here, stops the proxy from
+starting.
 
 ## Example Request
 

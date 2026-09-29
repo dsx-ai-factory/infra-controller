@@ -157,8 +157,9 @@ DPS stays one trace across the proxy hop (issue
   wraps the transport with `TraceInjectService`.
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
-  the BMC's — a request the proxy rejects never reaches one), and BMC target IP (span attribute, not
-  a Prometheus label). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
+  a Prometheus label), and, once the request passes its ACL, its request class
+  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
 
 Example config:
 
