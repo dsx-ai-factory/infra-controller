@@ -879,15 +879,16 @@ pub(crate) async fn on_demand_machine_validation(
         rpc::machine_validation_on_demand_request::Action::Start => {
             let mut txn = api.txn_begin().await?;
 
+            // Lock first, then read in a new statement. find_one's joined
+            // FOR UPDATE query can return an inner row read before the lock
+            // became available, including a stale scheduled-request flag.
+            db::machine::lock_by_id_for_update(&mut txn, &machine_id).await?;
+
             let machine = db::machine::find_one(
                 &mut txn,
                 &machine_id,
                 MachineSearchConfig {
                     include_dpus: false,
-                    // Hold the machine row lock through the scheduled-request
-                    // check and current-run update. This makes concurrent
-                    // on-demand starts for one machine deterministic.
-                    for_update: true,
                     ..MachineSearchConfig::default()
                 },
             )

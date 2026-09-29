@@ -233,6 +233,21 @@ where
         .pop())
 }
 
+/// Lock the machine row before reading its mutable request state. A separate
+/// read after this query sees changes committed by the previous lock holder.
+pub async fn lock_by_id_for_update(
+    txn: &mut PgConnection,
+    id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar::<_, MachineId>(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
 pub async fn find_existing_machine(
     txn: &mut PgConnection,
     macaddr: MacAddress,
