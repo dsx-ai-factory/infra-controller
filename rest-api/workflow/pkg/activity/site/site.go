@@ -758,11 +758,21 @@ func (mst ManageSite) updateSiteStatusInDB(ctx context.Context, tx *cdb.Tx, site
 	return nil
 }
 
-// CheckOTPExpirationAndRenewForAllSites periodically checks all sites and rotates OTPs if necessary
+// CheckOTPExpirationAndRenewForAllSites periodically checks all sites and rotates OTPs if necessary.
+// It must not be retried within a cron run. A retry would roll the OTP again for every Site already
+// rotated, invalidating the OTP its RotateTemporalCertAccessOTP workflow carries. So its errors are
+// non-retryable, MonitorTemporalCertExpirationForAllSites allows a single attempt, and the next cron
+// run picks up the remaining Sites.
 func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context) error {
 	logger := log.With().Str("Activity", "CheckOTPExpirationAndRenewForAllSites").Logger()
 
 	logger.Info().Msg("starting activity")
+
+	siteMgrURL := mst.cfg.GetSiteManagerEndpoint()
+	if siteMgrURL == "" {
+		logger.Error().Msg("Site Manager endpoint is not configured, cannot rotate OTPs")
+		return temporal.NewNonRetryableApplicationError("Site Manager endpoint is not configured", "SiteManagerEndpointNotConfigured", nil)
+	}
 
 	stDAO := cdbm.NewSiteDAO(mst.dbSession)
 	sites, _, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Statuses: []string{cdbm.SiteStatusRegistered}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
@@ -771,7 +781,8 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 		return err
 	}
 
-	siteMgrURL := mst.cfg.GetSiteManagerEndpoint()
+	dueSiteCount := 0
+	var failedSiteIDs []string
 	for _, site := range sites {
 
 		// Assume we need to rotate immediately
@@ -788,17 +799,20 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 
 		// Check if certificates are close to expiry
 		if daysToExpiration <= rotationBufferDays {
+			dueSiteCount++
 			logger.Info().Str("siteUUID", site.ID.String()).Msg("Certificates are close to expiry, rotating OTPs")
 
 			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteMgrURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to rotate OTPs")
+				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
 			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteMgrURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to retrieve new OTP after rotation")
+				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
@@ -811,6 +825,7 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 			tc, err := mst.siteClientPool.GetClientByID(site.ID)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to retrieve Temporal client for Site")
+				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
@@ -823,10 +838,17 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 			we, err := tc.ExecuteWorkflow(ctx, workflowOptions, "RotateTemporalCertAccessOTP", base64EncodedEncryptedOTP)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to start Temporal workflow for OTP processing")
+				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 			} else {
 				logger.Info().Str("Workflow ID", we.GetID()).Str("siteUUID", site.ID.String()).Msg("Successfully started Temporal workflow for OTP processing")
 			}
 		}
+	}
+
+	if len(failedSiteIDs) > 0 {
+		msg := fmt.Sprintf("failed to rotate OTP for %d of %d Sites due for rotation: %s", len(failedSiteIDs), dueSiteCount, strings.Join(failedSiteIDs, ", "))
+		logger.Error().Msg(msg)
+		return temporal.NewNonRetryableApplicationError(msg, "SiteOTPRotationFailed", nil)
 	}
 
 	logger.Info().Msg("successfully completed activity")

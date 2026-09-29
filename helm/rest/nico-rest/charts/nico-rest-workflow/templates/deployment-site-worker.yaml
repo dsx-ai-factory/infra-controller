@@ -27,6 +27,11 @@ spec:
         app: nico-rest-site-worker
         app.kubernetes.io/name: nico-rest-workflow
         app.kubernetes.io/component: site-worker
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
