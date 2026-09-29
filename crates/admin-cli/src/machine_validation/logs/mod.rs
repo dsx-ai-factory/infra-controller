@@ -17,6 +17,7 @@ impl Run for Args {
         match self {
             Self::Show(options) => cmd::show(options, &ctx.api_client).await,
             Self::Follow(options) => cmd::follow(options, &ctx.api_client).await,
+            Self::Attempts(options) => cmd::attempts(options, &ctx.api_client).await,
         }
     }
 }

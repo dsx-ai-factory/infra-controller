@@ -48,6 +48,7 @@ Print help (see a summary with -h)
 |---|---|
 | [`show`](./machine-validation-logs-show.md) | Show stored logs for a validation attempt |
 | [`follow`](./machine-validation-logs-follow.md) | Show stored logs and follow an active validation attempt |
+| [`attempts`](./machine-validation-logs-attempts.md) | List attempt IDs for one test in a validation run |
 
 ---
 

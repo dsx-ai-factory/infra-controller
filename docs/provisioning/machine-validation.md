@@ -485,21 +485,30 @@ nico-admin-cli machine-validation logs follow \
   --validation-id <validation_id> --test-id <test_id>
 ```
 
-`follow` prints stored chunks first, polls once per second, and exits when the
-attempt finishes. To inspect a specific attempt, including one from an earlier
-retry, use its UUID:
+`follow` prints stored output first, polls once per second, and exits when the
+attempt finishes. List current and earlier attempts for a test to find their
+UUIDs:
+
+```sh
+nico-admin-cli machine-validation logs attempts \
+  --validation-id <validation_id> --test-id <test_id>
+```
+
+Then inspect one attempt:
 
 ```sh
 nico-admin-cli machine-validation logs show --attempt-id <attempt_id>
 nico-admin-cli machine-validation logs follow --attempt-id <attempt_id>
 ```
 
-Both commands show the server timestamp, source stream, and sequence before each
-chunk. Use `--raw` to print only chunk content, or `--stdout-only` or
-`--stderr-only` to filter by stream. The run-and-test selector resolves the
-test's current attempt; use an attempt ID for earlier attempts. Logs are best
-effort: a full Scout buffer or the site's per-attempt storage limit may omit
-some output.
+Both commands show the server timestamp, source stream, and first sequence for
+each complete line. A partial line is printed when the source stream changes,
+when `show` finishes, or when the attempt becomes terminal. Use `--raw` to
+print chunk content immediately without metadata, or `--stdout-only` or
+`--stderr-only` to filter by stream. The
+run-and-test selector resolves the test's latest attempt; use an attempt ID for
+earlier attempts. Logs are best effort: a full Scout buffer or the site's
+per-attempt storage limit may omit some output.
 
 ## Interpreting Results
 

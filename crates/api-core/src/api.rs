@@ -2673,6 +2673,13 @@ impl Forge for Api {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
     }
 
+    async fn find_machine_validation_attempts(
+        &self,
+        request: Request<rpc::MachineValidationAttemptSearchFilter>,
+    ) -> Result<Response<rpc::MachineValidationAttemptList>, Status> {
+        crate::handlers::machine_validation::find_machine_validation_attempts(self, request).await
+    }
+
     async fn append_machine_validation_attempt_log(
         &self,
         request: Request<rpc::MachineValidationAttemptLogAppendRequest>,

@@ -227,6 +227,37 @@ fn parse_logs_selectors_and_reject_incomplete_selection() {
     );
 }
 
+#[test]
+fn parse_logs_attempts_requires_run_and_test() {
+    let validation_id = MachineValidationId::new();
+    let command = Cmd::command();
+    assert!(
+        command
+            .clone()
+            .try_get_matches_from([
+                "machine-validation",
+                "logs",
+                "attempts",
+                "--validation-id",
+                validation_id.to_string().as_str(),
+                "--test-id",
+                "basic-machine-validation",
+            ])
+            .is_ok()
+    );
+    assert!(
+        command
+            .try_get_matches_from([
+                "machine-validation",
+                "logs",
+                "attempts",
+                "--validation-id",
+                validation_id.to_string().as_str(),
+            ])
+            .is_err()
+    );
+}
+
 // tests parses to the Tests variant: `show` leaves test-id unset, `verify`
 // carries test-id/version, and `add` carries name/command/args.
 #[test]

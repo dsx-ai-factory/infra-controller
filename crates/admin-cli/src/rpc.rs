@@ -2553,6 +2553,20 @@ impl ApiClient {
             .await?)
     }
 
+    pub(crate) async fn find_machine_validation_attempts(
+        &self,
+        run_item_id: &str,
+    ) -> CarbideCliResult<rpc::MachineValidationAttemptList> {
+        Ok(self
+            .0
+            .find_machine_validation_attempts(rpc::MachineValidationAttemptSearchFilter {
+                run_item_id: Some(::rpc::common::Uuid {
+                    value: run_item_id.to_owned(),
+                }),
+            })
+            .await?)
+    }
+
     pub(crate) async fn get_machine_validation_attempt_logs(
         &self,
         attempt_id: &str,

@@ -43,6 +43,26 @@ Follow stdout content without metadata:
 "
     )]
     Follow(Options),
+    #[clap(
+        about = "List attempt IDs for one test in a validation run",
+        after_long_help = "\
+EXAMPLES:
+
+Find current and earlier attempt IDs for a test:
+    $ nico-admin-cli machine-validation logs attempts --validation-id 12345678-1234-5678-90ab-cdef01234567 --test-id basic-machine-validation
+
+"
+    )]
+    Attempts(AttemptOptions),
+}
+
+#[derive(ClapArgs, Debug)]
+pub(crate) struct AttemptOptions {
+    #[arg(long, help = "Run ID containing the test")]
+    pub(super) validation_id: MachineValidationId,
+
+    #[arg(long, help = "Test ID within the run")]
+    pub(super) test_id: String,
 }
 
 #[derive(ClapArgs, Debug)]
