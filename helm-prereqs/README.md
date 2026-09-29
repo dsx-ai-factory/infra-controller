@@ -971,19 +971,19 @@ helm-prereqs/renew-site-agent-temporal-cert.sh
 
 The script finds the namespace that holds the `nico-rest-site-agent-config`
 ConfigMap and reads the Site ID from its `CLUSTER_ID`. It stops if that ID does
-not match the `site-registration` Secret, or if the current context cannot patch
-that Secret, delete the Site Agent pod, and port-forward. It then rolls the
-Site's OTP in Site Manager, writes the new OTP to `site-registration`, and
-restarts `nico-rest-site-agent-0` twice: once to download the new certificate
-and once to load it. It succeeds when the Site Agent logs that its Temporal
-worker started.
+not match the registration Secret the Site Agent mounts (`site-registration` by
+default), or if the current context cannot patch that Secret, delete the Site
+Agent pod, and port-forward. It reaches Site Manager through a port-forward on a
+free local port and verifies its certificate against the CA and `creds-url` host
+in the registration Secret, as bootstrap does. It then rolls the Site's OTP,
+writes the new OTP to the registration Secret, and restarts
+`nico-rest-site-agent-0` twice: once to download the new certificate and once to
+load it. It succeeds when the Site Agent logs that its Temporal worker started.
 
 `--dry-run` reports the certificate expiry and Site Manager bootstrap state
 without changing anything, and `--yes` skips the confirmation prompt. Set
 `REST_NS` to skip namespace detection, for example when more than one namespace
-runs a Site Agent. Set `LOCAL_PORT` if local port `18100`, which the script uses
-to port-forward Site Manager, is taken. It needs `kubectl`, `curl`, and
-`python3`.
+runs a Site Agent. It needs `kubectl`, `curl`, and `python3`.
 
 ## Teardown
 

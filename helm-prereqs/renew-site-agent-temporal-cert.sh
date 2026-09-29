@@ -15,9 +15,6 @@ set -euo pipefail
 
 CONFIGMAP="nico-rest-site-agent-config"
 POD="nico-rest-site-agent-0"
-REGISTRATION_SECRET="site-registration"
-SITE_MANAGER_SVC="nico-rest-site-manager"
-LOCAL_PORT="${LOCAL_PORT:-18100}"
 
 usage="Usage: $0 [--dry-run] [--yes]"
 dry_run=false
@@ -35,7 +32,12 @@ log() { echo "$(date -u +%H:%M:%S) $*" >&2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 k() { kubectl -n "${REST_NS}" "$@"; }
 json_field() { python3 -c 'import json, sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1"; }
+registration() { k get secret "${registration_secret}" -o jsonpath="{.data.$1}" | base64 -d; }
 cert() { k get secret "${temporal_secret}" -o jsonpath='{.data.certificate}'; }
+site_manager() {
+    curl -sSf --cacert "${tmp}/ca.crt" --connect-to "${sm_hostport}:127.0.0.1:${local_port}" \
+        "https://${sm_hostport}/v1/site$1" "${@:2}"
+}
 expiry() {
     base64 -d <<<"$1" | python3 -c 'import ssl; print(ssl._ssl._test_decode_cert("/dev/stdin")["notAfter"])' \
         2>/dev/null || echo unknown
@@ -64,15 +66,19 @@ REST_NS="${REST_NS:-$(kubectl get configmap -A --field-selector "metadata.name=$
 [[ -n "${REST_NS}" && "${REST_NS}" != *" "* ]] ||
     die "cannot tell which namespace runs the Site Agent (found '${REST_NS}'), set REST_NS"
 
+# Bootstrap reads the registration Secret mounted at /etc/sitereg, so renew through that one.
+registration_secret="$(k get pod "${POD}" \
+    -o jsonpath='{.spec.volumes[?(@.name=="site-registration")].secret.secretName}')"
+registration_secret="${registration_secret:-site-registration}"
 site_id="$(k get configmap "${CONFIGMAP}" -o jsonpath='{.data.CLUSTER_ID}')"
-registered_id="$(k get secret "${REGISTRATION_SECRET}" -o jsonpath='{.data.site-uuid}' | base64 -d)"
+registered_id="$(registration site-uuid)"
 [[ -n "${site_id}" && "${site_id}" == "${registered_id}" ]] ||
-    die "${CONFIGMAP} has CLUSTER_ID '${site_id}', but ${REGISTRATION_SECRET} is for '${registered_id}'"
+    die "${CONFIGMAP} has CLUSTER_ID '${site_id}', but ${registration_secret} is for '${registered_id}'"
 [[ "$(k get configmap "${CONFIGMAP}" -o jsonpath='{.data.DISABLE_BOOTSTRAP}' | tr '[:upper:]' '[:lower:]')" != true ]] ||
     die "DISABLE_BOOTSTRAP is true, so the Site Agent would not download a new certificate"
 temporal_secret="$(k get configmap "${CONFIGMAP}" -o jsonpath='{.data.TEMPORAL_CERT}')"
 temporal_secret="${temporal_secret:-temporal-client-site-agent-certs}"
-can_i patch "secret/${REGISTRATION_SECRET}"
+can_i patch "secret/${registration_secret}"
 can_i delete "pod/${POD}"
 can_i create pods/portforward
 
@@ -80,15 +86,28 @@ old_cert="$(cert)"
 log "Site ${site_id}, namespace ${REST_NS}, context $(kubectl config current-context)"
 log "Temporal certificate expires $(expiry "${old_cert}")"
 
-kubectl -n "${REST_NS}" port-forward "svc/${SITE_MANAGER_SVC}" "${LOCAL_PORT}:8100" >/dev/null 2>&1 &
+# Reach Site Manager the way bootstrap does: at the creds-url host, verified against the
+# registration CA. kubectl picks a free local port for the port-forward.
+creds_url="$(registration creds-url)"
+sm_hostport="${creds_url#https://}"
+sm_hostport="${sm_hostport%%/*}"
+[[ "${creds_url}" == https://* && "${sm_hostport}" == *:* ]] ||
+    die "${registration_secret} has an unexpected creds-url '${creds_url}'"
+tmp="$(mktemp -d)"
+trap 'kill "${pf_pid:-}" 2>/dev/null || true; rm -rf "${tmp}"' EXIT
+registration cacert >"${tmp}/ca.crt"
+kubectl -n "${REST_NS}" port-forward "svc/${sm_hostport%%[.:]*}" ":${sm_hostport##*:}" \
+    >"${tmp}/port-forward.log" 2>&1 &
 pf_pid=$!
-trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
-site_manager="https://127.0.0.1:${LOCAL_PORT}/v1/site"
+local_port=""
 for _ in $(seq 20); do
-    curl -sk -o /dev/null "${site_manager}" && break
+    local_port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "${tmp}/port-forward.log")"
+    [[ -n "${local_port}" ]] && break
+    kill -0 "${pf_pid}" 2>/dev/null || break
     sleep 0.5
 done
-state="$(curl -sfk "${site_manager}/${site_id}" | json_field bootstrapstate)" ||
+[[ -n "${local_port}" ]] || die "cannot port-forward to Site Manager: $(cat "${tmp}/port-forward.log")"
+state="$(site_manager "/${site_id}" | json_field bootstrapstate)" ||
     die "cannot read Site ${site_id} from Site Manager"
 log "Site Manager bootstrap state is ${state}"
 
@@ -107,18 +126,18 @@ if [[ $- == *x* ]]; then
     set +x
     restore_xtrace=true
 fi
-curl -sfk -X POST "${site_manager}/roll/${site_id}" >/dev/null || die "Site Manager did not roll the OTP"
-site="$(curl -sfk "${site_manager}/${site_id}")"
+site_manager "/roll/${site_id}" -X POST -o /dev/null || die "Site Manager did not roll the OTP"
+site="$(site_manager "/${site_id}")"
 otp="$(json_field otp <<<"${site}")"
 [[ -n "${otp}" && "$(json_field bootstrapstate <<<"${site}")" == AwaitHandshake ]] ||
     die "Site Manager did not issue a new OTP"
 printf '{"stringData":{"otp":"%s"}}' "${otp}" |
-    k patch secret "${REGISTRATION_SECRET}" --type merge --patch-file /dev/stdin >/dev/null
+    k patch secret "${registration_secret}" --type merge --patch-file /dev/stdin >/dev/null
 unset site otp
 if "${restore_xtrace}"; then
     set -x
 fi
-log "Rolled the OTP and wrote it to ${REGISTRATION_SECRET}"
+log "Rolled the OTP and wrote it to ${registration_secret}"
 
 restart_site_agent
 for _ in $(seq 36); do

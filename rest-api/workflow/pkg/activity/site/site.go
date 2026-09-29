@@ -777,9 +777,10 @@ func (mst ManageSite) updateSiteStatusInDB(ctx context.Context, tx *cdb.Tx, site
 }
 
 // CheckOTPExpirationAndRenewForAllSites periodically checks all sites and rotates OTPs if necessary.
-// Both of its failures are non-retryable. A retry would roll the OTP again for every Site already
-// rotated, invalidating the OTP its RotateTemporalCertAccessOTP workflow carries. So the next cron
-// run picks up the remaining Sites instead.
+// It must not be retried within a cron run. A retry would roll the OTP again for every Site already
+// rotated, invalidating the OTP its RotateTemporalCertAccessOTP workflow carries. So its errors are
+// non-retryable, MonitorTemporalCertExpirationForAllSites allows a single attempt, and the next cron
+// run picks up the remaining Sites.
 func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context) error {
 	logger := log.With().Str("Activity", "CheckOTPExpirationAndRenewForAllSites").Logger()
 

@@ -27,10 +27,11 @@ spec:
         app: nico-rest-cloud-worker
         app.kubernetes.io/name: nico-rest-workflow
         app.kubernetes.io/component: cloud-worker
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
