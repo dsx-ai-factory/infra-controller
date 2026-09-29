@@ -580,7 +580,12 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 
 	site := util.TestBuildSite(t, dbSession, ip, "testSite", cdbm.SiteStatusPending, nil, ipu)
 	vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
-	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusReady)
+	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusInUse)
+	_, metadataErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+		MachineID: machine.ID,
+		Metadata:  &cdbm.SiteControllerMachine{Machine: &corev1.Machine{State: "Ready"}},
+	})
+	require.NoError(t, metadataErr)
 	allocation := util.TestBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
 	instanceType := util.TestBuildInstanceType(t, dbSession, ip, site, "testInstanceType")
 	_ = util.TestBuildAllocationContraints(t, dbSession, allocation, cdbm.AllocationResourceTypeInstanceType, instanceType.ID, cdbm.AllocationConstraintTypeReserved, 5, ipu)
@@ -664,7 +669,18 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 
 	err = ms.deleteInstanceFromDB(ctx, tx, instance, zerolog.Nop())
 	require.NoError(t, err)
+	// Neither the deletion nor the restored Ready state is visible before commit.
+	beforeCommit, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, readErr)
+	assert.True(t, beforeCommit.IsAssigned)
+	assert.Equal(t, cdbm.MachineStatusInUse, beforeCommit.Status)
 	require.NoError(t, tx.Commit())
+	afterCommit, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, readErr)
+	assert.False(t, afterCommit.IsAssigned)
+	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
+	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil)
+	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 	require.NoError(t, err)

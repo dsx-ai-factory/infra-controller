@@ -127,6 +127,10 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 			require.Len(t, machines, 2)
 			for _, machine := range machines {
 				assert.Equal(t, test.wantFailureDomain, machine.Labels["failure-domain"])
+				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, machine.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.True(t, persisted.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
 			}
 		})
 	}

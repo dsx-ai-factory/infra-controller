@@ -203,6 +203,20 @@ func (m *Machine) ToMetadataUpdateRequestProto(labels []*corev1.Label) *corev1.M
 	}
 }
 
+// StatusForAssignment combines the observed status with REST assignment. Only
+// Ready is masked; health, maintenance and transitional states keep precedence.
+// Clearing an assignment can restore Ready only when retained Core metadata
+// reports Ready. Otherwise fresh machine inventory must establish readiness.
+func (m *Machine) StatusForAssignment(assigned bool) string {
+	if assigned && m.Status == MachineStatusReady {
+		return MachineStatusInUse
+	}
+	if m.IsAssigned && !assigned && m.Status == MachineStatusInUse && m.Metadata.GetNormalizedState() == "Ready" {
+		return MachineStatusReady
+	}
+	return m.Status
+}
+
 // MachineCreateInput input parameters for Create method
 type MachineCreateInput struct {
 	MachineID                string

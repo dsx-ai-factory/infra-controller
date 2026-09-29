@@ -489,6 +489,15 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				continue
 			}
 
+			// Use the assignment re-read under the row lock, not the initial inventory
+			// lookup: creation and release may have committed while inventory ran.
+			reportedMachine := cdbm.Machine{Status: machineStatus}
+			effectiveStatus := reportedMachine.StatusForAssignment(existingCloudMachine.IsAssigned)
+			if effectiveStatus != machineStatus {
+				machineStatus = effectiveStatus
+				statusMessage = "Machine lifecycle is Ready; waiting for Instance assignment to clear"
+			}
+
 			// Update existing Machine record
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:             existingCloudMachine.ID,

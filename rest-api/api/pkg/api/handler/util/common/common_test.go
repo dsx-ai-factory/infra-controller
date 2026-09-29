@@ -1102,7 +1102,11 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err == nil {
-				assert.NotNil(t, s)
+				require.NotNil(t, s)
+				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, s.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.True(t, persisted.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
 				if tc.request != nil {
 					assert.True(t, s.MatchesLabelSelector(tc.request.MachineLabelSelector))
 				}

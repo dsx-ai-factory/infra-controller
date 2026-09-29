@@ -1316,6 +1316,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  machine.ID,
 				IsAssigned: cutil.GetPtr(true),
+				Status:     cutil.GetPtr(machine.StatusForAssignment(true)),
 			}
 			machine, err = mDAO.Update(ctx, tx, updateInput)
 			if err != nil {

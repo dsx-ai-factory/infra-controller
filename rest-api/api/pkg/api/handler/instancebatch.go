@@ -2157,6 +2157,7 @@ func allocateMachinesForBatch(
 		updateInputs = append(updateInputs, cdbm.MachineUpdateInput{
 			MachineID:  mc.ID,
 			IsAssigned: cutil.GetPtr(true),
+			Status:     cutil.GetPtr(umc.StatusForAssignment(true)),
 		})
 		verifiedMachines = append(verifiedMachines, umc)
 	}

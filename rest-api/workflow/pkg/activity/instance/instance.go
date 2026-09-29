@@ -1433,8 +1433,14 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 // clearMachineIsAssigned is a utility function to set the isAssigned state in the machine to false
 // tx must be non-nil when calling this function
 func (mi ManageInstance) clearMachineIsAssigned(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machineID string) error {
+	// Serialize with allocation before reading the status that will be restored.
+	err := tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to take advisory lock on machine for update")
+		return err
+	}
 	mDAO := cdbm.NewMachineDAO(mi.dbSession)
-	machine, err := mDAO.GetByID(ctx, tx, machineID, nil, false)
+	machine, err := mDAO.GetByID(ctx, tx, machineID, nil, true)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve machine for instance from DB")
 		return err
@@ -1442,16 +1448,10 @@ func (mi ManageInstance) clearMachineIsAssigned(ctx context.Context, tx *cdb.Tx,
 	if !machine.IsAssigned {
 		return nil
 	}
-	// Acquire an advisory lock on the machine, the lock is released when transaction
-	// commits or rollsback
-	err = tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machine.ID), false)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to take advisory lock on machine for update")
-		return err
-	}
 	updateInput := cdbm.MachineUpdateInput{
 		MachineID:  machine.ID,
 		IsAssigned: cwutil.GetPtr(false),
+		Status:     cwutil.GetPtr(machine.StatusForAssignment(false)),
 	}
 	_, err = mDAO.Update(ctx, tx, updateInput)
 	if err != nil {

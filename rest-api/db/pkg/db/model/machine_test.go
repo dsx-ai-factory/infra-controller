@@ -2542,3 +2542,33 @@ func TestMachine_ToMetadataUpdateRequestProto(t *testing.T) {
 		assert.Equal(t, "stored-name", req.Metadata.Name)
 	})
 }
+
+func TestMachine_StatusForAssignment(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      string
+		wasAssigned bool
+		assigned    bool
+		coreState   string
+		want        string
+	}{
+		{"claim Ready", MachineStatusReady, false, true, "", MachineStatusInUse},
+		{"unassigned Ready", MachineStatusReady, false, false, "", MachineStatusReady},
+		{"release observed Ready", MachineStatusInUse, true, false, "Ready", MachineStatusReady},
+		{"release before Core readiness", MachineStatusInUse, true, false, "Assigned/Ready", MachineStatusInUse},
+		{"release without inventory", MachineStatusInUse, true, false, "", MachineStatusInUse},
+		{"assigned error", MachineStatusError, false, true, "Ready", MachineStatusError},
+		{"release during maintenance", MachineStatusMaintenance, true, false, "Ready", MachineStatusMaintenance},
+		{"assigned cleanup", MachineStatusInitializing, true, true, "WaitingForCleanup", MachineStatusInitializing},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := Machine{Status: tc.status, IsAssigned: tc.wasAssigned}
+			if tc.coreState != "" {
+				machine.Metadata = &SiteControllerMachine{Machine: &corev1.Machine{State: tc.coreState}}
+			}
+			assert.Equal(t, tc.want, machine.StatusForAssignment(tc.assigned))
+			assert.Equal(t, tc.status, machine.Status, "projection must not mutate the snapshot")
+		})
+	}
+}

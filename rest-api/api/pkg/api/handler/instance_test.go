@@ -3975,6 +3975,17 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg: tnOrg7, reqUser: tnu7, respCode: responseCode,
 				checkRecovery: true, respRetryable: retryable, respRecoveryGuidance: !failure.knownRejection,
 				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					machineDAO := cdbm.NewMachineDAO(dbSession)
+					before, _, readErr := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{st7.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+					require.NoError(t, readErr)
+					t.Cleanup(func() {
+						for _, machine := range before {
+							after, getErr := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+							require.NoError(t, getErr)
+							assert.Equal(t, machine.IsAssigned, after.IsAssigned, "failed creation rolls back assignment")
+							assert.Equal(t, machine.Status, after.Status, "failed creation rolls back status")
+						}
+					})
 					original := scp.IDClientMap[st7.ID.String()]
 					t.Cleanup(func() { scp.IDClientMap[st7.ID.String()] = original })
 					client := &tmocks.Client{}
@@ -4078,6 +4089,12 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			if serr != nil {
 				t.Fatal(serr)
 			}
+
+			require.NotNil(t, rst.MachineID)
+			assignedMachine, getMachineErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, *rst.MachineID, nil, false)
+			require.NoError(t, getMachineErr)
+			assert.True(t, assignedMachine.IsAssigned)
+			assert.NotEqual(t, cdbm.MachineStatusReady, assignedMachine.Status, "creation must persist assignment and status together")
 
 			assert.Equal(t, rst.Name, tt.args.reqData.Name)
 			assert.Equal(t, rst.NetworkSecurityGroupID, tt.args.reqData.NetworkSecurityGroupID)

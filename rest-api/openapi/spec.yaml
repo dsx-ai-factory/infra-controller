@@ -27633,11 +27633,11 @@ components:
           labels:
             RackIdentifier: GVX11F01C02
             ServerName: SITE1-C03-Server-02
-          status: Ready
-          isUsableByTenant: true
+          status: Error
+          isUsableByTenant: false
           statusHistory:
-            - status: Ready
-              message: Machine is online and ready
+            - status: Error
+              message: Machine has one or more health probe alerts that prevents allocation
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
           created: '2019-08-24T14:15:22Z'
@@ -27667,7 +27667,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the Instance if this Machine is assigned to one
+          description: ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
         tenantId:
           type:
             - string
@@ -27769,7 +27769,14 @@ components:
     MachineStatus:
       title: MachineStatus
       type: string
-      description: Status values for Machine objects
+      description: >-
+        Machine status combines the observed Core lifecycle with REST Instance assignment.
+        A Ready Machine becomes InUse when REST assigns it, and remains InUse if Core reports
+        Ready while the REST assignment still exists. Error, Maintenance, Initializing, and
+        other non-Ready states retain precedence. When Instance deletion clears the assignment,
+        InUse returns to Ready only if the retained Core snapshot reports Ready; otherwise
+        fresh Machine inventory establishes the next status. Ready is not a reservation and
+        does not guarantee that a subsequent Instance creation will succeed.
       enum:
         - Initializing
         - Ready

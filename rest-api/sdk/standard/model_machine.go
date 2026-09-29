@@ -31,7 +31,7 @@ type Machine struct {
 	SiteId *string `json:"siteId,omitempty"`
 	// ID of the Instance Type, if assigned
 	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
-	// ID of the Instance if this Machine is assigned to one
+	// ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
 	InstanceId NullableString `json:"instanceId,omitempty"`
 	// ID of the Tenant that owns the Instance if the Machine is assigned to one
 	TenantId NullableString `json:"tenantId,omitempty"`
