@@ -1,11 +1,11 @@
 {
-  "id": "0c03ba01-d86b-4a57-a41e-cc359b380a6f",
-  "name": "demo-ipv4-vpc-prefix",
+  "id": "42624127-ec6a-4829-b9ca-2f6ffb5d4215",
+  "name": "application-network",
   "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
   "vpcId": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
   "ipBlockId": "20d7dd4f-ae43-4245-a9d9-d093296009c4",
-  "prefix": "10.217.98.208/28",
-  "prefixLength": 28,
+  "prefix": "10.217.98.0/25",
+  "prefixLength": 25,
   "status": "Provisioning",
   "statusHistory": [
     {

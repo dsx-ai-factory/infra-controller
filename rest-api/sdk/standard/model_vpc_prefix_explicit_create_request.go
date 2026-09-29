@@ -27,7 +27,8 @@ type VpcPrefixExplicitCreateRequest struct {
 	Name      string `json:"name"`
 	VpcId     string `json:"vpcId"`
 	IpBlockId string `json:"ipBlockId"`
-	Prefix    string `json:"prefix"`
+	// Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise.
+	Prefix string `json:"prefix"`
 }
 
 type _VpcPrefixExplicitCreateRequest VpcPrefixExplicitCreateRequest

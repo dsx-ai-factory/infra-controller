@@ -33,6 +33,7 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 		desc                    string
 		obj                     APIVpcPrefixCreateRequest
 		expectErr               bool
+		expectedError           string
 		expectedCanonicalPrefix string
 	}{
 		{
@@ -111,14 +112,16 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc:      "error when explicit prefix length is below structural minimum",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: vpcID, IPBlockID: &ipBlockID, Prefix: cutil.GetPtr("10.0.0.0/7")},
-			expectErr: true,
+			desc:          "error when explicit prefix length is below structural minimum",
+			obj:           APIVpcPrefixCreateRequest{Name: "ab", VpcID: vpcID, IPBlockID: &ipBlockID, Prefix: cutil.GetPtr("10.0.0.0/7")},
+			expectErr:     true,
+			expectedError: `prefix "10.0.0.0/7" has prefix length 7; must be between 8 and 126`,
 		},
 		{
-			desc:      "error when explicit prefix length is above structural maximum",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: vpcID, IPBlockID: &ipBlockID, Prefix: cutil.GetPtr("2001:db8::/127")},
-			expectErr: true,
+			desc:          "error when explicit prefix length is above structural maximum",
+			obj:           APIVpcPrefixCreateRequest{Name: "ab", VpcID: vpcID, IPBlockID: &ipBlockID, Prefix: cutil.GetPtr("2001:db8::/127")},
+			expectErr:     true,
+			expectedError: `prefix "2001:db8::/127" has prefix length 127; must be between 8 and 126`,
 		},
 		{
 			desc:                    "ok with explicit IPv4 prefix",
@@ -142,6 +145,9 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
 				fmt.Println(err.Error())
+			}
+			if tc.expectedError != "" {
+				require.ErrorContains(t, err, tc.expectedError)
 			}
 			if tc.expectedCanonicalPrefix != "" {
 				require.NotNil(t, tc.obj.Prefix)

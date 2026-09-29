@@ -134,8 +134,9 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
   <Accordion title="Add a VPC Prefix">
     Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready tenant IP Block at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
     <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
+    <Code src="snippets/output/create_vpc_prefix.json" title="Automatic Allocation Response" />
     <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
-    <Code src="snippets/output/create_vpc_prefix.json" title="Example Response" />
+    <Code src="snippets/output/create_vpc_prefix_explicit.json" title="Explicit CIDR Allocation Response" />
   </Accordion>
 </AccordionGroup>
 

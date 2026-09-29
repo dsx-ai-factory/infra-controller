@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -559,8 +560,8 @@ func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
 	}
 	require.Contains(t, flags, "prefix")
 	require.Contains(t, flags, "prefix-length")
-	assert.NotContains(t, flags["prefix"].(*cli.StringFlag).Usage, "(required)")
-	assert.NotContains(t, flags["prefix-length"].(*cli.StringFlag).Usage, "(required)")
+	assert.Contains(t, flags["prefix"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
+	assert.Contains(t, flags["prefix-length"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
 
 	var output bytes.Buffer
 	app.Writer = &output
@@ -568,6 +569,116 @@ func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
 	require.NoError(t, app.Run([]string{"nicocli", "vpc-prefix", "create", "--help"}))
 	assert.Contains(t, output.String(), "--prefix value")
 	assert.Contains(t, output.String(), "--prefix-length value")
+	assert.Contains(t, output.String(), "exactly one of --prefix or --prefix-length is required")
+}
+
+func TestNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
+	requestCount := 0
+	requestBody := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, err = w.Write([]byte(`{}`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	const (
+		vpcID     = "5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3"
+		ipBlockID = "8c1d1a06-90a2-4863-8ee1-6029265b9f0a"
+	)
+	tests := []struct {
+		name      string
+		args      []string
+		wantBody  string
+		wantError string
+	}{
+		{
+			name: "automatic allocation flags",
+			args: []string{"--name", "automatic", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix-length", "24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "explicit allocation flags",
+			args: []string{"--name", "explicit", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"explicit","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24"}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name:      "neither selector flags",
+			args:      []string{"--name", "missing", "--vpc-id", vpcID, "--ip-block-id", ipBlockID},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name:      "both selector flags",
+			args:      []string{"--name", "both", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24", "--prefix-length", "24"},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name: "null selector in inline JSON is omitted",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "both selectors in inline JSON",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"both","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24","prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeRequests := requestCount
+			requestBody = ""
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-prefix", "create",
+			}
+			err = app.Run(append(args, test.args...))
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Equal(t, beforeRequests, requestCount)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, beforeRequests+1, requestCount)
+			assert.JSONEq(t, test.wantBody, requestBody)
+		})
+	}
 }
 
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming

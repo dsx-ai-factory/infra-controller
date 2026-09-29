@@ -114,7 +114,13 @@ func (vpcr *APIVpcPrefixCreateRequest) validatePrefix() error {
 	}
 	if prefix.Bits() < vpcprefix.PrefixLengthMinimum || prefix.Bits() > vpcprefix.PrefixLengthMaximum {
 		return validation.Errors{
-			"prefix": fmt.Errorf("prefix length must be between %d and %d", vpcprefix.PrefixLengthMinimum, vpcprefix.PrefixLengthMaximum),
+			"prefix": fmt.Errorf(
+				"prefix %q has prefix length %d; must be between %d and %d",
+				inputPrefix,
+				prefix.Bits(),
+				vpcprefix.PrefixLengthMinimum,
+				vpcprefix.PrefixLengthMaximum,
+			),
 		}
 	}
 

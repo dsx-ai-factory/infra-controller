@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,10 @@ type bodyField struct {
 	schema     *Schema
 	wrapInList bool
 	itemType   SchemaType
+}
+
+var exactlyOneBodyFieldsByOperation = map[string][]string{
+	"create-vpc-prefix": {"prefix", "prefixLength"},
 }
 
 // GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
@@ -708,6 +713,9 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				if reqSet[name] {
 					usage += " (required)"
 				}
+				if fields := exactlyOneBodyFieldsByOperation[ro.op.OperationID]; slices.Contains(fields, name) {
+					usage += fmt.Sprintf(" (exactly one of %s is required)", exactlyOneBodyFlags(fields))
+				}
 				bodyFields = append(bodyFields, bodyField{
 					jsonName:   name,
 					flagName:   flagName,
@@ -784,6 +792,10 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			var body []byte
 			if hasBody {
 				body, err = buildRequestBody(c, bodyFields)
+				if err != nil {
+					return err
+				}
+				err = validateExactlyOneBodyFields(ro.op.OperationID, body)
 				if err != nil {
 					return err
 				}
@@ -1066,6 +1078,41 @@ func readFlagValue(c *cli.Context, p Parameter) string {
 
 func schemaToFlag(flagName, usage string, schema *Schema) cli.Flag {
 	return &cli.StringFlag{Name: flagName, Usage: usage}
+}
+
+func exactlyOneBodyFlags(fields []string) string {
+	flags := make([]string, 0, len(fields))
+	for _, field := range fields {
+		flags = append(flags, "--"+toKebab(field))
+	}
+	return strings.Join(flags, " or ")
+}
+
+func validateExactlyOneBodyFields(operationID string, body []byte) error {
+	fields := exactlyOneBodyFieldsByOperation[operationID]
+	if len(fields) == 0 {
+		return nil
+	}
+
+	values := make(map[string]json.RawMessage)
+	if len(body) > 0 {
+		err := json.Unmarshal(body, &values)
+		if err != nil {
+			return fmt.Errorf("invalid request body for %s: %w", operationID, err)
+		}
+	}
+
+	selected := 0
+	for _, field := range fields {
+		value, ok := values[field]
+		if ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return fmt.Errorf("exactly one of %s must be specified", exactlyOneBodyFlags(fields))
+	}
+	return nil
 }
 
 func buildRequestBody(c *cli.Context, bodyFields []bodyField) ([]byte, error) {
