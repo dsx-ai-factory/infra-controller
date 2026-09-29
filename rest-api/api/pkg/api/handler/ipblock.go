@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -131,27 +133,25 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 	var ipb *cdbm.IPBlock
 	var ssd *cdbm.StatusDetail
 	err = cdb.WithTx(ctx, cipbh.dbSession, func(tx *cdb.Tx) error {
-		// Site Config prefix import and DatacenterOnly IP Block creation share
-		// this lock; SitePrefix inventory reconciliation will use it too. Run
+		// Site Config prefix import and IP Block creation share this lock;
+		// SitePrefix inventory reconciliation will use it too. Every routing
+		// type takes it, since the overlap check below spans routing types. Run
 		// uniqueness checks after successful acquisition so a retried loser sees
 		// the root that committed first.
-		if apiRequest.RoutingType == cdbm.IPBlockRoutingTypeDatacenterOnly {
-			derr := tx.TryAcquireAdvisoryLock(
-				ctx,
-				cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID),
-				nil,
-			)
-			if derr != nil {
-				if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
-					logger.Warn().Err(derr).Msg("Site fabric IP Block lock is held by another writer")
-					return cutil.NewAPIError(http.StatusConflict, "Site fabric IP Blocks are being updated; retry the request", nil)
-				}
-				logger.Error().Err(derr).Msg("failed to acquire Site fabric IP Block lock")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IP Block", nil)
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID),
+			nil,
+		)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				logger.Warn().Err(derr).Msg("Site fabric IP Block lock is held by another writer")
+				return cutil.NewAPIError(http.StatusConflict, "Site fabric IP Blocks are being updated; retry the request", nil)
 			}
+			logger.Error().Err(derr).Msg("failed to acquire Site fabric IP Block lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IP Block", nil)
 		}
 
-		// TODO consider serializing name uniqueness across all routing types.
 		ipbs, total, derr := ipbDAO.GetAll(
 			ctx,
 			tx,
@@ -175,28 +175,52 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 			})
 		}
 
-		ipbs, total, derr = ipbDAO.GetAll(
+		// IPAM only checks overlaps within the namespace of one routing type, so
+		// compare the range with every root IP Block of the Site.
+		requestedPrefix, derr := netip.ParsePrefix(ipam.GetCidrForIPBlock(ctx, apiRequest.Prefix, apiRequest.PrefixLength))
+		if derr != nil {
+			logger.Warn().Err(derr).Msg("error parsing IP Block prefix in request")
+			return cutil.NewAPIError(http.StatusBadRequest, "Invalid prefix or prefix length in request", nil)
+		}
+		requestedPrefix = requestedPrefix.Masked()
+
+		ipbs, _, derr = ipbDAO.GetAll(
 			ctx,
 			tx,
 			cdbm.IPBlockFilterInput{
 				SiteIDs:                   []uuid.UUID{site.ID},
 				InfrastructureProviderIDs: []uuid.UUID{ip.ID},
-				Prefixes:                  []string{apiRequest.Prefix},
-				PrefixLengths:             []int{apiRequest.PrefixLength},
-				RoutingTypes:              []string{apiRequest.RoutingType},
 				ExcludeDerived:            true,
 			},
-			cdbp.PageInput{},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
 			nil,
 		)
 		if derr != nil {
-			logger.Error().Err(derr).Msg("db error checking for prefix and prefixlength uniqueness of ip block")
+			logger.Error().Err(derr).Msg("db error retrieving root ip blocks for site")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
 		}
-		if total > 0 {
+		rootPrefixes := make([]netip.Prefix, 0, len(ipbs))
+		for _, rootIPBlock := range ipbs {
+			rootPrefix, perr := netip.ParsePrefix(ipam.GetCidrForIPBlock(ctx, rootIPBlock.Prefix, rootIPBlock.PrefixLength))
+			if perr != nil {
+				logger.Error().Err(perr).Str("ipBlockId", rootIPBlock.ID.String()).Msg("failed to parse root IP Block prefix")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Could not parse existing IP Block prefix", nil)
+			}
+			rootPrefixes = append(rootPrefixes, rootPrefix.Masked())
+		}
+
+		match := slices.Index(rootPrefixes, requestedPrefix)
+		if match >= 0 {
 			logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Msg("ip block with same prefix and prefix_length already exists")
 			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s already exists for provider", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID), validation.Errors{
-				"id": errors.New(ipbs[0].ID.String()),
+				"id": errors.New(ipbs[match].ID.String()),
+			})
+		}
+		match = slices.IndexFunc(rootPrefixes, requestedPrefix.Overlaps)
+		if match >= 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Str("overlappingIpBlockId", ipbs[match].ID.String()).Msg("ip block overlaps an existing root ip block")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s overlaps %s IPBlock with prefix: %s and prefix_length: %d", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID, ipbs[match].RoutingType, ipbs[match].Prefix, ipbs[match].PrefixLength), validation.Errors{
+				"id": errors.New(ipbs[match].ID.String()),
 			})
 		}
 
@@ -487,7 +511,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 	// get status details
 	for _, ipb := range ipbs {
 		cipb := ipb
-		cipu, _ := puipbMap[ipb.ID]
+		cipu := puipbMap[ipb.ID]
 		apiIpb := model.NewAPIIPBlock(&cipb, ssdMap[cipb.ID.String()], cipu)
 		apiIpbs = append(apiIpbs, apiIpb)
 	}

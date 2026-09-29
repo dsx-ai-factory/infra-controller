@@ -72,9 +72,10 @@ var (
 )
 
 // SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
-// prefix import and DatacenterOnly IP Block creation for one Site. Later
-// SitePrefix inventory reconciliation can use the same lock when linking these
-// records.
+// prefix import and root IP Block creation for one Site. Later SitePrefix
+// inventory reconciliation can use the same lock when linking these records.
+// The key keeps its DatacenterOnly suffix, so an upgrade doesn't change the ID
+// that processes from the previous release still take.
 func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
 	return db.GetAdvisoryLockIDFromString(fmt.Sprintf(
 		"site-fabric-ip-blocks:%s:%s:%s",

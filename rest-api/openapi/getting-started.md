@@ -28,9 +28,11 @@ Once the Provider and the Tenant are initialized, the user can create resources 
 
 ## Creating Site IP Blocks
 
-To utilize a NICo Site, the Provider or Service Account holder must create IP Blocks for each network overlay defined in NICo Site configuration toml file.
+NICo creates a Site IP Block for each `site_fabric_prefixes` entry in the NICo Site configuration TOML file when the Site reports its configuration. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a root IP Block of either routing type doesn't get another one.
 
-To create an IP Block, the user must make a call to the [Create IP Block endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/create-ipblock).
+When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. While a new prefix overlaps a remaining root IP Block, NICo makes no IP Block changes for the Site. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+
+To create any other IP Block, the user must make a call to the [Create IP Block endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/create-ipblock).
 
 > **Note:** From this point onwards, a brief outline is provided for the typical API call flows for various use cases.
 

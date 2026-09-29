@@ -50,7 +50,7 @@ Only Infrastructure Providers can create a root IP Block. User must have authori
 
 Tenant IP Blocks are created via Allocation.
 
-A conflicting name or address range returns 409. `DatacenterOnly` creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another `DatacenterOnly` create or Site Config import. Retry the request.
+A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

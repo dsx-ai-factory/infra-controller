@@ -350,10 +350,18 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		PrefixLength:    prefLen24,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
+	publicOverlappingPrefix, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "public-overlapping-prefix",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypePublic,
+		Prefix:          "192.168.0.0",
+		PrefixLength:    25,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
+	assert.Nil(t, err)
 	lockBusyBody, err := json.Marshal(&model.APIIPBlockCreateRequest{
 		Name:            "site-fabric-lock-busy",
 		SiteID:          site.ID.String(),
-		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		RoutingType:     cdbm.IPBlockRoutingTypePublic,
 		Prefix:          "192.172.0.0",
 		PrefixLength:    prefLen24,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
@@ -362,7 +370,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		Name:            "errortest",
 		SiteID:          site.ID.String(),
 		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
-		Prefix:          "192.168.0.0",
+		Prefix:          "10.254.0.0",
 		PrefixLength:    prefLen15,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
@@ -397,6 +405,9 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	// An IPAM entry without an IP Block, so only IPAM can reject an overlapping range.
+	_, err = ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, "10.254.0.0", 16, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String())
+	require.NoError(t, err)
 
 	// OTEL Spanner configuration
 	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
@@ -536,15 +547,22 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			expectedErrorText: "IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
 		},
 		{
-			name:           "success when the same prefix uses another routing type",
-			reqOrgName:     ipOrg1,
-			reqBody:        string(publicSamePrefix),
-			user:           user,
-			expectedErr:    false,
-			expectedStatus: http.StatusCreated,
-			paramNamespace: ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypePublic, ip.ID.String(), site.ID.String()),
-			paramCIDR:      ipam.GetCidrForIPBlock(ctx, "192.168.0.0", 24),
-			expectedIpam:   true,
+			name:              "error when the same prefix uses another routing type",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(publicSamePrefix),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
+		},
+		{
+			name:              "error when the prefix overlaps an IP Block of another routing type",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(publicOverlappingPrefix),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "overlaps DatacenterOnly IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
 		},
 		{
 			name:               "conflict while Site fabric IP Blocks are being updated",
@@ -606,9 +624,9 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			expectedErr:        true,
 			expectedStatus:     http.StatusConflict,
 			paramNamespace:     ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String()),
-			paramCIDR:          ipam.GetCidrForIPBlock(ctx, "192.168.0.0", 24),
+			paramCIDR:          ipam.GetCidrForIPBlock(ctx, "10.254.0.0", 16),
 			expectedIpam:       true,
-			expectedIpamErrMsg: "Could not create IPAM entry for IPBlock. Details: 192.168.0.0/15 overlaps 192.168.0.0/24",
+			expectedIpamErrMsg: "Could not create IPAM entry for IPBlock. Details: 10.254.0.0/15 overlaps 10.254.0.0/16",
 		},
 	}
 	for _, tc := range tests {
@@ -682,7 +700,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 					assert.Equal(t, pref.Namespace, tc.paramNamespace)
 				}
 			} else {
-				fmt.Printf("error message body : %s", string(rec.Body.Bytes()))
+				fmt.Printf("error message body : %s", rec.Body.String())
 				if tc.expectedErrorText != "" {
 					assert.Contains(t, rec.Body.String(), tc.expectedErrorText)
 				}
