@@ -154,7 +154,6 @@ func TestParseTokenResponseRejectsUntrustedErrorText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// httptest permits a custom HTTP reason phrase for the rejection.
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tt.method == "client_secret_basic" {
 					_, _, ok := r.BasicAuth()
