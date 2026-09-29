@@ -47,6 +47,7 @@ const MAX_STRING_STD_SIZE: usize = 1024 * 1024; // 1MB in bytes;
 const DEFAULT_TIMEOUT: u64 = 3600;
 const PLUGIN_LOG_CHANNEL_CAPACITY: usize = 64;
 const PLUGIN_LOG_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const PLUGIN_LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // The API manager clamps heartbeat-based stale reconciliation to at least three missed beats, so
 // low stale_run_timeout config values cannot fail healthy runs between these heartbeat updates.
@@ -1194,16 +1195,33 @@ impl MachineValidation {
                         let plugin_execution = if execution_timeout.is_zero() {
                             Err("plugin timeout exhausted while pulling its image".to_owned())
                         } else {
-                            let log_sender =
-                                self.clone().plugin_attempt_log_stream(run_item.attempt_id);
-                            execute_plugin(
+                            let (log_sender, mut log_task) = self
+                                .clone()
+                                .plugin_attempt_log_stream(run_item.attempt_id)
+                                .unzip();
+                            let execution = execute_plugin(
                                 &spec,
                                 &input,
                                 execution_timeout,
                                 Path::new(&self.options.plugin_contract_dir),
                                 log_sender,
                             )
-                            .await
+                            .await;
+                            if let Some(task) = &mut log_task {
+                                match tokio::time::timeout(PLUGIN_LOG_DRAIN_TIMEOUT, &mut *task)
+                                    .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => {
+                                        warn!(%error, "Plugin attempt log streaming task failed");
+                                    }
+                                    Err(_) => {
+                                        warn!("Timed out draining plugin attempt logs");
+                                        task.abort();
+                                    }
+                                }
+                            }
+                            execution
                         };
                         match plugin_execution {
                             Ok(execution) => {
@@ -1355,13 +1373,13 @@ impl MachineValidation {
     fn plugin_attempt_log_stream(
         self,
         attempt_id: Option<String>,
-    ) -> Option<mpsc::Sender<PluginLogChunk>> {
+    ) -> Option<(mpsc::Sender<PluginLogChunk>, JoinHandle<()>)> {
         let Some(attempt_id) = attempt_id else {
             warn!("Plugin run item has no active attempt ID; live logs will not be persisted");
             return None;
         };
         let (sender, mut receiver) = mpsc::channel::<PluginLogChunk>(PLUGIN_LOG_CHANNEL_CAPACITY);
-        std::mem::drop(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut client = match tokio::time::timeout(
                 PLUGIN_LOG_RPC_TIMEOUT,
                 self.create_forge_client(),
@@ -1432,8 +1450,8 @@ impl MachineValidation {
                     }
                 }
             }
-        }));
-        Some(sender)
+        });
+        Some((sender, task))
     }
 
     pub async fn run(
