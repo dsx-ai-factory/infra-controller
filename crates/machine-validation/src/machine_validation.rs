@@ -333,6 +333,47 @@ impl Drop for MachineValidationHeartbeatGuard {
     }
 }
 
+/// Owns a plugin attempt-log task for the lifetime of plugin execution.
+///
+/// Dropping this guard aborts the task, which covers cancellation of the
+/// surrounding execution future. Normal completion drains the task first so
+/// queued logs are persisted before the attempt result is recorded.
+struct PluginLogTaskGuard {
+    task: Option<JoinHandle<()>>,
+}
+
+impl PluginLogTaskGuard {
+    fn new(task: JoinHandle<()>) -> Self {
+        Self { task: Some(task) }
+    }
+
+    async fn drain(&mut self) {
+        let Some(task) = self.task.as_mut() else {
+            return;
+        };
+        let result = tokio::time::timeout(PLUGIN_LOG_DRAIN_TIMEOUT, &mut *task).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "Plugin attempt log streaming task failed");
+            }
+            Err(_) => {
+                warn!("Timed out draining plugin attempt logs");
+                task.abort();
+            }
+        }
+        self.task.take();
+    }
+}
+
+impl Drop for PluginLogTaskGuard {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
 fn plugin_execution_spec(
     test: &rpc::forge::MachineValidationTest,
 ) -> Result<PluginRuntimeSpec, String> {
@@ -1195,9 +1236,10 @@ impl MachineValidation {
                         let plugin_execution = if execution_timeout.is_zero() {
                             Err("plugin timeout exhausted while pulling its image".to_owned())
                         } else {
-                            let (log_sender, mut log_task) = self
+                            let (log_sender, mut log_task_guard) = self
                                 .clone()
                                 .plugin_attempt_log_stream(run_item.attempt_id)
+                                .map(|(sender, task)| (sender, PluginLogTaskGuard::new(task)))
                                 .unzip();
                             let execution = execute_plugin(
                                 &spec,
@@ -1207,19 +1249,8 @@ impl MachineValidation {
                                 log_sender,
                             )
                             .await;
-                            if let Some(task) = &mut log_task {
-                                match tokio::time::timeout(PLUGIN_LOG_DRAIN_TIMEOUT, &mut *task)
-                                    .await
-                                {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(error)) => {
-                                        warn!(%error, "Plugin attempt log streaming task failed");
-                                    }
-                                    Err(_) => {
-                                        warn!("Timed out draining plugin attempt logs");
-                                        task.abort();
-                                    }
-                                }
+                            if let Some(task_guard) = &mut log_task_guard {
+                                task_guard.drain().await;
                             }
                             execution
                         };
