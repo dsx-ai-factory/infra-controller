@@ -19,8 +19,11 @@
 # and telemetrystatsprocessor using the OpenTelemetry Collector Builder (ocb).
 # Runs on the host platform and cross-compiles to arm64 via GOOS/GOARCH.
 #
-# Stage 2: Assemble the runtime image with the binary, wrapper scripts, and
-# default configuration.
+# Stage 2: Download and verify crictl in a throwaway stage so curl/tar stay
+# out of the runtime image.
+#
+# Stage 3: Assemble the runtime image with the binary, crictl, wrapper
+# scripts, and default configuration.
 #
 # NOTE: This image uses debian:12-slim instead of NVIDIA distroless because the
 # otelcol-wrapper entrypoint is a bash script that requires a full shell.
