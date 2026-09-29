@@ -2744,8 +2744,34 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
 /// verifies that the rack keeps waiting while any tracked machine is still in
 /// WaitingForRackFirmwareUpgrade, then errors only after every machine has left
 /// that wait state and at least one failed.
-#[crate::sqlx_test]
-async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error(
+///
+/// Expanded by hand instead of using `#[crate::sqlx_test]` so the body runs on
+/// a thread with a larger stack. This is the widest future in the crate's
+/// suite and does not fit the default one. Same shape as the measurement test
+/// in `tests::instance`.
+#[test]
+fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(sqlx::PgPool) -> _ =
+        test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::TestFn::run_test(test_fn, args)
+                .expect("firmware upgrade wait-for-complete test failed")
+        })
+        .expect("failed to spawn the firmware upgrade test thread")
+        .join()
+        .expect("firmware upgrade test thread panicked");
+}
+
+async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(

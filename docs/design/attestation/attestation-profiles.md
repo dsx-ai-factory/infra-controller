@@ -1,6 +1,6 @@
 # Machine SPDM Attestation Profiles
 
-**Implements:** [NVIDIA/infra-controller#4772](https://github.com/NVIDIA/infra-controller/issues/4772)
+**Implements:** [dsx-ai-factory/infra-controller#4772](https://github.com/dsx-ai-factory/infra-controller/issues/4772)
 — *SPEC-AS-12: Attestation Profiles*. Milestone v2.3.
 
 **Status:** Implemented

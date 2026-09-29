@@ -1232,7 +1232,41 @@ impl VerifierClient for VerifierClientSim {
     }
 }
 
-pub(in crate::tests) async fn create_test_env_with_overrides(
+/// Awaited behind a `Box::pin` so its frame is not inlined into the fixture's,
+/// which is in turn inlined into every test that builds an environment.
+async fn seed_mock_host_attestation_profile(db_pool: &sqlx::PgPool) {
+    let mut conn = db_pool.acquire().await.expect("no available connections");
+    let seeded = db::attestation_profile::find(&mut *conn, MOCK_HOST_HARDWARE_CLASS)
+        .await
+        .expect("failed to read the mock host's attestation profile");
+    if seeded.is_some() {
+        return;
+    }
+    db::attestation_profile::create(
+        &mut conn,
+        MOCK_HOST_HARDWARE_CLASS,
+        &AttestationPolicyDocument::new(AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+        }),
+        "test fixture",
+    )
+    .await
+    .expect("failed to seed the mock host's attestation profile");
+}
+
+/// Returns a boxed future rather than being an `async fn`, so a caller holds a
+/// pointer instead of inlining this fixture's frame into its own. Nearly every
+/// test in this crate awaits it, and the largest sit close enough to the
+/// default thread stack that the frame this adds decides whether they fit.
+pub(in crate::tests) fn create_test_env_with_overrides(
+    db_pool: sqlx::PgPool,
+    overrides: TestEnvOverrides,
+) -> impl std::future::Future<Output = TestEnv> {
+    Box::pin(create_test_env_with_overrides_inner(db_pool, overrides))
+}
+
+async fn create_test_env_with_overrides_inner(
     db_pool: sqlx::PgPool,
     overrides: TestEnvOverrides,
 ) -> TestEnv {
@@ -1351,23 +1385,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     // and creation rejects a duplicate class. Skipping also leaves a profile
     // the test wrote for this class ahead of the environment untouched.
     if config.spdm.enabled {
-        let mut conn = db_pool.acquire().await.expect("no available connections");
-        let seeded = db::attestation_profile::find(&mut *conn, MOCK_HOST_HARDWARE_CLASS)
-            .await
-            .expect("failed to read the mock host's attestation profile");
-        if seeded.is_none() {
-            db::attestation_profile::create(
-                &mut conn,
-                MOCK_HOST_HARDWARE_CLASS,
-                &AttestationPolicyDocument::new(AttesterSelection {
-                    mode: AttesterSelectionMode::Allowlist,
-                    component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
-                }),
-                "test fixture",
-            )
-            .await
-            .expect("failed to seed the mock host's attestation profile");
-        }
+        Box::pin(seed_mock_host_attestation_profile(&db_pool)).await;
     }
 
     let config = Arc::new(config);
