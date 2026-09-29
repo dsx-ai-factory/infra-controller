@@ -551,6 +551,18 @@
                 </li>
 
                 <li>
+                  <a href="#v1.HealthProbeAlert"><span class="badge">M</span>HealthProbeAlert</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthProbeSuccess"><span class="badge">M</span>HealthProbeSuccess</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthReport"><span class="badge">M</span>HealthReport</a>
+                </li>
+
+                <li>
                   <a href="#v1.Identifier"><span class="badge">M</span>Identifier</a>
                 </li>
 
@@ -1717,6 +1729,13 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><a href="#v1.LeakHandlingStatus">LeakHandlingStatus</a></td>
                   <td></td>
                   <td><p>Flow&#39;s leakage-handling status for this component. </p></td>
+                </tr>
+
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
                 </tr>
 
             </tbody>
@@ -3545,7 +3564,7 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending. Component UUID ascending breaks equal-field ties. </p></td>
                 </tr>
 
             </tbody>
@@ -3702,7 +3721,7 @@ backend applies the update. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by name ascending, then UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -3778,7 +3797,7 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending. Rack UUID ascending breaks equal-field ties. </p></td>
                 </tr>
 
             </tbody>
@@ -4167,6 +4186,148 @@ and returns OperationRun.stats. </p></td>
 
 
 
+        <h3 id="v1.HealthProbeAlert">HealthProbeAlert</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_alert_since</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>message</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tenant_message</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>classifications</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthProbeSuccess">HealthProbeSuccess</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthReport">HealthReport</h3>
+        <p>HealthReport is Flow's latest synchronized snapshot of Core aggregate health.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>source</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>triggered_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>observed_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>successes</td>
+                  <td><a href="#v1.HealthProbeSuccess">HealthProbeSuccess</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>alerts</td>
+                  <td><a href="#v1.HealthProbeAlert">HealthProbeAlert</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.Identifier">Identifier</h3>
         <p></p>
 
@@ -4273,7 +4434,8 @@ and returns OperationRun.stats. </p></td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
                   <td><p>Optional. Omit for offset 0 and limit 100. When present, offset must be
-non-negative and limit must be greater than zero. </p></td>
+non-negative and limit must be greater than zero. Results are ordered by
+UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -4315,7 +4477,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRulesRequest">ListOperationRulesRequest</h3>
-        <p></p>
+        <p>Results are ordered by creation time descending, then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4391,7 +4553,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunTargetsRequest">ListOperationRunTargetsRequest</h3>
-        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p>
+        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p><p>Results are ordered by phase index, then the unique sequence index.</p>
 
 
           <table class="field-table">
@@ -4467,7 +4629,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunsRequest">ListOperationRunsRequest</h3>
-        <p>ListOperationRunsRequest lists operation runs, newest first by default.</p>
+        <p>ListOperationRunsRequest lists operation runs by creation time descending,</p><p>then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4625,7 +4787,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListTaskSchedulesRequest">ListTaskSchedulesRequest</h3>
-        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending.</p>
+        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending, then UUID ascending.</p>
 
 
           <table class="field-table">
@@ -4721,7 +4883,7 @@ non-negative and limit must be greater than zero. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by creation time descending, then UUID descending. </p></td>
                 </tr>
 
                 <tr>
@@ -6806,6 +6968,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>Operability phase aggregated from component phases. </p></td>
                 </tr>
 
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -8027,7 +8196,8 @@ bypass readiness checks or state-controller routing. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending for targeted components. Stable component and
+drift identities break equal-field ties before drift pagination. </p></td>
                 </tr>
 
             </tbody>

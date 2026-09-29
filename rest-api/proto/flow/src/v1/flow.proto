@@ -311,6 +311,7 @@ message Component {
     TaskStats task_stats = 12;  // Active Tasks that explicitly target this component.
     string rack_external_id = 13;
     LeakHandlingStatus leak_handling_status = 14;  // Flow's leakage-handling status for this component.
+    HealthReport health = 15;  // Latest Core aggregate health snapshot mirrored by inventory sync.
 }
 
 message Rack {
@@ -322,6 +323,7 @@ message Rack {
     string external_id = 6;
     // Operability phase aggregated from component phases.
     Phase operation_status = 7;
+    HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
 }
 
 message Identifier {
@@ -1892,4 +1894,27 @@ message NVLDomainTarget {
     }
     // Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain.
     repeated ComponentType component_types = 3;
+}
+
+// HealthReport is Flow's latest synchronized snapshot of Core aggregate health.
+message HealthReport {
+    string source = 1;
+    optional string triggered_by = 2;
+    optional google.protobuf.Timestamp observed_at = 3;
+    repeated HealthProbeSuccess successes = 4;
+    repeated HealthProbeAlert alerts = 5;
+}
+
+message HealthProbeSuccess {
+    string id = 1;
+    optional string target = 2;
+}
+
+message HealthProbeAlert {
+    string id = 1;
+    optional string target = 2;
+    optional google.protobuf.Timestamp in_alert_since = 3;
+    string message = 4;
+    optional string tenant_message = 5;
+    repeated string classifications = 6;
 }

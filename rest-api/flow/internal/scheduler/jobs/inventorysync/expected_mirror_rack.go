@@ -279,7 +279,7 @@ func mirrorExpectedRacks(
 					return err
 				}
 			}
-			// Mirror-managed columns only; status / ingested_at / nvldomain_id
+			// Mirror-managed columns only; status / health / ingested_at / nvldomain_id
 			// belong to other paths. WhereAllWithDeleted is required so a
 			// resurrection (deleted_at cleared in Go) matches the tombstone —
 			// bun otherwise appends "deleted_at IS NULL" to the UPDATE and the
@@ -444,8 +444,8 @@ func rackLocationFromLabels(labels map[string]string) map[string]any {
 }
 
 // rackUpdatedFromCore returns a copy of `existing` with mirror-managed fields
-// overwritten from `fromCore`. Lifecycle (status / ingested_at) and
-// nvldomain_id belong to other paths and are left alone.
+// overwritten from `fromCore`. Runtime health, lifecycle (status / ingested_at),
+// and nvldomain_id belong to other paths and are left alone.
 //
 // A successful expected-inventory response is authoritative for all fields
 // copied by buildRackFromCore. Missing labels and metadata therefore clear the

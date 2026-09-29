@@ -12554,6 +12554,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
                       location:
                         region: us-east-1
                         datacenter: DC-01
@@ -12576,6 +12577,7 @@ paths:
                           powerState: 'on'
                           leakStatus: Leaking
                           leakHandlingStatus: ShuttingDown
+                          health: null
           headers:
             X-Pagination:
               schema:
@@ -12644,6 +12646,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
                     location:
                       region: us-east-1
                       datacenter: DC-01
@@ -12666,6 +12669,7 @@ paths:
                         powerState: 'on'
                         leakStatus: NoLeak
                         leakHandlingStatus: None
+                        health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12749,6 +12753,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -12968,6 +12973,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -13450,6 +13456,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
           headers:
             X-Pagination:
               schema:
@@ -15051,6 +15058,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -25338,6 +25346,7 @@ components:
       type: object
       description: Rack represents a physical rack in the datacenter
       required:
+        - health
         - nvLinkDomainIds
         - operationStatus
         - taskStats
@@ -25354,6 +25363,11 @@ components:
           taskStats:
             pendingTaskCount: 0
             activeTaskCount: 0
+          health:
+            source: rack-aggregate-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
           location:
             region: us-east-1
             datacenter: DC-01
@@ -25376,6 +25390,11 @@ components:
               powerState: 'on'
               leakStatus: Leaking
               leakHandlingStatus: ShuttingDown
+              health:
+                source: aggregate-host-health
+                observedAt: '2026-09-28T12:00:00Z'
+                successes: []
+                alerts: []
       properties:
         id:
           type: string
@@ -25422,6 +25441,11 @@ components:
             $ref: '#/components/schemas/RackComponent'
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     RackLocation:
       title: RackLocation
       type: object
@@ -25524,6 +25548,8 @@ components:
       title: RackComponent
       type: object
       description: A component within a Rack (e.g. compute node, switch, PDU)
+      required:
+        - health
       properties:
         id:
           type: string
@@ -25591,6 +25617,11 @@ components:
           description: Whether the component is considered leaking coolant
         leakHandlingStatus:
           $ref: '#/components/schemas/LeakHandlingStatus'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     BMCInfo:
       title: BMCInfo
       type: object
@@ -25610,6 +25641,7 @@ components:
       type: object
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
+        - health
         - nvLinkDomainId
         - taskStats
       examples:
@@ -25637,6 +25669,11 @@ components:
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
+          health:
+            source: aggregate-host-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
       properties:
         id:
           type: string
@@ -25707,6 +25744,11 @@ components:
           description: ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     TrayPosition:
       title: TrayPosition
       type: object
@@ -28296,6 +28338,106 @@ components:
             - string
             - 'null'
           description: 'PCI BusId of the Machine''s GPU'
+    AggregateHealth:
+      title: AggregateHealth
+      type: object
+      description: Describes an aggregate hardware health report and its probe results and alerts
+      required:
+        - source
+        - observedAt
+        - successes
+        - alerts
+      examples:
+        - source: aggregate-host-health
+          observedAt: null
+          successes:
+            - id: FanSpeed
+              target: System Board Fan1A
+            - id: PowerSupply
+              target: PS1 Status
+          alerts:
+            - id: FailedValidationTest
+              target: DcgmFullShort
+              inAlertSince: null
+              message: Failed validation test
+              tenantMessage: null
+              classifications:
+                - PreventAllocations
+      properties:
+        source:
+          type: string
+          description: Describes how the health report was generated
+        observedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time when health report was generated
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeSuccess'
+          description: Results from successful health probes for the resource
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeAlert'
+          description: Results from failed health probes for the resource
+    HealthProbeSuccess:
+      title: HealthProbeSuccess
+      type: object
+      description: Describes a successful health probe result
+      required:
+        - id
+        - target
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+    HealthProbeAlert:
+      title: HealthProbeAlert
+      type: object
+      description: Describes a failed health probe result
+      required:
+        - id
+        - target
+        - inAlertSince
+        - message
+        - tenantMessage
+        - classifications
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+        inAlertSince:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time since the alert has been in effect
+        message:
+          type: string
+          description: Details of the failed health probe result
+        tenantMessage:
+          type:
+            - string
+            - 'null'
+          description: 'Information provided by Tenant, if any'
+        classifications:
+          type: array
+          items:
+            type: string
+          description: 'Classifications for this alert, category or impact'
     MachineHealth:
       title: MachineHealth
       type: object

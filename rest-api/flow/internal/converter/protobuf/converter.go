@@ -248,6 +248,7 @@ func ComponentFrom(c *pb.Component) (*component.Component, error) {
 		ComponentID:     c.GetComponentId(),
 		PowerState:      c.GetPowerState(),
 		RackExternalID:  c.GetRackExternalId(),
+		Health:          HealthReportFrom(c.GetHealth()),
 	}
 	if domainID != nil {
 		result.NVLDomainID = *domainID
@@ -306,6 +307,7 @@ func RackFrom(r *pb.Rack) (*rack.Rack, error) {
 		Loc:             LocationFrom(r.GetLocation()),
 		Components:      components,
 		OperationStatus: types.PhaseUnknown,
+		Health:          HealthReportFrom(r.GetHealth()),
 	}
 	// OperationStatus is deliberately ignored on input. Flow derives this
 	// read-only field from persisted component statuses for Rack responses.
@@ -684,9 +686,94 @@ func ComponentTo(c *component.Component) *pb.Component {
 		NvlDomainId:     UUIDTo(c.NVLDomainID),
 		PowerState:      c.PowerState,
 		Status:          ComponentOperationStatusTo(c.Status),
+		Health:          HealthReportTo(c.Health),
 		LeakStatus:      LeakStatusTo(c.LeakStatus),
 		RackExternalId:  c.RackExternalID,
 	}
+}
+
+// HealthReportTo converts a persisted Core health snapshot to Flow's protobuf form.
+func HealthReportTo(report *types.HealthReport) *pb.HealthReport {
+	if report == nil {
+		return nil
+	}
+	successes := make([]*pb.HealthProbeSuccess, 0, len(report.Successes))
+	for _, success := range report.Successes {
+		successes = append(successes, &pb.HealthProbeSuccess{
+			Id:     success.ID,
+			Target: success.Target,
+		})
+	}
+	alerts := make([]*pb.HealthProbeAlert, 0, len(report.Alerts))
+	for _, alert := range report.Alerts {
+		protoAlert := &pb.HealthProbeAlert{
+			Id:              alert.ID,
+			Target:          alert.Target,
+			Message:         alert.Message,
+			TenantMessage:   alert.TenantMessage,
+			Classifications: alert.Classifications,
+		}
+		if alert.InAlertSince != nil {
+			protoAlert.InAlertSince = timestamppb.New(*alert.InAlertSince)
+		}
+		alerts = append(alerts, protoAlert)
+	}
+	result := &pb.HealthReport{
+		Source:      report.Source,
+		TriggeredBy: report.TriggeredBy,
+		Successes:   successes,
+		Alerts:      alerts,
+	}
+	if report.ObservedAt != nil {
+		result.ObservedAt = timestamppb.New(*report.ObservedAt)
+	}
+	return result
+}
+
+// HealthReportFrom converts Flow's protobuf health report to its persisted form.
+func HealthReportFrom(report *pb.HealthReport) *types.HealthReport {
+	if report == nil {
+		return nil
+	}
+	successes := make([]types.HealthProbeSuccess, 0, len(report.GetSuccesses()))
+	for _, success := range report.GetSuccesses() {
+		if success == nil {
+			continue
+		}
+		successes = append(successes, types.HealthProbeSuccess{
+			ID:     success.GetId(),
+			Target: success.Target,
+		})
+	}
+	alerts := make([]types.HealthProbeAlert, 0, len(report.GetAlerts()))
+	for _, alert := range report.GetAlerts() {
+		if alert == nil {
+			continue
+		}
+		converted := types.HealthProbeAlert{
+			ID:              alert.GetId(),
+			Target:          alert.Target,
+			Message:         alert.GetMessage(),
+			TenantMessage:   alert.TenantMessage,
+			Classifications: append([]string(nil), alert.GetClassifications()...),
+		}
+		if alert.GetInAlertSince() != nil {
+			inAlertSince := alert.GetInAlertSince().AsTime()
+			converted.InAlertSince = &inAlertSince
+		}
+		alerts = append(alerts, converted)
+	}
+	result := &types.HealthReport{
+		Source:      report.GetSource(),
+		TriggeredBy: report.TriggeredBy,
+		Successes:   successes,
+		Alerts:      alerts,
+	}
+	if report.GetObservedAt() != nil {
+		observedAt := report.GetObservedAt().AsTime()
+		result.ObservedAt = &observedAt
+	}
+	return result
 }
 
 // LeakStatusTo converts the Flow-internal LeakStatus to its protobuf
@@ -775,6 +862,7 @@ func RackTo(r *rack.Rack) *pb.Rack {
 		Location:        LocationTo(&r.Loc),
 		Components:      components,
 		OperationStatus: PhaseTo(r.OperationStatus),
+		Health:          HealthReportTo(r.Health),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
