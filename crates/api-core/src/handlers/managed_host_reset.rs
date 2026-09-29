@@ -139,6 +139,7 @@ pub(crate) async fn trigger_managed_host_reset(
                 &mut txn,
                 req.initiator().as_str_name(),
                 &machine_id,
+                req.ignore_cleanup,
             )
             .await?
             {

@@ -11080,6 +11080,8 @@ message ManagedHostResetRequest {
   // tenant instance and its data. The server rejects a Set on an assigned host
   // unless this is set.
   bool allow_reset_with_instance = 4;
+  // Skip host cleanup after the live instance is deleted.
+  bool ignore_cleanup = 5;
 }
 
 message ManagedHostResetListRequest {

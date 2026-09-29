@@ -64982,8 +64982,10 @@ type ManagedHostResetRequest struct {
 	// tenant instance and its data. The server rejects a Set on an assigned host
 	// unless this is set.
 	AllowResetWithInstance bool `protobuf:"varint,4,opt,name=allow_reset_with_instance,json=allowResetWithInstance,proto3" json:"allow_reset_with_instance,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Skip host cleanup after the live instance is deleted.
+	IgnoreCleanup bool `protobuf:"varint,5,opt,name=ignore_cleanup,json=ignoreCleanup,proto3" json:"ignore_cleanup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ManagedHostResetRequest) Reset() {
@@ -65040,6 +65042,13 @@ func (x *ManagedHostResetRequest) GetInitiator() UpdateInitiator {
 func (x *ManagedHostResetRequest) GetAllowResetWithInstance() bool {
 	if x != nil {
 		return x.AllowResetWithInstance
+	}
+	return false
+}
+
+func (x *ManagedHostResetRequest) GetIgnoreCleanup() bool {
+	if x != nil {
+		return x.IgnoreCleanup
 	}
 	return false
 }
@@ -73420,13 +73429,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"\b_gatewayB\t\n" +
 	"\a_svi_ipB\x19\n" +
-	"\x17_tenant_vrf_loopback_ip\"\xa2\x02\n" +
+	"\x17_tenant_vrf_loopback_ip\"\xc9\x02\n" +
 	"\x17ManagedHostResetRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x127\n" +
 	"\x04mode\x18\x02 \x01(\x0e2#.forge.ManagedHostResetRequest.ModeR\x04mode\x124\n" +
 	"\tinitiator\x18\x03 \x01(\x0e2\x16.forge.UpdateInitiatorR\tinitiator\x129\n" +
-	"\x19allow_reset_with_instance\x18\x04 \x01(\bR\x16allowResetWithInstance\"+\n" +
+	"\x19allow_reset_with_instance\x18\x04 \x01(\bR\x16allowResetWithInstance\x12%\n" +
+	"\x0eignore_cleanup\x18\x05 \x01(\bR\rignoreCleanup\"+\n" +
 	"\x04Mode\x12\x0f\n" +
 	"\vUnspecified\x10\x00\x12\a\n" +
 	"\x03Set\x10\x01\x12\t\n" +

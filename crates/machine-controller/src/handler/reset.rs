@@ -75,7 +75,18 @@ async fn handle_deleting_instance(
         db::machine::clear_failure_details(&dpu.id, &mut txn).await?;
     }
 
-    let next = waiting_for_cleanup_state(CleanupState::Init, CleanupContext::Reset);
+    let ignore_cleanup = state
+        .host_snapshot
+        .reset_requested
+        .as_ref()
+        .is_some_and(|request| request.ignore_cleanup);
+    let next = if ignore_cleanup {
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        }
+    } else {
+        waiting_for_cleanup_state(CleanupState::Init, CleanupContext::Reset)
+    };
     Ok(StateHandlerOutcome::transition(next).with_txn(txn))
 }
 
