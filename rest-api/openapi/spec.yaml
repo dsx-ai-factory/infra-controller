@@ -4492,6 +4492,70 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Expected Machine
+  '/v2/org/{org}/nico/expected-machine/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Machines
+      operationId: replace-all-expected-machine
+      description: |-
+        Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
+
+        Org must have an Infrastructure Provider entity and the caller must have Provider Admin access, or the caller must be a Tenant Admin with effective `TargetedInstanceCreation` access to the Site.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedMachineList'
+      responses:
+        '200':
+          description: Expected Machines replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedMachine'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
+    delete:
+      summary: Delete all Expected Machines
+      operationId: delete-all-expected-machine
+      description: |-
+        Delete the complete Expected Machine set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Machines if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Machines should be deleted
+      responses:
+        '204':
+          description: All Expected Machines deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
     parameters:
       - schema:
@@ -5014,6 +5078,72 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Power Shelf
+  '/v2/org/{org}/nico/expected-power-shelf/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Power Shelves
+      operationId: replace-all-expected-power-shelf
+      description: |-
+        Replace the complete Expected Power Shelf set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedPowerShelves` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and shelf serial numbers must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedPowerShelfList'
+      responses:
+        '200':
+          description: Expected Power Shelves replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedPowerShelf'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Power Shelf
+    delete:
+      summary: Delete all Expected Power Shelves
+      operationId: delete-all-expected-power-shelf
+      description: |-
+        Delete the complete Expected Power Shelf set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Power Shelves should be deleted
+      responses:
+        '204':
+          description: All Expected Power Shelves deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -6027,6 +6157,72 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Switch
+  '/v2/org/{org}/nico/expected-switch/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Switches
+      operationId: replace-all-expected-switch
+      description: |-
+        Replace the complete Expected Switch set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedSwitches` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses, switch serial numbers, and NVOS MAC addresses must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Switches if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedSwitchList'
+      responses:
+        '200':
+          description: Expected Switches replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedSwitch'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Switch
+    delete:
+      summary: Delete all Expected Switches
+      operationId: delete-all-expected-switch
+      description: |-
+        Delete the complete Expected Switch set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Switches if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Switches should be deleted
+      responses:
+        '204':
+          description: All Expected Switches deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -28798,6 +28994,34 @@ components:
         - siteId
         - bmcMacAddress
         - chassisSerialNumber
+    ExpectedMachineList:
+      title: ExpectedMachineList
+      type: object
+      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedMachines:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:5E'
+              chassisSerialNumber: CHASSIS-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Machines should be replaced
+        expectedMachines:
+          type: array
+          description: Full desired Expected Machine set; BMC MAC addresses and chassis serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedMachineCreateRequest'
+      required:
+        - siteId
+        - expectedMachines
     ExpectedMachineUpdateRequest:
       title: ExpectedMachineUpdateRequest
       type: object
@@ -29136,6 +29360,34 @@ components:
         - siteId
         - bmcMacAddress
         - shelfSerialNumber
+    ExpectedPowerShelfList:
+      title: ExpectedPowerShelfList
+      type: object
+      description: Complete replacement set of Expected Power Shelves for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedPowerShelves:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:70'
+              shelfSerialNumber: SHELF-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Power Shelves should be replaced
+        expectedPowerShelves:
+          type: array
+          description: Full desired Expected Power Shelf set; BMC MAC addresses and shelf serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedPowerShelfCreateRequest'
+      required:
+        - siteId
+        - expectedPowerShelves
     ExpectedPowerShelfUpdateRequest:
       title: ExpectedPowerShelfUpdateRequest
       type: object
@@ -30045,6 +30297,36 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+    ExpectedSwitchList:
+      title: ExpectedSwitchList
+      type: object
+      description: Complete replacement set of Expected Switches for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedSwitches:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:60'
+              switchSerialNumber: SWITCH-12345
+              nvosMacAddresses:
+                - '00:1A:2B:3C:4D:61'
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Switches should be replaced
+        expectedSwitches:
+          type: array
+          description: Full desired Expected Switch set; BMC MAC addresses, serial numbers, and NVOS MAC addresses must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedSwitchCreateRequest'
+      required:
+        - siteId
+        - expectedSwitches
     ExpectedSwitchUpdateRequest:
       title: ExpectedSwitchUpdateRequest
       type: object
