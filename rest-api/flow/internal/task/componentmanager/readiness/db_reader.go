@@ -6,8 +6,9 @@ package readiness
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
-	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -58,55 +59,58 @@ func (r *DBReader) GetStatusesByExternalIDs(ctx context.Context, externalIDs []s
 
 // GetHostExternalIDsByRackIDs implements StatusReader.
 //
-// Rack IDs are Core UUIDs as strings (component.rack_id stores the same
-// UUID Core uses). Strings that fail UUID parsing are silently dropped —
-// they cannot match any row, so we don't bother surfacing an error for
-// what is almost certainly an upstream typo.
+// Rack IDs are Core's external rack identifiers. They are resolved through
+// rack.external_id because component.rack_id contains Flow's rack UUID, which
+// is independent of the identifier Core assigns to the rack.
 func (r *DBReader) GetHostExternalIDsByRackIDs(ctx context.Context, rackIDs []string) (map[string][]string, error) {
 	if len(rackIDs) == 0 {
 		return map[string][]string{}, nil
 	}
 
-	parsed := make([]uuid.UUID, 0, len(rackIDs))
-	rackByUUID := make(map[uuid.UUID]string, len(rackIDs))
-	for _, s := range rackIDs {
-		u, err := uuid.Parse(s)
-		if err != nil {
-			continue
-		}
-		parsed = append(parsed, u)
-		rackByUUID[u] = s
-	}
-	if len(parsed) == 0 {
-		return map[string][]string{}, nil
-	}
-
 	type row struct {
-		bun.BaseModel `bun:"table:component,alias:c"`
-		ExternalID    string    `bun:"external_id"`
-		RackID        uuid.UUID `bun:"rack_id"`
+		bun.BaseModel  `bun:"table:rack,alias:r"`
+		RackExternalID string  `bun:"rack_external_id"`
+		HostExternalID *string `bun:"host_external_id"`
 	}
 
 	var rows []row
 	err := r.idb.NewSelect().
 		Model((*row)(nil)).
-		Column("external_id", "rack_id").
-		Where("rack_id IN (?)", bun.In(parsed)).
-		Where("type = ?", devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)).
-		Where("external_id IS NOT NULL AND external_id != ''").
+		ColumnExpr("r.external_id AS rack_external_id").
+		ColumnExpr("c.external_id AS host_external_id").
+		Join("LEFT JOIN component AS c").
+		JoinOn("c.rack_id = r.id").
+		JoinOn("c.type = ?", devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)).
+		JoinOn("c.external_id IS NOT NULL AND c.external_id != ''").
+		JoinOn("c.deleted_at IS NULL").
+		Where("r.external_id IN (?)", bun.In(rackIDs)).
+		Where("r.deleted_at IS NULL").
 		Scan(ctx, &rows)
 	if err != nil {
 		return nil, fmt.Errorf("select host components by rack: %w", err)
 	}
 
 	out := make(map[string][]string, len(rackIDs))
-	for _, r := range rows {
-		key, ok := rackByUUID[r.RackID]
-		if !ok {
-			continue
+	for _, row := range rows {
+		if _, ok := out[row.RackExternalID]; !ok {
+			out[row.RackExternalID] = nil
 		}
-		out[key] = append(out[key], r.ExternalID)
+		if row.HostExternalID != nil {
+			out[row.RackExternalID] = append(out[row.RackExternalID], *row.HostExternalID)
+		}
 	}
+
+	var unresolved []string
+	for _, rackID := range rackIDs {
+		if _, ok := out[rackID]; !ok {
+			unresolved = append(unresolved, rackID)
+		}
+	}
+	if len(unresolved) > 0 {
+		sort.Strings(unresolved)
+		return nil, fmt.Errorf("resolve rack external IDs: no rack found for %s", strings.Join(unresolved, ", "))
+	}
+
 	return out, nil
 }
 

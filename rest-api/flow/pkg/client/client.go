@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
@@ -1099,18 +1100,7 @@ func (c *Client) PatchComponent(
 		req.FirmwareVersion = opts.FirmwareVersion
 	}
 
-	if opts.SlotID != nil || opts.TrayIndex != nil || opts.HostID != nil {
-		req.Position = &pb.RackPosition{}
-		if opts.SlotID != nil {
-			req.Position.SlotId = *opts.SlotID
-		}
-		if opts.TrayIndex != nil {
-			req.Position.TrayIdx = *opts.TrayIndex
-		}
-		if opts.HostID != nil {
-			req.Position.HostId = *opts.HostID
-		}
-	}
+	req.Position, req.UpdateMask = componentPositionPatch(opts)
 
 	if opts.Description != nil {
 		req.Description = opts.Description
@@ -1133,6 +1123,28 @@ func (c *Client) PatchComponent(
 	}
 
 	return componentFromProto(rsp.Component), nil
+}
+
+func componentPositionPatch(opts PatchComponentOpts) (*pb.RackPosition, *fieldmaskpb.FieldMask) {
+	if opts.SlotID == nil && opts.TrayIndex == nil && opts.HostID == nil {
+		return nil, nil
+	}
+
+	position := &pb.RackPosition{}
+	mask := &fieldmaskpb.FieldMask{}
+	if opts.SlotID != nil {
+		position.SlotId = *opts.SlotID
+		mask.Paths = append(mask.Paths, "position.slot_id")
+	}
+	if opts.TrayIndex != nil {
+		position.TrayIdx = *opts.TrayIndex
+		mask.Paths = append(mask.Paths, "position.tray_idx")
+	}
+	if opts.HostID != nil {
+		position.HostId = *opts.HostID
+		mask.Paths = append(mask.Paths, "position.host_id")
+	}
+	return position, mask
 }
 
 // ========================================

@@ -25,6 +25,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,7 @@ import (
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/protobuf/proto"
 )
 
 func testTrayInitDB(t *testing.T) *cdb.Session {
@@ -630,7 +632,17 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 				// For error cases, reply with an empty response
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetComponentsResponse{})
 			}
-			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, nil)
+			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetComponentsRequest
+				testFlowProxyRequest(t, args, &req)
+				orderBy := tt.queryParams["orderBy"]
+				if orderBy == "" {
+					orderBy = model.TrayDefaultOrderBy
+				}
+				parts := strings.Split(orderBy, "_")
+				expected := model.GetProtoTrayOrderByFromQueryParam(strings.ToLower(strings.Join(parts[:len(parts)-1], "_")), parts[len(parts)-1])
+				assert.True(t, proto.Equal(expected, req.OrderBy))
+			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			// Build query string
@@ -681,6 +693,12 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			if tt.expectedTotal != nil {
 				assert.Equal(t, *tt.expectedTotal, pr.Total)
 			}
+			expectedOrderBy := tt.queryParams["orderBy"]
+			if expectedOrderBy == "" {
+				expectedOrderBy = model.TrayDefaultOrderBy
+			}
+			require.NotNil(t, pr.OrderBy)
+			assert.Equal(t, expectedOrderBy, *pr.OrderBy)
 		})
 	}
 }
@@ -1324,8 +1342,18 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 		trayID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusPreconditionFailed,
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+		},
 		{
 			name:           "success - power on tray",
 			reqOrg:         org,
@@ -1392,7 +1420,11 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1417,6 +1449,18 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				require.NoError(t, err)
+				assert.Equal(t, rec.Code, ec.Response().Status)
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "response must contain exactly one JSON value")
+				assert.Equal(t, tt.mockResultErr.Error(), response["message"])
+				assert.Contains(t, response, "data")
+				assert.Nil(t, response["data"])
+				assert.NotContains(t, response, "taskIds")
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1457,8 +1501,17 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusPreconditionFailed,
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+		},
 		{
 			name:           "success - power on all trays (no filter)",
 			reqOrg:         org,
@@ -1503,7 +1556,11 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -1528,6 +1585,18 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				require.NoError(t, err)
+				assert.Equal(t, rec.Code, ec.Response().Status)
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "response must contain exactly one JSON value")
+				assert.Equal(t, tt.mockResultErr.Error(), response["message"])
+				assert.Contains(t, response, "data")
+				assert.Nil(t, response["data"])
+				assert.NotContains(t, response, "taskIds")
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
 				return
 			}
@@ -1569,9 +1638,21 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		trayID         string
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","version":"24.11.0","authenticationData":{"shared":"tray-token"}}`, site.ID.String()),
+			expectedAuth:   "tray-token",
+			expectedStatus: http.StatusPreconditionFailed,
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+		},
 		{
 			name:           "success - firmware update with authentication data",
 			reqOrg:         org,
@@ -1590,6 +1671,15 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         trayID,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1622,7 +1712,11 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1656,7 +1750,21 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				require.NoError(t, err)
+				assert.Equal(t, rec.Code, ec.Response().Status)
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "response must contain exactly one JSON value")
+				assert.Equal(t, tt.mockResultErr.Error(), response["message"])
+				assert.Contains(t, response, "data")
+				assert.Nil(t, response["data"])
+				assert.NotContains(t, response, "taskIds")
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 
@@ -1696,9 +1804,20 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		user           *cdbm.User
 		body           string
 		mockTaskIDs    []*flowv1.UUID
+		mockResultErr  error
 		expectedAuth   string
+		expectedError  string
 		expectedStatus int
 	}{
+		{
+			name:           "failure - Flow rejects operation",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"shared":"batch-tray-token"}}`, site.ID.String()),
+			expectedAuth:   "batch-tray-token",
+			expectedStatus: http.StatusPreconditionFailed,
+			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
+		},
 		{
 			name:           "success - firmware update all trays with authentication data",
 			reqOrg:         org,
@@ -1715,6 +1834,14 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"%s"},"version":"24.11.0"}`, site.ID.String(), fwRackID),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - unknown per-component authentication field",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","authenticationData":{"perComponent":{"switch":"batch-tray-token"}}}`, site.ID.String()),
+			expectedError:  `authenticationData.perComponent contains unknown field \"switch\"`,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -1737,7 +1864,11 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
-			testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
+			} else {
+				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
+			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
@@ -1771,7 +1902,21 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.mockResultErr != nil {
+				require.NoError(t, err)
+				assert.Equal(t, rec.Code, ec.Response().Status)
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response), "response must contain exactly one JSON value")
+				assert.Equal(t, tt.mockResultErr.Error(), response["message"])
+				assert.Contains(t, response, "data")
+				assert.Nil(t, response["data"])
+				assert.NotContains(t, response, "taskIds")
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
 			if tt.expectedStatus != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), tt.expectedError)
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 

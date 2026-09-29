@@ -116,6 +116,15 @@ func (m *ManagerImpl) GetRacksByIDs(ctx context.Context, ids []uuid.UUID, withCo
 	return m.store.GetRacksByIDs(ctx, ids, withComponents)
 }
 
+// GetRackByExternalID retrieves a rack by its external inventory ID.
+func (m *ManagerImpl) GetRackByExternalID(
+	ctx context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	return m.store.GetRackByExternalID(ctx, externalID, withComponents)
+}
+
 // GetRackBySerial retrieves a rack by its serial number and manufacturer.
 func (m *ManagerImpl) GetRackBySerial(ctx context.Context, manufacturer string, serial string, withComponents bool) (*rack.Rack, error) {
 	return m.store.GetRackBySerial(ctx, manufacturer, serial, withComponents)

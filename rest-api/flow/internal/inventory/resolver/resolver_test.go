@@ -319,6 +319,64 @@ func TestRackByName(t *testing.T) {
 	}
 }
 
+func TestRackByExternalID(t *testing.T) {
+	rackID := uuid.New()
+	inventoryErr := errors.New("inventory unavailable")
+	tests := map[string]struct {
+		externalID     string
+		withComponents bool
+		inventory      *fakeInventory
+		wantErr        error
+		wantMessage    string
+	}{
+		"found": {
+			externalID:     "D09",
+			withComponents: true,
+			inventory: &fakeInventory{
+				rack: rack.New(deviceinfo.DeviceInfo{ID: rackID}, location.Location{}),
+			},
+		},
+		"missing external ID": {
+			inventory: &fakeInventory{},
+			wantErr:   ErrUnresolvable,
+		},
+		"inventory failure": {
+			externalID:  "D09",
+			inventory:   &fakeInventory{err: inventoryErr},
+			wantErr:     inventoryErr,
+			wantMessage: `rack external id "D09"`,
+		},
+		"nil rack": {
+			externalID:  "D09",
+			inventory:   &fakeInventory{},
+			wantErr:     ErrUnresolvable,
+			wantMessage: "has no canonical id",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			resolved, err := New(test.inventory).RackByExternalID(
+				context.Background(),
+				test.externalID,
+				test.withComponents,
+			)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				if test.wantMessage != "" {
+					require.ErrorContains(t, err, test.wantMessage)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, rackID, resolved.Info.ID)
+			require.Equal(t, "D09", test.inventory.rackExternalID)
+			require.Equal(t, test.withComponents, test.inventory.withComponents)
+		})
+	}
+}
+
 func testComponent(
 	id uuid.UUID,
 	rackID uuid.UUID,
@@ -341,6 +399,7 @@ type fakeInventory struct {
 	rack           *rack.Rack
 	componentID    uuid.UUID
 	externalIDs    []string
+	rackExternalID string
 	rackIdentifier identifier.Identifier
 	withComponents bool
 	err            error
@@ -360,6 +419,16 @@ func (f *fakeInventory) GetComponentsByExternalIDs(
 ) ([]*component.Component, error) {
 	f.externalIDs = externalIDs
 	return f.components, f.err
+}
+
+func (f *fakeInventory) GetRackByExternalID(
+	_ context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	f.rackExternalID = externalID
+	f.withComponents = withComponents
+	return f.rack, f.err
 }
 
 func (f *fakeInventory) GetRackByIdentifier(

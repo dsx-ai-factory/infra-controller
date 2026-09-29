@@ -33,9 +33,15 @@ const (
 	defaultQueueTimeout      = time.Hour
 )
 
-// ErrRackConflict marks a rejected task submission caused by an active
-// conflicting task on the target rack.
-var ErrRackConflict = errors.New("rack conflict")
+var (
+	// ErrRackConflict marks a rejected task submission caused by an active
+	// conflicting task on the target rack.
+	ErrRackConflict = errors.New("rack conflict")
+
+	// ErrTaskNotCancellable marks a cancellation rejected because the task has
+	// already reached a terminal state other than Terminated.
+	ErrTaskNotCancellable = errors.New("task cannot be cancelled")
+)
 
 // Config holds the configuration for the task manager.
 type Config struct {
@@ -496,7 +502,10 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task *taskdef.Task,
 	targetRack *rack.Rack,
 ) error {
-	ruleID := operations.ExtractRuleID(task.Operation.Info)
+	ruleID, err := operations.ExtractRuleID(task.Operation.Info)
+	if err != nil {
+		return fmt.Errorf("extract operation rule ID: %w", err)
+	}
 
 	rule, err := m.ruleResolver.ResolveRule(
 		ctx, task.Operation.Type, task.Operation.Code, task.RackID, ruleID,
@@ -565,7 +574,7 @@ func (m *ManagerImpl) CancelTask(ctx context.Context, taskID uuid.UUID) error {
 
 	if task.Status.IsFinished() {
 		return fmt.Errorf(
-			"task %s cannot be cancelled (status: %s)", taskID, task.Status,
+			"%w: task %s has status %s", ErrTaskNotCancellable, taskID, task.Status,
 		)
 	}
 

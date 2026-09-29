@@ -143,6 +143,44 @@ func (r *Resolver) RackByID(
 	)
 }
 
+// RackByExternalID returns the canonical rack for one external inventory ID.
+func (r *Resolver) RackByExternalID(
+	ctx context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	if externalID == "" {
+		return nil, unresolvableError("rack external id is required")
+	}
+
+	type externalIDReader interface {
+		GetRackByExternalID(context.Context, string, bool) (*rack.Rack, error)
+	}
+	reader, ok := r.inventory.(externalIDReader)
+	if !ok {
+		return nil, fmt.Errorf("inventory reader does not support rack external ID lookup")
+	}
+
+	reference := fmt.Sprintf("rack external id %q", externalID)
+	resolved, err := reader.GetRackByExternalID(ctx, externalID, withComponents)
+	if err != nil {
+		return nil, classifyLookupError(reference, err)
+	}
+	if resolved == nil || resolved.Info.ID == uuid.Nil {
+		return nil, unresolvableError("%s has no canonical id", reference)
+	}
+	if err := resolved.ValidateComponentIDs(); err != nil {
+		return nil, fmt.Errorf(
+			"%w: %s has invalid components: %w",
+			ErrUnresolvable,
+			reference,
+			err,
+		)
+	}
+
+	return resolved, nil
+}
+
 // RackByName returns the canonical rack for one inventory name.
 func (r *Resolver) RackByName(
 	ctx context.Context,

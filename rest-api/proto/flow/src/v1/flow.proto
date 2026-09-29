@@ -465,6 +465,7 @@ message GetListOfRacksRequest {
     repeated Filter filters = 1;  // Filter conditions for rack queries
     bool with_components = 2;
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Rack UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
 }
 
@@ -492,6 +493,7 @@ message DetachRacksFromNVLDomainRequest {
 
 message GetListOfNVLDomainsRequest {
     StringQueryInfo info = 1;
+    // Results are ordered by name ascending, then UUID ascending.
     optional Pagination pagination = 2;
 }
 
@@ -563,6 +565,7 @@ message GetComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components.
     repeated Filter filters = 2;  // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Component UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
 }
 
@@ -575,6 +578,8 @@ message ValidateComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs.
     repeated Filter filters = 2;           // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending for targeted components. Stable component and
+    // drift identities break equal-field ties before drift pagination.
     optional OrderBy order_by = 4;
 }
 
@@ -659,6 +664,10 @@ message PatchComponentRequest {
     optional string description = 4;      // Update description (JSON string)
     optional UUID rack_id = 5;            // Re-assign to a different rack
     repeated BMCInfo bmcs = 6;            // Update BMCs (matched by MAC address; create if new)
+    // Optional for backward compatibility. When omitted, position replaces all
+    // three coordinates. When set, supported paths are position.slot_id,
+    // position.tray_idx, and position.host_id; only those coordinates change.
+    google.protobuf.FieldMask update_mask = 7;
 }
 
 message PatchComponentResponse {
@@ -771,6 +780,7 @@ message DecommissionRackRequest {
 message ListTasksRequest {
     optional UUID rack_id = 1;                  // Restrict to Tasks created against this rack.
     bool active_only = 2;                       // Restrict to non-terminal Tasks (Waiting, Pending, Running).
+    // Results are ordered by creation time descending, then UUID descending.
     optional Pagination pagination = 3;
     // Restrict to Tasks that target this component UUID, regardless of
     // component type. A rack_id + component_id combination that references
@@ -869,6 +879,7 @@ message GetOperationRuleRequest {
     UUID rule_id = 1;
 }
 
+// Results are ordered by creation time descending, then UUID descending.
 message ListOperationRulesRequest {
     optional OperationType operation_type = 1;
     optional bool is_default = 2;
@@ -1009,7 +1020,7 @@ message GetTaskScheduleRequest {
 }
 
 // ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-// Results are ordered by creation time ascending.
+// Results are ordered by creation time ascending, then UUID ascending.
 message ListTaskSchedulesRequest {
     optional UUID       rack_id      = 1;  // if set, return only schedules with a scope on this rack
     optional Pagination pagination   = 2;
@@ -1203,7 +1214,8 @@ message GetOperationRunResponse {
     OperationRun operation_run = 1;
 }
 
-// ListOperationRunsRequest lists operation runs, newest first by default.
+// ListOperationRunsRequest lists operation runs by creation time descending,
+// then UUID descending.
 message ListOperationRunsRequest {
     OperationRunFilter filter = 1;
     optional Pagination pagination = 2;
@@ -1246,6 +1258,7 @@ enum OperationRunTargetPhaseScope {
 // ListOperationRunTargetsRequest lists materialized rack execution targets for
 // one operation run. status UNKNOWN means no target-status filter is applied.
 // phase_scope UNKNOWN defaults to CURRENT_PHASE.
+// Results are ordered by phase index, then the unique sequence index.
 message ListOperationRunTargetsRequest {
     UUID operation_run_id = 1;
     OperationRunTargetStatus status = 2;

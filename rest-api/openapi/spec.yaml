@@ -11110,7 +11110,7 @@ paths:
               - MODEL_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `NAME_ASC`; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
       responses:
         '200':
           description: OK
@@ -11910,6 +11910,18 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                terminal-task:
+                  value:
+                    source: nico
+                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
+                    data: null
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -12037,7 +12049,8 @@ paths:
       description: |-
         List Operation Rules on a Site. Filters compose with AND; results are paginated
         and the `X-Pagination` response header reports the total count over the
-        post-filter set.
+        post-filter set. Results are ordered by creation time descending, then
+        Rule UUID descending.
 
         Org must have an Infrastructure Provider entity. User must have authorization
         role with `PROVIDER_ADMIN` suffix.
@@ -12409,7 +12422,8 @@ paths:
       description: |-
         List Task Runs on a Site. Filters compose with AND; results are paginated
         and the `X-Pagination` response header reports the total count over the
-        post-filter set.
+        post-filter set. Results are ordered by creation time descending, then
+        Task Run UUID descending.
 
         Org must have an Infrastructure Provider entity. User must have
         authorization role with `PROVIDER_ADMIN` suffix.
@@ -12616,7 +12630,8 @@ paths:
         `GET /task/{taskId}`.
 
         Filters compose with AND. Results are paginated; the `X-Pagination`
-        response header reports the total count over the post-filter set.
+        response header reports the total count over the post-filter set. Results
+        are ordered by phase index, then the unique sequence index.
 
         Task Runs are site-scoped; `siteId` must be the Site that owns the
         Task Run. Org must have an Infrastructure Provider entity. User must have
@@ -13351,7 +13366,7 @@ paths:
               - TYPE_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `NAME_ASC`; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
       responses:
         '200':
           description: OK

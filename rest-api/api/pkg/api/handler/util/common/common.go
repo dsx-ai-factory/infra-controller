@@ -2096,7 +2096,6 @@ func QueryParamHash(params url.Values) string {
 // UUID; callers validate at the API model layer.
 func ExecutePowerControlWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2105,7 +2104,7 @@ func ExecutePowerControlWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	var fullMethod string
 	var flowRequest proto.Message
 	ruleUUID := GetFlowUUIDPtr(ruleID)
@@ -2154,12 +2153,12 @@ func ExecutePowerControlWorkflow(
 			OverrideReadinessCheck: overrideReadinessCheck,
 		}
 	default:
-		return nil, cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
+		return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		fullMethod,
 		flowRequest, &flowResponse,
 		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
@@ -2178,7 +2177,6 @@ func ExecutePowerControlWorkflow(
 // Operation Rule.
 func ExecuteBringUpRackWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2187,7 +2185,7 @@ func ExecuteBringUpRackWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.BringUpRackRequest{
 		TargetSpec:             targetSpec,
 		Description:            description,
@@ -2197,7 +2195,7 @@ func ExecuteBringUpRackWorkflow(
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_BringUpRack_FullMethodName,
 		flowRequest, &flowResponse,
 		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
@@ -2223,7 +2221,6 @@ func ExecuteBringUpRackWorkflow(
 // Operation Rule.
 func ExecuteFirmwareUpdateWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2235,7 +2232,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
 		TargetSpec:             targetSpec,
 		TargetVersion:          version,
@@ -2258,7 +2255,7 @@ func ExecuteFirmwareUpdateWorkflow(
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPCWithSecrets(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
 		FlowWorkflowID(workflowID), conflictPolicy,

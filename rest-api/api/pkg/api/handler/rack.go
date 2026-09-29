@@ -160,13 +160,13 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.GetRackInfoResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetRackInfoByID_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(fmt.Sprintf("rack-get-%s", rackStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -303,6 +303,9 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.RackDefaultOrderBy)
+	}
 
 	// Validate pagination attributes
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.RackOrderByFieldMap)))
@@ -346,13 +349,13 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.GetListOfRacksResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetListOfRacks_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -512,13 +515,13 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(fmt.Sprintf("rack-validate-%s", rackStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -657,13 +660,13 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -800,10 +803,10 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-update-%s-%s", apiRequest.State, rackStrID), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -918,10 +921,10 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 	// Build TargetSpec from filter (nil filter = all racks)
 	targetSpec := request.Filter.ToTargetSpec()
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
 		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1006,7 +1009,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1052,11 +1055,11 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
 		apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1105,7 +1108,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchRackFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch rack firmware update request")
@@ -1171,11 +1174,11 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	// Build TargetSpec from filter (nil filter = all racks)
 	targetSpec := request.Filter.ToTargetSpec()
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1312,10 +1315,10 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 		description = fmt.Sprintf("API bring up Rack %s", rackStrID)
 	}
 
-	flowResp, err := common.ExecuteBringUpRackWorkflow(ctx, c, logger, stc, targetSpec, description,
+	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-%s", rackStrID), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1435,10 +1438,10 @@ func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
 		description = "API batch bring up Racks"
 	}
 
-	flowResp, err := common.ExecuteBringUpRackWorkflow(ctx, c, logger, stc, targetSpec, description,
+	flowResp, proxyErr := common.ExecuteBringUpRackWorkflow(ctx, logger, stc, targetSpec, description,
 		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("rack-bringup-batch-%s", common.RequestHash(request.Filter)), "Rack")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

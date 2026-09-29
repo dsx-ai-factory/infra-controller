@@ -146,6 +146,25 @@ func TestCreateAndExecuteTaskSchedulesExistingIdempotentTaskWithoutExecutionID(t
 	require.Zero(t, store.createTaskCalls)
 }
 
+func TestManagerImpl_CancelTask(t *testing.T) {
+	taskID := uuid.New()
+	store := &managerTaskStore{tasksByID: map[uuid.UUID]*taskdef.Task{
+		taskID: {
+			ID:     taskID,
+			Status: taskcommon.TaskStatusFailed,
+		},
+	}}
+	executor := &managerExecutor{}
+	manager := &ManagerImpl{taskStore: store, executor: executor}
+
+	err := manager.CancelTask(context.Background(), taskID)
+
+	require.ErrorIs(t, err, ErrTaskNotCancellable)
+	require.ErrorContains(t, err, "status failed")
+	require.Zero(t, executor.terminateCalls)
+	require.Empty(t, store.statusUpdates)
+}
+
 func testPowerControlOperation(t *testing.T) operation.Wrapper {
 	t.Helper()
 
@@ -164,12 +183,14 @@ func testPowerControlOperation(t *testing.T) operation.Wrapper {
 type managerTaskStore struct {
 	activeTasksByRack    map[uuid.UUID][]*taskdef.Task
 	taskByIdempotencyKey map[string]*taskdef.Task
+	tasksByID            map[uuid.UUID]*taskdef.Task
 	listActiveCalls      int
 	createTaskCalls      int
 	lockKeyCalls         int
 	lockRackCalls        int
 	updateScheduledCalls int
 	updatedScheduledTask *taskdef.Task
+	statusUpdates        []*taskdef.TaskStatusUpdate
 }
 
 func (s *managerTaskStore) RunInTransaction(
@@ -201,8 +222,8 @@ func (s *managerTaskStore) GetTaskByIdempotencyKey(
 	return s.taskByIdempotencyKey[key], nil
 }
 
-func (s *managerTaskStore) GetTask(_ context.Context, _ uuid.UUID) (*taskdef.Task, error) {
-	panic("managerTaskStore.GetTask: not implemented")
+func (s *managerTaskStore) GetTask(_ context.Context, id uuid.UUID) (*taskdef.Task, error) {
+	return s.tasksByID[id], nil
 }
 
 func (s *managerTaskStore) GetTasks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task, error) {
@@ -232,9 +253,10 @@ func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.
 
 func (s *managerTaskStore) UpdateTaskStatus(
 	_ context.Context,
-	_ *taskdef.TaskStatusUpdate,
+	update *taskdef.TaskStatusUpdate,
 ) error {
-	panic("managerTaskStore.UpdateTaskStatus: not implemented")
+	s.statusUpdates = append(s.statusUpdates, update)
+	return nil
 }
 
 func (s *managerTaskStore) UpdateTaskReport(
@@ -367,9 +389,10 @@ var _ interface {
 } = (*managerTaskStore)(nil)
 
 type managerExecutor struct {
-	executionID  string
-	executeCalls int
-	lastRequest  *taskdef.ExecutionRequest
+	executionID    string
+	executeCalls   int
+	lastRequest    *taskdef.ExecutionRequest
+	terminateCalls int
 }
 
 func (e *managerExecutor) Start(context.Context) error {
@@ -401,5 +424,6 @@ func (e *managerExecutor) CheckStatus(
 }
 
 func (e *managerExecutor) TerminateTask(context.Context, string, string) error {
-	panic("managerExecutor.TerminateTask: not implemented")
+	e.terminateCalls++
+	return nil
 }

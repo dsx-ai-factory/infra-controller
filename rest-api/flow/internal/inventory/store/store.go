@@ -48,6 +48,7 @@ type Store interface {
 	CreateExpectedRack(ctx context.Context, rack *rack.Rack) (uuid.UUID, error)
 	GetRackByID(ctx context.Context, id uuid.UUID, withComponents bool) (*rack.Rack, error)
 	GetRacksByIDs(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error)
+	GetRackByExternalID(ctx context.Context, externalID string, withComponents bool) (*rack.Rack, error)
 	GetRackBySerial(ctx context.Context, manufacturer string, serial string, withComponents bool) (*rack.Rack, error)
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
 	PatchRack(ctx context.Context, rack *rack.Rack) (string, error)
