@@ -884,6 +884,10 @@ pub(crate) async fn on_demand_machine_validation(
                 &machine_id,
                 MachineSearchConfig {
                     include_dpus: false,
+                    // Hold the machine row lock through the scheduled-request
+                    // check and current-run update. This makes concurrent
+                    // on-demand starts for one machine deterministic.
+                    for_update: true,
                     ..MachineSearchConfig::default()
                 },
             )

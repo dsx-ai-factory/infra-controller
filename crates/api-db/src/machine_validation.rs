@@ -346,19 +346,34 @@ pub async fn find_active(txn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineVa
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn find_active_machine_validation_by_machine_id(
+/// Finds the specified active on-demand run for its owning machine.
+///
+/// The machine's context-specific validation ID is authoritative. Looking up
+/// an arbitrary active run by machine can select an older abandoned run when a
+/// newer on-demand request has already replaced the machine's current run ID.
+pub async fn find_active_on_demand_machine_validation_by_id_and_machine_id(
     txn: impl DbReader<'_>,
+    id: &MachineValidationId,
     machine_id: &MachineId,
 ) -> DatabaseResult<MachineValidation> {
-    let ret = find_by_machine_id(txn, machine_id).await?;
-    for iter in ret {
-        if is_active(&iter) {
-            return Ok(iter);
-        }
-    }
-    Err(DatabaseError::InvalidArgument(format!(
-        "Not active machine validation in  {machine_id:?} "
-    )))
+    let query = "
+        SELECT * FROM machine_validation
+        WHERE id = $1
+        AND machine_id = $2
+        AND context = 'OnDemand'
+        AND end_time IS NULL
+        AND state IN ('Started', 'InProgress')";
+    sqlx::query_as::<_, MachineValidation>(query)
+        .bind(id)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| {
+            DatabaseError::InvalidArgument(format!(
+                "Machine validation run {id} is not active for machine {machine_id}"
+            ))
+        })
 }
 
 pub async fn find_by_id(
@@ -506,6 +521,49 @@ mod tests {
         assert_eq!(persisted.end_time, updated.end_time);
         assert_eq!(persisted.status, updated.status);
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn finding_current_active_run_ignores_an_older_unfinished_run(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let older_run = insert_active_validation(
+            txn.as_mut(),
+            chrono::Utc::now() - chrono::Duration::minutes(10),
+            60,
+            None,
+        )
+        .await?;
+        let current_run =
+            insert_active_validation(txn.as_mut(), chrono::Utc::now(), 60, None).await?;
+
+        let selected = find_active_on_demand_machine_validation_by_id_and_machine_id(
+            txn.as_mut(),
+            &current_run,
+            &test_machine_id(),
+        )
+        .await?;
+
+        assert_eq!(selected.id, current_run);
+        assert_ne!(selected.id, older_run);
+
+        const SET_DISCOVERY_CONTEXT: &str =
+            "UPDATE machine_validation SET context = 'Discovery' WHERE id = $1";
+        sqlx::query(SET_DISCOVERY_CONTEXT)
+            .bind(current_run)
+            .execute(txn.as_mut())
+            .await?;
+
+        let error = find_active_on_demand_machine_validation_by_id_and_machine_id(
+            txn.as_mut(),
+            &current_run,
+            &test_machine_id(),
+        )
+        .await
+        .expect_err("a non-on-demand run must not be selected");
+        assert!(error.to_string().contains("is not active"));
         Ok(())
     }
 
