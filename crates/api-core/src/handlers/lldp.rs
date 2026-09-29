@@ -34,8 +34,6 @@ pub(crate) async fn report_lldp_neighbors(
     log_request_data(&request);
 
     let machine_id = convert_and_log_machine_id(request.get_ref().machine_id.as_ref())?;
-    // RBAC admits any scout, so the report may only name the machine its certificate was issued
-    // for. Skipped with bypass_rbac: test tooling uses a TLS client cert without a SPIFFE identity.
     if !api.runtime_config.bypass_rbac {
         let id_str = request
             .extensions()
@@ -67,7 +65,6 @@ pub(crate) async fn report_lldp_neighbors(
     Ok(Response::new(()))
 }
 
-/// Apply one LLDP report, from either reporter, to the machine's stored neighbors.
 pub(crate) async fn handle_lldp_report(
     api: &Api,
     machine_id: &MachineId,
@@ -110,7 +107,7 @@ pub(crate) async fn handle_lldp_report(
     }
 }
 
-/// Replace the machine's stored neighbors with `neighbors`.
+/// Replace the machine's stored neighbors with new ones.
 async fn store_neighbors(
     api: &Api,
     machine_id: &MachineId,

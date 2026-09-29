@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 MIRANTIS, INC. & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 MIRANTIS, INC. & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -61,7 +61,7 @@ pub async fn find_by_machine_ids(
     Ok(by_machine)
 }
 
-/// Make `neighbors` the machine's stored LLDP neighbors. An empty slice clears them.
+/// An empty slice clears the LLDP neighbors.
 pub async fn replace_all(
     txn: &mut PgConnection,
     machine_id: &MachineId,
