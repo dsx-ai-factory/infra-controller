@@ -259,6 +259,7 @@ enabled with a non-empty (and non-null) objectTypes list.
   "releaseNamespace" .Release.Namespace
   "rms" .Values.rms
   "service" .Values.service
+  "sshConsole" .Values.sshConsole
   "siteConfig" .Values.siteConfig
   "vaultClusterInfo" .Values.vaultClusterInfo
 -}}
