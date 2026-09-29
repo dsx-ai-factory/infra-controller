@@ -65,6 +65,31 @@ pub enum SchedulingOutcome {
     NoProfile,
 }
 
+/// Which lookup supplied the profile.
+///
+/// A label rather than context because the outcome is the same either way: a
+/// class re-keyed by changed BMC reporting (§5.2) drops onto the fallback and
+/// keeps reporting `Scheduled`, so without this dimension nothing distinguishes
+/// a machine attesting what its operator asked for from one attesting whatever
+/// `any` allows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
+enum ProfileSource {
+    /// The machine's own hardware class had a profile.
+    Class,
+    /// Its class had none, so the reserved `any` profile applied.
+    AnyFallback,
+}
+
+impl ProfileSource {
+    fn of(used_any_fallback: bool) -> Self {
+        if used_any_fallback {
+            Self::AnyFallback
+        } else {
+            Self::Class
+        }
+    }
+}
+
 /// One scheduling attempt, in the terms the trigger response reports.
 #[derive(Debug)]
 pub struct SchedulingResult {
@@ -101,7 +126,9 @@ impl SchedulingResult {
 }
 
 /// Counted by outcome so a site accumulating unprofiled hardware, or a profile
-/// nothing satisfies, shows up on a graph rather than only in logs.
+/// nothing satisfies, shows up on a graph rather than only in logs, and by
+/// which lookup supplied the profile so a fleet sliding onto the `any` fallback
+/// does too.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "attestation_scheduled",
@@ -110,17 +137,17 @@ impl SchedulingResult {
     log = info,
     metric = counter,
     message = "SPDM attestation scheduling finished",
-    describe = "Number of SPDM attestation scheduling attempts, by outcome"
+    describe = "Number of SPDM attestation scheduling attempts, by outcome and which lookup supplied the profile"
 )]
 struct AttestationScheduled {
     #[label]
     outcome: SchedulingOutcome,
+    #[label]
+    profile_source: ProfileSource,
     #[context]
     machine_id: MachineId,
     #[context]
     hardware_class: String,
-    #[context]
-    used_any_fallback: bool,
     /// The only durable record of which revision decided: nothing persists it
     /// on the work rows, and a later trigger replaces them.
     #[context]
@@ -154,8 +181,8 @@ pub async fn trigger_attestation(
     carbide_instrument::emit(AttestationScheduled {
         outcome: result.outcome,
         machine_id: *machine_id,
+        profile_source: ProfileSource::of(result.used_any_fallback),
         hardware_class: result.hardware_class.clone(),
-        used_any_fallback: result.used_any_fallback,
         profile_version: result.profile_version.clone(),
         devices_scheduled: result.devices_scheduled,
     });
@@ -401,7 +428,7 @@ fn from_component_integrity(
     let ca_certificate_link = integrity
         .spdm
         .map(|x| x.identity_authentication)
-        .map(|x| x.responder_authentication.component_certificate)
+        .and_then(|x| x.responder_authentication.component_certificate)
         .map(|x| x.odata_id);
 
     let evidence_target =

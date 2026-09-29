@@ -155,12 +155,24 @@ sink the key.
 | manufacturer | `ComputerSystem.Manufacturer` → `ServiceRoot.Vendor` → `unknown`    |
 | model        | `ComputerSystem.Model` → `ServiceRoot.Product` → `nomodel`          |
 
-The `ComputerSystem` is the one exploration treats as the host: the first member
-after the first that reports a BIOS, or the first member when none does. A BMC
-serving several — an NVIDIA compute tray exposes a host system beside its GPU
-baseboard — can therefore move a class by reordering its `Systems` collection,
-which is the same re-keying the `any` fallback (§4.2) and the coverage view
-(§6.4) already cover.
+`Systems` is a collection, and a BMC can serve more than one member — an NVIDIA
+compute tray exposes a host system beside its GPU baseboard — so which
+`ComputerSystem` supplies those two fields is a choice. Exploration picks the
+one it treats as the host, and the two backends (§5.1) pick it differently:
+
+- `nv-redfish` sets the first member aside, takes the first of the *remaining*
+  members that reports a BIOS, and falls back to the set-aside first member when
+  none of the rest does.
+- libredfish prefers `System_0`, probing it for a BIOS ahead of the others, and
+  falls back to it when nothing reports one.
+
+Two consequences follow, and both are re-keyings the `any` fallback (§4.2) and
+the coverage view (§6.4) already cover. A BMC can move a class by reordering its
+`Systems` collection. And on a BMC where more than one member reports a BIOS,
+the two backends can derive different classes for the same machine, so migrating
+an endpoint between them can move its class too. Aligning the two is out of
+scope here: the selected system also derives the machine's `MachineId`, so
+changing either rule reaches well past the class name.
 
 Each field is normalised on its own: lowercased, every run of characters outside
 `a-z0-9` becomes a single `-`, and leading and trailing `-` are dropped. The
@@ -176,6 +188,8 @@ dell-inc_poweredge-r750
 fields, every explored endpoint gets a keyable class — worst case
 `unknown_nomodel`, which an operator can write a profile for. There is no
 `unrecognized` marker.
+
+#### Keys considered and rejected
 
 **Why not the SKU.** A third field from `ComputerSystem.SKU` would give
 sub-model granularity, and an earlier revision of this design used one. Redfish
@@ -212,8 +226,6 @@ A selection has one mode and a list of patterns.
 | `ALLOWLIST` | Attest only the attesters matching a pattern.                           |
 | `DENYLIST`  | Attest every attester the BMC reports, except those matching a pattern. |
 
-One `mode` field holds one value.
-
 **One reserved fallback:** `any`**.** A profile keyed `any` applies to a machine
 whose own class has no profile. An exact class match always wins, so `any` is
 consulted only after that lookup misses.
@@ -230,9 +242,12 @@ place the gap is visible.
 A `mode: NONE` profile on a real class also attests nothing, but on purpose.
 `NONE` means an operator decided this platform has nothing to attest.
 `NoProfile` means nobody decided anything. Since an exact match beats `any`,
-`NONE` is also how to keep the `ALL` fallback off hardware that could never
-satisfy it. Power shelves and generic Dell hosts are the cases to seed that
-way.
+`NONE` is also how to hold the `ALL` fallback off hardware with no attesters to
+offer — a power shelf, say. `ALL` reaches such a machine and settles at
+`NoAttestersFound`, which is harmless but costs a BMC connection every pass and
+reads the same as a machine whose collection stopped reporting. `NONE` settles
+from the profile alone, so it is both cheaper and a record of which of the two
+this is.
 
 ### 4.3 Patterns: exact and prefix
 
@@ -340,9 +355,14 @@ list attesters before collecting.
   attester's `ComponentIntegrity` `Id` — which the existing controller picks up.
 
 Step 6 stays a live call even though exploration records the same collection
-(§7.1): selection has to reflect what the BMC reports at the moment of
-attestation, not what it reported when last explored. The recorded copy is for
-authoring and diagnosis.
+(§7.1). Selection has to use what the BMC reports now, since the recorded copy
+can name an attester the BMC no longer exposes. That copy is for authoring and
+diagnosis.
+
+`ALL` takes whatever it finds, so a BMC that drops an attester attests the rest
+and still reports `Scheduled`. Only losing all of them is an outcome of its
+own. The attester inventory shows the change, but exploration writes it, so it
+appears on the next explore rather than here. §12 covers closing that gap.
 
 ### 5.1 Where the hardware class comes from
 
@@ -377,6 +397,10 @@ not in what the field means.
 Two things make it survivable rather than breaking.
 
 - The new class has no profile, so `any` applies and the machine still attests.
+  It attests what `any` allows, though, not what the old profile asked for, and
+  the outcome is `Scheduled` either way. The scheduling metric is labelled with
+  which lookup supplied the profile (§10) so the drop onto the fallback can be
+  alerted on rather than waiting for someone to read coverage.
 - Coverage (§6.4) lists the new class and its endpoint count, so it is visible,
   and keeps the old one at zero endpoints rather than dropping it.
 
@@ -1095,21 +1119,26 @@ declared event rather than a plain log line.
     metric_name = "carbide_attestation_scheduling_total",
     component = "machine-controller", log = info, metric = counter,
     message = "SPDM attestation scheduling finished",
-    describe = "Number of SPDM attestation scheduling attempts, by outcome")]
+    describe = "Number of SPDM attestation scheduling attempts, by outcome \
+                and which lookup supplied the profile")]
 struct AttestationScheduled {
     #[label] outcome: SchedulingOutcome,
+    #[label] profile_source: ProfileSource,
     #[context] machine_id: MachineId,
     #[context] hardware_class: String,
-    #[context] used_any_fallback: bool,
     #[context] profile_version: Option<String>,
     #[context] devices_scheduled: u64,
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 values, so it is safe as a label, and it is
-the only one: a site accumulating unprofiled hardware is a count of machines in a
-state, which the coverage view answers directly, where this metric counts
-occurrences.
+`outcome` is a fixed enum of the §5.3 values and `profile_source` a two-variant
+one, so both are safe as labels, and they are the only two. `profile_source`
+earns its place because a class re-keyed by changed BMC reporting (§5.2) drops
+onto the `any` fallback and keeps reporting `Scheduled`, so the outcome alone
+cannot tell a machine attesting what its operator asked for from one attesting
+whatever `any` allows. Nothing else is added: a site accumulating unprofiled
+hardware is a count of machines in a state, which the coverage view answers
+directly, where this metric counts occurrences.
 
 Machine IDs are unbounded and stay in `#[context]`. Class names stay there too:
 the explorer writes the column, so nothing at the emit site bounds what a stored
@@ -1212,6 +1241,11 @@ own ticket.
 DPU machines and reporting one result.
 - **Attestation run identity,** so a late worker from an old attempt cannot write
 onto a new one.
+- **Having attestation record the attesters it saw,** the way exploration
+already does (§7.5). Only exploration writes to the inventory today, so a
+machine that starts reporting fewer attesters stays invisible until the next
+explore, even though attestation saw it first. The count attestation logs is
+not a metric, so nothing trends it either.
 - **Adopting a moved class in one command,** as a `profile create --copy-from
 <class>` flag plus the coverage hint that names a candidate. Deferred, not
 rejected: §5.2's re-authoring step is the whole cost of a class moving, and this

@@ -1218,12 +1218,10 @@ message SpdmMachineAttestationStatus {
   SpdmAttestationStatus attestation_status = 2;
 }
 
-// Why one attestation scheduling attempt ended as it did. Only SCHEDULED
-// wrote work; the rest are the ways a machine can end up attesting nothing,
-// kept apart because an operator fixes each differently.
+// Why one attestation scheduling attempt ended as it did.
 enum SpdmSchedulingOutcome {
-  // Unset sentinel. The server always reports a real outcome, so this only
-  // appears to a client newer than the server it is talking to.
+  // Unset sentinel. A successful response always carries a real outcome, so
+  // this only appears to a client newer than the server it is talking to.
   SPDM_SCHEDULING_OUTCOME_UNSPECIFIED = 0;
   // One work row was written per selected attester.
   SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;

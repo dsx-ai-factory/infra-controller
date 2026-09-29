@@ -81,14 +81,12 @@ func (SpdmAttestationStatus) EnumDescriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{0}
 }
 
-// Why one attestation scheduling attempt ended as it did. Only SCHEDULED
-// wrote work; the rest are the ways a machine can end up attesting nothing,
-// kept apart because an operator fixes each differently.
+// Why one attestation scheduling attempt ended as it did.
 type SpdmSchedulingOutcome int32
 
 const (
-	// Unset sentinel. The server always reports a real outcome, so this only
-	// appears to a client newer than the server it is talking to.
+	// Unset sentinel. A successful response always carries a real outcome, so
+	// this only appears to a client newer than the server it is talking to.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_UNSPECIFIED SpdmSchedulingOutcome = 0
 	// One work row was written per selected attester.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_SCHEDULED SpdmSchedulingOutcome = 1

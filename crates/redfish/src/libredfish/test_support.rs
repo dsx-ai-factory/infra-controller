@@ -2192,11 +2192,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/ERoT_BMC_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2205,7 +2205,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2226,11 +2226,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2239,7 +2239,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2260,11 +2260,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2273,7 +2273,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2294,11 +2294,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_2/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2307,7 +2307,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2333,11 +2333,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2346,7 +2346,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2367,11 +2367,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2380,7 +2380,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),

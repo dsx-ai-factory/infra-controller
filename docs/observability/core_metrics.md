@@ -33,7 +33,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_version</td><td>gauge</td><td>Version (git sha, build date, etc) of this service</td></tr>
 <tr><td>carbide_attestation_attester_sets_total</td><td>counter</td><td>Number of previously unseen SPDM-capable attester sets recorded for a hardware class</td></tr>
 <tr><td>carbide_attestation_profile_changes_total</td><td>counter</td><td>Number of accepted attestation profile create, update, and delete operations, by operation.</td></tr>
-<tr><td>carbide_attestation_scheduling_total</td><td>counter</td><td>Number of SPDM attestation scheduling attempts, by outcome</td></tr>
+<tr><td>carbide_attestation_scheduling_total</td><td>counter</td><td>Number of SPDM attestation scheduling attempts, by outcome and which lookup supplied the profile</td></tr>
 <tr><td>carbide_attestation_total</td><td>counter</td><td>Number of device attestations performed, by device type and outcome.</td></tr>
 <tr><td>carbide_auth_context_missing_total</td><td>counter</td><td>Number of Forge authorization requests missing authentication context, by authorizer</td></tr>
 <tr><td>carbide_auth_denied_total</td><td>counter</td><td>Number of Forge calls denied by the authorizer</td></tr>
