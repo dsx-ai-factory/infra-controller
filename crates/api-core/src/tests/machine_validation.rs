@@ -42,7 +42,6 @@ use rpc::forge::{
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
-use crate::tests::common::postgres::wait_for_blocked_query;
 
 fn authenticated_machine_request<T>(
     message: T,
@@ -710,9 +709,6 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     // Without the handler's row lock, both requests can observe an unscheduled
     // machine and each create a run before either updates the request flag.
     let mut gate = env.pool.begin().await?;
-    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(gate.as_mut())
-        .await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
         .bind(mh.host().id)
         .execute(gate.as_mut())
@@ -730,25 +726,45 @@ async fn concurrent_on_demand_requests_create_only_one_run(
     };
     let first_api = env.api.clone();
     let second_api = env.api.clone();
-    let first = first_api.on_demand_machine_validation(request());
-    let second = second_api.on_demand_machine_validation(request());
-    tokio::pin!(first);
-    tokio::pin!(second);
+    let first_request = request();
+    let second_request = request();
+    let mut requests = tokio::spawn(async move {
+        tokio::join!(
+            first_api.on_demand_machine_validation(first_request),
+            second_api.on_demand_machine_validation(second_request)
+        )
+    });
+
+    let wait_for_both_requests = async {
+        for _ in 0..300 {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT activity.pid)
+                 FROM pg_stat_activity AS activity
+                 WHERE activity.datname = current_database()
+                   AND activity.wait_event_type = 'Lock'
+                   AND strpos(activity.query, 'SELECT id FROM machines WHERE id = $1 FOR UPDATE') > 0",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("database lock state should be readable");
+            if blocked == 2 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("both on-demand requests should wait for the machine lock");
+    };
 
     tokio::select! {
-        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
-        result = &mut second => panic!("second request passed the machine lock: {result:?}"),
-        // pg_stat_activity.query can truncate this long SELECT before its
-        // trailing FOR UPDATE clause, so match the beginning of the query.
-        _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT row_to_json(m.*)") => {},
+        result = &mut requests => panic!("requests passed the machine lock: {result:?}"),
+        _ = wait_for_both_requests => {},
     }
     gate.commit().await?;
 
-    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        tokio::join!(first, second)
-    })
-    .await
-    .expect("concurrent on-demand requests should finish");
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), requests)
+        .await
+        .expect("concurrent on-demand requests should finish")
+        .expect("concurrent request task should not panic");
 
     let responses = [first, second];
     assert_eq!(
