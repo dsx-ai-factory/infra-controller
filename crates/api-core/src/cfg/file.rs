@@ -220,6 +220,12 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub dhcp_servers: Vec<Ipv4Addr>,
 
+    /// DHCPv6 Preference option sent in ADVERTISE messages. Omission leaves the
+    /// option absent and uses the protocol preference of zero; `Some(0)` emits
+    /// an explicit zero.
+    #[serde(default)]
+    pub dhcpv6_server_preference: Option<u8>,
+
     /// NTP server IP addresses for the site.
     #[serde(default)]
     pub ntp_servers: Vec<Ipv4Addr>,
@@ -309,7 +315,8 @@ pub struct CarbideConfig {
     pub common_tenant_host_asn: Option<u32>,
 
     /// VPC isolation policy enforced on tenant traffic.
-    /// Controls whether VPCs are mutually isolated or open.
+    /// Select `mutual_isolation` (the default) or `open` at site installation.
+    /// Changing this policy on an existing site is not supported.
     #[serde(default)]
     pub vpc_isolation_behavior: VpcIsolationBehaviorType,
 
@@ -4785,7 +4792,16 @@ pub struct VmaasConfig {
     #[serde(default = "default_to_true")]
     pub allow_instance_vf: bool,
 
-    /// Select which representors from the configured VF population HBN is expected to use.
+    /// Comma-separated representors HBN is expected to use during DPU provisioning.
+    /// When `allow_instance_vf` is true, non-DPF instance admission recognizes individual
+    /// `pf0vfN` entries and inclusive `pf0vfN-pf0vfM` ranges; other representors do not select
+    /// tenant VFs. Requested VF IDs are limited to VF0 through VF15 and must also be lower than
+    /// `dpu_config.num_of_vfs`. An explicit value replaces the fallback; when omitted or empty,
+    /// VF0 through VF13 are selected and still capped by `num_of_vfs`. Malformed PF0 VF selectors,
+    /// whitespace, and empty list entries cause non-DPF instance creation and network updates to
+    /// fail. DPF-managed hosts ignore this field for instance admission: BF4 Astra hosts use the
+    /// static VF0 through VF13 inventory provisioned for Astra, while other DPF hosts use the
+    /// configured intercept topology or retain topology-free compatibility behavior.
     pub hbn_reps: Option<String>,
 
     /// Provisioning-time topology for bridges inserted between host representors and HBN.
@@ -6137,6 +6153,7 @@ path = "credentials.yaml"
             }
         );
         assert!(config.dhcp_servers.is_empty());
+        assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
         assert!(config.route_servers.is_empty());
@@ -6236,6 +6253,47 @@ path = "credentials.yaml"
                 config.allow_insecure_discovery
             },
         );
+    }
+
+    /// Verifies omission, explicit zero, and the one-octet protocol bounds.
+    #[test]
+    fn dhcpv6_server_preference_enforces_config_contract() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: "",
+                    expect: None,
+                },
+                // Explicit zero must not be mistaken for an omitted setting.
+                Check {
+                    scenario: "explicit protocol minimum",
+                    input: "dhcpv6_server_preference = 0",
+                    expect: Some(0),
+                },
+                // The protocol maximum is a valid explicit setting.
+                Check {
+                    scenario: "explicit protocol maximum",
+                    input: "dhcpv6_server_preference = 255",
+                    expect: Some(255),
+                },
+            ],
+            |patch| {
+                let config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(patch))
+                    .extract()
+                    .unwrap();
+                config.dhcpv6_server_preference
+            },
+        );
+
+        // Serde must reject a value that the DHCPv6 packet cannot encode.
+        let result = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(Toml::string("dhcpv6_server_preference = 256"))
+            .extract::<CarbideConfig>();
+        assert!(result.is_err());
     }
 
     // The address contract: host-only gets the BMC proxy's default port, a

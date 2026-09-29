@@ -2,21 +2,23 @@
 # machine-a-tron-scale-4500.yaml — 4,500 hosts × 2 DPUs across 3 MAT pods
 # (Controller Mode). Derived from machine-a-tron-scale.yaml.
 #
-# Example: a /18 ServiceCIDR gives 16,384 IPs. 4,500 hosts × 3 BMCs =
-# 13,500 per-BMC ClusterIP Services. Cluster services live in the low range,
-# so each pod gets its own carved segment from the upper space (NICo has a
-# one-IPv4-prefix-per-segment constraint → one segment per pod):
+# 4,500 hosts × 3 BMCs = 13,500 BMC addresses, published as Service externalIPs,
+# so the BMC segments must lie outside the cluster ServiceCIDR, pod CIDR, node
+# network, and any network the nodes or pods must otherwise reach.
+# They are carved from 10.200.0.0/16 above the default simulated-oob range
+# (SCALE_OOB_PREFIX, 10.200.0.0/18). NICo allows one IPv4 prefix per segment,
+# so each pod gets its own segment:
 #
-#   mat-0: 10.233.16.0/20 (4,094 IPs) → 1,350 hosts (4,050 BMCs)
-#   mat-1: 10.233.32.0/19 (8,190 IPs) → 2,700 hosts (8,100 BMCs)
-#   mat-2: 10.233.8.0/21  (2,046 IPs) →   450 hosts (1,350 BMCs)
+#   mat-0: 10.200.64.0/20 (4,094 IPs) → 1,350 hosts (4,050 BMCs)
+#   mat-1: 10.200.96.0/19 (8,190 IPs) → 2,700 hosts (8,100 BMCs)
+#   mat-2: 10.200.80.0/21 (2,046 IPs) →   450 hosts (1,350 BMCs)
 #                                        4,500 hosts / 13,500 BMCs total
 #
-# NICo siteConfig needs (added for the E7-v6 run):
+# NICo siteConfig needs:
 #   allow_insecure_discovery = true
-#   [networks.mat-bmc-0] type=underlay prefix=10.233.16.0/20 gateway=10.233.16.1
-#   [networks.mat-bmc-1] type=underlay prefix=10.233.32.0/19 gateway=10.233.32.1
-#   [networks.mat-bmc-2] type=underlay prefix=10.233.8.0/21 gateway=10.233.8.1
+#   [networks.mat-bmc-0] type=underlay prefix=10.200.64.0/20 gateway=10.200.64.1
+#   [networks.mat-bmc-1] type=underlay prefix=10.200.96.0/19 gateway=10.200.96.1
+#   [networks.mat-bmc-2] type=underlay prefix=10.200.80.0/21 gateway=10.200.80.1
 # =============================================================================
 
 image:
@@ -119,7 +121,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.233.16.1"
+        bmcDhcpRelayAddress: "10.200.64.1"
         underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-1:
@@ -134,7 +136,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.233.32.1"
+        bmcDhcpRelayAddress: "10.200.96.1"
         underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-2:
@@ -149,7 +151,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.233.8.1"
+        bmcDhcpRelayAddress: "10.200.80.1"
         underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
 

@@ -689,10 +689,20 @@ pub struct DetachedDpuServiceDefinition {
     pub labels: BTreeMap<String, String>,
     pub helm_chart: DetachedHelmChart,
     pub deploy_in_cluster: bool,
-    pub security_privileged: bool,
+    pub security: DetachedDpuServiceSecurity,
     /// Optional DaemonSet settings supplied by the feature using the SDK.
     /// Absence remains absence; the SDK does not impose placement policy.
     pub service_daemon_set: Option<DetachedServiceDaemonSet>,
+}
+
+/// Security settings for a detached DPUService managed by an SDK caller.
+///
+/// Keeping the fields together preserves the DPF security boundary and makes
+/// presence-gated capabilities explicit at the SDK boundary.
+#[derive(Debug, Clone)]
+pub struct DetachedDpuServiceSecurity {
+    pub privileged: bool,
+    pub spiffe: bool,
 }
 
 /// Caller-configurable fields on a detached DPUService's generated DaemonSet.
@@ -744,13 +754,23 @@ pub struct DpuServiceObservation {
     pub dpu_cluster_selector_present: bool,
     pub interfaces_present: bool,
     pub paused: Option<bool>,
-    pub security_privileged: Option<bool>,
+    pub security: Option<DpuServiceSecurityObservation>,
     pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+/// Security settings observed on a live DPUService.
+///
+/// Optional privilege state preserves malformed or legacy resources, while
+/// the SPIFFE Boolean records whether its presence-gated object exists.
+#[derive(Debug, Clone)]
+pub struct DpuServiceSecurityObservation {
+    pub privileged: Option<bool>,
+    pub spiffe: bool,
 }
 
 /// SDK-owned view of the DaemonSet settings observed on a DPUService.

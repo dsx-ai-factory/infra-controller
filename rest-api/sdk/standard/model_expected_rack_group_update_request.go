@@ -20,11 +20,11 @@ import (
 // checks if the ExpectedRackGroupUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedRackGroupUpdateRequest{}
 
-// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For single updates (PATCH /expected-rack-group/{id}), the `id` field is optional in the body and must match the path ID when provided.  The `rackGroupId` field is immutable on update — omit it or provide the existing value.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
+// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.  Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.  The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackGroupUpdateRequest struct {
-	// Unique identifier (UUID) of the Expected Rack Group to update. Optional for single Expected Rack Group update (must be empty or match the id from the URL path).
+	// Unique identifier (UUID) of the Expected Rack Group to update. Can be omitted or set to `null`. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 	Id NullableString `json:"id,omitempty"`
-	// Operator-supplied rack group identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core uses rackGroupId as the identity key.
+	// Operator-supplied rack group identifier. Immutable on update: omit this field, send `null`, or provide the existing value without changing the identity. A changed value is rejected because Core uses rackGroupId as the identity key.
 	RackGroupId NullableString `json:"rackGroupId,omitempty"`
 	// Optional replacement topology identifier, non-blank and at most 128 characters.
 	Topology NullableString `json:"topology,omitempty"`
@@ -34,7 +34,7 @@ type ExpectedRackGroupUpdateRequest struct {
 	Name NullableString `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
 	// Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
 	Description NullableString `json:"description,omitempty"`
-	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -195,7 +195,6 @@ func (o *ExpectedRackGroupUpdateRequest) GetRacks() []ExpectedRackGroupRack {
 
 // GetRacksOk returns a tuple with the Racks field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupUpdateRequest) GetRacksOk() ([]ExpectedRackGroupRack, bool) {
 	if o == nil || IsNil(o.Racks) {
 		return nil, false
@@ -303,16 +302,16 @@ func (o *ExpectedRackGroupUpdateRequest) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedRackGroupUpdateRequest) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroupUpdateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {
@@ -363,7 +362,7 @@ func (o ExpectedRackGroupUpdateRequest) ToMap() (map[string]interface{}, error) 
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.Labels) {
+	if o.Labels != nil {
 		toSerialize["labels"] = o.Labels
 	}
 	return toSerialize, nil

@@ -68,6 +68,7 @@ func TestAPIBatchUpdateNVLinkDomainPowerStateRequest_Validate(t *testing.T) {
 	tests := []struct {
 		name      string
 		request   APIBatchUpdateNVLinkDomainPowerStateRequest
+		wantState string
 		assertErr func(*testing.T, error)
 	}{
 		{
@@ -78,6 +79,16 @@ func TestAPIBatchUpdateNVLinkDomainPowerStateRequest_Validate(t *testing.T) {
 				State:           PowerControlStateOn,
 				RuleID:          &ruleID,
 			},
+			wantState: PowerControlStateOn,
+		},
+		{
+			name: "normalizes legacy power state",
+			request: APIBatchUpdateNVLinkDomainPowerStateRequest{
+				SiteID:          uuid.NewString(),
+				NVLinkDomainIDs: []string{nvLinkDomainID},
+				State:           "acpowercycle",
+			},
+			wantState: PowerControlStateACCycle,
 		},
 		{
 			name: "accepts multiple unique domain UUIDs",
@@ -190,6 +201,9 @@ func TestAPIBatchUpdateNVLinkDomainPowerStateRequest_Validate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if test.wantState != "" {
+				assert.Equal(t, test.wantState, test.request.State)
+			}
 		})
 	}
 }

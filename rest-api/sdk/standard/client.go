@@ -67,6 +67,8 @@ type APIClient struct {
 
 	DPUReprovisionAPI *DPUReprovisionAPIService
 
+	DomainAPI *DomainAPIService
+
 	ExpectedMachineAPI *ExpectedMachineAPIService
 
 	ExpectedPowerShelfAPI *ExpectedPowerShelfAPIService
@@ -100,8 +102,6 @@ type APIClient struct {
 	MeasuredBootTrustedProfileAPI *MeasuredBootTrustedProfileAPIService
 
 	MetadataAPI *MetadataAPIService
-
-	NVLinkDomainAPI *NVLinkDomainAPIService
 
 	NVLinkLogicalPartitionAPI *NVLinkLogicalPartitionAPIService
 
@@ -176,6 +176,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.DPUExtensionServiceAPI = (*DPUExtensionServiceAPIService)(&c.common)
 	c.DPUMachineAPI = (*DPUMachineAPIService)(&c.common)
 	c.DPUReprovisionAPI = (*DPUReprovisionAPIService)(&c.common)
+	c.DomainAPI = (*DomainAPIService)(&c.common)
 	c.ExpectedMachineAPI = (*ExpectedMachineAPIService)(&c.common)
 	c.ExpectedPowerShelfAPI = (*ExpectedPowerShelfAPIService)(&c.common)
 	c.ExpectedRackAPI = (*ExpectedRackAPIService)(&c.common)
@@ -193,7 +194,6 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.MeasuredBootTrustedMachineAPI = (*MeasuredBootTrustedMachineAPIService)(&c.common)
 	c.MeasuredBootTrustedProfileAPI = (*MeasuredBootTrustedProfileAPIService)(&c.common)
 	c.MetadataAPI = (*MetadataAPIService)(&c.common)
-	c.NVLinkDomainAPI = (*NVLinkDomainAPIService)(&c.common)
 	c.NVLinkLogicalPartitionAPI = (*NVLinkLogicalPartitionAPIService)(&c.common)
 	c.NetworkSecurityGroupAPI = (*NetworkSecurityGroupAPIService)(&c.common)
 	c.OperatingSystemAPI = (*OperatingSystemAPIService)(&c.common)

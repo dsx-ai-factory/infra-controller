@@ -122,6 +122,8 @@ navigation:
       contents:
         - page: IP and Network Configuration
           path: provisioning/ip-and-network-configuration.md
+        - page: Deploy DHCPv6
+          path: provisioning/dhcpv6-deployment.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
@@ -157,6 +159,8 @@ navigation:
           path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
+        - page: Templated iPXE Operating Systems
+          path: configuration/templated-ipxe-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity

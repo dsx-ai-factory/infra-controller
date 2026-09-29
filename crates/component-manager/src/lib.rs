@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod machine_info_provider;
 mod nvos_update_manager;
 mod rack_firmware_update_manager;
 #[cfg(test)]
@@ -21,6 +22,11 @@ pub mod rms;
 pub mod tls;
 pub mod types;
 
+#[cfg(feature = "test-support")]
+pub use machine_info_provider::TestMachineInfoProvider;
+pub use machine_info_provider::{
+    MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
+};
 pub use nvos_update_manager::{NvosUpdateManager, NvosUpdateRequest};
 pub use rack_firmware_update_manager::{RackFirmwareUpdateManager, RackFirmwareUpdateRequest};
 

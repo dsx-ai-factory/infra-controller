@@ -136,7 +136,7 @@ type Interface struct {
 }
 
 // EthernetInterfaceKey returns a stable string key for the Interface fields controlled by an update request.
-// Equivalent requested IP addresses must reuse the interface instead of replacing it.
+// Equivalent requested IP addresses and anycast prefixes must reuse the interface instead of replacing it.
 func (ifc Interface) EthernetInterfaceKey() string {
 	values := url.Values{}
 	if ifc.SubnetID != nil {
@@ -174,7 +174,14 @@ func (ifc Interface) EthernetInterfaceKey() string {
 	}
 	if ifc.InlineRoutingProfile != nil {
 		values.Set("has_inline_routing_profile", "true")
-		values["inline_routing_prefix"] = append([]string(nil), ifc.InlineRoutingProfile.AllowedAnycastPrefixes...)
+		// Only normalize address text; preserve host bits, prefix order, and duplicates.
+		for _, prefix := range ifc.InlineRoutingProfile.AllowedAnycastPrefixes {
+			parsedPrefix, err := netip.ParsePrefix(prefix)
+			if err == nil {
+				prefix = parsedPrefix.String()
+			}
+			values.Add("inline_routing_prefix", prefix)
+		}
 	}
 
 	return values.Encode()

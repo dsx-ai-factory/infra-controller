@@ -70,7 +70,7 @@ The following table maps the sections on this page to what the run does:
 | §1.2 [Secrets](#12-image-pull-and-helm-repository-credentials) | Creates `hbn-user-password` (generated once), `dpf-pull-secret` / `nico-pull-secret` (from `NICO_DPF_NGC_API_KEY` / `NICO_DPF_NICO_NGC_API_KEY`, defaulting to `REGISTRY_PULL_SECRET`), and the three Argo CD repository Secrets (GA repo URLs; override with `NICO_DPF_HELM_REPO_OCI/HTTPS/CARBIDE`). |
 | §1.4 [Cert-manager policy](#14-cert-manager-policy-and-rbac-for-dpf) | Applied only when the approver-policy CRD exists. The stock helm-prereqs cert-manager does **not** run approver-policy, so this is normally skipped. |
 | [Prerequisites](#1-prerequisites) (Argo CD, Kamaji, NFD, maintenance-operator) | Installed from `helm-prereqs/helmfile.yaml` with versions/values pinned from `doca-platform deploy/helmfiles/prereqs.yaml`; cert-manager and local-path-provisioner are reused from the base install.<br/><br/>Kamaji has a cold-start deadlock (its controller needs the `default` DataStore, whose admission webhook the controller itself serves) — setup.sh breaks it automatically. Note: upstream pins cert-manager v1.19.3 while helm-prereqs ships v1.17.1 — a known, compatible skew. |
-| §2 [Operator install](#2-dpf-installation) | Clones `NVIDIA/doca-platform` at `NICO_DPF_VERSION` (default `v26.4.0`, cached under `helm-prereqs/.dpf-src/`) and installs `deploy/charts/dpf-operator`.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_VERSION` (override with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default — a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
+| §2 [Operator install](#2-dpf-installation) | Installs `deploy/charts/dpf-operator` from a `NVIDIA/doca-platform` checkout at the reviewed commit this repository pins (currently `v26.4.0`). Two source paths enforce that commit: the `helm-prereqs/doca-platform` git submodule in a git checkout (initialized automatically), or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged `nico-prereqs` chart. `NICO_DPF_SRC` overrides both with an operator-managed local checkout (air-gapped sites); keep it at the pinned commit, because setup.sh installs whatever it contains and only warns when its HEAD differs from the pin.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_IMAGE_TAG` (defaults to the pinned release; override the repository with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default - a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
 | §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
 | §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-start-carbide-api-to-create-the-dpf-initialization-objects) | `setup.sh` renders `[dpf].enabled = true` and deploys Core once after the DPF prerequisites are ready. carbide-api initializes the DPF SDK and creates the BFB, DPUFlavor, and DPUDeployment on that first startup.<br/><br/>When `NICO_DPF_BMC_ROOT_PASSWORD` is set, setup creates or reuses a persistent watched version-0 credential Secret after deployment is accepted and configures local ownership before that rollout. Declining deployment leaves the Secret untouched. Otherwise the credential may come from an operator-managed credential-file Secret or be configured through the API later. In `local_first` or `backend` mode, a fresh site starts without it and the 60-second refresh writes the derived current-version `bmc-shared-password` Secret after the credential becomes available. Authoritative `local` mode requires version 0 before startup when v0 is current or the current target cannot be resolved. |
@@ -381,24 +381,35 @@ helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
   dpf-operator dpf-repository/dpf-operator --version=$TAG
 
-# Or from a clone of NVIDIA/doca-platform at the same tag (what
-# setup.sh does by default):
+# Or from the helm-prereqs/doca-platform submodule at its pinned commit
+# (what setup.sh does by default; run from the repository root). The source
+# chart ships an empty controllerManager.image, so the image must be set:
+NICO_DPF_IMAGE_REPO="nvcr.io/nvidia/doca/dpf-system"
+NICO_DPF_IMAGE_TAG="v26.4.0"
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
-  dpf-operator ./doca-platform/deploy/charts/dpf-operator
+  --set "controllerManager.image.repository=$NICO_DPF_IMAGE_REPO" \
+  --set "controllerManager.image.tag=$NICO_DPF_IMAGE_TAG" \
+  dpf-operator ./helm-prereqs/doca-platform/deploy/charts/dpf-operator
 ```
 
 The public `nvcr.io/nvidia/doca` operator image pulls anonymously, so no pull
 secret is set by default (matching `setup.sh`). Add
-`--set "imagePullSecrets[0].name=dpf-pull-secret"` **only** when pulling the
-operator image from a private registry or mirror — a registry-scoped secret
-without `nvidia/doca` entitlement turns a working public pull into a 403.
+`--set "imagePullSecrets[0].name=<secret>"` (what `setup.sh` does when
+`NICO_DPF_IMAGE_PULL_SECRET` is set) **only** when pulling the operator image
+from a private registry or mirror - a registry-scoped secret without
+`nvidia/doca` entitlement turns a working public pull into a 403.
 
 NICo-specific notes on the parameters:
 
 - `enableNodeFeatureRules=false` — the chart's bundled `NodeFeatureRule`
   resources are disabled because nodes are labeled via NFD's own configuration
   (relying on PCI class `0200`).
+- `controllerManager.image.repository` / `.tag` - the in-repo source chart
+  leaves the operator image empty (CI stamps it when publishing to NGC), so
+  `setup.sh` sets them from `NICO_DPF_IMAGE_REPO` (default
+  `nvcr.io/nvidia/doca/dpf-system`) and `NICO_DPF_IMAGE_TAG` (default
+  `v26.4.0`, the pinned release). The published NGC chart already carries them.
 
 Adjust `REGISTRY` and `TAG` to the version of DPF you are deploying.
 
@@ -1266,6 +1277,12 @@ unset BMC_ROOT_PASSWORD
 `printf` is a shell builtin, so the value never appears in a process argument
 list.
 
+On a site deployed with `helm-prereqs`, `siteCredentials` in
+`helm-prereqs/values.yaml` provides this credential and the two Unified
+Extensible Firmware Interface (UEFI) site defaults as a Kubernetes Secret that
+nico-api reads as its credential file, ahead of Vault. Refer to
+[Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret).
+
 Until the credential is set, DPU provisioning cannot proceed and Site Explorer
 does not run: it requires this credential plus the host and DPU UEFI site
 defaults, and fails each iteration with `MissingCredentials` until all three are
@@ -1322,9 +1339,11 @@ nico-admin-cli expected-machine patch \
 
 #### 3.7.c. `nico-admin-cli expected-machine update --filename` — single-host update from JSON
 
-Updates one entry from a JSON file. The JSON shape uses
-`chassis_serial_number` (not `serial_number`) and any field omitted from the
-file is **preserved** server-side.
+Updates one entry from a JSON file. Use `chassis_serial_number`, not
+`serial_number`. Omitted or `null` metadata clears the stored name,
+description, and labels, including in the example below. Refer to the
+[expected-machine update reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-update.md)
+for required fields, preservation rules, and legacy fallback behavior.
 
 `em.json`:
 
@@ -1342,8 +1361,8 @@ file is **preserved** server-side.
 nico-admin-cli expected-machine update --filename em.json
 ```
 
-This is the most ergonomic path for "toggle DPF on one already-existing
-expected machine without touching anything else."
+To change only DPF, use `expected-machine patch` with `--dpf-enabled`
+and a BMC MAC address or ID selector.
 
 #### 3.7.d. `nico-admin-cli expected-machine replace-all --filename` — destructive full reload
 
@@ -1380,8 +1399,7 @@ This is **not a merge**. Any expected-machine row that is not present in the fil
 | Goal | Path |
 | --- | --- |
 | Add a new host with DPF enabled | `nico-admin-cli expected-machine add … --dpf-enabled true` |
-| Flip DPF on an existing entry, preserving everything else | `nico-admin-cli expected-machine update --filename em.json` |
-| Flip DPF inline with one or more other fields | `nico-admin-cli expected-machine patch … --dpf-enabled true` |
+| Change DPF on an existing entry | `nico-admin-cli expected-machine patch … --dpf-enabled true` |
 | Replace the entire inventory | `nico-admin-cli expected-machine replace-all --filename em-all.json` |
 | Inspect current value | `nico-admin-cli expected-machine show <bmc-mac>` |
 

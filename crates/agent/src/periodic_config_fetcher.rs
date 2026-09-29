@@ -664,7 +664,7 @@ mod tests {
         rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V6.into(),
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             prefix: "2001:db8::/64".to_string(),
             gateway: None,
             svi_ip: Some("2001:db8::2/64".to_string()),
@@ -703,7 +703,7 @@ mod tests {
             vlan_id: 100,
             ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
                 ip: "2001:db8::1".to_string(),
-                interface_prefix: "2001:db8::/127".to_string(),
+                interface_prefix: "2001:db8::1/128".to_string(),
                 svi_ip: Some("2001:db8::2/64".to_string()),
             }),
             addresses: vec![ipv6_address()],
@@ -719,7 +719,7 @@ mod tests {
         let mut dual_stack = expected_ipv4_interface();
         dual_stack.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::2/64".to_string()),
         });
         dual_stack.addresses = vec![ipv6_address(), ipv4_address()];
@@ -735,7 +735,7 @@ mod tests {
         let mut dual_stack_without_ipv6_svi = expected_ipv4_interface();
         dual_stack_without_ipv6_svi.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: None,
         });
         dual_stack_without_ipv6_svi.addresses = vec![ipv4_address(), ipv6_without_svi.clone()];
@@ -1016,7 +1016,7 @@ mod tests {
             response.tenant_interfaces[1].ipv6_interface_config,
             Some(rpc::FlatInterfaceIpv6Config {
                 ip: "2001:db8::1".to_string(),
-                interface_prefix: "2001:db8::/127".to_string(),
+                interface_prefix: "2001:db8::1/128".to_string(),
                 svi_ip: Some("2001:db8::2/64".to_string()),
             })
         );

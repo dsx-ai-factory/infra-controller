@@ -25,6 +25,9 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, DatabaseError};
 
+/// `list_requests` returns actions, optionally filtered by a BMC's IP address.
+/// Equivalent IP addresses match; other strings retain exact text matching.
+/// Omitting the filter returns all actions.
 pub async fn list_requests(
     request: model::redfish::RedfishListActionsFilter,
     txn: impl DbReader<'_>,
@@ -47,10 +50,18 @@ pub async fn list_requests(
     );
 
     if let Some(machine_ip) = request.machine_ip {
-        query
-            .push(" WHERE ")
-            .push_bind(vec![machine_ip])
-            .push(" <@ machine_ips");
+        query.push(" WHERE ");
+        if let Ok(machine_ip) = machine_ip.parse::<IpAddr>() {
+            // Action creation stores `host(mia.address)`, which can differ
+            // from Rust's IPv6 display (for example, `::192.0.2.1`).
+            query
+                .push("ARRAY[host(")
+                .push_bind(machine_ip)
+                .push("::inet)]");
+        } else {
+            query.push_bind(vec![machine_ip]);
+        }
+        query.push(" <@ machine_ips");
     }
 
     query.push(" ORDER BY applied_at DESC");
@@ -273,4 +284,96 @@ pub async fn delete_request(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+    use model::redfish::{RedfishCreateAction, RedfishListActionsFilter};
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn list_requests_matches_equivalent_addresses(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let mut request_ids = Vec::new();
+        for address in ["2001:db8::10", "::c000:201"] {
+            // Action creation gets these strings from `host(mia.address)`.
+            let stored_address: String = sqlx::query_scalar("SELECT host($1::inet)")
+                .bind(address.parse::<IpAddr>().unwrap())
+                .fetch_one(txn.as_mut())
+                .await
+                .unwrap();
+            let serial = "serial".to_string();
+            request_ids.push(
+                insert_request(
+                    "requester".to_string(),
+                    RedfishCreateAction {
+                        target: "/redfish/v1/Systems/System.Embedded.1".to_string(),
+                        action: "ComputerSystem.Reset".to_string(),
+                        parameters: "{}".to_string(),
+                    },
+                    txn.as_mut(),
+                    vec![stored_address],
+                    vec![&serial],
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        txn.commit().await.unwrap();
+        let pool = &pool;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "expanded mixed-case IPv6",
+                    input: Some("2001:0DB8:0:0:0:0:0:10"),
+                    expect: Yields(vec![request_ids[0]]),
+                },
+                Case {
+                    scenario: "IPv4-compatible IPv6 in hexadecimal",
+                    input: Some("::c000:201"),
+                    expect: Yields(vec![request_ids[1]]),
+                },
+                Case {
+                    scenario: "IPv4-compatible IPv6 in dotted decimal",
+                    input: Some("::192.0.2.1"),
+                    expect: Yields(vec![request_ids[1]]),
+                },
+                Case {
+                    scenario: "unknown address",
+                    input: Some("2001:db8::20"),
+                    expect: Yields(vec![]),
+                },
+                Case {
+                    scenario: "invalid address",
+                    input: Some("not-an-address"),
+                    expect: Yields(vec![]),
+                },
+                Case {
+                    scenario: "unfiltered",
+                    input: None,
+                    expect: Yields(request_ids),
+                },
+            ],
+            |machine_ip| async move {
+                let mut ids = list_requests(
+                    RedfishListActionsFilter {
+                        machine_ip: machine_ip.map(str::to_string),
+                    },
+                    pool,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>();
+                ids.sort_unstable();
+                Ok::<_, String>(ids)
+            },
+        )
+        .await;
+    }
 }

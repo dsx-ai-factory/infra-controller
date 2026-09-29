@@ -116,6 +116,23 @@ vault:
           username: ""
           password: ""          # SITE SECRET: your host UEFI password — populate per site
 
+## Site-wide BMC root and UEFI site defaults as a nico-api credential-file
+## Secret (key credentials.yaml); see README.md, "Site Credentials Secret".
+siteCredentials:
+  enabled: false
+  secretName: "nico-site-credentials"
+  ## Only the passwords are used. site-explorer logs in with each BMC's own account.
+  bmcRoot:
+    username: "root"
+    password: ""          # machine-a-tron test value: NicoSiteRoot1
+  uefi:
+    dpu:
+      username: ""
+      password: ""        # machine-a-tron test value: bluefield
+    host:
+      username: ""
+      password: ""        # machine-a-tron test value: bluefield
+
 certManager:
   siteRoot:
     create: true

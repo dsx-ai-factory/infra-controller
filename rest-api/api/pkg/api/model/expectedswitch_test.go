@@ -441,26 +441,6 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			desc:      "error when only DefaultBmcUsername is provided",
-			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcUsername: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "error when only DefaultBmcPassword is provided",
-			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcPassword: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "NVOS username without password",
-			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr("admin")},
-			expectErr: true,
-		},
-		{
-			desc:      "NVOS password without username",
-			obj:       APIExpectedSwitchUpdateRequest{NvOsPassword: cutil.GetPtr("secret")},
-			expectErr: true,
-		},
-		{
 			desc:      "empty NVOS pair",
 			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr(""), NvOsPassword: cutil.GetPtr("")},
 			expectErr: true,
@@ -846,7 +826,11 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
 		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosMacAddresses":[]}`, wantPaths: []string{"metadata.labels", "nvos_mac_addresses"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
 		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
+		{name: "NVOS username leaves the password unselected", body: `{"nvOsUsername":"admin","nvOsPassword":null}`, wantPaths: []string{"nvos_username"}},
+		{name: "NVOS password leaves the username unselected", body: `{"nvOsPassword":"secret"}`, wantPaths: []string{"nvos_password"}},
 		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
 	}
 	for _, test := range tests {
@@ -867,14 +851,14 @@ func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
 				assert.Equal(t, "slot_id", labels[0].GetKey())
 				assert.Equal(t, "0", labels[0].GetValue())
 			}
-			if request.DefaultBmcPassword != nil {
+			if request.DefaultBmcUsername != nil {
 				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedSwitch().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
 				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedSwitch().GetBmcPassword())
 			}
-			if request.NvOsPassword != nil {
-				assert.Equal(t, *request.NvOsUsername, decoded.GetExpectedSwitch().GetNvosUsername())
-				assert.Equal(t, *request.NvOsPassword, decoded.GetExpectedSwitch().GetNvosPassword())
-			}
+			assert.Equal(t, request.NvOsUsername, decoded.GetExpectedSwitch().NvosUsername)
+			assert.Equal(t, request.NvOsPassword, decoded.GetExpectedSwitch().NvosPassword)
 		})
 	}
 }
