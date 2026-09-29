@@ -78,3 +78,34 @@ impl From<LldpNeighbor> for rpc::forge::InterfaceLldp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialized_neighbor_omits_empty_deprecated_fields() {
+        let neighbor = LldpNeighbor {
+            local_mac_address: "02:00:00:00:01:c0".parse().unwrap(),
+            local_port: "p0".to_string(),
+            chassis_id_type: "mac".to_string(),
+            chassis_id_value: "02:00:00:00:02:01".to_string(),
+            remote_port_type: "ifname".to_string(),
+            remote_port_value: "swp1".to_string(),
+            system_name: "leaf-sw-01".to_string(),
+            system_description: String::new(),
+            management_addresses: vec![],
+            med_serial: None,
+            med_manufacturer: None,
+            med_model: None,
+        };
+
+        let json = serde_json::to_value(rpc::forge::InterfaceLldp::from(neighbor)).unwrap();
+        let lldp = json["lldp"].as_object().unwrap();
+
+        assert!(!lldp.contains_key("id"));
+        assert!(!lldp.contains_key("remote_port"));
+        assert_eq!(lldp["id_value"], "02:00:00:00:02:01");
+        assert_eq!(lldp["remote_port_value"], "swp1");
+    }
+}
