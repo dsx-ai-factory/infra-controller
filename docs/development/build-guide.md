@@ -82,9 +82,27 @@ and then block waiting for connections — that is expected and counts as a pass
 
 ## Build Optimizations and Trade-offs
 
-The Docker release image build (`Dockerfile.release-container-sa-x86_64`) includes several
-non-obvious optimizations. This section documents the intent and trade-offs so future maintainers
-understand why the build is structured the way it is.
+The workspace Cargo profiles and Docker release image build
+(`Dockerfile.release-container-sa-x86_64`) include several non-obvious optimizations. This section
+documents the intent and trade-offs so future maintainers understand why the build is structured
+the way it is.
+
+### Test binaries and debugger support
+
+The default `test` profile uses `debug = "line-tables-only"`. This keeps source file and line
+information for useful stack traces while reducing the disk space consumed by test binaries and
+the `target` directory. It omits the variable and type information needed to inspect program state
+in a debugger.
+
+When running a test under gdb, lldb, or another source-level debugger, use the `test-debug`
+profile to build with full debug information:
+
+```bash
+cargo test --profile test-debug <cargo-test-options>
+```
+
+Cargo places these artifacts in `target/test-debug`, separately from the default test artifacts.
+The custom profile otherwise inherits the settings of the standard `test` profile.
 
 ### `debug = "line-tables-only"` in the release profile
 
