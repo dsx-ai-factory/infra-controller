@@ -170,14 +170,14 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 	requestedPrefixLength, err := apiRequest.GetPrefixLength()
 	if err != nil {
 		logger.Warn().Err(err).Msg("error resolving VPC prefix length")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid VPC Prefix Length in request", err)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Prefix Length: %v in request", requestedPrefixLength), err)
 	}
 	requestedPrefix := netip.Prefix{}
 	if apiRequest.Prefix != nil {
 		requestedPrefix, err = netip.ParsePrefix(*apiRequest.Prefix)
 		if err != nil {
 			logger.Warn().Err(err).Msg("error parsing explicit VPC prefix")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid VPC Prefix in request", err)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Prefix: %v in request", *apiRequest.Prefix), err)
 		}
 	}
 
