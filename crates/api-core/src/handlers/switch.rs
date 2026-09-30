@@ -83,20 +83,18 @@ async fn load_switch_nvos_info(
         };
 
         let nvos_ports = nvos_info_by_switch.entry(row.switch_id).or_default();
-        if nvos_ports.last().and_then(|port| port.mac.as_ref()) != Some(&mac) {
-            nvos_ports.push(rpc::SwitchNvosPortInfo {
-                mac: Some(mac),
-                service_port: None,
-                addresses: Vec::new(),
-            });
-        }
-
-        if let Some(ip) = row.nvos_ip {
-            nvos_ports
-                .last_mut()
-                .expect("an NVOS port was added for the current MAC")
-                .addresses
-                .push(switch_nvos_address(ip));
+        let address = row.nvos_ip.map(switch_nvos_address);
+        match nvos_ports.last_mut() {
+            Some(port) if port.mac.as_ref() == Some(&mac) => {
+                port.addresses.extend(address);
+            }
+            _ => {
+                nvos_ports.push(rpc::SwitchNvosPortInfo {
+                    mac: Some(mac),
+                    service_port: None,
+                    addresses: address.into_iter().collect(),
+                });
+            }
         }
     }
 
