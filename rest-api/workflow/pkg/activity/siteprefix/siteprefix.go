@@ -64,9 +64,8 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return invalid("Site provider changed while acquiring inventory lock")
 		}
 		reportedAt := inventory.Timestamp.AsTime()
-		if !lockedSite.IsTimeWithinStaleInventoryThreshold(reportedAt) {
-			return nil
-		}
+		// Pages share the collection's start time and can arrive minutes apart.
+		// Only a newer accepted collection supersedes them, not elapsed age.
 		progress := lockedSite.SitePrefixInventoryProgress
 		if progress != nil && reportedAt.Before(progress.ReportedAt) {
 			return nil
