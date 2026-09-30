@@ -1814,7 +1814,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 		{
 			// Earlier releases created DatacenterOnly IP Blocks for public prefixes,
 			// and IPAM keeps those apart from the Public prefix that replaces them.
-			name: "fails when a new prefix overlaps an IP Block that Allocations still use",
+			name: "skips a new prefix that overlaps an IP Block that Allocations still use",
 			existingIPBlocks: map[string]siteIPBlock{
 				"198.51.100.0/24": {
 					name:            "site-fabric-ipv4-198-51-100-0-24",
@@ -1822,9 +1822,15 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 					protocolVersion: cdbm.IPBlockProtocolVersionV4,
 				},
 			},
-			allocatedCIDRs:  []string{"198.51.100.0/24"},
-			prefixes:        []string{"198.51.100.0/23"},
-			wantErrContains: "overlaps IP Block",
+			allocatedCIDRs: []string{"198.51.100.0/24"},
+			prefixes:       []string{"198.51.100.0/23", "10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
 		},
 		{
 			name:               "returns error while another writer holds the Site fabric lock",
