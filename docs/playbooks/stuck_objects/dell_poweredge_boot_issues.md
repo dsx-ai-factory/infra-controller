@@ -84,7 +84,7 @@ Try NICo machine setup first:
 
    ```bash
    MAC_ADDRESS=$(nico-admin-cli -f json machine show <machine-id> \
-     | jq -r '.interfaces[] | select(.primary_interface == true) | .mac_address')
+     | jq -r '.status.interfaces[] | select(.primary_interface == true) | .mac_address')
    ```
 
 1. Run machine setup against the BMC:
