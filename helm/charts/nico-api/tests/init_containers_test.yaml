@@ -96,26 +96,21 @@ tests:
       - failedTemplate:
           errorMessage: "nico-api.initContainers[1] requires either non-empty repository and tag or a non-empty image"
 
-  - it: should reject a numeric tag instead of rendering its coerced value
+  - it: should retain numeric tag support and the numeric zero fallback
     set:
       initContainers:
-        - name: valid-init
-          image: registry.example.com/custom-init:original
         - name: numeric-tag
           repository: registry.example.com/custom-init
-          tag: 1.10
-          image: registry.example.com/custom-init:fallback
-    asserts:
-      - failedTemplate:
-          errorMessage: 'nico-api.initContainers[1].tag must be a string; quote numeric-looking tags (for example, "1.10")'
-
-  - it: should reject a numeric zero tag instead of silently using the fallback image
-    set:
-      initContainers:
+          tag: 123
         - name: zero-tag
           repository: registry.example.com/custom-init
           tag: 0
           image: registry.example.com/custom-init:fallback
     asserts:
-      - failedTemplate:
-          errorMessage: 'nico-api.initContainers[0].tag must be a string; quote numeric-looking tags (for example, "1.10")'
+      - equal:
+          path: spec.template.spec.initContainers
+          value:
+            - name: numeric-tag
+              image: registry.example.com/custom-init:123
+            - name: zero-tag
+              image: registry.example.com/custom-init:fallback

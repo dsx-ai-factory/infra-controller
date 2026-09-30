@@ -52,7 +52,9 @@ fileDescriptorLimit: 65536
 
 ## Optional general-purpose init containers, run in list order after bootArtifactContainers.
 ## Omitted or empty lists add no general-purpose init containers.
-## Non-null tags must be strings; quote numeric-looking tags (for example, "1.10").
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
 ## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
 ## they take precedence over `image`. If either is omitted or empty, supply `image`.
 ## Rendering fails if neither form supplies an image; the error identifies the list entry.
@@ -77,7 +79,9 @@ initContainers: []
 ## NOTE: copy ONLY directories that exist in the image. The boot-artifacts-aarch64 image
 ## ships /aarch64 and /apt (NOT /firmware); copying a missing dir makes `cp` exit non-zero
 ## and the init container crash-loops.
-## Non-null tags must be strings; quote numeric-looking tags (for example, "1.10").
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
 ## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
 ## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
 ## Rendering fails if neither form supplies an image; the error identifies the list entry.
