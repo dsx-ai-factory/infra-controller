@@ -9,6 +9,8 @@
 ##     the machine-a-tron pod IP. Never use this file with real hardware.
 ##   - [site_explorer] throughput knobs for thousands of mock BMCs.
 ##   - [machine_state_controller.controller] max_concurrency = 100.
+##   - nico-api.apiAdmissionControl.enabled: false, because every simulated
+##     agent shares one client identity.
 ##   - [networks.simulated-oob], [networks.simulated-admin] and
 ##     [networks.simulated-underlay]: the DHCP relay targets of the
 ##     machine-a-tron values files in this directory.
@@ -134,6 +136,11 @@ nico-api:
   ## deploy IMG=<registry>/dpf-sim-controller:<tag> creates it with the DPF CRDs.
   dpf:
     rbacCreate: true
+
+  ## Every simulated agent presents the same client identity, so the per-client
+  ## admission limits reject the whole fleet at once. Simulation only.
+  apiAdmissionControl:
+    enabled: false
 
   siteConfig:
     enabled: true

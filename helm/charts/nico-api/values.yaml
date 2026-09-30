@@ -497,6 +497,14 @@ auth:
 machineStateController:
   maxConcurrency: 10
 
+## API admission control. enabled must be true or false, and the chart default
+## matches the binary default. Keep it enabled on real hardware. Disable it for
+## a simulated fleet whose agents share one client identity, or as a rollback
+## escape hatch. The per-client limits stay at the binary defaults and can be
+## changed with an [api_admission_control] table in siteConfig.nicoApiSiteConfig.
+apiAdmissionControl:
+  enabled: true
+
 ## Config files -- can be overridden with custom content
 configFiles:
   nicoApiConfig: ""  # If empty, uses the default from files/

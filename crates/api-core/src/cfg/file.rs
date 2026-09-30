@@ -6387,6 +6387,7 @@ path = "credentials.yaml"
                 "{{ .Values.machineStateController.maxConcurrency | int }}",
                 "10",
             ),
+            ("{{ .Values.apiAdmissionControl.enabled }}", "true"),
             (
                 "{{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}",
                 "[]",
