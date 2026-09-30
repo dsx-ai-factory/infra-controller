@@ -888,12 +888,12 @@ func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input O
 	if input.IpxeScript != nil {
 		it.IpxeScript = input.IpxeScript
 		updatedFields = append(updatedFields, "ipxe_script")
-		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("ipxe_script", *input.IpxeScript))
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.Bool("ipxe_script_set", true))
 	}
 	if input.UserData != nil {
 		it.UserData = input.UserData
 		updatedFields = append(updatedFields, "user_data")
-		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("user_data", *input.UserData))
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.Bool("user_data_set", true))
 	}
 	if input.AllowOverride != nil {
 		it.AllowOverride = *input.AllowOverride

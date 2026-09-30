@@ -976,6 +976,9 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	trace := func(key, value string) {
 		cotel.SetAttribute(instanceDAOSpan, attribute.String("patch."+key, value))
 	}
+	tracePresence := func(key string) {
+		cotel.SetAttribute(instanceDAOSpan, attribute.Bool("patch."+key+"_set", true))
+	}
 	if c.Name != nil {
 		proto.Name = *c.Name
 		columns = append(columns, "name")
@@ -1039,7 +1042,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.IpxeScript != nil {
 		proto.IpxeScript = c.IpxeScript
 		columns = append(columns, "ipxe_script")
-		trace("ipxe_script", *c.IpxeScript)
+		tracePresence("ipxe_script")
 	}
 	if c.AlwaysBootWithCustomIpxe != nil {
 		proto.AlwaysBootWithCustomIpxe = *c.AlwaysBootWithCustomIpxe
@@ -1054,7 +1057,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.UserData != nil {
 		proto.UserData = c.UserData
 		columns = append(columns, "user_data")
-		trace("user_data", *c.UserData)
+		tracePresence("user_data")
 	}
 	if c.AutoNetwork != nil {
 		proto.AutoNetwork = *c.AutoNetwork
@@ -1102,7 +1105,7 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	if c.TpmEkCertificate != nil {
 		proto.TpmEkCertificate = c.TpmEkCertificate
 		columns = append(columns, "tpm_ek_certificate")
-		trace("tpm_ek_certificate", *c.TpmEkCertificate)
+		tracePresence("tpm_ek_certificate")
 	}
 	_ = traceItems // retained for future per-row trace decisions if needed
 

@@ -637,7 +637,7 @@ func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockU
 	if input.Status != nil {
 		ipb.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		cotel.SetAttribute(ipblockDAOSpan, attribute.String("name", *input.Status))
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
