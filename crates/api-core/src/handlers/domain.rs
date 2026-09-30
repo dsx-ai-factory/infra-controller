@@ -74,6 +74,34 @@ fn require_site_agent<T>(request: &Request<T>) -> Result<(), Status> {
     Ok(())
 }
 
+/// RPC RBAC permits both the operator CLI and site agent on these two
+/// methods. Only the site agent may use a reserved ID; conversely its service
+/// identity must never use the unrestricted operator operation. A request
+/// containing both identities is not an operator request.
+fn authorize_domain_intent<T>(request: &Request<T>, reserved: bool) -> Result<(), Status> {
+    if reserved {
+        return require_site_agent(request);
+    }
+    if request
+        .extensions()
+        .get::<AuthContext>()
+        .is_some_and(|auth| {
+            auth.principals.iter().any(|principal| matches!(
+            principal,
+            Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
+        ))
+        })
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "site-agent domain writes require a reserved ID operation".to_string(),
+        )
+        .into());
+    }
+    // The RPC middleware performs ordinary operator RBAC before dispatch.
+    // Direct test-harness callers have no AuthContext and bypass that layer.
+    Ok(())
+}
+
 pub(crate) async fn create(
     api: &Api,
     request: Request<CreateDomainRequest>,
@@ -82,9 +110,7 @@ pub(crate) async fn create(
 
     // A reserved ID is an internal REST replay identity, not a user-supplied
     // ID. The CLI and legacy callers continue to request a fresh Core ID.
-    if request.get_ref().reserved_id.is_some() {
-        require_site_agent(&request)?;
-    }
+    authorize_domain_intent(&request, request.get_ref().reserved_id.is_some())?;
 
     let mut txn = api.txn_begin().await?;
     let req = request.into_inner();
@@ -193,9 +219,7 @@ pub(crate) async fn delete(
 ) -> Result<Response<DomainDeletionResult>, Status> {
     crate::api::log_request_data(&request);
 
-    if request.get_ref().cancel_reserved_id {
-        require_site_agent(&request)?;
-    }
+    authorize_domain_intent(&request, request.get_ref().cancel_reserved_id)?;
     let mut txn = api.txn_begin().await?;
 
     let req = request.into_inner();

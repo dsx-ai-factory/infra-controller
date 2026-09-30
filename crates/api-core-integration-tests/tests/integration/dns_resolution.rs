@@ -235,11 +235,53 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         default_ttl: Some(600),
         reserved_id: Some(id),
     };
+    // A site-agent service cannot drop the reserved-ID fence and obtain a
+    // fresh operator-owned domain, even though RPC RBAC admits this method.
+    let unreserved_site_create = api
+        .create_domain(site_request(CreateDomainRequest {
+            name: "unreserved-site.example".into(),
+            default_ttl: None,
+            reserved_id: None,
+        }))
+        .await
+        .expect_err("SiteAgent must use the reserved create operation");
+    assert_eq!(unreserved_site_create.code(), tonic::Code::PermissionDenied);
+
     let unauthorized = api
         .create_domain(Request::new(payload()))
         .await
         .expect_err("direct caller without SiteAgent identity cannot reserve an ID");
     assert_eq!(unauthorized.code(), tonic::Code::PermissionDenied);
+
+    let mut operator_request = Request::new(CreateDomainRequest {
+        name: "operator-owned.example".into(),
+        default_ttl: None,
+        reserved_id: None,
+    });
+    operator_request
+        .extensions_mut()
+        .insert(carbide_api_core::AuthContext {
+            principals: vec![Principal::ExternalUser(
+                carbide_authn::middleware::ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                ),
+            )],
+            authorization: None,
+        });
+    let operator_zone = api
+        .create_domain(operator_request)
+        .await
+        .expect("operator create remains available")
+        .into_inner();
+    assert_ne!(operator_zone.id, Some(id));
+    api.delete_domain(Request::new(DomainDeletionRequest {
+        id: operator_zone.id,
+        cancel_reserved_id: false,
+    }))
+    .await
+    .expect("operator ordinary delete remains available");
 
     let created = api
         .create_domain(site_request(payload()))
@@ -317,6 +359,28 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
     // caller only knows the ID. The guard must leave both rows intact.
     let domain = env.create_test_domain("referenced.example").await;
     let segment = env.network_controller().create_admin_segment(&domain).await;
+    let unauthorized_site_delete = api
+        .delete_domain(site_request(DomainDeletionRequest {
+            id: Some(domain.id),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .expect_err("SiteAgent cannot perform an operator delete on another domain");
+    assert_eq!(
+        unauthorized_site_delete.code(),
+        tonic::Code::PermissionDenied
+    );
+    let unauthorized_site_owned_delete = api
+        .delete_domain(site_request(DomainDeletionRequest {
+            id: Some(id),
+            cancel_reserved_id: false,
+        }))
+        .await
+        .expect_err("SiteAgent cannot omit the cancellation fence for its own domain");
+    assert_eq!(
+        unauthorized_site_owned_delete.code(),
+        tonic::Code::PermissionDenied
+    );
     let blocked = api
         .delete_domain(Request::new(DomainDeletionRequest {
             id: Some(domain.id),

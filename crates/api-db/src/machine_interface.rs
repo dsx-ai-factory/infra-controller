@@ -634,6 +634,23 @@ pub async fn count_by_segment_id(
     Ok(address_count.max(0) as usize)
 }
 
+/// Prevents machine-interface writers from adding a segment allocation while a
+/// short transaction checks whether that segment can be reassigned.
+///
+/// Ordinary inserts and updates take `ROW EXCLUSIVE`, which conflicts with
+/// this `SHARE` lock. The caller must retain the transaction through the
+/// allocation check and reassignment.
+pub async fn lock_table_for_segment_reassignment(
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    let query = "LOCK TABLE machine_interfaces IN SHARE MODE";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 pub async fn find_one(
     txn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
