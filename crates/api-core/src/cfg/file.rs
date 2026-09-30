@@ -1084,8 +1084,8 @@ impl ApiAdmissionControlConfig {
             self.pending_timeout,
             self.client_idle_timeout,
         )
-            .map(Some)
-            .map_err(|error| eyre::eyre!("api_admission_control.{error}"))
+        .map(Some)
+        .map_err(|error| eyre::eyre!("api_admission_control.{error}"))
     }
 
     /// Reject invalid bounds before the API listener starts.
@@ -1105,9 +1105,9 @@ impl ApiAdmissionControlConfig {
                 self.max_work_in_flight,
                 self.max_pending,
             )
-                .map_err(|error| {
-                    eyre::eyre!("api_admission_control.service_limits.{service_id}.{error}")
-                })?;
+            .map_err(|error| {
+                eyre::eyre!("api_admission_control.service_limits.{service_id}.{error}")
+            })?;
         }
         Ok(())
     }
@@ -1388,13 +1388,13 @@ impl CarbideConfig {
                             .expect("IpNetwork guarantees a valid address-family prefix length")
                     }),
             )
-                .into_iter()
-                .map(|prefix| {
-                    let prefix: IpNet = prefix.into();
-                    IpNetwork::new(prefix.network(), prefix.prefix_len())
-                        .expect("IpNet guarantees a valid address-family prefix length")
-                })
-                .collect(),
+            .into_iter()
+            .map(|prefix| {
+                let prefix: IpNet = prefix.into();
+                IpNetwork::new(prefix.network(), prefix.prefix_len())
+                    .expect("IpNet guarantees a valid address-family prefix length")
+            })
+            .collect(),
         };
         prefixes.sort_by_cached_key(ToString::to_string);
         prefixes.dedup();
@@ -1815,17 +1815,17 @@ fn is_valid_kubernetes_object_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= KUBERNETES_DNS_SUBDOMAIN_MAX_LENGTH
         && value.split('.').all(|label| {
-        let bytes = label.as_bytes();
-        bytes
-            .first()
-            .is_some_and(|byte| is_dns_1123_alphanumeric(*byte))
-            && bytes
-            .last()
-            .is_some_and(|byte| is_dns_1123_alphanumeric(*byte))
-            && bytes
-            .iter()
-            .all(|byte| is_dns_1123_alphanumeric(*byte) || *byte == b'-')
-    })
+            let bytes = label.as_bytes();
+            bytes
+                .first()
+                .is_some_and(|byte| is_dns_1123_alphanumeric(*byte))
+                && bytes
+                    .last()
+                    .is_some_and(|byte| is_dns_1123_alphanumeric(*byte))
+                && bytes
+                    .iter()
+                    .all(|byte| is_dns_1123_alphanumeric(*byte) || *byte == b'-')
+        })
 }
 
 fn is_dns_1123_alphanumeric(byte: u8) -> bool {
@@ -1839,8 +1839,8 @@ fn is_valid_kubernetes_data_key(value: &str) -> bool {
         && value != "."
         && !value.starts_with("..")
         && value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn is_valid_kubernetes_label_key(value: &str) -> bool {
@@ -2171,9 +2171,7 @@ impl Default for DpfMandatoryServicesConfig {
 /// sync at compile time.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(
-    clippy::enum_variant_names
-)] // DOCA is part of the service identity, not a redundant prefix.
+#[allow(clippy::enum_variant_names)] // DOCA is part of the service identity, not a redundant prefix.
 pub enum DpfExtraService {
     /// DOCA Weave DHCP agent service.
     DocaWeaveDhcpAgent,
@@ -3103,8 +3101,8 @@ impl FnnRoutingProfileConfig {
             && !leak_tenant_host_routes_to_underlay.unwrap_or_default()
             && !tenant_leak_communities_accepted.unwrap_or_default()
             && accepted_leaks_from_underlay
-            .as_ref()
-            .is_none_or(Vec::is_empty)
+                .as_ref()
+                .is_none_or(Vec::is_empty)
             && allowed_anycast_prefixes.as_ref().is_none_or(Vec::is_empty)
     }
 }
@@ -6307,7 +6305,7 @@ path = "credentials.yaml"
                 client_key: default_bmc_proxy_client_key(),
                 root_ca: default_bmc_proxy_root_ca(),
             }
-                .proxy_target()
+            .proxy_target()
         };
 
         assert_eq!(
@@ -6456,7 +6454,7 @@ path = "credentials.yaml"
             config.component_manager.as_ref().unwrap(),
             &config.rack_profiles,
         )
-            .unwrap();
+        .unwrap();
         let profiles = &config.rack_profiles.rack_profiles;
         assert_eq!(profiles.len(), 16);
         for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
@@ -7478,7 +7476,7 @@ source = "legacy_download"
 object_kind = "secret"
 "#,
         )
-            .unwrap_err();
+        .unwrap_err();
 
         assert!(error.to_string().contains("unknown field `object_kind`"));
     }
@@ -7574,7 +7572,7 @@ helm_version = "configured-version"
 sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
 "#,
         )
-            .unwrap();
+        .unwrap();
         let expected = crate::dpf_services::default_dpu_agent_service();
 
         assert_eq!(config.services.dpu_agent.name, expected.name);
@@ -7697,7 +7695,7 @@ sign_proxy_url = "http://bf4-dsx-imds.dpf-operator-system.svc.cluster.local:8080
 [deployments.bf4_generic.services.fmds]
 "#,
         )
-            .unwrap();
+        .unwrap();
         let services = config.deployments.bf4_generic.unwrap().services.unwrap();
         let expected_agent = crate::dpf_services::default_dpu_agent_service();
         let expected_fmds = crate::dpf_services::default_fmds_service();
@@ -7730,7 +7728,7 @@ helm_version = "development-version"
 helm_version = "flow-controller-dev"
 "#,
         )
-            .unwrap();
+        .unwrap();
 
         let deployment = config.deployments.bf4_astra.as_ref().unwrap();
         let configured = deployment
@@ -7779,7 +7777,7 @@ deployment_name = "astra-deployment"
 node_label_key = "carbide.nvidia.com/astra"
 "#,
         )
-            .unwrap();
+        .unwrap();
         let deployment = config.deployments.bf4_astra.as_ref().unwrap();
         let resolved = config.resolved_services_for(deployment, DpuDeploymentType::Bf4Astra);
         let dhcp_agent = resolved
@@ -7828,7 +7826,7 @@ docker_image_pull_secret = "site-dpf-image-pull-secret"
 helm_repo_url = "oci://registry.example.test/doca"
 "#,
         )
-            .unwrap();
+        .unwrap();
 
         let deployment = DpfDeploymentConfig::default();
         for deployment_type in [
@@ -8038,7 +8036,7 @@ helm_repo_url = "oci://registry.example.test/doca"
                     name,
                     key,
                 }
-                    .validate()
+                .validate()
             },
         );
     }
