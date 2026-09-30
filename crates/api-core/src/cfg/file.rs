@@ -5699,6 +5699,7 @@ path = "credentials.yaml"
             max_bios_config_retries: 3,
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
+            full_lockdown_recovery_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -5747,6 +5748,7 @@ path = "credentials.yaml"
                 max_bios_config_retries: 3,
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
+                full_lockdown_recovery_enabled: false,
             }
         );
     }
@@ -5771,8 +5773,19 @@ path = "credentials.yaml"
                 max_bios_config_retries: 3,
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
+                full_lockdown_recovery_enabled: false,
             }
         );
+    }
+
+    #[test]
+    fn full_lockdown_recovery_requires_explicit_opt_in() {
+        let omitted: MachineStateControllerConfig = serde_json::from_str("{}").unwrap();
+        assert!(!omitted.full_lockdown_recovery_enabled);
+        assert!(!MachineStateControllerConfig::default().full_lockdown_recovery_enabled);
+        let enabled: MachineStateControllerConfig =
+            serde_json::from_str(r#"{"full_lockdown_recovery_enabled":true}"#).unwrap();
+        assert!(enabled.full_lockdown_recovery_enabled);
     }
 
     #[test]

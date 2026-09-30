@@ -851,6 +851,7 @@ dependencies = [
  "indexmap 2.14.0",
  "itertools 0.14.0",
  "lazy_static",
+ "libredfish",
  "mac_address",
  "metrics-endpoint",
  "nix 0.31.3",
