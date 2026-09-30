@@ -45,6 +45,36 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 		{name: "validation and authorization", run: runCreateDomainHandlerValidationAndAuthorization},
 		{name: "reservation DB failure does not call Core", run: runCreateDomainHandlerCompensatesCoreAfterDatabaseFailure},
 		{
+			name: "lost cancellation reply cannot allow late Ready completion",
+			run: func(t *testing.T) {
+				fixture := newDomainHandlerFixture(t, nil)
+				fixture.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, nil, tp.NewNonRetryableApplicationError(
+					"Domain rejected", swe.ErrTypeNICoFailedPrecondition, errors.New("Domain rejected")))
+				fixture.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, errors.New("cancellation reply lost"))
+				recorder := fixture.request(t, NewCreateDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodPost, "/", "", model.APIDomainCreateRequest{
+					Name: "lost-reply.example.com", SiteID: fixture.site.ID.String(),
+				})
+				require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+				fixture.requireDomainWithStatus(t, "lost-reply.example.com", cdbm.DomainStatusRejecting)
+				domains, _, err := cdbm.NewDomainDAO(fixture.dbSession).GetAll(context.Background(), nil,
+					cdbm.DomainFilterInput{TenantIDs: []uuid.UUID{fixture.tenant.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				require.NoError(t, err)
+				require.Len(t, domains, 1)
+				domain := domains[0]
+				require.NotNil(t, domain.ControllerDomainID)
+				// Simulate the original CreateDomain's delayed success after Core
+				// cancellation committed but its response was lost to REST.
+				changed, err := cdb.WithTxResult(context.Background(), fixture.dbSession, func(tx *cdb.Tx) (bool, error) {
+					return cdbm.NewDomainDAO(fixture.dbSession).TransitionOwned(context.Background(), tx, domain.ID,
+						*domain.ControllerDomainID, cdbm.DomainStatusPending, cdbm.DomainStatusReady)
+				})
+				require.NoError(t, err)
+				assert.False(t, changed, "a durable cancellation intent must fence all late Ready writes")
+				fixture.requireDomainWithStatus(t, "lost-reply.example.com", cdbm.DomainStatusRejecting)
+			},
+		},
+		{
 			name: "Core rejection preserves Error reservation",
 			run: func(t *testing.T) {
 				fixture := newDomainHandlerFixture(t, nil)
@@ -54,7 +84,6 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 					errors.New("Domain rejected"),
 				))
 
-				fixture.expectCore(t, corev1.Forge_FindDomain_FullMethodName, &corev1.DomainList{}, nil)
 				fixture.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
 				recorder := fixture.request(t, NewCreateDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodPost, "/", "", model.APIDomainCreateRequest{
 					Name:   "rejected.example.com",

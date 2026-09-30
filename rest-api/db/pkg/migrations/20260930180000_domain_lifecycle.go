@@ -63,7 +63,7 @@ func domainLifecycleUpMigration(ctx context.Context, db *bun.DB) error {
 		CREATE INDEX domain_recovery_due_idx ON domain (recovery_next_at, updated, id)
 		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
 		AND controller_domain_id IS NOT NULL
-		AND status IN ('DomainStatusPending', 'DomainStatusDeleting')
+		AND status IN ('DomainStatusPending', 'DomainStatusRejecting', 'DomainStatusDeleting')
 	`)
 	if err != nil {
 		return err

@@ -16,6 +16,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	tclient "go.temporal.io/sdk/client"
 )
 
 type ManageDomain struct {
@@ -83,20 +84,15 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 			// this intent. A proxy timeout or transport failure leaves the same
 			// reserved ID Pending for safe replay on a later sweep.
 			if apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusPreconditionFailed {
-				resolution, err := cdb.WithTxResult(ctx, m.DB, func(tx *cdb.Tx) (struct{ ready, finalized bool }, error) {
-					ready, finalized, err := dao.FinalizeRejectedOwned(ctx, tx, d.ID, *d.ControllerDomainID, d.RecoveryToken, func(ctx context.Context) (bool, bool) {
-						return common.ReservedDomainRejectionFence(ctx, stc, *d.ControllerDomainID, d.Hostname, d.SiteID.String())
-					})
-					return struct{ ready, finalized bool }{ready, finalized}, err
+				staged, err := cdb.WithTxResult(ctx, m.DB, func(tx *cdb.Tx) (bool, error) {
+					return dao.StageRejectedOwned(ctx, tx, d.ID, *d.ControllerDomainID, d.RecoveryToken)
 				})
-				if err != nil {
-					return fmt.Errorf("Core rejection reconciliation unconfirmed: %w", err)
+				if err != nil || !staged {
+					return fmt.Errorf("Domain rejection staging failed: staged=%t err=%v", staged, err)
 				}
-				if !resolution.finalized {
-					return fmt.Errorf("Domain recovery claim superseded before cancellation")
-				}
-
-				return nil
+				// The persisted Rejecting state prevents an older create from
+				// completing Ready, even when this cancellation's reply is lost.
+				return m.cancelRejected(ctx, dao, d, stc)
 			}
 			return fmt.Errorf("reserved Core create unconfirmed: %s", apiErr.Message)
 		}
@@ -107,6 +103,8 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		if err != nil || !changed {
 			return fmt.Errorf("Domain Ready CAS failed: changed=%t err=%v", changed, err)
 		}
+	case cdbm.DomainStatusRejecting:
+		return m.cancelRejected(ctx, dao, d, stc)
 	case cdbm.DomainStatusDeleting:
 		// Even an absent Core row must leave a durable cancellation tombstone
 		// before REST may soft-delete its projection (late create race).
@@ -120,6 +118,20 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		}
 	default:
 		return fmt.Errorf("unexpected Domain recovery status %q", d.Status)
+	}
+	return nil
+}
+
+// cancelRejected retries the same reserved ID after any lost Core reply. Error
+// is terminal only after Core confirms its durable cancellation tombstone.
+func (m ManageDomain) cancelRejected(ctx context.Context, dao cdbm.DomainDAO, d *cdbm.Domain, stc tclient.Client) error {
+	req := &corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: d.ControllerDomainID.String()}, CancelReservedId: true}
+	if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
+		return fmt.Errorf("Core rejection cancellation unconfirmed: %s", apiErr.Message)
+	}
+	changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusRejecting, cdbm.DomainStatusError, false)
+	if err != nil || !changed {
+		return fmt.Errorf("Domain rejection completion failed: changed=%t err=%v", changed, err)
 	}
 	return nil
 }

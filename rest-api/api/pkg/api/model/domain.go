@@ -102,7 +102,7 @@ func mapDomainStatus(status string) string {
 	switch status {
 	case cdbm.DomainStatusReady:
 		return "Ready"
-	case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering:
+	case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering, cdbm.DomainStatusRejecting:
 		return "Pending"
 	case cdbm.DomainStatusDeleting:
 		return "Deleting"

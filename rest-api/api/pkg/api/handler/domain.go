@@ -102,7 +102,7 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 		switch domain.Status {
 		case cdbm.DomainStatusReady:
 			return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
-		case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering:
+		case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering, cdbm.DomainStatusRejecting:
 			return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
 		default:
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain reservation is not available for creation", nil)
@@ -118,21 +118,27 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 		if apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusPreconditionFailed {
 			// These definitive Core validation/conflict responses may be surfaced;
 			// retain a durable Error row so a retry cannot adopt by DNS name.
-			resolution, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (struct{ ready, finalized bool }, error) {
-				ready, finalized, err := domainDAO.FinalizeRejectedOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, nil, func(ctx context.Context) (bool, bool) {
-					return common.ReservedDomainRejectionFence(ctx, stc, *domain.ControllerDomainID, domain.Hostname, site.ID.String())
-				})
-				return struct{ ready, finalized bool }{ready, finalized}, err
+			staged, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {
+				return domainDAO.StageRejectedOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, nil)
 			})
-			if transitionErr == nil && resolution.finalized {
-				if resolution.ready {
-					domain.Status = cdbm.DomainStatusReady
-					return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
+			if transitionErr == nil && staged {
+				domain.Status = cdbm.DomainStatusRejecting
+				// A lost cancel reply leaves Rejecting durable. A delayed successful
+				// create cannot mark it Ready; the periodic recovery retries cancel.
+				cancelErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName,
+					&corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: domain.ControllerDomainID.String()}, CancelReservedId: true}, nil, site.ID.String())
+				if cancelErr == nil {
+					finalized, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {
+						return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, cdbm.DomainStatusRejecting, cdbm.DomainStatusError)
+					})
+					if err == nil && finalized {
+						return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+					}
+					logger.Error().Err(err).Str("domainID", domain.ID.String()).Msg("Domain cancellation confirmed but Error projection unresolved")
 				}
-				return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+				return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
 			}
-
-			logger.Error().Err(transitionErr).Str("domainID", domain.ID.String()).Msg("could not persist rejected Domain intent")
+			logger.Error().Err(transitionErr).Str("domainID", domain.ID.String()).Msg("could not stage rejected Domain intent")
 		}
 		// A 504 does not cancel an in-flight Site workflow. Keep the durable
 		// reservation rather than reporting a false rollback or issuing a new ID.
@@ -384,7 +390,7 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 	// times out, the API process exits, or the final REST write fails.
 	domainDAO := cdbm.NewDomainDAO(ddh.dbSession)
 	if domain.Status != cdbm.DomainStatusDeleting {
-		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusError {
+		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusRejecting && domain.Status != cdbm.DomainStatusError {
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
 		}
 		changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
