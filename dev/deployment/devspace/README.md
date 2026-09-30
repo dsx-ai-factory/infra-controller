@@ -114,14 +114,14 @@ devspace deploy
 
 DevSpace will:
 
-- compile the shared Core binaries once with [`Dockerfile.core-artifacts`](Dockerfile.core-artifacts), then build the local runtime images from [`Dockerfile.api`](Dockerfile.api), [`Dockerfile.bmc-proxy`](Dockerfile.bmc-proxy), and [`Dockerfile.machine-a-tron`](Dockerfile.machine-a-tron); the `full` profile also builds [`Dockerfile.pxe`](Dockerfile.pxe)
+- compile the shared Core binaries once with [`Dockerfile.core-artifacts`](Dockerfile.core-artifacts), then build the local runtime images from [`Dockerfile.api`](Dockerfile.api), [`Dockerfile.bmc-proxy`](Dockerfile.bmc-proxy), and [`Dockerfile.machine-a-tron`](Dockerfile.machine-a-tron); the `full` profile also packages PXE with [`Dockerfile.pxe`](Dockerfile.pxe)
 - build the REST API, workflow, site-manager, site-agent, database migration, certificate-manager, and MCP images from [`rest-api/docker/local`](../../../rest-api/docker/local)
 - deploy the Helm chart in [`helm/`](../../../helm) (including `nico-machine-a-tron`)
 - deploy the REST umbrella, site-agent, and MCP charts in [`helm/rest`](../../../helm/rest)
 - inject the built image names and DevSpace-generated tags into both deployments at runtime
 - register a local REST site, configure its Temporal namespace, and confirm that the site agent establishes a Core gRPC connection
 
-The image builds are configured in [`devspace.yaml`](../../../devspace.yaml). DevSpace always invokes the native [`dev/docker/Dockerfile.build-container-x86_64`](../../../dev/docker/Dockerfile.build-container-x86_64) or [`dev/docker/Dockerfile.build-container-aarch64`](../../../dev/docker/Dockerfile.build-container-aarch64) build so Docker notices architecture and Dockerfile changes while reusing unchanged layers from its cache. In the first build stage, a single shared builder compiles the API, admin CLI, BMC proxy, and machine-a-tron binaries while the REST images build in parallel. The builder exports those binaries to the local `nico-devspace-core-artifacts` image. In the second stage, the three Core runtime Dockerfiles copy their binaries from that image in parallel and add only their distinct runtime packages and assets. The `full` profile separately compiles and packages PXE while sharing the same BuildKit Cargo caches. DevSpace always invokes the enabled runtime builds because its custom-build change cache can outlive the corresponding local Docker images; Docker still reuses unchanged layers. BuildKit cache mounts are used for Cargo registry, Cargo git checkouts, and Cargo target output so rebuilds stay fast without copying host build artifacts into the image.
+The image builds are configured in [`devspace.yaml`](../../../devspace.yaml). DevSpace always invokes the native [`dev/docker/Dockerfile.build-container-x86_64`](../../../dev/docker/Dockerfile.build-container-x86_64) or [`dev/docker/Dockerfile.build-container-aarch64`](../../../dev/docker/Dockerfile.build-container-aarch64) build so Docker notices architecture and Dockerfile changes while reusing unchanged layers from its cache. In the first build stage, a single shared builder compiles the API, admin CLI, BMC proxy, machine-a-tron, and PXE binaries while the REST images build in parallel. The builder exports those binaries to the local `nico-devspace-core-artifacts` image. In the second stage, the three Core runtime Dockerfiles copy their binaries from that image in parallel and add only their distinct runtime packages and assets. The `full` profile packages the PXE binary from the same shared artifacts image; it does not start a second Cargo build. DevSpace always invokes the enabled runtime builds because its custom-build change cache can outlive the corresponding local Docker images; Docker still reuses unchanged layers. BuildKit cache mounts are used for Cargo registry, Cargo git checkouts, and Cargo target output so rebuilds stay fast without copying host build artifacts into the image.
 
 Host setup preloads PostgreSQL 14.5 for the DevSpace REST migration wait container. It also aliases that cached image as 14.4 inside the kind node for the standalone REST local deployment path, avoiding a second PostgreSQL image pull.
 
@@ -196,7 +196,7 @@ The `full` profile inherits `dsx-exchange` and also builds and deploys the
 dedicated `nico-pxe` image and HTTP service:
 
 ```bash
-devspace deploy -n nico-system --profile full --build-sequential
+devspace deploy -n nico-system --profile full
 ```
 
 The default and `dsx-exchange` profiles leave `nico-pxe` disabled. The local

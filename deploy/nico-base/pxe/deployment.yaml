@@ -34,6 +34,9 @@ spec:
         kubectl.kubernetes.io/default-container: nico-pxe
     spec:
       securityContext:
+        # Keep artifact sidecars root for copying; only PXE serves as UID 10001.
+        # The boot-artifacts component grants the serving group read/traverse
+        # on copied artifacts, including source files with mode 0600.
         fsGroup: 10001
       containers:
         - name: nico-pxe

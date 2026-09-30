@@ -3,20 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM build-container-localdev AS builder
-
-ENV CARGO_HOME=/cargo-home
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-ENV CARGO_TARGET_DIR=/cargo-target
-
-WORKDIR /workspace
-COPY . .
-
-RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=locked \
-  --mount=type=cache,id=nico-devspace-cargo-target,target=/cargo-target,sharing=locked \
-  cargo build -p carbide-pxe --bin carbide --locked && \
-  mkdir -p /artifacts && \
-  cp /cargo-target/debug/carbide /artifacts/carbide
+FROM nico-devspace-core-artifacts AS artifacts
 
 FROM ubuntu:24.04
 
@@ -30,7 +17,7 @@ RUN groupadd --gid 10001 nico \
   /opt/carbide/scout-firmware-scripts \
   /forge-boot-artifacts/blobs
 
-COPY --chown=nico:nico --from=builder /artifacts/carbide /opt/carbide/carbide
+COPY --chown=nico:nico --from=artifacts /artifacts/carbide /opt/carbide/carbide
 COPY --chown=nico:nico pxe/templates/ /opt/carbide/pxe/templates/
 COPY --chown=nico:nico pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
 

@@ -516,6 +516,8 @@ profiles:
               - include
               - dev/docker/Dockerfile.build-container-x86_64
               - dev/docker/Dockerfile.build-container-aarch64
+              - dev/deployment/devspace/Dockerfile.core-artifacts
+              - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
               - dev/deployment/devspace/Dockerfile.pxe
               - dev/deployment/devspace/Dockerfile.pxe.dockerignore
               - pxe/ipxe/local/embed.ipxe

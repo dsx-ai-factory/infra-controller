@@ -74,6 +74,9 @@ initContainers: []
 ## NOTE: copy ONLY directories that exist in the image. The boot-artifacts-aarch64 image
 ## ships /aarch64 and /apt (NOT /firmware); copying a missing dir makes `cp` exit non-zero
 ## and the init container crash-loops.
+## Each copy command must chgrp the copied trees to the serving GID 10001 and
+## chmod g+rX: source files may be 0600, and fsGroup does not repair copied modes.
+## Do not add world permissions; retain site-specific restrictions.
 ## Prefer separate `repository` + `tag` fields (they win when set). The combined
 ## `image: <ref>:<tag>` form is still honored for backward compatibility.
 bootArtifactContainers: []
@@ -81,15 +84,15 @@ bootArtifactContainers: []
 #   - name: boot-artifacts-x86-64
 #     repository: <your-registry>/boot-artifacts-x86_64
 #     tag: <tag>
-#     command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /x86_64 /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/x86_64; chmod -R g+rX /forge-boot-artifacts/blobs/internal/x86_64"]
 #   - name: boot-artifacts-aarch64
 #     repository: <your-registry>/boot-artifacts-aarch64
 #     tag: <tag>
-#     command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt"]
 #   - name: machine-validation-config
 #     repository: <your-registry>/machine-validation-config
 #     tag: <tag>
-#     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
+#     command: ["sh", "-c", "set -e; cp -r /machine-validation /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/machine-validation; chmod -R g+rX /forge-boot-artifacts/blobs/internal/machine-validation"]
 
 ## Boot artifact serving configuration
 ## The chart always mounts writable scratch storage at <servePath>/blobs/internal,

@@ -35,6 +35,9 @@ spec:
     spec:
       serviceAccountName: {{ include "nico-pxe.name" . }}
       securityContext:
+        # The artifact init containers need root to copy from their images.
+        # Only the serving container runs as UID/GID 10001; fsGroup alone
+        # cannot make source-mode 0600 copies readable (see deploy component).
         fsGroup: 10001
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

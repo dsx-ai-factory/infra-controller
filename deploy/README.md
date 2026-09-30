@@ -317,14 +317,23 @@ The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io`, reads Rocket/pxe
 **External inputs you must provide**
 
 - A published PXE image (override `yourdockerregistry.com/path/to/nico-core:latest`).
-- ConfigMap(s) with `Rocket.toml` / templates at `/tmp/nico` plus any env ConfigMap (`nico-pxe-env-config`) your boot flow requires.
+- Required operator-supplied ConfigMap `nico-pxe-config` with a `Rocket.toml`
+  key mounted at `/tmp/nico/Rocket.toml`. The base does not generate it, and
+  the pod cannot start without it. Optional `nico-pxe-env-config` supplies
+  environment settings. The `full` DevSpace profile packages PXE request
+  templates in its image.
 - A cert‑manager `ClusterIssuer` for the SPIFFE certificate.
 
 **Quick start**
 
 1. Build/publish the PXE image and patch the Deployment to use it.
-2. Create the config/env ConfigMaps referenced above.
-3. Deploy PXE:
+2. Create `nico-pxe-config` with `Rocket.toml` for your environment before
+   applying the Deployment; provide the optional env ConfigMap if needed. Do
+   not commit site credentials to this repo.
+3. If a downstream JSON6902 overlay already adds a `config` volume to
+   `nico-pxe`, remove that addition or replace the base `config` volume instead.
+   Duplicate volume names are invalid; retain the site-specific Rocket source.
+4. Deploy PXE:
 
    ```bash
    kubectl apply -k deploy/nico-base/pxe -n <NICO_NAMESPACE>
@@ -449,7 +458,7 @@ Reusable Kustomize components that layer registry credentials and boot artifact 
 
 Path: `deploy/components/`
 
-- Component `boot-artifacts-containers` – JSON6902 patch that adds an EmptyDir volume plus sidecar containers to `nico-pxe` and `nico-api` Deployments. The sidecars copy `x86_64`, `aarch64`, `apt`, `firmware`, and machine-validation artifacts into `/nico-boot-artifacts/blobs/internal`, including a legacy x86_64 image for backward compatibility.
+- Component `boot-artifacts-containers` – JSON6902 patch that adds an EmptyDir volume plus sidecar containers to `nico-pxe` and `nico-api` Deployments. The sidecars copy `x86_64`, `aarch64`, `apt`, and machine-validation artifacts into `/forge-boot-artifacts/blobs/internal`, including a legacy x86_64 image for backward compatibility.
 - Component `imagepullsecret` – JSON6902 patch that injects an `imagepullsecret` reference into all Deployments, Jobs, and StatefulSets.
 
 **External inputs you must provide**

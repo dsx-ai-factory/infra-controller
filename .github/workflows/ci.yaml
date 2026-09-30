@@ -160,6 +160,7 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      pxe_kustomize_changed: ${{ steps.base-container-gate.outputs.pxe_kustomize_changed }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
     steps:
@@ -207,10 +208,12 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+            pxe_kustomize:
               - 'deploy/components/boot-artifacts-containers/**'
               - 'deploy/nico-base/api/**'
               - 'deploy/nico-base/pxe/**'
-              - 'deploy/tests/**'
+              - 'deploy/tests/pxe-with-boot-artifacts/**'
+              - 'deploy/tests/test-pxe-non-root.sh'
       - name: Calculate version
         id: version
         run: |
@@ -398,6 +401,7 @@ jobs:
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
+          PXE_KUSTOMIZE_CHANGED: ${{ steps.build-container-changes.outputs.pxe_kustomize }}
         run: |
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
@@ -408,6 +412,7 @@ jobs:
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
+          pxe_kustomize_changed=false
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-rebuild-base-containers ]]; then
             build_container_x86_64_run=true
@@ -430,6 +435,10 @@ jobs:
 
           if [[ "${SOURCE_FILES_CHANGED}" == "true" ]]; then
              source_files_changed=true
+          fi
+
+          if [[ "${PXE_KUSTOMIZE_CHANGED}" == "true" ]]; then
+             pxe_kustomize_changed=true
           fi
 
           if [[ "${RUNTIME_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
@@ -461,6 +470,7 @@ jobs:
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
+          echo "pxe_kustomize_changed=${pxe_kustomize_changed}" >> "$GITHUB_OUTPUT"
 
           MAJOR_MINOR=$(echo "${VERSION}" | cut -d. -f1,2)
           echo "major_minor_version=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
@@ -1618,6 +1628,25 @@ jobs:
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
 
+  pxe-kustomize-render:
+    needs: prepare
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.pxe_kustomize_changed == 'true' }}
+    runs-on: linux-amd64-cpu32
+    container:
+      image: ${{ needs.prepare.outputs.lint_container_ref }}
+      credentials:
+        username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+        password: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Trust the workspace in this container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Test PXE Kustomize renders
+        run: deploy/tests/test-pxe-non-root.sh
+
   lint-police:
     needs:
       - prepare
@@ -1644,9 +1673,6 @@ jobs:
       # remaining steps run as root against the runner-owned bind mount.
       - name: Trust the workspace in this container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Test PXE Kustomize renders
-        run: deploy/tests/test-pxe-non-root.sh
 
       - name: Validate Cargo metadata
         run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
@@ -2131,6 +2157,7 @@ jobs:
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
+      - pxe-kustomize-render
     steps:
       - name: Generate summary
         run: |
@@ -2318,6 +2345,7 @@ jobs:
       # Source and repository policy checks
       - proto-police
       - lint-police
+      - pxe-kustomize-render
       - migration-police
       - proto-breaking-changes
       - check-rest-core-proto-sync

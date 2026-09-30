@@ -11,7 +11,8 @@ kubectl kustomize "${repo_root}/deploy/nico-base/pxe" \
   | kubectl patch --local -f - --type=merge --patch '{}' -o json \
   | jq --exit-status --slurp '
       [.[] | select(.kind == "Deployment" and .metadata.name == "nico-pxe")] as $deployments
-      | ($deployments | length) == 1
+      | ([.[] | select(.kind == "ConfigMap" and .metadata.name == "nico-pxe-config")] | length) == 0
+        and ($deployments | length) == 1
         and ($deployments[0].spec.template.spec as $pod
           | [$pod.containers[] | select(.name == "nico-pxe")] as $main
           | ($main | length) == 1
@@ -20,7 +21,7 @@ kubectl kustomize "${repo_root}/deploy/nico-base/pxe" \
             and ($main[0].securityContext.runAsNonRoot == true)
             and ($main[0].securityContext.runAsUser == 10001)
             and ($main[0].securityContext.runAsGroup == 10001)
-            and ([$pod.volumes[] | select(.name == "config" and .configMap.name == "nico-pxe-config")] | length) == 1
+            and ([$pod.volumes[] | select(.name == "config" and .configMap.name == "nico-pxe-config" and .configMap.optional != true)] | length) == 1
             and ([$pod.volumes[] | select(.name == "boot-artifacts" and .emptyDir == {})] | length) == 1
             and ([$main[0].volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1
             and (all($pod.containers[].volumeMounts[]?; .name as $name | any($pod.volumes[]; .name == $name)))
@@ -54,6 +55,8 @@ kubectl kustomize "${repo_root}/deploy/tests/pxe-with-boot-artifacts" \
         and (all($pxe_artifacts[]; . as $artifact | ([$artifact.volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1))
         and (all($api_artifacts[]; . as $artifact | ([$artifact.volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1))
         and (all($pxe_artifacts[], $api_artifacts[]; (.securityContext.runAsUser? == null) and (.securityContext.runAsNonRoot? == null)))
+        and (all($pxe_artifacts[], $api_artifacts[]; .args[-1] | contains("chgrp -R 10001 ") and contains("chmod -R g+rX ")))
+        and (all($pxe_artifacts[], $api_artifacts[]; .args[-1] | contains("cp -r /firmware ") | not))
         and ([$api.volumes[] | select(.name == "boot-artifacts" and .emptyDir == {})] | length) == 1
         and ([$api_main.volumeMounts[] | select(.name == "boot-artifacts" and .mountPath == "/forge-boot-artifacts/blobs/internal")] | length) == 1
         and (all($pxe.containers[].volumeMounts[]?; .name as $name | any($pxe.volumes[]; .name == $name)))
