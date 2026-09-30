@@ -15,26 +15,24 @@
  * limitations under the License.
  */
 
-mod create;
-mod delete;
-mod show;
-mod update;
+use rpc::admin_cli::OutputFormat;
 
-// Cross-module re-exports for jump module
-use clap::Parser;
-pub(crate) use show::args::Args as ShowDomain;
-pub(crate) use show::cmd::handle_show;
+use super::args::Args;
+use crate::domain::show::cmd::convert_domain_to_nice_format;
+use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
 
-use crate::cfg::dispatch::Dispatch;
-
-#[derive(Parser, Debug, Dispatch)]
-pub(crate) enum Cmd {
-    #[clap(about = "Create a forward DNS domain")]
-    Create(create::Args),
-    #[clap(about = "Delete an unreferenced DNS domain")]
-    Delete(delete::Args),
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
-    #[clap(about = "Update domain default TTL")]
-    Update(update::Args),
+pub(super) async fn create(
+    args: Args,
+    output_format: OutputFormat,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
+    let created = api_client
+        .create_domain(args.name, args.default_ttl)
+        .await?;
+    match output_format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&created)?),
+        _ => println!("{}", convert_domain_to_nice_format(&created)?),
+    }
+    Ok(())
 }

@@ -15,26 +15,21 @@
  * limitations under the License.
  */
 
-mod create;
-mod delete;
-mod show;
-mod update;
-
-// Cross-module re-exports for jump module
+use carbide_uuid::domain::DomainId;
 use clap::Parser;
-pub(crate) use show::args::Args as ShowDomain;
-pub(crate) use show::cmd::handle_show;
 
-use crate::cfg::dispatch::Dispatch;
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
 
-#[derive(Parser, Debug, Dispatch)]
-pub(crate) enum Cmd {
-    #[clap(about = "Create a forward DNS domain")]
-    Create(create::Args),
-    #[clap(about = "Delete an unreferenced DNS domain")]
-    Delete(delete::Args),
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
-    #[clap(about = "Update domain default TTL")]
-    Update(update::Args),
+Delete a domain that has no live network or interface references:
+    $ nico-admin-cli domain delete 12345678-1234-5678-90ab-cdef01234567
+
+")]
+pub(crate) struct Args {
+    #[clap(
+        value_name = "DomainId",
+        help = "ID of the unreferenced domain to delete"
+    )]
+    pub(super) domain: DomainId,
 }

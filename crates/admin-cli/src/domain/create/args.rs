@@ -15,26 +15,26 @@
  * limitations under the License.
  */
 
-mod create;
-mod delete;
-mod show;
-mod update;
-
-// Cross-module re-exports for jump module
 use clap::Parser;
-pub(crate) use show::args::Args as ShowDomain;
-pub(crate) use show::cmd::handle_show;
 
-use crate::cfg::dispatch::Dispatch;
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
 
-#[derive(Parser, Debug, Dispatch)]
-pub(crate) enum Cmd {
-    #[clap(about = "Create a forward DNS domain")]
-    Create(create::Args),
-    #[clap(about = "Delete an unreferenced DNS domain")]
-    Delete(delete::Args),
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
-    #[clap(about = "Update domain default TTL")]
-    Update(update::Args),
+Create a forward DNS domain using the site default TTL:
+    $ nico-admin-cli domain create example.com
+
+Create a domain with a ten-minute default record TTL:
+    $ nico-admin-cli domain create example.com --default-ttl 600
+
+")]
+pub(crate) struct Args {
+    #[clap(value_name = "NAME", help = "Lowercase forward DNS domain name")]
+    pub(super) name: String,
+    #[clap(
+        long,
+        value_name = "SECONDS",
+        help = "Default record TTL, 30 to 86400 seconds"
+    )]
+    pub(super) default_ttl: Option<u32>,
 }

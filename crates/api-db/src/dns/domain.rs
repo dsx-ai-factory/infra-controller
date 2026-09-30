@@ -51,6 +51,8 @@ pub struct DbDomain {
     pub name: String,
     /// Default record TTL; absence means the site default.
     pub default_ttl: Option<model::dns::ZoneTtl>,
+    pub reserved_create: bool,
+    pub create_default_ttl: Option<model::dns::ZoneTtl>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -95,8 +97,64 @@ impl<'a> ColumnInfo<'a> for NameColumn {
     }
 }
 
+/// Serialize all forward-zone writers against the *entire* forward namespace.
+/// A name-specific lock does not serialize an ancestor with its child. Legacy
+/// writers retain the historical ability to create nested zones, but cannot
+/// race a tenant-reserved overlap check into accepting an unsafe new zone.
+async fn lock_forward_namespace(txn: &mut PgConnection, name: &str) -> DatabaseResult<bool> {
+    if super::normalize_reverse_zone_name(name).is_some() {
+        return Ok(false);
+    }
+    let query = "SELECT pg_advisory_xact_lock(hashtextextended('dns:forward-zone-namespace', 0))";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(true)
+}
+
+/// Checked under the forward namespace lock. Only newly reserved (tenant)
+/// zones reject ancestor/descendant authority changes against all zones;
+/// legacy admin callers can nest legacy zones, but not bypass an existing
+/// reserved zone. Every forward writer participates in the same lock.
+async fn ensure_forward_name_free(
+    txn: &mut PgConnection,
+    name: &str,
+    reject_overlaps: bool,
+) -> DatabaseResult<()> {
+    let name = super::normalize_domain(name);
+    let query = "SELECT EXISTS (
+        SELECT 1 FROM domains
+        WHERE deleted IS NULL
+          AND lower(rtrim(name, '.')) NOT LIKE '%.in-addr.arpa'
+          AND lower(rtrim(name, '.')) NOT LIKE '%.ip6.arpa'
+          AND (
+            lower(rtrim(name, '.')) = $1
+            OR (($2 OR reserved_create) AND (
+              right(lower(rtrim(name, '.')), length($1) + 1) = '.' || $1
+              OR right($1, length(lower(rtrim(name, '.'))) + 1) = '.' || lower(rtrim(name, '.'))
+            ))
+          )
+    )";
+    let occupied: bool = sqlx::query_scalar(query)
+        .bind(&name)
+        .bind(reject_overlaps)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if occupied {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "forward DNS domain {name} conflicts with an existing zone"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult<Domain> {
     validate_domain_name(&value.name)?;
+    if lock_forward_namespace(txn, &value.name).await? {
+        ensure_forward_name_free(txn, &value.name, false).await?;
+    }
 
     // Create default metadata entry
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
@@ -113,12 +171,43 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     }
 }
 
+/// Create an internal REST-owned domain with the ID durably reserved before
+/// the RPC. The caller must hold the exclusive per-ID advisory transaction lock
+/// (via `lock_id_exclusive`) and check that this ID does not exist.
+pub async fn persist_reserved(
+    value: NewDomain,
+    id: DomainId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<Domain> {
+    validate_domain_name(&value.name)?;
+    if lock_forward_namespace(txn, &value.name).await? {
+        ensure_forward_name_free(txn, &value.name, true).await?;
+    }
+    let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
+    let query = "INSERT INTO domains
+                 (id, name, soa, domain_metadata_id, default_ttl, reserved_create, create_default_ttl)
+                 VALUES ($1, $2, $3, $4, $5, true, $5) RETURNING *";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(id)
+        .bind(&value.name)
+        .bind(sqlx::types::Json(&value.soa))
+        .bind(metadata_id)
+        .bind(value.default_ttl)
+        .fetch_one(txn)
+        .await
+        .map(Domain::from)
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Create the domain only if it would be the first one
 pub async fn persist_first(
     value: &NewDomain,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<Domain>> {
     validate_domain_name(&value.name)?;
+    // Preserve the historic `None` on nonempty domains, but serialize
+    // forward writers so the tenant overlap scan cannot race this insert.
+    lock_forward_namespace(txn, &value.name).await?;
 
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
@@ -253,6 +342,143 @@ pub async fn find_by_uuid(
         .map(|f| f.first().cloned())
 }
 
+/// Locks a live domain identity while a caller creates a reference to it.
+///
+/// The shared advisory lock permits concurrent reference creation but conflicts
+/// with the exclusive lock acquired by [`find_by_uuid_for_delete`]. Callers
+/// must keep the transaction open until the reference is persisted.
+pub async fn lock_live_for_reference(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<(), DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock_shared(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let query = "SELECT EXISTS (SELECT 1 FROM domains WHERE id = $1 AND deleted IS NULL)";
+    let exists: bool = sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if !exists {
+        return Err(DatabaseError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Exclusively locks a domain identity, including an as-yet-uncreated ID.
+pub async fn lock_id_exclusive(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<(), DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+    Ok(())
+}
+
+/// Exclusively locks a domain identity for deletion, then finds the domain.
+/// Deleted domains are included so repeated deletion remains idempotent.
+pub async fn find_by_uuid_for_delete(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<Option<Domain>, DatabaseError> {
+    lock_id_exclusive(txn, uuid).await?;
+    let query = "SELECT * FROM domains WHERE id = $1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(uuid)
+        .fetch_optional(txn)
+        .await
+        .map(|domain| domain.map(Domain::from))
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Reports whether a live network segment or machine interface references the
+/// domain. The caller must first hold the delete lock for this domain.
+pub async fn has_live_references(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (
+                     SELECT 1
+                     FROM network_segments
+                     WHERE subdomain_id = $1 AND deleted IS NULL
+                 ) OR EXISTS (
+                     SELECT 1
+                     FROM machine_interfaces
+                     WHERE domain_id = $1
+                 )";
+    sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Returns the immutable create-intent snapshot for a locked ID, including
+/// a soft-deleted row, so retries cannot adopt a legacy/foreign zone.
+pub async fn reserved_create_intent(
+    txn: &mut PgConnection,
+    id: DomainId,
+) -> DatabaseResult<Option<(Domain, bool, Option<model::dns::ZoneTtl>)>> {
+    let query = "SELECT * FROM domains WHERE id = $1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map(|row| {
+            row.map(|d| {
+                let is_reserved = d.reserved_create;
+                let create_ttl = d.create_default_ttl;
+                (Domain::from(d), is_reserved, create_ttl)
+            })
+        })
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Mark an absent, REST-reserved ID as cancelled. The caller MUST hold the
+/// per-domain exclusive advisory lock through commit; this is also the lock
+/// used by reserved create. Repeated cancellations are idempotent.
+pub async fn cancel_reserved_id(txn: &mut PgConnection, id: DomainId) -> DatabaseResult<()> {
+    let query = "INSERT INTO domain_reserved_id_cancellations(id) VALUES ($1)
+                 ON CONFLICT (id) DO NOTHING";
+    sqlx::query(query)
+        .bind(id)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Must be called under the per-ID lock held by create/delete to avoid a
+/// response-lost creation racing an absent-ID cancellation.
+pub async fn is_reserved_id_cancelled(
+    txn: &mut PgConnection,
+    id: DomainId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (SELECT 1 FROM domain_reserved_id_cancellations WHERE id = $1)";
+    sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Batched counterpart to [`find_by_uuid`]: fetch every domain in `ids` with a single
 /// `WHERE id = ANY($1)` query (deleted entries included, matching `find_by_uuid`), keyed by id.
 ///
@@ -283,6 +509,7 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
                      deleted = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
                  WHERE id = $1
                    AND updated = $2
+                   AND deleted IS NULL
                  RETURNING *";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(value.id)
@@ -313,6 +540,7 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
                      default_ttl = $5
                  WHERE id = $3
                    AND updated = $4
+                   AND deleted IS NULL
                  RETURNING *";
 
     sqlx::query_as::<_, DbDomain>(query)

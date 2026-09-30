@@ -15,26 +15,22 @@
  * limitations under the License.
  */
 
-mod create;
-mod delete;
-mod show;
-mod update;
+use rpc::admin_cli::OutputFormat;
 
-// Cross-module re-exports for jump module
-use clap::Parser;
-pub(crate) use show::args::Args as ShowDomain;
-pub(crate) use show::cmd::handle_show;
+use super::args::Args;
+use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
 
-use crate::cfg::dispatch::Dispatch;
-
-#[derive(Parser, Debug, Dispatch)]
-pub(crate) enum Cmd {
-    #[clap(about = "Create a forward DNS domain")]
-    Create(create::Args),
-    #[clap(about = "Delete an unreferenced DNS domain")]
-    Delete(delete::Args),
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
-    #[clap(about = "Update domain default TTL")]
-    Update(update::Args),
+pub(super) async fn delete(
+    args: Args,
+    output_format: OutputFormat,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
+    api_client.delete_domain(args.domain).await?;
+    if output_format == OutputFormat::Json {
+        println!("{{\"deleted\":\"{}\"}}", args.domain);
+    } else {
+        println!("Deleted domain {}", args.domain);
+    }
+    Ok(())
 }

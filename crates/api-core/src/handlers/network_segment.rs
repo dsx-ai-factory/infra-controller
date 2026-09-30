@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_authn::middleware::Principal;
 use carbide_uuid::vpc::VpcId;
+use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
@@ -28,6 +30,7 @@ use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
+use crate::auth::AuthContext;
 use crate::{CarbideError, CarbideResult};
 
 pub(crate) async fn find_ids(
@@ -206,12 +209,38 @@ pub(crate) async fn attach_to_vpc(
 ) -> Result<Response<rpc::NetworkSegment>, Status> {
     crate::api::log_request_data(&request);
 
+    // Site-agent is a tenant proxy: a bare attach request would let a stale
+    // REST operation overwrite another Core writer. Operators retain the
+    // legacy no-precondition API, while REST must present a stored intent.
+    let is_site_agent = request
+        .extensions()
+        .get::<AuthContext>()
+        .is_some_and(|auth| {
+            auth.principals.iter().any(|principal| matches!(
+                principal,
+                Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
+            ))
+        });
     let rpc::AttachNetworkSegmentToVpcRequest {
         network_segment_id,
         vpc_id,
         allow_replace,
-        ..
+        expected_source_vpc_id,
+        expected_segment_version,
     } = request.into_inner();
+    if is_site_agent && expected_segment_version.is_none() {
+        return Err(CarbideError::InvalidArgument(
+            "site-agent attach requires expected_segment_version".to_string(),
+        )
+        .into());
+    }
+    let expected_version: Option<ConfigVersion> = expected_segment_version
+        .map(|version| {
+            version.parse().map_err(|_| {
+                CarbideError::InvalidArgument("invalid expected_segment_version".to_string())
+            })
+        })
+        .transpose()?;
 
     let segment_id =
         network_segment_id.ok_or(CarbideError::MissingArgument("network_segment_id"))?;
@@ -231,6 +260,8 @@ pub(crate) async fn attach_to_vpc(
         id: vpc_id.to_string(),
     })?;
 
+    db::network_segment::lock_for_attach(txn.as_mut(), segment_id).await?;
+
     let segment = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
@@ -243,6 +274,24 @@ pub(crate) async fn attach_to_vpc(
         kind: "network segment",
         id: segment_id.to_string(),
     })?;
+
+    // The expected version comes from the public segment lifecycle response.
+    // Check before even accepting a same-target no-op, so an old operation
+    // cannot succeed after an unrelated write (including an A->B->A move).
+    if expected_version.is_some_and(|expected| segment.version != expected) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {} changed since attach intent was recorded",
+            segment.id
+        ))
+        .into());
+    }
+    if expected_source_vpc_id.is_some_and(|expected| segment.config.vpc_id != Some(expected)) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {} is no longer attached to the expected source VPC",
+            segment.id
+        ))
+        .into());
+    }
 
     if segment.config.segment_type != NetworkSegmentType::HostInband {
         return Err(CarbideError::InvalidArgument(format!(
@@ -434,6 +483,10 @@ pub(crate) async fn save_without_reverse_zones(
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    if let Some(domain_id) = ns.subdomain_id {
+        db::dns::domain::lock_live_for_reference(txn.as_mut(), domain_id).await?;
+    }
+
     let prefixes = ns
         .prefixes
         .iter()

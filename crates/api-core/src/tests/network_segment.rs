@@ -2452,6 +2452,73 @@ async fn attach_to_different_vpc_requires_force(
     Ok(())
 }
 
+/// The version is a fencing token, not merely an expected source VPC: after
+/// A -> B -> A the old A -> B activity must not be able to replay.
+#[crate::sqlx_test]
+async fn site_agent_attach_stale_version_cannot_replay_after_aba(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_authn::middleware::Principal;
+
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (a, _) = common::api_fixtures::vpc::create_flat_vpc(&env, "aba-a".into(), None).await;
+    let (b, _) = common::api_fixtures::vpc::create_flat_vpc(&env, "aba-b".into(), None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_HOST_INBAND_ABA",
+        "198.51.105.0/24",
+        "198.51.105.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+    let id = segment.id.unwrap();
+    let attached_a = attach_network_segment_to_vpc(&env, id, a, false)
+        .await?
+        .into_inner();
+    let initial_version = attached_a.status.unwrap().lifecycle.unwrap().version;
+    let site_request = |target, source, version: String| {
+        let mut request = Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
+            network_segment_id: Some(id),
+            vpc_id: Some(target),
+            allow_replace: true,
+            expected_source_vpc_id: Some(source),
+            expected_segment_version: Some(version),
+        });
+        request.extensions_mut().insert(crate::auth::AuthContext {
+            principals: vec![Principal::SpiffeServiceIdentifier(
+                "elektra-site-agent".into(),
+            )],
+            authorization: None,
+        });
+        request
+    };
+    let moved_b = env
+        .api
+        .attach_network_segment_to_vpc(site_request(b, a, initial_version.clone()))
+        .await?
+        .into_inner();
+    let version_b = moved_b.status.unwrap().lifecycle.unwrap().version;
+    let returned_a = env
+        .api
+        .attach_network_segment_to_vpc(site_request(a, b, version_b))
+        .await?
+        .into_inner();
+    assert_eq!(returned_a.config.unwrap().vpc_id, Some(a));
+    let stale = env
+        .api
+        .attach_network_segment_to_vpc(site_request(b, a, initial_version))
+        .await
+        .expect_err("stale A->B replay must not move A->B after ABA");
+    assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+    let current: Option<VpcId> =
+        sqlx::query_scalar("SELECT vpc_id FROM network_segments WHERE id = $1")
+            .bind(id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(current, Some(a), "failed replay left DB state intact");
+    Ok(())
+}
+
 async fn create_unattached_segment(
     env: &common::api_fixtures::TestEnv,
     name: &str,
@@ -2494,6 +2561,8 @@ async fn attach_network_segment_to_vpc(
             network_segment_id: Some(network_segment_id),
             vpc_id: Some(vpc_id),
             allow_replace,
+            expected_source_vpc_id: None,
+            expected_segment_version: None,
         }))
         .await
 }
