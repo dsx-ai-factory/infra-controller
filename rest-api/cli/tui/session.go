@@ -423,20 +423,27 @@ func (s *Session) fetchDomains(ctx context.Context) ([]NamedItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make([]NamedItem, len(domains))
-	for i, domain := range domains {
+	// The Domain fetcher is used to choose a subnet's subdomainId. A
+	// reservation or deletion is visible in the Domain list, but it cannot
+	// be referenced by a new subnet until Core confirms it is Ready.
+	result := make([]NamedItem, 0, len(domains))
+	for _, domain := range domains {
 		if str(domain, "tenantId") != tenantID {
 			return nil, fmt.Errorf("domain %q is not owned by the current tenant", str(domain, "id"))
 		}
-		result[i] = NamedItem{
-			Name: str(domain, "name"),
-			ID:   str(domain, "id"),
+		if str(domain, "status") != "Ready" {
+			continue
+		}
+		result = append(result, NamedItem{
+			Name:   str(domain, "name"),
+			ID:     str(domain, "id"),
+			Status: str(domain, "status"),
 			Extra: map[string]string{
 				"siteId":   str(domain, "siteId"),
 				"tenantId": str(domain, "tenantId"),
 			},
 			Raw: domain,
-		}
+		})
 	}
 	return result, nil
 }

@@ -17,12 +17,13 @@ import (
 )
 
 // ReconcileAttachmentIntents processes a bounded number of authorized, durable
-// operations per cloud workflow tick. A claimed row remains pending if Core is
+// operations per cloud workflow tick, claiming one row so a preceding Site
+// RPC cannot consume another row's lease. A claimed row remains pending if Core is
 // unreachable, the Site loses its tenant association or Core reports a third
 // VPC; neither inventory nor elapsed time is proof of a successful attach.
 func (ms ManageSubnet) ReconcileAttachmentIntents(ctx context.Context) error {
 	dao := cdbm.NewSubnetDAO(ms.dbSession)
-	intents, err := dao.ClaimAttachmentRecovery(ctx, 8, 120*time.Second)
+	intents, err := dao.ClaimAttachmentRecovery(ctx, 1, 120*time.Second)
 	if err != nil {
 		return err
 	}

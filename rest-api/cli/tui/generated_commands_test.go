@@ -313,6 +313,29 @@ func TestGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll(t *testing
 	assert.Contains(t, output, `"H100"`)
 }
 
+// Generated DNS Domain list must preserve the selected Site scope while
+// exposing Pending rows for observability (unlike subnet's Ready-only chooser).
+func TestGeneratedDNSDomainList_UsesSelectedSiteAndShowsPending(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v2/org/acme/nico/domain", r.URL.Path)
+		assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":"domain-1","status":"Pending","name":"dev.example","siteId":"site-1"}]`)
+	}))
+	defer server.Close()
+
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	session.Scope.SiteID = "site-1"
+	command := requireTUICommand(t, "dns-domain list")
+	var runErr error
+	output := captureStdout(func() {
+		runErr = command.Run(session, nil)
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, output, "Pending")
+	assert.Contains(t, output, "--site-id site-1")
+}
+
 func TestGeneratedCommand_ExplicitPaginationIsNotOverridden(t *testing.T) {
 	for _, test := range []struct {
 		name           string

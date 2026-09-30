@@ -15,7 +15,7 @@ import (
 )
 
 // ReconcileSubnetAttachmentIntents processes only persisted immutable intents.
-// The DB claim limits each tick to eight rows, with cross-replica leases and
+// The DB claim limits each tick to one row, with cross-replica leases and
 // delayed retries; this workflow does not discover or adopt arbitrary segments.
 func ReconcileSubnetAttachmentIntents(ctx workflow.Context) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{

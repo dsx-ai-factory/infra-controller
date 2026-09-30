@@ -94,7 +94,7 @@ func (ssd SubnetSQLDAO) ClaimAttachmentRecovery(ctx context.Context, maxRows int
         WITH due AS (SELECT id FROM subnet WHERE deleted IS NULL AND attach_intent_id IS NOT NULL
             AND (attach_next_at IS NULL OR attach_next_at <= current_timestamp)
             AND (attach_lease_until IS NULL OR attach_lease_until <= current_timestamp)
-            ORDER BY updated, id LIMIT ? FOR UPDATE SKIP LOCKED)
+            ORDER BY attach_attempts, updated, id LIMIT ? FOR UPDATE SKIP LOCKED)
         UPDATE subnet AS su SET attach_recovery_token = gen_random_uuid(),
             attach_lease_until = current_timestamp + (? * interval '1 second'),
             attach_attempts = attach_attempts + 1

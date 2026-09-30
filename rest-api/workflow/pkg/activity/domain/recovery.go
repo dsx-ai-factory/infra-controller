@@ -23,11 +23,12 @@ type ManageDomain struct {
 }
 
 // ReconcileReservedDomains executes only durable, previously authorized
-// reserved-ID intents. No arbitrary legacy Core resource or DNS name is
+// reserved-ID intents, claiming one row per tick so its lease cannot expire
+// while an earlier row waits on a Site RPC. No arbitrary legacy DNS name is
 // claimed as tenant-owned. Each batch and Site request has a finite bound.
 func (m ManageDomain) ReconcileReservedDomains(ctx context.Context) error {
 	dao := cdbm.NewDomainDAO(m.DB)
-	due, err := dao.ClaimRecovery(ctx, 8, 120*time.Second)
+	due, err := dao.ClaimRecovery(ctx, 1, 120*time.Second)
 	if err != nil {
 		return err
 	}

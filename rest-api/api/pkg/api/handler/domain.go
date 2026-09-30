@@ -115,7 +115,7 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, coreRequest, coreDomain, site.ID.String())
 	if apiErr != nil {
 		logAPIError(logger, apiErr, "Domain create did not return a confirmed resource; reservation retained")
-		if apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusBadRequest {
+		if apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusPreconditionFailed {
 			// These definitive Core validation/conflict responses may be surfaced;
 			// retain a durable Error row so a retry cannot adopt by DNS name.
 			changed, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {

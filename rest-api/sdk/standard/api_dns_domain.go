@@ -44,7 +44,15 @@ func (r ApiCreateDomainRequest) Execute() (*Domain, *http.Response, error) {
 /*
 CreateDomain Create Domain
 
-Create a tenant-owned DNS Domain at a Site.
+Create a tenant-owned DNS Domain at a Site. Domain IDs in this API are
+tenant-owned REST IDs; Core DNS IDs are not accepted from clients.
+Repeating the same authenticated tenant/Site/normalized name creation
+intent returns the same reserved Domain (202 while Pending, 200 once
+Ready), not a new Core Domain or an adoption by DNS name. After 202,
+poll GET on the returned Domain ID until status is Ready before using
+that REST ID as a Subnet subdomainId. Pending, Deleting and Error are
+not usable for Subnet creation; a 504 does not prove that a Core write
+was rolled back. Conflicting names or creation intents are rejected.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
@@ -221,7 +229,13 @@ func (r ApiDeleteDomainRequest) Execute() (*http.Response, error) {
 /*
 DeleteDomain Delete Domain
 
-Delete a tenant-owned DNS Domain by ID.
+Delete a tenant-owned DNS Domain by its REST ID. Referenced Domains
+cannot be deleted. If Core deletion or its reserved-ID cancellation
+cannot be confirmed, the owned reservation remains Deleting. Retry
+DELETE with the same REST ID after an unconfirmed 504; 204 means Core
+deletion/cancellation and REST removal were both confirmed. Do not
+interpret a 504 as absence or rollback. Only the owning tenant with
+current Site access can read or retry the reservation.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 

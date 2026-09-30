@@ -274,7 +274,7 @@ func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease ti
 			AND controller_domain_id IS NOT NULL AND status IN (?, ?)
 			AND (recovery_next_at IS NULL OR recovery_next_at <= current_timestamp)
 			AND (recovery_lease_until IS NULL OR recovery_lease_until <= current_timestamp)
-			ORDER BY updated, id LIMIT ? FOR UPDATE SKIP LOCKED
+			ORDER BY recovery_attempts, updated, id LIMIT ? FOR UPDATE SKIP LOCKED
 		)
 		UPDATE domain AS d SET recovery_token = gen_random_uuid(),
 			recovery_lease_until = current_timestamp + (? * interval '1 second'),

@@ -43,9 +43,9 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 	}{
 		{name: "success", run: runCreateDomainHandlerSuccess},
 		{name: "validation and authorization", run: runCreateDomainHandlerValidationAndAuthorization},
-		{name: "database failure compensates Core", run: runCreateDomainHandlerCompensatesCoreAfterDatabaseFailure},
+		{name: "reservation DB failure does not call Core", run: runCreateDomainHandlerCompensatesCoreAfterDatabaseFailure},
 		{
-			name: "Core failure creates no projection",
+			name: "Core rejection preserves Error reservation",
 			run: func(t *testing.T) {
 				fixture := newDomainHandlerFixture(t, nil)
 				fixture.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, nil, tp.NewNonRetryableApplicationError(
@@ -59,11 +59,11 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 					SiteID: fixture.site.ID.String(),
 				})
 				assert.Equal(t, http.StatusPreconditionFailed, recorder.Code, recorder.Body.String())
-				fixture.requireNoDomains(t)
+				fixture.requireDomainWithStatus(t, "rejected.example.com", cdbm.DomainStatusError)
 			},
 		},
 		{
-			name: "unexpected Core identity creates no projection",
+			name: "unexpected Core identity stays Pending",
 			run: func(t *testing.T) {
 				responses := []struct {
 					name     string
@@ -81,39 +81,10 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 							Name:   "invalid-response.example.com",
 							SiteID: fixture.site.ID.String(),
 						})
-						assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
-						fixture.requireNoDomains(t)
+						assert.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+						fixture.requireDomainWithStatus(t, "invalid-response.example.com", cdbm.DomainStatusPending)
 					})
 				}
-			},
-		},
-		{
-			name: "canceled request still attempts bounded compensation and preserves DB error",
-			run: func(t *testing.T) {
-				fixture := newDomainHandlerFixture(t, nil)
-				controllerDomainID := uuid.New()
-				requestContext, cancelRequest := context.WithCancel(context.Background())
-				fixture.expectCoreWithCallback(t, corev1.Forge_CreateDomain_FullMethodName, &corev1.Domain{
-					Id: &corev1.DomainId{Value: controllerDomainID.String()},
-				}, nil, cancelRequest, nil)
-				deleteRequest := fixture.expectCoreWithCallback(t, corev1.Forge_DeleteDomain_FullMethodName, nil, tp.NewNonRetryableApplicationError(
-					"cleanup failed",
-					swe.ErrTypeNICoFailedPrecondition,
-					errors.New("cleanup failed"),
-				), nil, func(ctx context.Context) bool { return ctx.Err() == nil })
-
-				recorder := fixture.requestWithContext(t, requestContext, NewCreateDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodPost, "/", "", model.APIDomainCreateRequest{
-					Name:   "canceled.example.com",
-					SiteID: fixture.site.ID.String(),
-				})
-				assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
-				assert.Contains(t, recorder.Body.String(), "Failed to create Domain, DB transaction error")
-				assert.NotContains(t, recorder.Body.String(), "cleanup failed")
-
-				var coreDeleteRequest corev1.DomainDeletionRequest
-				require.NoError(t, protojson.Unmarshal(deleteRequest.RequestJSON, &coreDeleteRequest))
-				assert.Equal(t, controllerDomainID.String(), coreDeleteRequest.GetId().GetValue())
-				fixture.requireNoDomains(t)
 			},
 		},
 	}
@@ -125,9 +96,7 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 
 func runCreateDomainHandlerSuccess(t *testing.T) {
 	fixture := newDomainHandlerFixture(t, nil)
-	controllerDomainID := uuid.New()
 	proxiedRequest := fixture.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, &corev1.Domain{
-		Id:   &corev1.DomainId{Value: controllerDomainID.String()},
 		Name: "tenant.example.com",
 	}, nil)
 
@@ -139,7 +108,7 @@ func runCreateDomainHandlerSuccess(t *testing.T) {
 
 	var response model.APIDomain
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-	assert.NotEqual(t, controllerDomainID.String(), response.ID)
+	assert.Equal(t, cdbm.DomainStatusReady, response.Status)
 	assert.Equal(t, fixture.tenant.ID.String(), response.TenantID)
 	assert.Equal(t, fixture.site.ID.String(), response.SiteID)
 	assert.Equal(t, "tenant.example.com", response.Name)
@@ -147,12 +116,14 @@ func runCreateDomainHandlerSuccess(t *testing.T) {
 	var coreRequest corev1.CreateDomainRequest
 	require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
 	assert.Equal(t, "tenant.example.com", coreRequest.GetName())
+	require.NotEmpty(t, coreRequest.GetReservedId().GetValue())
+	assert.NotEqual(t, coreRequest.GetReservedId().GetValue(), response.ID)
 
 	persisted, err := cdbm.NewDomainDAO(fixture.dbSession).GetByID(context.Background(), nil, uuid.MustParse(response.ID), nil)
 	require.NoError(t, err)
 	assert.Equal(t, &fixture.tenant.ID, persisted.TenantID)
 	assert.Equal(t, &fixture.site.ID, persisted.SiteID)
-	assert.Equal(t, &controllerDomainID, persisted.ControllerDomainID)
+	assert.Equal(t, coreRequest.GetReservedId().GetValue(), persisted.ControllerDomainID.String())
 	assert.Equal(t, cdbm.DomainStatusReady, persisted.Status)
 }
 
@@ -193,27 +164,17 @@ func runCreateDomainHandlerValidationAndAuthorization(t *testing.T) {
 
 func runCreateDomainHandlerCompensatesCoreAfterDatabaseFailure(t *testing.T) {
 	fixture := newDomainHandlerFixture(t, nil)
-	controllerDomainID := uuid.New()
 	_, err := fixture.dbSession.DB.ExecContext(context.Background(), `
 		ALTER TABLE domain ADD CONSTRAINT domain_test_reject_hostname
 		CHECK (hostname <> 'db-fail.example.com')
 	`)
 	require.NoError(t, err)
 
-	fixture.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, &corev1.Domain{
-		Id: &corev1.DomainId{Value: controllerDomainID.String()},
-	}, nil)
-	deleteRequest := fixture.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
-
 	recorder := fixture.request(t, NewCreateDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodPost, "/", "", model.APIDomainCreateRequest{
 		Name:   "db-fail.example.com",
 		SiteID: fixture.site.ID.String(),
 	})
 	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
-
-	var coreDeleteRequest corev1.DomainDeletionRequest
-	require.NoError(t, protojson.Unmarshal(deleteRequest.RequestJSON, &coreDeleteRequest))
-	assert.Equal(t, controllerDomainID.String(), coreDeleteRequest.GetId().GetValue())
 
 	domains, _, err := cdbm.NewDomainDAO(fixture.dbSession).GetAll(context.Background(), nil, cdbm.DomainFilterInput{}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
@@ -465,7 +426,7 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			expectedDeleted: true,
 		},
 		{
-			name: "Core failed precondition preserves projection",
+			name: "Core failed precondition preserves Deleting reservation",
 			coreError: tp.NewNonRetryableApplicationError(
 				"Domain is in use",
 				swe.ErrTypeNICoFailedPrecondition,
@@ -474,14 +435,13 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
-			name: "Core not found reconciles projection",
+			name: "Core not found retains Deleting reservation",
 			coreError: tp.NewNonRetryableApplicationError(
 				"Domain not found",
 				swe.ErrTypeNICoObjectNotFound,
 				errors.New("Domain not found"),
 			),
-			expectedStatus:  http.StatusNoContent,
-			expectedDeleted: true,
+			expectedStatus: http.StatusNotFound,
 		},
 	}
 
@@ -499,6 +459,7 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
 			assert.Equal(t, controllerDomainID.String(), coreRequest.GetId().GetValue())
 			assert.NotEqual(t, domain.ID.String(), coreRequest.GetId().GetValue())
+			assert.True(t, coreRequest.GetCancelReservedId())
 
 			persisted, err := cdbm.NewDomainDAO(fixture.dbSession).GetByID(context.Background(), nil, domain.ID, nil)
 			if tt.expectedDeleted {
@@ -507,6 +468,7 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, domain.ID, persisted.ID)
+				assert.Equal(t, cdbm.DomainStatusDeleting, persisted.Status)
 			}
 		})
 	}
@@ -533,6 +495,7 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 		persisted, err := cdbm.NewDomainDAO(fixture.dbSession).GetByID(context.Background(), nil, domain.ID, nil)
 		require.NoError(t, err)
 		assert.Equal(t, domain.ID, persisted.ID)
+		assert.Equal(t, cdbm.DomainStatusDeleting, persisted.Status)
 	})
 
 	t.Run("invalid and hidden identities do not reach Core", func(t *testing.T) {
@@ -672,6 +635,15 @@ func (f *domainHandlerFixture) expectCoreWithCallback(
 	workflowRun := &tmocks.WorkflowRun{}
 	workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		if response != nil {
+			// A successful reserved create must return the exact caller-reserved ID,
+			// not a second test-generated ID disconnected from the durable row.
+			if d, ok := response.(*corev1.Domain); ok && d.GetId() == nil && d.GetName() != "" && fullMethod == corev1.Forge_CreateDomain_FullMethodName {
+				var create corev1.CreateDomainRequest
+				require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &create))
+				require.NotEmpty(t, create.GetReservedId().GetValue())
+				response = proto.Clone(d)
+				response.(*corev1.Domain).Id = create.GetReservedId()
+			}
 			responseJSON, err := protojson.Marshal(response)
 			require.NoError(t, err)
 			args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
@@ -694,6 +666,18 @@ func (f *domainHandlerFixture) expectCoreWithCallback(
 		f.siteClient.AssertExpectations(t)
 	})
 	return proxiedRequest
+}
+
+func (f *domainHandlerFixture) requireDomainWithStatus(t *testing.T, name, status string) {
+	t.Helper()
+	domains, _, err := cdbm.NewDomainDAO(f.dbSession).GetAll(context.Background(), nil,
+		cdbm.DomainFilterInput{TenantIDs: []uuid.UUID{f.tenant.ID}},
+		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	require.NoError(t, err)
+	require.Len(t, domains, 1)
+	assert.Equal(t, name, domains[0].Hostname)
+	assert.Equal(t, status, domains[0].Status)
+	assert.NotNil(t, domains[0].ControllerDomainID)
 }
 
 func (f *domainHandlerFixture) requireNoDomains(t *testing.T) {
