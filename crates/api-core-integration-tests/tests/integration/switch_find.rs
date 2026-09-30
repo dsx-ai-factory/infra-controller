@@ -53,10 +53,7 @@ async fn add_declared_nvos_mac(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.db_txn().await;
     let rows = db::switch::find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
-    let mut nvos_macs = rows
-        .into_iter()
-        .filter_map(|row| row.nvos_mac)
-        .collect::<Vec<_>>();
+    let mut nvos_macs = rows.into_iter().map(|row| row.nvos_mac).collect::<Vec<_>>();
     nvos_macs.push(nvos_mac);
     let endpoint_rows =
         db::switch::find_switch_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
@@ -435,7 +432,27 @@ async fn test_legacy_nvos_info_skips_unresolved_lower_mac(
     let env = TestHarness::builder(pool).build().await;
     let switch_id = create_discovered_switch(&env, 1, "Switch1").await?;
     let unresolved_nvos_mac = "44:44:33:33:00:ff".parse()?;
-    add_declared_nvos_mac(&env, switch_id, unresolved_nvos_mac).await?;
+    add_nvos_interface(&env, switch_id, unresolved_nvos_mac).await?;
+
+    // Keep the discovered interface, but remove the address allocated by the fixture.
+    let mut txn = env.db_txn().await;
+    let interface = db::machine_interface::find_by_mac_address(txn.as_mut(), unresolved_nvos_mac)
+        .await?
+        .into_iter()
+        .next()
+        .expect("NVOS machine interface");
+    for address in &interface.addresses {
+        assert!(
+            db::machine_interface_address::delete_by_interface_and_address(
+                txn.as_mut(),
+                interface.id,
+                *address,
+                AllocationType::Dhcp,
+            )
+            .await?
+        );
+    }
+    txn.commit().await?;
 
     let response = env
         .api()
@@ -477,7 +494,7 @@ async fn test_find_switches_by_ids_groups_dual_stack_addresses_by_nvos_port(
     let mut txn = env.db_txn().await;
     let rows = db::switch::find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
     let row = rows.first().expect("seeded NVOS endpoint");
-    let nvos_mac = row.nvos_mac.expect("seeded NVOS MAC");
+    let nvos_mac = row.nvos_mac;
     let ipv4 = row.nvos_ip.expect("seeded NVOS IPv4 address");
     txn.rollback().await?;
 
