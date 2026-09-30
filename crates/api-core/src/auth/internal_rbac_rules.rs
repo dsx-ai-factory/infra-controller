@@ -557,6 +557,10 @@ impl InternalRBACRules {
             "GetMachineValidationAttempt",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm(
+            "FindMachineValidationAttempts",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("AppendMachineValidationAttemptLog", vec![Scout]);
         x.perm(
             "GetMachineValidationAttemptLogs",

@@ -363,6 +363,7 @@ const (
 	Forge_FindMachineValidationRunItemIds_FullMethodName                    = "/forge.Forge/FindMachineValidationRunItemIds"
 	Forge_FindMachineValidationRunItemsByIds_FullMethodName                 = "/forge.Forge/FindMachineValidationRunItemsByIds"
 	Forge_GetMachineValidationAttempt_FullMethodName                        = "/forge.Forge/GetMachineValidationAttempt"
+	Forge_FindMachineValidationAttempts_FullMethodName                      = "/forge.Forge/FindMachineValidationAttempts"
 	Forge_AppendMachineValidationAttemptLog_FullMethodName                  = "/forge.Forge/AppendMachineValidationAttemptLog"
 	Forge_GetMachineValidationAttemptLogs_FullMethodName                    = "/forge.Forge/GetMachineValidationAttemptLogs"
 	Forge_HeartbeatMachineValidationRun_FullMethodName                      = "/forge.Forge/HeartbeatMachineValidationRun"
@@ -1163,6 +1164,8 @@ type ForgeClient interface {
 	FindMachineValidationRunItemsByIds(ctx context.Context, in *MachineValidationRunItemsByIdsRequest, opts ...grpc.CallOption) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(ctx context.Context, in *MachineValidationAttemptGetRequest, opts ...grpc.CallOption) (*MachineValidationAttempt, error)
+	// List attempts for one Machine-Validation run item, oldest first.
+	FindMachineValidationAttempts(ctx context.Context, in *MachineValidationAttemptSearchFilter, opts ...grpc.CallOption) (*MachineValidationAttemptList, error)
 	// Append the next ordered stdout or stderr chunk while an attempt is active.
 	AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error)
 	// Read a cursor-based page of persisted attempt logs.
@@ -4945,6 +4948,16 @@ func (c *forgeClient) GetMachineValidationAttempt(ctx context.Context, in *Machi
 	return out, nil
 }
 
+func (c *forgeClient) FindMachineValidationAttempts(ctx context.Context, in *MachineValidationAttemptSearchFilter, opts ...grpc.CallOption) (*MachineValidationAttemptList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationAttemptList)
+	err := c.cc.Invoke(ctx, Forge_FindMachineValidationAttempts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineValidationAttemptLogAppendResponse)
@@ -7375,6 +7388,8 @@ type ForgeServer interface {
 	FindMachineValidationRunItemsByIds(context.Context, *MachineValidationRunItemsByIdsRequest) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error)
+	// List attempts for one Machine-Validation run item, oldest first.
+	FindMachineValidationAttempts(context.Context, *MachineValidationAttemptSearchFilter) (*MachineValidationAttemptList, error)
 	// Append the next ordered stdout or stderr chunk while an attempt is active.
 	AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error)
 	// Read a cursor-based page of persisted attempt logs.
@@ -8759,6 +8774,9 @@ func (UnimplementedForgeServer) FindMachineValidationRunItemsByIds(context.Conte
 }
 func (UnimplementedForgeServer) GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMachineValidationAttempt not implemented")
+}
+func (UnimplementedForgeServer) FindMachineValidationAttempts(context.Context, *MachineValidationAttemptSearchFilter) (*MachineValidationAttemptList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindMachineValidationAttempts not implemented")
 }
 func (UnimplementedForgeServer) AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendMachineValidationAttemptLog not implemented")
@@ -15436,6 +15454,24 @@ func _Forge_GetMachineValidationAttempt_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindMachineValidationAttempts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationAttemptSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindMachineValidationAttempts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindMachineValidationAttempts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindMachineValidationAttempts(ctx, req.(*MachineValidationAttemptSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_AppendMachineValidationAttemptLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineValidationAttemptLogAppendRequest)
 	if err := dec(in); err != nil {
@@ -20045,6 +20081,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMachineValidationAttempt",
 			Handler:    _Forge_GetMachineValidationAttempt_Handler,
+		},
+		{
+			MethodName: "FindMachineValidationAttempts",
+			Handler:    _Forge_FindMachineValidationAttempts_Handler,
 		},
 		{
 			MethodName: "AppendMachineValidationAttemptLog",
