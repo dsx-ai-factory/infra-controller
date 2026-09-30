@@ -43,19 +43,8 @@ const (
 	envBSPScheduleDelay = "OTEL_BSP_SCHEDULE_DELAY"
 	envBSPExportTimeout = "OTEL_BSP_EXPORT_TIMEOUT"
 
-	protocolGRPC         = "grpc"
-	protocolHTTPProtobuf = "http/protobuf"
-
-	// These are count/time safety bounds, not a byte-level memory guarantee.
-	// Operators still need to size span counts relative to workload pod limits.
-	minBSPMaxQueueSize  = 1
-	maxBSPMaxQueueSize  = 16384
-	minBSPMaxBatchSize  = 1
-	maxBSPMaxBatchSize  = 2048
-	minBSPScheduleDelay = 100
-	maxBSPScheduleDelay = 10000
-	minBSPExportTimeout = 1000
-	maxBSPExportTimeout = 60000
+	protocolGRPC         otlpProtocol = "grpc"
+	protocolHTTPProtobuf otlpProtocol = "http/protobuf"
 )
 
 type batchSpanProcessorConfig struct {
@@ -65,7 +54,7 @@ type batchSpanProcessorConfig struct {
 	exportTimeout      time.Duration
 }
 
-func (c batchSpanProcessorConfig) options() []sdktrace.BatchSpanProcessorOption {
+func (c *batchSpanProcessorConfig) options() []sdktrace.BatchSpanProcessorOption {
 	return []sdktrace.BatchSpanProcessorOption{
 		sdktrace.WithMaxQueueSize(c.maxQueueSize),
 		sdktrace.WithMaxExportBatchSize(c.maxExportBatchSize),
@@ -86,11 +75,11 @@ func ExporterConfigured() bool {
 	return os.Getenv(envExporterEndpoint) != "" || os.Getenv(envTracesEndpoint) != ""
 }
 
-// Enabled reports whether Bootstrap successfully installed a tracer provider.
-// Recording-only instrumentation such as database hooks must use this gate.
-// Transport instrumentation must use TransportEnabled so context can cross a
-// service that does not export spans locally.
-func Enabled() bool {
+// TracingEnabled reports whether Bootstrap successfully installed a tracer
+// provider. Recording-only instrumentation such as database hooks must use this
+// gate. Transport instrumentation must use TransportEnabled so context can
+// cross a service that does not export spans locally.
+func TracingEnabled() bool {
 	return tracingEnabled.Load()
 }
 
@@ -140,7 +129,8 @@ func Bootstrap(ctx context.Context, enabled bool, serviceNameFallback string) (f
 		log.Info().Msg("tracing enabled but no OTLP exporter endpoint configured, tracer provider not installed")
 		return noopShutdown, nil
 	}
-	batchConfig, err := batchSpanProcessorConfigFromEnv()
+	var batchConfig batchSpanProcessorConfig
+	err = batchConfig.fromEnv()
 	if err != nil {
 		return noopShutdown, err
 	}
@@ -150,7 +140,8 @@ func Bootstrap(ctx context.Context, enabled bool, serviceNameFallback string) (f
 		return noopShutdown, fmt.Errorf("failed to build OTel resource: %w", err)
 	}
 
-	exp, err := newExporter(ctx)
+	protocol := exportProtocol()
+	exp, err := protocol.newExporter(ctx)
 	if err != nil {
 		return noopShutdown, err
 	}
@@ -169,7 +160,7 @@ func Bootstrap(ctx context.Context, enabled bool, serviceNameFallback string) (f
 
 	log.Info().
 		Str("serviceName", serviceName(res)).
-		Str("protocol", exportProtocol()).
+		Str("protocol", string(protocol)).
 		Int("batchMaxQueueSize", batchConfig.maxQueueSize).
 		Int("batchMaxExportSize", batchConfig.maxExportBatchSize).
 		Dur("batchScheduleDelay", batchConfig.batchTimeout).
@@ -183,72 +174,93 @@ func Bootstrap(ctx context.Context, enabled bool, serviceNameFallback string) (f
 	}, nil
 }
 
-func batchSpanProcessorConfigFromEnv() (batchSpanProcessorConfig, error) {
-	maxQueueSize, err := boundedIntFromEnv(
-		envBSPMaxQueueSize,
-		sdktrace.DefaultMaxQueueSize,
-		minBSPMaxQueueSize,
-		maxBSPMaxQueueSize,
-	)
+// fromEnv sets c from the OTEL_BSP_* variables, leaving c unchanged on error.
+func (c *batchSpanProcessorConfig) fromEnv() error {
+	maxQueueSize, err := bspMaxQueueSize.read()
 	if err != nil {
-		return batchSpanProcessorConfig{}, err
+		return err
 	}
-	maxExportBatchSize, err := boundedIntFromEnv(
-		envBSPMaxBatchSize,
-		sdktrace.DefaultMaxExportBatchSize,
-		minBSPMaxBatchSize,
-		maxBSPMaxBatchSize,
-	)
+	maxExportBatchSize, err := bspMaxBatchSize.read()
 	if err != nil {
-		return batchSpanProcessorConfig{}, err
+		return err
 	}
 	if maxExportBatchSize > maxQueueSize {
-		return batchSpanProcessorConfig{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%s must be less than or equal to %s",
 			envBSPMaxBatchSize,
 			envBSPMaxQueueSize,
 		)
 	}
-	scheduleDelayMillis, err := boundedIntFromEnv(
-		envBSPScheduleDelay,
-		sdktrace.DefaultScheduleDelay,
-		minBSPScheduleDelay,
-		maxBSPScheduleDelay,
-	)
+	scheduleDelayMillis, err := bspScheduleDelay.read()
 	if err != nil {
-		return batchSpanProcessorConfig{}, err
+		return err
 	}
-	exportTimeoutMillis, err := boundedIntFromEnv(
-		envBSPExportTimeout,
-		sdktrace.DefaultExportTimeout,
-		minBSPExportTimeout,
-		maxBSPExportTimeout,
-	)
+	exportTimeoutMillis, err := bspExportTimeout.read()
 	if err != nil {
-		return batchSpanProcessorConfig{}, err
+		return err
 	}
 
-	return batchSpanProcessorConfig{
+	*c = batchSpanProcessorConfig{
 		maxQueueSize:       maxQueueSize,
 		maxExportBatchSize: maxExportBatchSize,
 		batchTimeout:       time.Duration(scheduleDelayMillis) * time.Millisecond,
 		exportTimeout:      time.Duration(exportTimeoutMillis) * time.Millisecond,
-	}, nil
+	}
+	return nil
 }
 
-func boundedIntFromEnv(name string, fallback, minimum, maximum int) (int, error) {
-	value := strings.TrimSpace(os.Getenv(name))
+// boundedIntSetting is an integer environment variable with a default and
+// inclusive bounds.
+type boundedIntSetting struct {
+	name     string
+	fallback int
+	minimum  int
+	maximum  int
+}
+
+// These are count/time safety bounds, not a byte-level memory guarantee.
+// Operators still need to size span counts relative to workload pod limits.
+var (
+	bspMaxQueueSize = boundedIntSetting{
+		name:     envBSPMaxQueueSize,
+		fallback: sdktrace.DefaultMaxQueueSize,
+		minimum:  1,
+		maximum:  16384,
+	}
+	bspMaxBatchSize = boundedIntSetting{
+		name:     envBSPMaxBatchSize,
+		fallback: sdktrace.DefaultMaxExportBatchSize,
+		minimum:  1,
+		maximum:  2048,
+	}
+	bspScheduleDelay = boundedIntSetting{
+		name:     envBSPScheduleDelay,
+		fallback: sdktrace.DefaultScheduleDelay,
+		minimum:  100,
+		maximum:  10000,
+	}
+	bspExportTimeout = boundedIntSetting{
+		name:     envBSPExportTimeout,
+		fallback: sdktrace.DefaultExportTimeout,
+		minimum:  1000,
+		maximum:  60000,
+	}
+)
+
+// read returns the variable's value, or the fallback when it is unset or blank.
+func (s boundedIntSetting) read() (int, error) {
+	value := strings.TrimSpace(os.Getenv(s.name))
 	if value == "" {
-		return fallback, nil
+		return s.fallback, nil
 	}
 
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < minimum || parsed > maximum {
+	if err != nil || parsed < s.minimum || parsed > s.maximum {
 		return 0, fmt.Errorf(
 			"%s must be an integer from %d through %d",
-			name,
-			minimum,
-			maximum,
+			s.name,
+			s.minimum,
+			s.maximum,
 		)
 	}
 	return parsed, nil
@@ -320,23 +332,27 @@ func serviceName(res *resource.Resource) string {
 	return ""
 }
 
+// otlpProtocol is an OTEL_*_PROTOCOL value such as grpc or http/protobuf.
+type otlpProtocol string
+
 // exportProtocol resolves the OTLP transport protocol per the OTel spec
 // precedence: traces-specific variable, then general, then http/protobuf.
-func exportProtocol() string {
-	if p := os.Getenv(envTracesProtocol); p != "" {
-		return p
+func exportProtocol() otlpProtocol {
+	p := os.Getenv(envTracesProtocol)
+	if p == "" {
+		p = os.Getenv(envExporterProtocol)
 	}
-	if p := os.Getenv(envExporterProtocol); p != "" {
-		return p
+	if p == "" {
+		return protocolHTTPProtobuf
 	}
-	return protocolHTTPProtobuf
+	return otlpProtocol(p)
 }
 
-// newExporter builds the OTLP trace exporter for the configured protocol.
-// Endpoint, headers, and TLS/insecure settings are read from the standard
-// OTEL_EXPORTER_OTLP_* environment variables by the exporter itself.
-func newExporter(ctx context.Context) (*otlptrace.Exporter, error) {
-	switch p := exportProtocol(); p {
+// newExporter builds the OTLP trace exporter for p. Endpoint, headers, and
+// TLS/insecure settings are read from the standard OTEL_EXPORTER_OTLP_*
+// environment variables by the exporter itself.
+func (p otlpProtocol) newExporter(ctx context.Context) (*otlptrace.Exporter, error) {
+	switch p {
 	case protocolGRPC:
 		exp, err := otlptracegrpc.New(ctx)
 		if err != nil {

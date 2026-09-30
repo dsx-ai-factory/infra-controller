@@ -70,7 +70,7 @@ func NewSessionFromConfig(ctx context.Context, c Config) (*Session, error) {
 // the hook is never attached to a no-op provider. Statements are recorded as
 // templates with placeholders; bound parameter values never reach a span.
 func tracingQueryHook(dbName string) bun.QueryHook {
-	if !cotel.Enabled() {
+	if !cotel.TracingEnabled() {
 		return nil
 	}
 	return bunotel.NewQueryHook(bunotel.WithDBName(dbName))

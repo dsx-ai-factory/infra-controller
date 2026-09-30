@@ -42,7 +42,7 @@ func clearTracingEnv(t *testing.T) {
 	tracingEnabled.Store(false)
 }
 
-func TestBatchSpanProcessorConfigFromEnv(t *testing.T) {
+func TestBatchSpanProcessorConfig_fromEnv(t *testing.T) {
 	tests := []struct {
 		descr   string
 		values  map[string]string
@@ -129,7 +129,8 @@ func TestBatchSpanProcessorConfigFromEnv(t *testing.T) {
 				t.Setenv(key, value)
 			}
 
-			got, err := batchSpanProcessorConfigFromEnv()
+			var got batchSpanProcessorConfig
+			err := got.fromEnv()
 
 			if tc.wantErr != "" {
 				require.Error(t, err)
@@ -301,9 +302,9 @@ func TestExporterConfigured(t *testing.T) {
 func TestExportProtocol(t *testing.T) {
 	tcs := []struct {
 		descr          string
-		protocol       string
-		tracesProtocol string
-		want           string
+		protocol       otlpProtocol
+		tracesProtocol otlpProtocol
+		want           otlpProtocol
 	}{
 		{descr: "defaults to http/protobuf", want: protocolHTTPProtobuf},
 		{descr: "general protocol", protocol: protocolGRPC, want: protocolGRPC},
@@ -313,18 +314,18 @@ func TestExportProtocol(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.descr, func(t *testing.T) {
 			clearTracingEnv(t)
-			t.Setenv(envExporterProtocol, tc.protocol)
-			t.Setenv(envTracesProtocol, tc.tracesProtocol)
+			t.Setenv(envExporterProtocol, string(tc.protocol))
+			t.Setenv(envTracesProtocol, string(tc.tracesProtocol))
 
 			assert.Equal(t, tc.want, exportProtocol())
 		})
 	}
 }
 
-func TestNewExporter(t *testing.T) {
+func TestOtlpProtocol_newExporter(t *testing.T) {
 	tcs := []struct {
 		descr    string
-		protocol string
+		protocol otlpProtocol
 		wantErr  bool
 	}{
 		{descr: "grpc", protocol: protocolGRPC},
@@ -335,12 +336,11 @@ func TestNewExporter(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.descr, func(t *testing.T) {
 			clearTracingEnv(t)
-			t.Setenv(envExporterProtocol, tc.protocol)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			exp, err := newExporter(ctx)
+			exp, err := tc.protocol.newExporter(ctx)
 			if tc.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, exp)
@@ -377,7 +377,7 @@ func TestBootstrapNoop(t *testing.T) {
 
 			// The global tracer provider must be untouched
 			assert.Same(t, prevTP, otel.GetTracerProvider())
-			assert.False(t, Enabled())
+			assert.False(t, TracingEnabled())
 			assert.True(t, TransportEnabled())
 			assert.ElementsMatch(t, []string{"traceparent", "tracestate", "baggage"}, otel.GetTextMapPropagator().Fields())
 
@@ -432,7 +432,7 @@ func TestBootstrapInstallsGlobals(t *testing.T) {
 
 	_, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider)
 	assert.True(t, ok, "expected an SDK tracer provider to be installed")
-	assert.True(t, Enabled())
+	assert.True(t, TracingEnabled())
 	assert.True(t, TransportEnabled())
 
 	// W3C trace-context and baggage are the default pair.
@@ -446,7 +446,7 @@ func TestBootstrapInstallsGlobals(t *testing.T) {
 	assert.ElementsMatch(t, fields, Propagator().Fields())
 
 	require.NoError(t, shutdown(ctx))
-	assert.False(t, Enabled())
+	assert.False(t, TracingEnabled())
 	assert.False(t, TransportEnabled())
 }
 
@@ -463,7 +463,7 @@ func TestBootstrapRejectsInvalidPropagator(t *testing.T) {
 	require.NotNil(t, shutdown)
 	assert.NoError(t, shutdown(context.Background()))
 	assert.Same(t, previousProvider, otel.GetTracerProvider())
-	assert.False(t, Enabled())
+	assert.False(t, TracingEnabled())
 	assert.False(t, TransportEnabled())
 }
 
@@ -481,5 +481,5 @@ func TestBootstrapRejectsInvalidBatchSpanProcessorConfig(t *testing.T) {
 	require.NotNil(t, shutdown)
 	assert.NoError(t, shutdown(context.Background()))
 	assert.Same(t, previousProvider, otel.GetTracerProvider())
-	assert.False(t, Enabled())
+	assert.False(t, TracingEnabled())
 }
