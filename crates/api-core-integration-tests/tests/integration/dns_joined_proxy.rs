@@ -37,8 +37,7 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
         tonic::transport::Server::builder()
             // This isolates transport/error mapping, not TLS/mTLS RBAC. Explicitly
             // supply the same SiteAgent AuthContext used by direct Core fixtures.
-            .add_service(tonic::service::interceptor(
-                rpc::forge::forge_server::ForgeServer::from_arc(api),
+            .layer(tonic::service::InterceptorLayer::new(
                 |mut req: Request<()>| -> Result<Request<()>, Status> {
                     req.extensions_mut().insert(carbide_api_core::AuthContext {
                         principals: vec![Principal::SpiffeServiceIdentifier(
@@ -49,6 +48,7 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
                     Ok(req)
                 },
             ))
+            .add_service(rpc::forge::forge_server::ForgeServer::from_arc(api))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 tokio::net::TcpListener::from_std(listener).expect("fixture Tokio socket"),
             ))
