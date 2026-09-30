@@ -57,8 +57,6 @@ const (
 	// status the handler chose. Any handler-side wait, including the Temporal
 	// proxy timeout ladders, must complete well inside it.
 	WriteTimeout = 60 * time.Second
-
-	defaultTracingServerName = "nico-rest-api"
 )
 
 func InitTemporalClients(tcfg *cconfig.TemporalConfig) (tsdkClient.Client, tsdkClient.NamespaceClient, error) {
@@ -163,15 +161,10 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	}
 
 	if cotel.TransportEnabled() {
-		serverName := cfg.GetAPIName()
-		if serverName == "" {
-			serverName = defaultTracingServerName
-		}
-
 		// Bootstrap resolves the exported service.name independently, with
 		// OTEL_SERVICE_NAME taking precedence over the config fallback. This name
 		// identifies the HTTP server to the Echo instrumentation only.
-		e.Use(otelecho.Middleware(serverName, otelecho.WithSkipper(skipTracingRoutes)))
+		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(skipTracingRoutes)))
 	}
 
 	// Sentry middleware
