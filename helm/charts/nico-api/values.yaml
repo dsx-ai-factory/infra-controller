@@ -360,7 +360,7 @@ componentManager:
 ## standard rack-management path; set enabled: false on deployments that do
 ## not run RMS.
 ##
-## Qualified NVL72 / NVL72_GB300 rack_profiles always ship in the global toml;
+## Qualified rack_profiles always ship in the global toml;
 ## override OEM vendors (or add test profiles) via site-config merge.
 ##
 ## Enabling BEFORE rack-manager is deployed is safe: the client is constructed

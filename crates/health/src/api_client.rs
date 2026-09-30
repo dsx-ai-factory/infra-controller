@@ -930,6 +930,7 @@ impl ApiEndpointSource {
         )
     }
 
+    #[allow(deprecated)]
     fn extract_switch_host_endpoint(
         &self,
         switch: &rpc::forge::Switch,

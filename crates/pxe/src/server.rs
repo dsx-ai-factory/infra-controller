@@ -34,6 +34,7 @@ use axum::http::{Request, Response};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tower::Service;
@@ -43,13 +44,20 @@ use tower::Service;
 /// closes it.
 pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long to wait for open connections to finish after shutdown starts
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Serves `app` on `listener`. Each connection carries `ConnectInfo<SocketAddr>`
 /// for the peer, matching what `Router::into_make_service_with_connect_info`
 /// provides.
+///
+/// `serve` returns after `shutdown` resolves, either open connections finish or
+/// `DRAIN_TIMEOUT` expires
 pub(crate) async fn serve<S>(
     listener: TcpListener,
     app: S,
     header_read_timeout: Duration,
+    shutdown: impl Future<Output = ()>,
 ) -> io::Result<()>
 where
     S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
@@ -63,8 +71,17 @@ where
         .timer(TokioTimer::new())
         .header_read_timeout(header_read_timeout);
 
+    // Tracks open connections so requests in progress can finish after shutdown
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+
     loop {
-        let (stream, peer_address) = match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = &mut shutdown => break,
+        };
+
+        let (stream, peer_address) = match accepted {
             Ok(accepted) => accepted,
             Err(error) if is_connection_error(&error) => continue,
             Err(error) => {
@@ -80,15 +97,27 @@ where
             .map_request(|request: Request<Incoming>| request.map(Body::new))
             .layer(Extension(ConnectInfo(peer_address)))
             .service(app.clone());
+        let connection =
+            builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app));
+        let connection = graceful.watch(connection);
         tokio::spawn(async move {
-            if let Err(error) = builder
-                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(app))
-                .await
-            {
+            if let Err(error) = connection.await {
                 tracing::debug!(%error, %peer_address, "connection closed with error");
             }
         });
     }
+
+    if tokio::time::timeout(DRAIN_TIMEOUT, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            drain_timeout_seconds = DRAIN_TIMEOUT.as_secs(),
+            "connections still open at drain timeout; closing them"
+        );
+    }
+
+    Ok(())
 }
 
 fn is_connection_error(error: &io::Error) -> bool {
@@ -129,7 +158,7 @@ mod tests {
             "/",
             get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.to_string() }),
         );
-        tokio::spawn(serve(listener, app, TEST_TIMEOUT));
+        tokio::spawn(serve(listener, app, TEST_TIMEOUT, std::future::pending()));
         addr
     }
 
@@ -193,5 +222,45 @@ mod tests {
                 "{scenario}: closed before the timeout elapsed"
             );
         }
+    }
+
+    /// A request already in progress must still get a response after the server
+    /// stops accepting new connections
+    #[tokio::test]
+    async fn shutdown_waits_for_a_request_in_progress() {
+        const HANDLER_DELAY: Duration = Duration::from_millis(300);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(HANDLER_DELAY).await;
+                "done"
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(serve(listener, app, HEADER_READ_TIMEOUT, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let mut stream = TcpStream::connect(server).await.unwrap();
+        stream
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: pxe\r\n\r\n")
+            .await
+            .unwrap();
+
+        // Let the handler start, then ask the server to stop while it runs.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown_tx.send(()).unwrap();
+
+        let response = read_until(&mut stream, "done").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        tokio::time::timeout(WAIT, serving)
+            .await
+            .expect("serve did not return after draining")
+            .unwrap()
+            .unwrap();
     }
 }
