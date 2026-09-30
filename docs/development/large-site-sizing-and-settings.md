@@ -111,13 +111,22 @@ nico-api at 8 cores. To set it, use the nico-api chart value
 config overlay `siteConfig.nicoApiSiteConfig`, which nico-api merges over the
 base configuration.
 
+A run on `main` as of 2026-09-30 with the same settings took 8.2 hours at 80,
+against the 4.5 to 5.0 hours in the table. The cause is the connection-pool
+waves described in [issue 7064](https://github.com/dsx-ai-factory/infra-controller/issues/7064): the
+9,000 DPU agents poll their network config in lockstep every 30 seconds and
+leave the pool with no idle connection for about a third of each period. The
+`max_database_connections` and hardware-health `[rate_limit]` rows below,
+plus jitter in the agent poll interval, are the mitigation.
+
 ## Settings Changed From the Defaults
 
 | Setting | Used | Default and why it was changed |
 |---|---|---|
 | `[site_explorer]` `explorations_per_run`, `machines_created_per_run`, and `concurrent_explorations` | 2000, 1000, and 300 | 360, 100, and 100: the defaults cap how many endpoints each explorer iteration probes and how many machines it creates, so 13,500 machines would need many more iterations |
 | `[site_explorer]` `switches_created_per_run` and `power_shelves_created_per_run` | 1000 and 1000 | 9 switches and 1 power shelf per iteration. Even at 100 each, 2,250 switches and 2,000 shelves needed more than 20 iterations |
-| `max_database_connections` | 500 | 1000. A site setting of 300 exhausted the pool at 13,500 machines, and 500 was enough for a single nico-api replica |
+| `max_database_connections` | 900 | 1000. The 9,000 DPU agents poll their network config in lockstep every 30 s, and each poll holds a connection for about 15 statements. A 500 pool had no idle connection for about 10 s of every 30 s, and every database user in nico-api waited. 900 cut agent requests from 605 ms to 204 ms. helm-prereqs sets Postgres `max_connections` to 1024, which nico-api shares with the other databases on the cluster. Refer to [issue 7064](https://github.com/dsx-ai-factory/infra-controller/issues/7064) |
+| nico-hardware-health `[rate_limit]` (`CARBIDE_HEALTH__RATE_LIMIT__BUCKET_BURST` and `CARBIDE_HEALTH__RATE_LIMIT__BUCKET_REPLENISH` in the chart's `env`) | `bucket_burst` 100 and `bucket_replenish` 30ms, the limiter's own defaults | Off. Without the limiter every simulated BMC re-authenticates through nico-api every 120 s, about 100 credential mints per second and about 20 percent of the agent request time |
 | nico-api CPU limit | 8 cores | 3 cores: nico-api used 5 to 6 cores at controller concurrency 80 and above. The 32 GiB memory limit is the chart default and was not changed |
 | Postgres CPU and memory limits | 16 cores and 32 GiB | 8 cores and 16 GiB: throttled in 88 percent of CFS periods at 8 cores. The memory raise was headroom only, refer to the sizing section |
 | `[machine_state_controller.controller] max_concurrency` (chart value `machineStateController.maxConcurrency`) | 80 to 120 recommended. The runs covered 10 to 160 | 10, refer to the table above |
@@ -128,16 +137,19 @@ The TOML keys are nico-api configuration: the chart's base file merged with the
 site config overlay `siteConfig.nicoApiSiteConfig`. Set them in the overlay.
 The two settings that name a chart value can be set through the nico-api chart
 instead, and an overlay entry for the same key takes precedence over the chart
-value.
+value. The hardware-health `[rate_limit]` row is that chart's configuration,
+set through its `env` map as `nico-hardware-health.env` in the same values
+file.
 
 To reproduce the fleet, run Machine-a-Tron as ten instances of 25 racks each in
 controller mode behind the protocol gateway. Keep them on one BMC segment with
 the BMC addresses published as Service externalIPs. The fleet needs one BMC
 address per endpoint, 17,750 in total, so the segment must be at least a `/17`.
 Refer to
-[Multi-pod simulation with Controller Mode](machine-a-tron-deployment.md#multi-pod-simulation-with-controller-mode)
-for the deployment steps. Its example segment is a `/18`, which holds 16,384
-addresses, so the runs used one `10.200.0.0/17` segment instead.
+[Replicating the 250-Rack Fleet](machine-a-tron-scale-testing.md#replicating-the-250-rack-fleet)
+for the ordered steps. The simulation overlay's `simulated-oob` segment is a
+`/18`, which holds 16,384 addresses, so the runs used one `10.200.0.0/17`
+segment instead.
 
 ## Reading the Numbers
 
