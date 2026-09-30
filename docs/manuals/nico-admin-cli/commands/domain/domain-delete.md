@@ -1,21 +1,21 @@
-# `nico-admin-cli domain`
+# `nico-admin-cli domain delete`
 
-*[Network commands](../../network.md) › **domain***
+*[Network commands](../../network.md) › [domain](./domain.md) › **delete***
 
 ## NAME
 
-nico-admin-cli-domain - Domain related handling
+nico-admin-cli-domain-delete - Delete an unreferenced DNS domain
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain [--extended] [--sort-by]
-[-h|--help] <subcommands>
+nico-admin-cli domain delete [--extended] [--sort-by]
+[-h|--help] <DomainId>
 ```
 
 ## DESCRIPTION
 
-Domain related handling
+Delete an unreferenced DNS domain
 
 ## OPTIONS
 
@@ -41,14 +41,15 @@ Sort output by specified field
 
 Print help (see a summary with -h)
 
-## Subcommands
+`<DomainId>`
 
-| Subcommand | Description |
-|---|---|
-| [`create`](./domain-create.md) | Create a forward DNS domain |
-| [`delete`](./domain-delete.md) | Delete an unreferenced DNS domain |
-| [`show`](./domain-show.md) | Display Domain information |
-| [`update`](./domain-update.md) | Update domain default TTL |
+ID of the unreferenced domain to delete
+
+## Examples
+
+```sh
+nico-admin-cli domain delete 12345678-1234-5678-90ab-cdef01234567
+```
 
 ---
 

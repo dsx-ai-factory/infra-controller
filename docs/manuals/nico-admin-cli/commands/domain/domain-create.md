@@ -1,23 +1,27 @@
-# `nico-admin-cli domain`
+# `nico-admin-cli domain create`
 
-*[Network commands](../../network.md) › **domain***
+*[Network commands](../../network.md) › [domain](./domain.md) › **create***
 
 ## NAME
 
-nico-admin-cli-domain - Domain related handling
+nico-admin-cli-domain-create - Create a forward DNS domain
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain [--extended] [--sort-by]
-[-h|--help] <subcommands>
+nico-admin-cli domain create [--default-ttl]
+[--extended] [--sort-by] [-h|--help] <NAME>
 ```
 
 ## DESCRIPTION
 
-Domain related handling
+Create a forward DNS domain
 
 ## OPTIONS
+
+`--default-ttl <SECONDS>`
+
+Default record TTL, 30 to 86400 seconds
 
 `--extended`
 
@@ -41,14 +45,16 @@ Sort output by specified field
 
 Print help (see a summary with -h)
 
-## Subcommands
+`<NAME>`
 
-| Subcommand | Description |
-|---|---|
-| [`create`](./domain-create.md) | Create a forward DNS domain |
-| [`delete`](./domain-delete.md) | Delete an unreferenced DNS domain |
-| [`show`](./domain-show.md) | Display Domain information |
-| [`update`](./domain-update.md) | Update domain default TTL |
+Lowercase forward DNS domain name
+
+## Examples
+
+```sh
+nico-admin-cli domain create example.com
+nico-admin-cli domain create example.com --default-ttl 600
+```
 
 ---
 
