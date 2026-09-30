@@ -1084,6 +1084,9 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	allocationConstraintDAO := cdbm.NewAllocationConstraintDAO(mst.dbSession)
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mst.dbSession)
 
+	// IP Blocks are logged as removed or created only once the transaction
+	// commits, since an error later in the loop rolls back every change.
+	var removedIPBlocks, createdIPBlocks []*cdbm.IPBlock
 	err = cdb.WithTx(ctx, mst.dbSession, func(tx *cdb.Tx) error {
 		derr := tx.AcquireAdvisoryLock(
 			ctx,
@@ -1194,11 +1197,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				return derr
 			}
 
-			logger.Info().
-				Str("IPBlockID", lockedIPBlock.ID.String()).
-				Str("Prefix", prefix.String()).
-				Str("RoutingType", lockedIPBlock.RoutingType).
-				Msg("removed Site fabric IP Block for an unreported prefix")
+			removedIPBlocks = append(removedIPBlocks, lockedIPBlock)
 		}
 
 		for _, prefix := range prefixes {
@@ -1274,13 +1273,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				return derr
 			}
 
-			logger.Info().
-				Str("IPBlockID", createdIPBlock.ID.String()).
-				Str("Prefix", prefixAddr).
-				Int("PrefixLength", prefixLength).
-				Str("RoutingType", routingType).
-				Msg("created Site fabric IP Block")
-
+			createdIPBlocks = append(createdIPBlocks, createdIPBlock)
 			rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: createdIPBlock.ID})
 		}
 
@@ -1288,6 +1281,22 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	})
 	if err != nil {
 		return err
+	}
+
+	for _, ipBlock := range removedIPBlocks {
+		logger.Info().
+			Str("IPBlockID", ipBlock.ID.String()).
+			Str("Prefix", ipam.GetCidrForIPBlock(ctx, ipBlock.Prefix, ipBlock.PrefixLength)).
+			Str("RoutingType", ipBlock.RoutingType).
+			Msg("removed Site fabric IP Block for an unreported prefix")
+	}
+	for _, ipBlock := range createdIPBlocks {
+		logger.Info().
+			Str("IPBlockID", ipBlock.ID.String()).
+			Str("Prefix", ipBlock.Prefix).
+			Int("PrefixLength", ipBlock.PrefixLength).
+			Str("RoutingType", ipBlock.RoutingType).
+			Msg("created Site fabric IP Block")
 	}
 
 	logger.Info().Msg("successfully completed activity")
