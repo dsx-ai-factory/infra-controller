@@ -712,6 +712,25 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         }
     }
 
+    // NVUE allows one prefix match per rule, so index both families separately.
+    let [
+        tenant_host_routes_to_underlay,
+        tenant_host_routes_to_underlay_ipv6,
+    ] = [
+        tenant_host_routes_to_underlay,
+        tenant_host_routes_to_underlay_ipv6,
+    ]
+    .map(|prefixes| {
+        prefixes
+            .into_iter()
+            .enumerate()
+            .map(|(offset, prefix)| Prefix {
+                Index: (65002 + offset).to_string(),
+                Prefix: prefix,
+            })
+            .collect::<Vec<_>>()
+    });
+
     let (anycast_ipv4, anycast_ipv6) =
         split_prefixes_by_family(&conf.anycast_site_prefixes, None, 1000);
     let (deny_ipv4, deny_ipv6) =
@@ -1530,13 +1549,13 @@ struct TmplNvue {
     LoopbackIpv6: String,
     /// Does any opted-in VPC have an IPv4 host route to leak to the underlay?
     HasAnyVpcTenantHostLeakToUnderlay: bool,
-    /// IPv4 host routes prepared for the underlay prefix list.
-    TenantHostRoutesToUnderlay: Vec<String>,
+    /// Indexed IPv4 host routes prepared for the underlay prefix list.
+    TenantHostRoutesToUnderlay: Vec<Prefix>,
 
     /// Does any opted-in VPC have an IPv6 host route to leak to the underlay?
     HasAnyVpcTenantHostLeakToUnderlayIpv6: bool,
-    /// IPv6 host routes prepared for the underlay prefix list.
-    TenantHostRoutesToUnderlayIpv6: Vec<String>,
+    /// Indexed IPv6 host routes prepared for the underlay prefix list.
+    TenantHostRoutesToUnderlayIpv6: Vec<Prefix>,
 
     /// Does any VPC have a VRF loopback?
     HasAnyVpcVrfLoopback: bool,
