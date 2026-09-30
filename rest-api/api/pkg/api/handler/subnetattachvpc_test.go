@@ -155,6 +155,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 		expectedStatus     int
 		expectedVpc        string
 		expectProxyRequest bool
+		expectReadRequest  bool
 	}{
 		{
 			name: "reassigns an unallocated ETV Subnet after explicit acknowledgement",
@@ -175,9 +176,9 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				return fixture.subnet.ID.String(), string(body), fixture.user
 			},
-			expectedStatus:     http.StatusOK,
-			expectedVpc:        "source",
-			expectProxyRequest: false,
+			expectedStatus:    http.StatusOK,
+			expectedVpc:       "source",
+			expectReadRequest: true,
 		},
 		{
 			name: "reassigns between VPCs using the same NVUE mode",
@@ -243,7 +244,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			expectedVpc:    "source",
 		},
 		{
-			name: "delegates stale Subnet lifecycle state to Core",
+			name: "rejects a stale Subnet lifecycle state before attaching in Core",
 			prepare: func(t *testing.T, fixture *subnetAttachVpcFixture) (string, string, *cdbm.User) {
 				_, err := cdbm.NewSubnetDAO(fixture.dbSession).Update(context.Background(), nil, cdbm.SubnetUpdateInput{
 					SubnetId: fixture.subnet.ID, Status: cutil.GetPtr(cdbm.SubnetStatusError), IsMissingOnSite: cutil.GetPtr(true),
@@ -253,9 +254,9 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				return fixture.subnet.ID.String(), string(body), fixture.user
 			},
-			expectedStatus:     http.StatusOK,
-			expectedVpc:        "target",
-			expectProxyRequest: true,
+			expectedStatus:    http.StatusConflict,
+			expectedVpc:       "source",
+			expectReadRequest: true,
 		},
 		{
 			name: "delegates stale source VPC lifecycle state to Core",
@@ -435,8 +436,11 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				expectedVpcID = fixture.targetVpc.ID
 			}
 			assert.Equal(t, expectedVpcID, updatedSubnet.VpcID)
+			if test.expectReadRequest {
+				assert.Nil(t, updatedSubnet.AttachIntentID, "rejected attachment must not leave an intent")
+			}
 
-			if test.expectProxyRequest || test.name == "keeps same-target retry idempotent without replacement acknowledgement" {
+			if test.expectProxyRequest || test.expectReadRequest {
 				assert.Equal(t, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName, fixture.readRequest.FullMethod)
 			} else {
 				assert.Empty(t, fixture.readRequest.FullMethod)
