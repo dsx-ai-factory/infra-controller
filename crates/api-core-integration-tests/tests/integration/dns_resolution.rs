@@ -530,6 +530,31 @@ async fn test_reserved_create_delete_concurrent_and_name_collision(pool: PgPool)
         "a cancelled reserved ID must never become live"
     );
 
+    // Repeated delivery of the *same* create intent must converge on one
+    // stable row even when both calls begin before either has returned.
+    // The ID advisory lock serializes the two transactions; this test does
+    // not force them to overlap inside the database transaction.
+    let replay_id: DomainId = uuid::Uuid::new_v4().into();
+    let replay_payload = || {
+        site_request(CreateDomainRequest {
+            name: "same-intent.example".into(),
+            default_ttl: Some(720),
+            reserved_id: Some(replay_id),
+        })
+    };
+    let (first, second) = tokio::join!(
+        api.create_domain(replay_payload()),
+        api.create_domain(replay_payload())
+    );
+    let first = first.expect("first reserved create succeeds").into_inner();
+    let second = second.expect("same-ID replay succeeds").into_inner();
+    assert_eq!(first.id, Some(replay_id));
+    assert_eq!(second.id, first.id);
+    assert_eq!(
+        second.created, first.created,
+        "replay returned the same row"
+    );
+
     let a: DomainId = uuid::Uuid::new_v4().into();
     let b: DomainId = uuid::Uuid::new_v4().into();
     let payload = |id| {
