@@ -35,6 +35,7 @@ listener's own TLS material and does not require client authentication, so
 ```toml
 [nvlink_config]
 enabled = true
+allow_insecure = false
 nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
 nmx_c_tls_authority = "mat-mock.nvidia.com"
 ```

@@ -121,10 +121,14 @@ simulated BMC, using the BMC address assigned by NICo as the Service IP. NICo
 therefore connects directly to each simulated BMC instead of routing every
 Redfish request through the shared machine-a-tron proxy.
 
-The Tilt BMC underlay is `10.96.64.0/18`, which lies within Kind's default
-`10.96.0.0/16` ServiceCIDR. Kubernetes rejects an explicit ClusterIP outside
-the cluster ServiceCIDR, so keep this range aligned with the Kind network
-configuration if the ServiceCIDR changes.
+The Tilt BMC underlay is `10.96.64.0/18` and the DPU OOB / switch NVOS underlay
+is `10.96.192.0/18`; both lie within Kind's default `10.96.0.0/16` ServiceCIDR.
+The controller also creates a `mat-nvos-*` Service per simulated NVLink switch
+on its NVOS lease, through which NICo reaches machine-a-tron's hosted NMX-C
+mock. Kubernetes rejects an explicit ClusterIP outside the cluster ServiceCIDR,
+so keep both ranges aligned with the Kind network configuration if the
+ServiceCIDR changes. NICo seeds `[networks.*]` segments only on a fresh
+database, so changing either prefix needs a fresh Tilt cluster state.
 
 ## Image builds
 

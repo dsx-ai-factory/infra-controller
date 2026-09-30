@@ -73,6 +73,19 @@
 #        dpuinit. GUARDRAIL: hard-fails if the real DPF operator is deployed,
 #        since both would drive DPU.status.phase.
 #
+#  * NMX-C mock (Phase 5b, controller mode only): machine-a-tron serves an
+#    NMX-C mock for every simulated rack on its bmc-mock listener, and NICo
+#    reaches it at each switch's NVOS address through the per-switch
+#    `mat-nvos-*` Services that mat-k8s-controller creates. NICo dials by IP,
+#    so it verifies machine-a-tron's certificate against
+#    [nvlink_config].nmx_c_tls_authority, which the chart places on every pod
+#    certificate as an extra SAN. The script appends a managed
+#    [nvlink_config] block (CA = nico-roots, authority = NMXC_MOCK_AUTHORITY)
+#    unless the site already configures [nvlink_config] itself. Override
+#    mode has no per-switch addresses, so nothing is configured there.
+#    Racks still need switches at CONTROL_PLANE_STATE_CONFIGURED (set from
+#    the RMS mock) before NICo resolves an endpoint for them.
+#
 #  * SVI IPs on the simulated prefixes (Phase 5, scale mode): the host
 #    network-config builder under FNN requires network_prefixes.svi_ip on L2
 #    segments; without it get_managed_host_network_config fails with
@@ -145,6 +158,10 @@
 #   DPF_SIM_IMAGE_TAG      Tag for the derived default above. Default: latest
 #   DPF_NAMESPACE          DPF namespace (must match the site config).
 #                          Default: dpf-operator-system
+#   NMXC_MOCK_AUTHORITY    TLS name NICo verifies the hosted NMX-C mock
+#                          against (Phase 5b); also added to every
+#                          machine-a-tron certificate as an extra SAN.
+#                          Default: mat-mock.nvidia.com
 #
 # Usage:
 #   export KUBECONFIG=/path/to/kubeconfig
@@ -152,6 +169,7 @@
 #   ./setup-machine-a-tron.sh -y         # non-interactive
 #   ./setup-machine-a-tron.sh --skip-nico-core-config   # don't touch nico-core
 #   ./setup-machine-a-tron.sh --skip-dpf-sim  # no DPF simulator / RBAC / flag
+#   ./setup-machine-a-tron.sh --skip-nvlink-config  # leave [nvlink_config] alone
 # =============================================================================
 
 set -euo pipefail
@@ -291,6 +309,8 @@ DPF_SIM_IMAGE_TAG="${DPF_SIM_IMAGE_TAG:-latest}"
 ASSUME_YES=false
 SKIP_NICO_CORE_CONFIG=false
 SKIP_DPF_SIM=false
+SKIP_NVLINK_CONFIG=false
+NMXC_MOCK_AUTHORITY="${NMXC_MOCK_AUTHORITY:-mat-mock.nvidia.com}"
 CM_JSON=""
 MERGED_VALUES=""
 cleanup() { rm -f "$CM_JSON" "$MERGED_VALUES" 2>/dev/null || true; }
@@ -302,6 +322,7 @@ for arg in "$@"; do
         --scale) MAT_MODE="scale" ;;
         --skip-nico-core-config) SKIP_NICO_CORE_CONFIG=true ;;
         --skip-dpf-sim) SKIP_DPF_SIM=true ;;
+        --skip-nvlink-config) SKIP_NVLINK_CONFIG=true ;;
         -h|--help) awk 'NR==1{next} /^# =+$/{r++; if(r==2) exit} /^#/{sub(/^# ?/,""); print}' "$0"; exit 0 ;;
         *) echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
@@ -1157,6 +1178,117 @@ PY
 fi
 
 # =============================================================================
+# Phase 5b — point NICo's NVLink partition monitor at the hosted NMX-C mock
+#   Controller mode only: NICo dials a rack's NMX-C at a switch NVOS address,
+#   which exists as a routable ClusterIP only when mat-k8s-controller creates
+#   the per-switch `mat-nvos-*` Services. The block is appended once, inside
+#   sentinels, and never overwrites an operator's own [nvlink_config].
+# =============================================================================
+phase "Phase 5b — NMX-C mock ([nvlink_config])"
+# MAT_MULTIPOD=1 always runs the controller; single-pod values files opt in
+# with mat-k8s-controller.enabled (structural YAML parse when available,
+# otherwise a scoped line scan, as Phase 6 does for machine groups).
+_controller_mode() {
+    [[ "${MAT_MULTIPOD:-0}" == "1" ]] && return 0
+    python3 - "$VALUES_FILE" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+try:
+    import yaml
+    doc = yaml.safe_load(text) or {}
+    sys.exit(0 if (doc.get("mat-k8s-controller") or {}).get("enabled") is True else 1)
+except ImportError:
+    pass
+in_sec, sec_indent = False, 0
+for raw in text.splitlines():
+    if not raw.strip() or raw.lstrip().startswith("#"):
+        continue
+    indent = len(raw) - len(raw.lstrip())
+    if in_sec and indent <= sec_indent:
+        in_sec = False
+    if re.match(r'\s*mat-k8s-controller\s*:', raw):
+        in_sec, sec_indent = True, indent
+    elif in_sec and re.match(r'\s*enabled\s*:\s*true\b', raw):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+NVLINK_CONFIGURED=false
+if $SKIP_NICO_CORE_CONFIG || $SKIP_NVLINK_CONFIG; then
+    warn "skipping [nvlink_config]; configure it manually to reach the NMX-C mock"
+elif ! _controller_mode; then
+    info "override mode has no per-switch NVOS addresses; NMX-C mock not configured"
+else
+    CM_JSON="$(mktemp)"
+    kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o json > "$CM_JSON" 2>/dev/null \
+        || die "nico-api-site-config-files configmap not found"
+    _PATCH_RESULT="$(NMXC_MOCK_AUTHORITY="$NMXC_MOCK_AUTHORITY" python3 - "$CM_JSON" <<'PY'
+import json, os, re, sys
+path = sys.argv[1]
+cm = json.load(open(path))
+BEGIN = "# --- BEGIN machine-a-tron NMX-C mock (managed by setup-machine-a-tron.sh) ---"
+END   = "# --- END machine-a-tron NMX-C mock ---"
+block = f'''{BEGIN}
+# NICo dials the mock at switch NVOS addresses on machine-a-tron's TLS
+# listener, so it verifies the certificate against this shared SAN. The mock
+# does not require a client certificate.
+[nvlink_config]
+enabled = true
+allow_insecure = false
+nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+nmx_c_tls_authority = "{os.environ["NMXC_MOCK_AUTHORITY"]}"
+{END}
+'''
+result, changed = "nochange", False
+for k, v in cm["data"].items():
+    if "[site_explorer]" not in v:
+        continue
+    if BEGIN in v:
+        pre, _, rest = v.partition(BEGIN)
+        _, _, post = rest.partition(END)
+        base = pre.rstrip("\n") + "\n" + post.lstrip("\n")
+    else:
+        base = v
+    if re.search(r'^\s*\[nvlink_config\]\s*$', base, re.M):
+        # The operator owns this section (real NMX-C, or hand-tuned); leave it.
+        result = "foreign"
+        continue
+    new = base.rstrip("\n") + "\n\n" + block
+    if new != v:
+        cm["data"][k] = new
+        changed = True
+if changed:
+    result = "changed"
+for f in ("resourceVersion", "uid", "creationTimestamp", "managedFields"):
+    cm["metadata"].pop(f, None)
+json.dump(cm, open(path, "w"))
+print(result)
+PY
+)"
+    case "$_PATCH_RESULT" in
+        changed)
+            kubectl apply -f "$CM_JSON" >/dev/null
+            info "[nvlink_config] appended (authority ${NMXC_MOCK_AUTHORITY}); restarting nico-api"
+            kubectl rollout restart deployment/nico-api -n "$NICO_SYSTEM_NS" >/dev/null
+            kubectl rollout status deployment/nico-api -n "$NICO_SYSTEM_NS" --timeout=180s >/dev/null \
+                || warn "nico-api rollout did not complete in time; continuing"
+            NVLINK_CONFIGURED=true
+            ok "NICo NVLink monitor points at the machine-a-tron NMX-C mock"
+            ;;
+        nochange)
+            NVLINK_CONFIGURED=true
+            ok "[nvlink_config] for the NMX-C mock already in place"
+            ;;
+        foreign)
+            warn "site config already has its own [nvlink_config]; left untouched — set nmx_c_tls_authority=${NMXC_MOCK_AUTHORITY} and the nico-roots CA there to use the mock"
+            ;;
+        *)
+            die "unexpected [nvlink_config] patch result: ${_PATCH_RESULT}"
+            ;;
+    esac
+fi
+
+# =============================================================================
 # Phase 6 — resolve DHCP relays + sizing check
 # =============================================================================
 phase "Phase 6 — DHCP relays + pool sizing (${MAT_MODE})"
@@ -1481,6 +1613,12 @@ cat > "$MERGED_VALUES" <<EOF
 image:
   repository: "${MAT_IMAGE_REPO}"
   tag: "${MAT_IMAGE_TAG}"
+# The SAN NICo verifies the hosted NMX-C mock against (Phase 5b); must match
+# [nvlink_config].nmx_c_tls_authority. Listed explicitly so an
+# NMXC_MOCK_AUTHORITY override and the chart's certificate cannot drift.
+certificate:
+  extraDnsNames:
+    - "${NMXC_MOCK_AUTHORITY}"
 EOF
 # MAT_MULTIPOD=1: the values file defines its own pods map (mat-0..mat-N with
 # per-pod host counts and relay addresses); injecting the single-pod default
@@ -1530,7 +1668,8 @@ kubectl rollout status deployment/"$RELEASE" -n "$MAT_NAMESPACE" --timeout=180s 
 phase "Phase 10 — verification"
 info "waiting for cert to be issued from the current CA..."
 kubectl wait --for=condition=Ready certificate/"${RELEASE}-certificate" -n "$MAT_NAMESPACE" --timeout=120s >/dev/null 2>&1 \
-    && ok "client certificate Ready" || warn "certificate not Ready yet — check cert-manager"
+    && ok "client certificate Ready" \
+    || warn "certificate not Ready yet — check cert-manager (an issuer that refuses the ${NMXC_MOCK_AUTHORITY} SAN shows up here)"
 
 # wait windows scale with the deployment size (scale mode: hundreds-thousands)
 IFACE_WAIT=$(( 90 + NEED )); (( IFACE_WAIT > 1800 )) && IFACE_WAIT=1800
@@ -1719,6 +1858,18 @@ else
     warn "  check: kubectl logs -n ${NICO_SYSTEM_NS} deploy/nico-api | grep -i 'site.explor\\|MissingCred\\|Refusing\\|Failed to create'"
     warn "  check: kubectl logs -n ${MAT_NAMESPACE} deploy/${RELEASE} | grep -iE 'No IP addresses|error'"
     warn "  a common cause: admin/OOB pool exhaustion — see the sizing output of Phase 6"
+fi
+
+# --- NMX-C mock reachability (Phase 5b) --------------------------------------
+# mat-k8s-controller creates a `mat-nvos-*` Service per switch once NVOS DHCP
+# completes; without them NICo has no route to the mock's NVOS addresses.
+if $NVLINK_CONFIGURED; then
+    _NVOS_SVCS="$(kubectl get svc -A -l nvidia-infra-controller/mat-machine-type=nvos --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    if (( _NVOS_SVCS > 0 )); then
+        ok "NMX-C mock: ${_NVOS_SVCS} switch NVOS Service(s) (mat-nvos-*, port 9370) route to machine-a-tron"
+    else
+        warn "no mat-nvos-* Services yet — created after switch NVOS DHCP; until then NICo cannot reach the NMX-C mock (check mat-k8s-controller logs)"
+    fi
 fi
 
 phase "Done"
