@@ -48,14 +48,13 @@ pub(super) async fn reprovision(api_client: &ApiClient, reprov: Args) -> Carbide
     }
 }
 
-#[allow(deprecated)]
 async fn apply_health_report(
     api_client: &ApiClient,
     id: carbide_uuid::machine::MachineId,
     update_message: String,
 ) -> CarbideCliResult<()> {
     // Set a HostUpdateInProgress health report entry on the Host
-    let host_id = match id.machine_type() {
+    let host_id: Option<carbide_uuid::machine::MachineId> = match id.machine_type() {
         MachineType::Host => Some(id),
         MachineType::Dpu => {
             let machine = api_client
@@ -65,8 +64,11 @@ async fn apply_health_report(
                 .into_iter()
                 .next();
 
-            if let Some(host_id) = machine.map(|x| x.associated_host_machine_id) {
-                host_id
+            if let Some(host_id) = machine.map(|x| {
+                x.status
+                    .and_then(|status| status.associated_host_machine_id)
+            }) {
+                host_id.map(Into::into)
             } else {
                 return Err(CarbideCliError::GenericError(format!(
                     "Could not find host attached with dpu {id}",
@@ -90,10 +92,12 @@ async fn apply_health_report(
             .next();
 
         if let Some(host_machine) = host_machine
-            && host_machine
-                .health_sources
-                .iter()
-                .any(|or| or.source == "host-update")
+            && host_machine.status.as_ref().is_some_and(|status| {
+                status
+                    .health_sources
+                    .iter()
+                    .any(|origin| origin.source == "host-update")
+            })
         {
             return Err(CarbideCliError::GenericError(format!(
                 "Host machine: {:?} already has a \"host-update\" health report entry.",
@@ -104,7 +108,7 @@ async fn apply_health_report(
         let report = get_health_report(HealthReportTemplates::HostUpdate, Some(update_message));
 
         api_client
-            .machine_insert_health_report_override(*host_machine_id, report.into(), false)
+            .machine_insert_health_report_override(host_machine_id, report.into(), false)
             .await?;
     }
 

@@ -38,6 +38,10 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+mod listener;
+
+pub use listener::bind_tcp_listener;
+
 /// Health and readiness controller
 #[derive(Debug, Clone)]
 pub struct HealthController {
@@ -281,13 +285,13 @@ pub async fn run_metrics_endpoint(config: &MetricsEndpointConfig) -> Result<(), 
 /// Start a HTTP endpoint which exposes metrics and runs until `cancel_token` is
 /// cancelled.
 ///
-/// This binds `config.address`; callers that have already bound a listener can use
-/// [`run_metrics_endpoint_with_listener`] directly.
+/// This binds `config.address` using [`bind_tcp_listener`], including its IPv4 fallback.
+/// Callers that have already bound a listener can use [`run_metrics_endpoint_with_listener`] directly.
 pub async fn run_metrics_endpoint_with_cancellation(
     config: &MetricsEndpointConfig,
     cancel_token: CancellationToken,
 ) -> Result<(), std::io::Error> {
-    let listener = TcpListener::bind(&config.address).await?;
+    let listener = bind_tcp_listener(config.address).await?;
 
     tracing::info!(
         metrics_address = config.address.to_string(),

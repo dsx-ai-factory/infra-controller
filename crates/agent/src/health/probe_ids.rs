@@ -23,7 +23,7 @@ lazy_static::lazy_static! {
     pub static ref ServiceRunning: HealthProbeId = "ServiceRunning".parse().unwrap();
     pub static ref DhcpRelay: HealthProbeId = "DhcpRelay".parse().unwrap();
     pub static ref DhcpServer: HealthProbeId = "DhcpServer".parse().unwrap();
-    pub static ref BgpStats: HealthProbeId = "BgpStats".parse().unwrap();
+    pub static ref BgpStats: HealthProbeId = HealthProbeId::bgp_stats();
     pub static ref BgpPeeringTor: HealthProbeId = HealthProbeId::bgp_peering_tor();
     pub static ref BgpPeeringRouteServer: HealthProbeId = "BgpPeeringRouteServer".parse().unwrap();
     pub static ref UnexpectedBgpPeer: HealthProbeId = "UnexpectedBgpPeer".parse().unwrap();
@@ -32,8 +32,8 @@ lazy_static::lazy_static! {
     pub static ref FileIsValid: HealthProbeId = "FileIsValid".parse().unwrap();
     pub static ref BgpDaemonEnabled: HealthProbeId = "BgpDaemonEnabled".parse().unwrap();
     pub static ref RestrictedMode: HealthProbeId = "RestrictedMode".parse().unwrap();
-    pub static ref PostConfigCheckWait: HealthProbeId = "PostConfigCheckWait".parse().unwrap();
+    pub static ref PostConfigCheckWait: HealthProbeId = HealthProbeId::post_config_check_wait();
     pub static ref DpuDiskUtilizationCheck: HealthProbeId = "DpuDiskUtilizationCheck".parse().unwrap();
     pub static ref DpuDiskUtilizationCritical: HealthProbeId = "DpuDiskUtilizationCritical".parse().unwrap();
-    pub static ref NvueApiRunning: HealthProbeId = "NvueApiRunning".parse().unwrap();
+    pub static ref NvueApiRunning: HealthProbeId = HealthProbeId::nvue_api_running();
 }

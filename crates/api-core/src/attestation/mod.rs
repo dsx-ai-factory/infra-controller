@@ -74,12 +74,15 @@ pub(crate) async fn backfill_ek_cert_status_for_existing_machines(
 
     let mut txn = Transaction::begin(db_pool).await?;
 
-    let machines: Vec<::carbide_uuid::machine::MachineId> =
-        db::machine::find(&mut txn, ObjectFilter::All, MachineSearchConfig::default())
-            .await?
-            .iter()
-            .map(|machine| machine.id)
-            .collect();
+    let machines: Vec<::carbide_uuid::machine::MachineId> = db::machine::find(
+        &mut txn,
+        ObjectFilter::<MachineId>::All,
+        MachineSearchConfig::default(),
+    )
+    .await?
+    .iter()
+    .map(|machine| machine.id)
+    .collect();
 
     if !machines.is_empty() {
         let topologies =

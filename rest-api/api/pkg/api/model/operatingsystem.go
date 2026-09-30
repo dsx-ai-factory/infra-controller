@@ -12,7 +12,6 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -23,7 +22,6 @@ import (
 const (
 	validationErrorInfrastructureProviderIDExpectNil = "Specifying InfrastructureProviderID is currently not supported"
 	errMsgInvalidImageSHA                            = "not a valid SHA hash"
-	errMsgInvalidImageDiskPath                       = "not a valid disk path"
 	errMsgExactlyOneRootFsField                      = "exactly one of 'rootFsId' and 'rootFsLabel' must be specified"
 	errMsgOnlyOneRootFsField                         = "only one of 'rootFsId' and 'rootFsLabel' may be specified"
 	errMsgNotEmpty                                   = "cannot be empty"
@@ -291,6 +289,10 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 		validation.Field(&oscr.InfrastructureProviderID,
 			// infrastructure provider id must be nil
 			validation.Nil.Error(validationErrorInfrastructureProviderIDExpectNil)),
+		validation.Field(&oscr.UserData,
+			validation.When(oscr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -375,7 +377,7 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 			validation.Field(&oscr.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(oscr.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&oscr.ImageDisk,
-				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&oscr.RootFsID,
 				validation.When(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel), validation.Required.Error(errMsgExactlyOneRootFsField)),
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel)), validation.Empty.Error(errMsgExactlyOneRootFsField))),
@@ -430,54 +432,19 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 		return nil
 	}
 
-	// At this point, we know phone-home has been requested,
-	// so default to empty user-data if nothing was passed in
-	if oscr.UserData == nil || *oscr.UserData == "" {
-		oscr.UserData = cutil.GetPtr("{}")
-	}
-
-	userDataMap := &yaml.Node{}
-
-	var documentRoot *yaml.Node
-
-	isUserDataValidYAML := false
-
-	err := yaml.Unmarshal([]byte(*oscr.UserData), userDataMap)
-	if err == nil {
-
-		// We have a slightly more restrictive view of what
-		// counts as valid YAML.
-		if len(userDataMap.Content) > 0 {
-			documentRoot = userDataMap.Content[0]
-			if documentRoot.Kind == yaml.MappingNode {
-				isUserDataValidYAML = true
-			}
-		}
-	}
-
-	if !isUserDataValidYAML {
+	userData, err := util.EnablePhoneHomeInUserData(oscr.UserData, phonehomeUrl)
+	if errors.Is(err, util.ErrUnsupportedUserData) {
 		return validation.Errors{
-			"userData": errors.New("userData specified in request must be valid cloud-init YAML to enable phone home"),
+			"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 		}
 	}
-
-	if err := util.InsertPhoneHomeIntoUserData(documentRoot, phonehomeUrl); err != nil {
-		return validation.Errors{
-			"userData": errors.New("failed to update userData with phone home config"),
-		}
-	}
-
-	byteUserData, err := yaml.Marshal(userDataMap)
 	if err != nil {
-		return validation.Errors{
-			"userData": errors.New("failed to re-construct userData after processing phone home config"),
-		}
+		return phoneHomeUserDataError(true)
 	}
 
-	// Render it back out.
-	oscr.UserData = cutil.GetPtr(string(byteUserData))
+	oscr.UserData = userData
 
-	return nil
+	return util.ValidateEffectiveUserData(oscr.UserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to create the
@@ -548,6 +515,10 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.When(osur.Name != nil, validation.Required.Error(validationErrorStringLength)),
 			validation.When(osur.Name != nil, validation.By(util.ValidateNameCharacters)),
 			validation.When(osur.Name != nil, validation.Length(2, 256).Error(validationErrorStringLength))),
+		validation.Field(&osur.UserData,
+			validation.When(osur.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -718,7 +689,7 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.Field(&osur.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(osur.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&osur.ImageDisk,
-				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&osur.RootFsID,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.RootFsLabel)), validation.Empty.Error(errMsgOnlyOneRootFsField))),
 			validation.Field(&osur.RootFsLabel,
@@ -727,17 +698,17 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 	} else {
 		err = validation.ValidateStruct(osur,
 			validation.Field(&osur.ImageSHA,
-				validation.Nil.Error("imageSHA cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageSHA cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthType,
-				validation.Nil.Error("imageAuthType cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthType cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthToken,
-				validation.Nil.Error("imageAuthToken cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthToken cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageDisk,
-				validation.Nil.Error("imageDisk cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageDisk cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsID,
-				validation.Nil.Error("rootFsID cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsID cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsLabel,
-				validation.Nil.Error("rootFsLabel cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsLabel cannot be specified unless OS is image-based")),
 		)
 	}
 
@@ -767,111 +738,55 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	nicoAuthoredPhoneHome := existingOS.PhoneHomeEnabled && osur.UserData == nil
 
 	if mergedPhoneHomeEnabled == nil {
+		// An update naming neither user-data nor phone-home is not asking for the
+		// block to be rewritten, and the stored blob can be user-data we no longer
+		// edit, so it is left as it is. It still reaches the Site, so its size is
+		// checked before returning.
+		if osur.UserData == nil {
+			return util.ValidateEffectiveUserData(mergedUserData)
+		}
+
 		mergedPhoneHomeEnabled = &existingOS.PhoneHomeEnabled
-
-		// If phone-home has never been enabled, then
-		// any user-data content was always acceptable,
-		// so do nothing and return.
-		if !*mergedPhoneHomeEnabled {
-			return nil
-		}
 	}
 
-	// If phone-home is being disabled, but there
-	// isn't any user-data to begin with, there's nothing to do.
-	if !*mergedPhoneHomeEnabled && (mergedUserData == nil || *mergedUserData == "") {
-		return nil
-	}
-
-	if mergedUserData == nil || *mergedUserData == "" {
-		// A request to disable that had no user-data would
-		// have returned already; so, If we're here, then we
-		// have a request to enable that is totally missing
-		// user data, so default it.
-		mergedUserData = cutil.GetPtr("{}")
-	}
-
-	userDataMap := &yaml.Node{}
-
-	var documentRoot *yaml.Node
-
-	isUserDataValidYAML := false
-
-	err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-	if err == nil {
-
-		// We have a slightly more restrictive view of what
-		// counts as valid YAML.
-		if len(userDataMap.Content) > 0 {
-			documentRoot = userDataMap.Content[0]
-			if documentRoot.Kind == yaml.MappingNode {
-				isUserDataValidYAML = true
-			}
-		}
-	}
+	var userData *string
+	var err error
 
 	if *mergedPhoneHomeEnabled {
-		if !isUserDataValidYAML {
-			return validation.Errors{
-				"userData": errors.New("userData specified in request must be valid cloud-init YAML to enable phone home"),
-			}
-		}
-
-		// If some user-data was sent in,
-		// insert our phone-home block into the
-		// existing data.
-		if err := util.InsertPhoneHomeIntoUserData(documentRoot, phonehomeUrl); err != nil {
-			return validation.Errors{
-				"userData": errors.New("failed to update userData with phone home config"),
-			}
-		}
-	} else if isUserDataValidYAML {
-		// If phone-home is being disabled,
-		// We still have to make sure we don't try to remove from invalid yaml,
-		// but the UI will always send false if phone-home is unchecked,
-		// so we want to do this check silently and not alert people who
-		// are using non-YAML user-data.
-
-		// Our own block is removed by key, because the URL frozen into it may
-		// predate a change to site.phoneHomeUrl.
-		var phoneHomeURLFilter *string = nil
-		if !nicoAuthoredPhoneHome {
-			phoneHomeURLFilter = &phonehomeUrl
-		}
-
-		if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
-			return validation.Errors{
-				"userData": errors.New("failed to remove phone home config from userData"),
-			}
-		}
+		userData, err = util.EnablePhoneHomeInUserData(mergedUserData, phonehomeUrl)
+	} else if nicoAuthoredPhoneHome {
+		userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 	} else {
-		// If we've arrived here, then phone-home is being disabled,
-		// and the user-data is NOT valid YAML,
-		// but we don't care, so don't touch user-data and just return.
-		return nil
+		userData, err = util.DisablePhoneHomeInUserData(mergedUserData, phonehomeUrl)
 	}
 
-	if len(documentRoot.Content) == 0 {
-		// If we've arrived here, then the original user-data
-		// was valid, but phone-home has been disabled, and the
-		// phone-home block was the only thing in the original YAML,
-		// so just blank the DB field.
-		osur.UserData = cutil.GetPtr("")
-		return nil
-	}
-
-	// Render any data that still exists.
-	byteUserData, err := yaml.Marshal(userDataMap)
-	if err != nil {
-		return validation.Errors{
-			"userData": errors.New("failed to re-construct userData after processing phone home config"),
+	switch {
+	case errors.Is(err, util.ErrUnsupportedUserData):
+		if *mergedPhoneHomeEnabled {
+			return validation.Errors{
+				"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+			}
 		}
+
+		// The UI always sends false when phone-home is unchecked, so user-data
+		// the block cannot be in is left alone rather than rejected.
+	case err != nil:
+		return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+	case userData != nil:
+		// Empty means phone-home was all the user-data held, so the DB field is
+		// blanked; an emptied archive keeps its header instead.
+		osur.UserData = userData
 	}
 
-	// Set it in the request.
-	osur.UserData = cutil.GetPtr(string(byteUserData))
+	// The stored blob reaches the Site whether or not phone-home rewrote it - and
+	// user-data we cannot edit is left alone above - so its size is checked here
+	// rather than per path.
+	effectiveUserData := mergedUserData
+	if osur.UserData != nil {
+		effectiveUserData = osur.UserData
+	}
 
-	return nil
+	return util.ValidateEffectiveUserData(effectiveUserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to update the

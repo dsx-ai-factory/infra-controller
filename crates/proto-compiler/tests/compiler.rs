@@ -37,8 +37,16 @@ fn compile_fixture(name: &str) -> Result<Schema, Error> {
 fn compile_codegen_fixtures(names: &[&str]) -> Result<Schema, Error> {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let annotations = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rpc/proto");
+    let mut proto_files = names
+        .iter()
+        .map(|name| fixtures.join(name))
+        .collect::<Vec<_>>();
+    proto_files.push(annotations.join("codegen/v1/rust_type.proto"));
+    if names.iter().any(|name| name.contains("rust_type_override")) {
+        proto_files.push(annotations.join("codegen/v1/machine_id_types.proto"));
+    }
     compile(&CompilerConfig {
-        proto_files: names.iter().map(|name| fixtures.join(name)).collect(),
+        proto_files,
         include_paths: vec![fixtures, annotations],
         protoc_args: Vec::new(),
     })
@@ -483,5 +491,114 @@ fn invalid_external_mapping_extension_shape_is_reported() {
         schema.collect_codegen(),
         Err(Error::InvalidCodegenExtension(name))
             if name == "carbide.codegen.v1.imported_extern_path"
+    ));
+}
+
+#[test]
+fn rust_type_overrides_change_only_the_rust_descriptor_view() {
+    let schema = compile_codegen_fixtures(&["rust_type_overrides.proto"])
+        .expect("Rust type override fixture compiles");
+    let public_request = schema
+        .descriptor_pool
+        .get_message_by_name(&format!("{FIXTURE_PACKAGE}.rust_type_overrides.Request"))
+        .expect("public request exists");
+    for field_name in ["singular", "optional_id", "repeated_ids", "list"] {
+        let Kind::Message(message) = public_request
+            .get_field_by_name(field_name)
+            .expect("public field exists")
+            .kind()
+        else {
+            panic!("public field is a message");
+        };
+        assert!(
+            message.full_name().contains("PublicMachineId"),
+            "the public descriptor remains unchanged"
+        );
+    }
+
+    let codegen = schema.collect_codegen().expect("overrides are valid");
+    let rust_descriptor_set = codegen
+        .rust_file_descriptor_set(&schema.file_descriptor_set)
+        .expect("Rust descriptor is transformed");
+    let rust_pool = DescriptorPool::from_file_descriptor_set(rust_descriptor_set)
+        .expect("transformed descriptor resolves");
+    let rust_request = rust_pool
+        .get_message_by_name(&format!("{FIXTURE_PACKAGE}.rust_type_overrides.Request"))
+        .expect("Rust request exists");
+    for (field_name, expected) in [
+        ("singular", "common.DpuMachineId"),
+        ("optional_id", "common.HostMachineId"),
+        ("repeated_ids", "common.StableHostMachineId"),
+        ("list", "common.HostMachineIdList"),
+    ] {
+        let Kind::Message(actual) = rust_request
+            .get_field_by_name(field_name)
+            .expect("Rust field exists")
+            .kind()
+        else {
+            panic!("Rust field is a message");
+        };
+        assert_eq!(actual.full_name(), expected);
+    }
+    let nested = rust_pool
+        .get_message_by_name(&format!(
+            "{FIXTURE_PACKAGE}.rust_type_overrides.Request.Nested"
+        ))
+        .expect("nested message exists");
+    let Kind::Message(nested_id) = nested.get_field_by_name("id").unwrap().kind() else {
+        panic!("nested field is a message");
+    };
+    assert_eq!(nested_id.full_name(), "common.DpuMachineId");
+
+    let method = rust_pool
+        .get_service_by_name(&format!(
+            "{FIXTURE_PACKAGE}.rust_type_overrides.FixtureService"
+        ))
+        .expect("service exists")
+        .methods()
+        .next()
+        .expect("method exists");
+    assert_eq!(method.input().full_name(), "common.StableHostMachineId");
+    assert_eq!(method.output().full_name(), "common.DpuMachineId");
+}
+
+#[test]
+fn unknown_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["invalid_rust_type_overrides.proto"])
+        .expect("unknown target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::UnknownRustTypeOverride { target, replacement })
+            if target.ends_with("UnknownTarget.id") && replacement == ".missing.MachineId"
+    ));
+}
+
+#[test]
+fn wire_incompatible_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["incompatible_rust_type_override.proto"])
+        .expect("incompatible target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::IncompatibleRustTypeOverride { target, .. })
+            if target.ends_with("Target.id")
+    ));
+}
+
+#[test]
+fn non_message_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["non_message_rust_type_override.proto"])
+        .expect("non-message target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::IncompatibleRustTypeOverride { target, .. })
+            if target.ends_with("Target.id")
+    ));
+}
+
+#[test]
+fn duplicate_rust_type_override_is_rejected_by_protoc() {
+    assert!(matches!(
+        compile_codegen_fixtures(&["duplicate_rust_type_override.proto"]),
+        Err(Error::CompileProtobuf { .. })
     ));
 }

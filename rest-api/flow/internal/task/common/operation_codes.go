@@ -12,7 +12,12 @@ type OperationCode string
 // Inject-expectation operation codes.
 const OpCodeInjectExpectation = "inject_expectation"
 
-// Power control operation codes
+// Power control operation codes.
+//
+// force_power_on and warm_reset have no distinct Flow RPC or REST action.
+// Public client aliases normalize them to PowerOnRack and PowerResetRack,
+// respectively. cold_reset is exposed as the REST acpowercycle action through
+// ACPowerCycleRack.
 const (
 	OpCodePowerControlPowerOn       = "power_on"
 	OpCodePowerControlForcePowerOn  = "force_power_on"

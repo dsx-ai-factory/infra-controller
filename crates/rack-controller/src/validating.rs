@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_uuid::rack::RackId;
-use model::machine::Machine;
+use model::machine::StableHostMachine;
 use model::metadata::Metadata;
 use model::rack::{MachineRvLabels, Rack, RackState, RackValidationState};
 use state_controller::state_handler::{
@@ -113,7 +113,10 @@ struct RvPartitions {
 
 impl RvPartitions {
     /// Build from a vec of machines, filtering by run ID.
-    fn from_machines(machines: Vec<Machine>, run_id: &str) -> Result<Self, StateHandlerError> {
+    fn from_machines(
+        machines: Vec<StableHostMachine>,
+        run_id: &str,
+    ) -> Result<Self, StateHandlerError> {
         Self::from_meta_iter(machines.into_iter().map(|m| m.metadata), run_id)
     }
 
@@ -221,7 +224,7 @@ async fn find_rv_run_id(
     let run_label = MachineRvLabels::RunId.as_str();
     let found = machines
         .into_iter()
-        .find_map(|m| m.metadata.labels.get(run_label).cloned());
+        .find_map(|mut m| m.metadata.labels.remove(run_label));
 
     tracing::debug!(
         rack_id = %rack_id,

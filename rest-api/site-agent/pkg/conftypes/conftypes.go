@@ -41,7 +41,23 @@ type TemporalConfig struct {
 	TemporalSubscribeQueue     string `json:"temporalSubscribeQueue"`
 	TemporalInventorySchedule  string `json:"temporalInventorySchedule"`
 	TemporalCertPath           string `json:"temporalCertPath"`
+	// InventoryCloudPageSize is the number of inventory items published to Cloud per
+	// Temporal workflow page. Read from INVENTORY_CLOUD_PAGE_SIZE, defaulting to
+	// DefaultInventoryCloudPageSize; bounded by MaxInventoryCloudPageSize.
+	InventoryCloudPageSize int `json:"inventoryCloudPageSize"`
 }
+
+const (
+	// DefaultInventoryCloudPageSize is the fallback page size when
+	// INVENTORY_CLOUD_PAGE_SIZE is unset. Matches the historical hardcoded value.
+	DefaultInventoryCloudPageSize = 25
+	// MaxInventoryCloudPageSize caps the configurable page size. Do not read it as a size that
+	// fits Temporal's 2MB blob limit: a real Machine has measured at 49KB after pruning and
+	// 156KB before it, so 100 of them exceeds the limit either way. Staying under it is the
+	// publish ladder's job, which shrinks a page until it measures small enough, and this bound
+	// only keeps the starting page size somewhere sensible.
+	MaxInventoryCloudPageSize = 100
+)
 
 // GetTemporalCertOTPFullPath - Get Temporal Cert OTP path
 func (tc *TemporalConfig) GetTemporalCertOTPFullPath() string {
@@ -101,24 +117,25 @@ type FlowGrpcConfig struct {
 
 // Config for Site Agent
 type Config struct {
-	Temporal         TemporalConfig
-	CoreGrpc         CoreGrpcConfig
-	FlowGrpc         FlowGrpcConfig
-	IsMasterPod      bool          `json:"isMasterPod"`
-	EnableDebug      bool          `json:"enableDebug"`
-	DevMode          bool          `json:"devMode"`
-	EnableTLS        bool          `json:"enableTLS"`
-	DisableBootstrap bool          `json:"disableBootstrap"`
-	BootstrapSecret  string        `json:"bootstrapSecret"` // Path to the bootstrap secret file
-	WatcherInterval  time.Duration `json:"watcherInterval"`
-	PodNamespace     string        `json:"podNamespace"`
-	TemporalSecret   string        `json:"temporalSecret"`
-	MetricsPort      string        `json:"metricsPort"`
-	MetricsNamespace string        `json:"metricsNamespace"`
-	SiteVersion      string        `json:"siteVersion"`
-	CloudVersion     string        `json:"cloudVersion"`
-	RunningIn        RunInEnvironment
-	UtMode           bool
+	Temporal            TemporalConfig
+	CoreGrpc            CoreGrpcConfig
+	FlowGrpc            FlowGrpcConfig
+	IsMasterPod         bool          `json:"isMasterPod"`
+	EnableDebug         bool          `json:"enableDebug"`
+	DevMode             bool          `json:"devMode"`
+	EnableTLS           bool          `json:"enableTLS"`
+	DisableBootstrap    bool          `json:"disableBootstrap"`
+	BootstrapSecret     string        `json:"bootstrapSecret"`     // Path to the bootstrap secret file
+	BootstrapSecretName string        `json:"bootstrapSecretName"` // Name of the Secret mounted at BootstrapSecret, OTP rotation writes to it
+	WatcherInterval     time.Duration `json:"watcherInterval"`
+	PodNamespace        string        `json:"podNamespace"`
+	TemporalSecret      string        `json:"temporalSecret"`
+	MetricsPort         string        `json:"metricsPort"`
+	MetricsNamespace    string        `json:"metricsNamespace"`
+	SiteVersion         string        `json:"siteVersion"`
+	CloudVersion        string        `json:"cloudVersion"`
+	RunningIn           RunInEnvironment
+	UtMode              bool
 }
 
 // String - json string

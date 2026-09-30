@@ -74,6 +74,16 @@ var (
 	}
 )
 
+// ControllerMachineStateReady identifies Core's Ready lifecycle state.
+// It is separate from the REST status, which also accounts for assignment and health.
+const ControllerMachineStateReady = "Ready"
+
+// Canonical Machine history messages shared by allocation, release, and inventory.
+const (
+	MachineStatusInUseMessage = "Machine is being used by an Instance"
+	MachineStatusReadyMessage = "Machine is ready for assignment"
+)
+
 // A light wrapper around the protobuf so
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
@@ -201,6 +211,20 @@ func (m *Machine) ToMetadataUpdateRequestProto(labels []*corev1.Label) *corev1.M
 			Labels: labels,
 		},
 	}
+}
+
+// StatusForAssignment combines the observed status with REST assignment. Only
+// Ready is masked; health, maintenance and transitional states keep precedence.
+// Clearing an assignment can restore Ready only when retained Core metadata
+// reports Ready. Otherwise fresh machine inventory must establish readiness.
+func (m *Machine) StatusForAssignment(assigned bool) string {
+	if assigned && m.Status == MachineStatusReady {
+		return MachineStatusInUse
+	}
+	if m.IsAssigned && !assigned && m.Status == MachineStatusInUse && m.Metadata.GetNormalizedState() == ControllerMachineStateReady {
+		return MachineStatusReady
+	}
+	return m.Status
 }
 
 // MachineCreateInput input parameters for Create method
@@ -386,6 +410,10 @@ type MachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (*Machine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) ([]Machine, int, error)
+	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
+	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
+	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
+	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetByID returns row for specified ID
 	GetByID(ctx context.Context, tx *db.Tx, machineID string, includeRelations []string, forUpdate bool) (*Machine, error)
 	// GetCountByStatus returns row counts per status
@@ -774,6 +802,92 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 	}
 
 	return machines, machinePaginator.Total, nil
+}
+
+// GetDistinctLabelKeys returns paginated, distinct Machine label keys.
+func (msd MachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelKeys")
+	if machineDAOSpan != nil {
+		defer machineDAOSpan.End()
+	}
+
+	keys := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return keys, 0, nil
+	}
+
+	idb := db.GetIDB(tx, msd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("machine AS m").
+		ColumnExpr("DISTINCT label.key AS key").
+		Join("CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(m.labels) = 'object' THEN m.labels ELSE '{}'::jsonb END) AS label(key)").
+		Where("m.deleted IS NULL")
+
+	distinctQuery, err := msd.setQueryWithFilter(filter, distinctQuery, machineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_machine_label_keys", distinctQuery).
+		Column("key")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelKeyOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelKeyOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, labelPaginator.Total, nil
+}
+
+// GetDistinctLabelValues returns paginated, distinct Machine label values for a label key.
+func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelValues")
+	if machineDAOSpan != nil {
+		defer machineDAOSpan.End()
+		msd.tracerSpan.SetAttribute(machineDAOSpan, "label_key", labelKey)
+	}
+
+	values := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return values, 0, nil
+	}
+
+	idb := db.GetIDB(tx, msd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("machine AS m").
+		ColumnExpr("DISTINCT jsonb_extract_path_text(m.labels, ?) AS value", labelKey).
+		Where("m.deleted IS NULL").
+		Where("m.labels \\? ?", labelKey).
+		Where("jsonb_extract_path_text(m.labels, ?) IS NOT NULL", labelKey)
+
+	distinctQuery, err := msd.setQueryWithFilter(filter, distinctQuery, machineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_machine_label_values", distinctQuery).
+		Column("value")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelValueOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelValueOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, labelPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Machine

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -23,6 +24,11 @@ import (
 func testTxGetTestSession(t *testing.T) *Session {
 	host := "localhost"
 	port := 30432
+	if configured := os.Getenv("PGPORT"); configured != "" {
+		var err error
+		port, err = strconv.Atoi(configured)
+		require.NoError(t, err)
+	}
 	if os.Getenv("CI") == "true" {
 		host = "postgres"
 		port = 5432
@@ -448,6 +454,22 @@ func TestWithTxResult_CommitsAndReturnsValue(t *testing.T) {
 	err = GetIDB(nil, dbSession).NewSelect().Model(tt).Where("id = ?", id).Scan(ctx)
 	assert.Nil(t, err)
 	assert.Equal(t, name, tt.Name)
+}
+
+func TestWithTxResult_TagsCommitFailure(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	ctx := context.Background()
+
+	result, err := WithTxResult(ctx, dbSession, func(tx *Tx) (string, error) {
+		_, execErr := GetIDB(tx, dbSession).ExecContext(ctx, "CREATE TEMP TABLE expected_inventory_commit_failure (id integer PRIMARY KEY, parent_id integer REFERENCES expected_inventory_commit_failure(id) DEFERRABLE INITIALLY DEFERRED) ON COMMIT DROP")
+		require.NoError(t, execErr)
+		_, execErr = GetIDB(tx, dbSession).ExecContext(ctx, "INSERT INTO expected_inventory_commit_failure VALUES (1, 2)")
+		require.NoError(t, execErr)
+		return "Core succeeded", nil
+	})
+	require.ErrorIs(t, err, ErrTransactionCommit)
+	assert.Empty(t, result)
 }
 
 func TestWithTx_RollsBackOnPanicAndRepanics(t *testing.T) {

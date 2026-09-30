@@ -10,7 +10,9 @@ import (
 	"slices"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
 	temporalactivity "go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/worker"
 	temporalworkflow "go.temporal.io/sdk/workflow"
 
@@ -119,14 +121,27 @@ func (c *Config) Build(
 
 	subscriberClient, err := temporal.New(c.ClientConf)
 	if err != nil {
-		publisherClient.Client().Close()
+		publisherClient.Close()
 		return nil, err
+	}
+
+	// The client interceptor (temporal.New) writes the context onto the
+	// workflow; without the matching worker interceptor here it arrives and
+	// stops, and every Core call an activity makes starts a fresh root.
+	tracingInterceptor, err := opentelemetry.NewTracingInterceptor(
+		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	if err != nil {
+		publisherClient.Close()
+		subscriberClient.Close()
+		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", err)
 	}
 
 	allActivities := acts.All()
 	allWorkflows := workflow.GetAllWorkflows()
 	workers := make(map[string]worker.Worker)
 	for queue, options := range c.WorkerOptions {
+		// options is a copy of the map value, so this does not mutate c.
+		options.Interceptors = append(options.Interceptors, tracingInterceptor)
 		worker := worker.New(subscriberClient.Client(), queue, options)
 		for name, fn := range allActivities {
 			worker.RegisterActivityWithOptions(
@@ -186,8 +201,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		log.Info().Msgf("Temporal worker stopped for queue %s", queue)
 	}
 
-	m.publisherClient.Client().Close()
-	m.subscriberClient.Client().Close()
+	m.publisherClient.Close()
+	m.subscriberClient.Close()
 
 	return nil
 }

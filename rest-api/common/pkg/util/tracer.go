@@ -69,7 +69,7 @@ func (c *TracerSpan) CreateChildInContext(ctx context.Context, spanName string, 
 	// get root tracer from context
 	tracer, ok := ctx.Value(otelecho.TracerKey).(oteltrace.Tracer)
 	if !ok {
-		logger.Error().Msg("error extracting tracer from context")
+		logger.Debug().Msg("error extracting tracer from context")
 		return ctx, nil
 	}
 

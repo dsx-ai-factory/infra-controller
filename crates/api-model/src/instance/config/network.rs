@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use ipnetwork::IpNetwork;
@@ -255,9 +255,9 @@ impl InstanceNetworkConfig {
     /// Returns the DPU machine IDs used by the instance network configuration.
     pub fn get_used_dpus(
         &self,
-        device_to_id_map: &HashMap<String, Vec<MachineId>>,
-        primary_dpu_machine_id: Option<MachineId>,
-    ) -> Vec<MachineId> {
+        device_to_id_map: &HashMap<String, Vec<DpuMachineId>>,
+        primary_dpu_machine_id: Option<DpuMachineId>,
+    ) -> Vec<DpuMachineId> {
         let device_locators: Vec<&DeviceLocator> = self
             .interfaces
             .iter()
@@ -281,7 +281,7 @@ impl InstanceNetworkConfig {
             return primary_dpu_machine_id.into_iter().collect();
         }
 
-        let used_dpus: Vec<MachineId> = device_locators
+        let used_dpus: Vec<DpuMachineId> = device_locators
             .iter()
             .filter_map(|device_locator| {
                 device_to_id_map

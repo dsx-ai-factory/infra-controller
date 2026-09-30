@@ -31,6 +31,11 @@ pub enum RedfishClientCreationError {
     InvalidHeader(String),
     #[error("missing arguments: {0}")]
     MissingArgument(String),
+    /// The pool cannot serve this request as asked -- e.g. the proxied pool
+    /// rejecting explicit credentials or a non-443 BMC port. The payload is
+    /// the full operator-facing explanation.
+    #[error("{0}")]
+    Unsupported(String),
 }
 
 /// Error from a credential-lifecycle operation ([`super::BmcCredentialOps`]),

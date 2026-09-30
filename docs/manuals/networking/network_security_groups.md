@@ -71,7 +71,7 @@ An NSG is a tenant-owned object with the following shape:
 |---|---|
 | `id` | NSG identifier, optionally supplied by the caller as a UUID at creation. If omitted, NICo generates one. Either way, it is returned on the created NSG. A supplied `id` that collides with an existing NSG is rejected with `409 Conflict`. |
 | `tenant_organization_id` | The owning tenant |
-| `stateful_egress` | When `true`, return traffic for egress flows is permitted automatically. Requires the site-level `stateful_acls_enabled` flag (see below) |
+| `stateful_egress` | When `true`, return traffic for egress flows is permitted automatically. It can be enabled only when the site-level `stateful_acls_enabled` flag is `true` (see below) |
 | `rules` | Ordered list of `NetworkSecurityGroupRule` entries, evaluated by priority |
 | `version` | Optimistic-concurrency token; required when updating the NSG |
 
@@ -247,8 +247,11 @@ the DPU side.
 Toggling this flag controls whether NICo will configure the DPU's default
 stateful-ACL options in the NVUE config it pushes. Stateful NSG behaviour
 also requires the tenant to set `stateful_egress = true` on the NSG;
-without the site-level switch, the DPU treats every rule as stateless
-regardless of the per-NSG flag.
+when the site-level switch is disabled, NICo rejects stateful NSG
+creation and updates that enable stateful egress. An existing stateful
+NSG can still be otherwise updated if an operator later disables the
+site flag, but the DPU treats its rules as stateless until site support
+is enabled again.
 
 Leave `stateful_acls_enabled = false` until every DPU in the site is
 running HBN 2.3 or later. Earlier HBN versions implement reflexive ACLs in
@@ -335,9 +338,9 @@ worth knowing before designing rule sets:
 - **IPv4 and IPv6 are separate rules.** A rule has an `ipv6` boolean and
   applies only to one address family; if a tenant needs both, two rules
   are required.
-- **`stateful_egress` requires the site flag.** A tenant may set
-  `stateful_egress = true` on the NSG, but it has no effect until the
-  site-level `stateful_acls_enabled = true`.
+- **`stateful_egress` requires the site flag.** Creating an NSG with
+  `stateful_egress = true`, or updating it from `false` to `true`, is
+  rejected unless the site-level `stateful_acls_enabled` flag is `true`.
 - **Updates require version-token agreement.** An NSG update takes the
   NSG's `version` and fails if it has been concurrently modified. This is
   the standard NICo optimistic-concurrency pattern.
@@ -416,6 +419,7 @@ For a given tenant configuration, confirm:
 | Symptom | Likely cause |
 |---|---|
 | `network-security-group create` fails with size-limit error | Expanded rule count exceeds `max_network_security_group_size` |
+| NSG creation or update fails when enabling stateful egress | `stateful_acls_enabled = false` site-wide |
 | `network-security-group create` fails with a conflict (`409`) on `id` | A caller-supplied NSG `id` collides with an existing NSG; omit the `id` to auto-generate one, or choose a different UUID |
 | Stateful return traffic is being dropped | `stateful_acls_enabled = false` site-wide, or `stateful_egress = false` on the NSG, or DPU on HBN earlier than 2.3 |
 | Tenant rule that "should permit" a flow has no effect | An operator `policy_overrides` rule denies the same flow at higher (earlier-evaluated) priority |

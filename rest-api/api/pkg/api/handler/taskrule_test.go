@@ -184,7 +184,7 @@ func TestCreateRuleHandler_Handle(t *testing.T) {
 
 			// A per-request ID is what keeps two creates from becoming one
 			// rule, so the policy that resolves a collision never applies.
-			assert.True(t, strings.HasPrefix(started.ID, "flow-grpc-task-rule-create-"), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, "task-rule-create-"), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.WorkflowIDConflictPolicy)
 
 			var got model.APITaskRule
@@ -559,7 +559,7 @@ func TestUpdateRuleHandler_Handle(t *testing.T) {
 			// Concurrent updates to one rule must stay separate executions, so
 			// the ID carries a per-request suffix and never resolves a
 			// collision by reading another request's result.
-			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("flow-grpc-task-rule-update-%s-", tt.ruleID)), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("task-rule-update-%s-", tt.ruleID)), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.WorkflowIDConflictPolicy)
 		})
 	}

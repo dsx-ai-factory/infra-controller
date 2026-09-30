@@ -6,6 +6,8 @@ metadata:
   labels:
     {{- include "nico-dhcp.labels" . | nindent 4 }}
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   selector:
     {{- include "nico-dhcp.selectorLabels" . | nindent 4 }}
   ports:

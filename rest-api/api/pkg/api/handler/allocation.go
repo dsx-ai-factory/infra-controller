@@ -264,10 +264,25 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				if ipb.SiteID != site.ID {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID.String()), nil)
 				}
+				serr = ipb.ValidateChildPrefixLength(ac.ConstraintValue)
+				if serr != nil {
+					if errors.Is(serr, cdbm.ErrChildPrefixLengthTooShort) {
+						return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("Could not create child IPAM entry for Allocation Constraint. Details: %s", serr.Error()), nil)
+					}
+					return cutil.NewAPIError(http.StatusBadRequest, serr.Error(), nil)
+				}
 
 				// Allocate a child prefix in ipam
 				childPrefix, serr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, cah.dbSession, ipamStorage, ipb, ac.ConstraintValue)
 				if serr != nil {
+					if errors.Is(serr, ipam.ErrParentIPBlockReload) {
+						if errors.Is(serr, cdb.ErrDoesNotExist) {
+							logger.Warn().Err(serr).Msg("parent IP Block disappeared while creating Allocation")
+							return cutil.NewAPIError(http.StatusBadRequest, "The IP Block in the Allocation Constraint no longer exists", nil)
+						}
+						logger.Error().Err(serr).Msg("unable to reload parent IP Block for Allocation")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation due to DB error", nil)
+					}
 					// printing parent prefix usage to debug the child prefix failure
 					parentPrefix, sserr := ipamStorage.ReadPrefix(ctx, ipb.Prefix, ipam.GetIpamNamespaceForIPBlock(ctx, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String()))
 					if sserr == nil {

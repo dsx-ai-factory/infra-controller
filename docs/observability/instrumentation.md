@@ -31,7 +31,7 @@ operator-facing references, refer to [Core Metrics](core_metrics.md) and [Loggin
   gauges and `SharedMetricsHolder` snapshots stay exactly as they are.
 
 Part of the instrumentation-coherency initiative
-([#3169](https://github.com/NVIDIA/infra-controller/issues/3169)).
+([#3169](https://github.com/dsx-ai-factory/infra-controller/issues/3169)).
 
 ---
 
@@ -353,7 +353,7 @@ exporter -- is missing a catalogue row. An unchecked metric can enter through th
 generator only when it appears in that carbide-api scrape; compatibility metrics owned by
 other binaries remain outside the catalogue. New checked metrics cannot land undocumented.
 Precisely matching unchecked declarations to exported families remains tracked in
-[#3221](https://github.com/NVIDIA/infra-controller/issues/3221).
+[#3221](https://github.com/dsx-ai-factory/infra-controller/issues/3221).
 
 ## Startup zero series
 
@@ -439,7 +439,7 @@ installing the meter provider. The Event derive does not install this baseline a
   `MetricsCapture` for unit-level Event assertions; when regenerating a row that depends on a
   scrape, run the provider-owning integration test by itself in a fresh test process. Late
   provider-setup hardening is tracked in
-  [#4174](https://github.com/NVIDIA/infra-controller/issues/4174); it does not cover test-side
+  [#4174](https://github.com/dsx-ai-factory/infra-controller/issues/4174); it does not cover test-side
   provider replacement.
 - **Events are occurrences.** Do not model state with counters; keep gauges on the
   existing observable-gauge pattern.
@@ -453,7 +453,7 @@ installing the meter provider. The Event derive does not install this baseline a
 
 ## References
 
-- The initiative: [#3169](https://github.com/NVIDIA/infra-controller/issues/3169)
+- The initiative: [#3169](https://github.com/dsx-ai-factory/infra-controller/issues/3169)
   (unify logging and metrics behind a single instrumentation standard).
 - The crate: `crates/instrument` (rustdoc on `Event`, `emit`, `LabelValue`, `testing`).
 - The catalogue: [Core Metrics](core_metrics.md) -- the generated and source-checked

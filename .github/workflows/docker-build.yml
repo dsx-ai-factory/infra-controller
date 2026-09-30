@@ -175,7 +175,7 @@ jobs:
       # needed when this run rebuilt base containers (their refs point at the
       # target) and for multi-platform builds that push from the build step
       - name: Login to target registry (pre-build)
-        if: ${{ (inputs.target_prebuild_login && inputs.source_registry_host != '') || (inputs.push && (contains(inputs.platforms, ',') || github.repository == 'NVIDIA/infra-controller')) }}
+        if: ${{ (inputs.target_prebuild_login && inputs.source_registry_host != '') || (inputs.push && (contains(inputs.platforms, ',') || github.repository == 'dsx-ai-factory/infra-controller')) }}
         uses: ./.github/actions/docker-auth
         with:
           registry: ${{ steps.registry-host.outputs.host }}
@@ -279,7 +279,7 @@ jobs:
       - name: Decide whether to load the image locally
         id: loadgate
         env:
-          NEEDED: ${{ (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'NVIDIA/infra-controller') }}
+          NEEDED: ${{ (inputs.load && !inputs.push && inputs.scan && github.ref == 'refs/heads/main') || (inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller') }}
         run: printf 'load=%s\n' "${NEEDED}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
@@ -294,11 +294,11 @@ jobs:
           # build so no credential is present during base pulls. Multi-platform
           # images cannot be loaded into the classic store, so they always push
           # directly.
-          push: ${{ inputs.push && (contains(inputs.platforms, ',') || github.repository == 'NVIDIA/infra-controller') }}
+          push: ${{ inputs.push && (contains(inputs.platforms, ',') || github.repository == 'dsx-ai-factory/infra-controller') }}
           load: ${{ steps.loadgate.outputs.load == 'true' }}
           # mirrors: the docker exporter cannot attach attestations, and
           # provenance would embed private downstream repo refs into artifacts
-          provenance: ${{ github.repository == 'NVIDIA/infra-controller' && 'mode=min' || 'false' }}
+          provenance: ${{ github.repository == 'dsx-ai-factory/infra-controller' && 'mode=min' || 'false' }}
           tags: ${{ steps.tag_list.outputs.tags }}
           build-args: ${{ steps.parse-args.outputs.build_args }}
           # Every ref reads the cache; only main writes it. The Rust images
@@ -321,7 +321,7 @@ jobs:
             sccache_gha_rw_mode=${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
 
       - name: Login to target registry
-        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'NVIDIA/infra-controller' }}
+        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}
         uses: ./.github/actions/docker-auth
         with:
           registry: ${{ steps.registry-host.outputs.host }}
@@ -330,7 +330,7 @@ jobs:
 
       - name: Push image tags
         id: push
-        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'NVIDIA/infra-controller' }}
+        if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}
         env:
           TAGS: ${{ steps.tag_list.outputs.tags }}
           PRIMARY: ${{ steps.tag_list.outputs.primary }}

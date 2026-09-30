@@ -23,10 +23,18 @@ use clap::ValueEnum;
 pub(super) enum ExtensionServiceType {
     #[value(alias = "k8s")]
     KubernetesPod = 0, // Kubernetes pod service type
+    DpfHelmChart = 1, // DPF-managed Helm service type
 }
 
 impl From<ExtensionServiceType> for i32 {
     fn from(v: ExtensionServiceType) -> Self {
         v as i32
     }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(super) enum DpuTarget {
+    Primary,
+    AllActive,
+    All,
 }

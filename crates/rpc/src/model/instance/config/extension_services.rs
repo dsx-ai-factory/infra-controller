@@ -43,6 +43,7 @@ impl TryFrom<rpc::InstanceDpuExtensionServiceConfig> for InstanceExtensionServic
         })?;
 
         Ok(InstanceExtensionServiceConfig {
+            dpu_target: None,
             service_id,
             version,
             removed: None,

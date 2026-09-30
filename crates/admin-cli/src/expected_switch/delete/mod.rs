@@ -19,6 +19,7 @@ mod args;
 mod cmd;
 
 pub(super) use args::Args;
+use rpc::forge::ExpectedSwitchRequest;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -26,7 +27,8 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::delete(self, &ctx.api_client).await?;
+        let request = ExpectedSwitchRequest::try_from(self).unwrap_or_else(|error| error.exit());
+        cmd::delete(request, &ctx.api_client).await?;
         Ok(())
     }
 }

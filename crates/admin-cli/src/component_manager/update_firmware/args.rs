@@ -20,8 +20,9 @@ use std::path::PathBuf;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 
 use crate::component_manager::common::{
-    ComputeTrayComponentArg, MachineTargetArgs, NvSwitchComponentArg, PowerShelfComponentArg,
-    PowerShelfTargetArgs, RackTargetArgs, SwitchTargetArgs,
+    ComputeTrayComponentArg, ComputeTraySelection, ComputeTrayTargetArgs, NvSwitchComponentArg,
+    PowerShelfComponentArg, PowerShelfSelection, PowerShelfTargetArgs, RackTargetArgs,
+    SwitchSelection, SwitchTargetArgs,
 };
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
@@ -38,14 +39,28 @@ Update only specific switch components, forcing the update:
     --switch-id 12345678-1234-5678-90ab-cdef01234567 --component bmc,bios --force-update \
     --target-version fw-1.2.3
 
+Queue firmware on a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager update-firmware switch \
+    --mac-address 00:11:22:33:44:55 --target-version fw-1.2.3
+
 Queue firmware on compute trays from an RMS SOT JSON file:
     $ nico-admin-cli component-manager update-firmware compute-tray \
     --machine-id 12345678-1234-5678-90ab-cdef01234567 --sot-json-file ./sot.json \
     --access-token mytoken
 
+Queue firmware on a compute tray by BMC MAC (targets the tray before ingestion; \
+this dispatches directly to RMS with NOAUTH artifact downloads, so --access-token \
+is not accepted here):
+    $ nico-admin-cli component-manager update-firmware compute-tray \
+    --mac-address 00:11:22:33:44:55 --sot-json-file ./sot.json
+
 Queue firmware on power shelves:
     $ nico-admin-cli component-manager update-firmware power-shelf \
     --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --target-version fw-1.2.3
+
+Queue firmware on a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager update-firmware power-shelf \
+    --mac-address 00:11:22:33:44:55 --target-version fw-1.2.3
 
 Queue firmware on all eligible devices in a rack:
     $ nico-admin-cli component-manager update-firmware rack \
@@ -127,7 +142,7 @@ struct PowerShelfArgs {
 #[derive(ClapArgs, Debug)]
 struct ComputeTrayArgs {
     #[clap(flatten)]
-    ids: MachineTargetArgs,
+    ids: ComputeTrayTargetArgs,
 
     #[clap(flatten)]
     firmware_source: FirmwareSourceArgs,
@@ -236,9 +251,14 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
-                        rpc::forge::update_component_firmware_request::Target::Switches(
+                        rpc::forge::update_component_firmware_request::Target::Switches({
+                            let (switch_ids, bmc_macs) = match target.ids.into_selection() {
+                                SwitchSelection::SwitchIds(list) => (Some(list), None),
+                                SwitchSelection::Macs(macs) => (None, Some(macs)),
+                            };
                             rpc::forge::UpdateSwitchFirmwareTarget {
-                                switch_ids: Some(target.ids.into()),
+                                switch_ids,
+                                bmc_macs,
                                 components: target
                                     .components
                                     .into_iter()
@@ -246,8 +266,8 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                                         rpc::forge::NvSwitchComponent::from(component) as i32
                                     })
                                     .collect(),
-                            },
-                        ),
+                            }
+                        }),
                     ),
                 })
             }
@@ -257,9 +277,14 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                 force_update: target.force_update,
                 bypass_state_controller: target.bypass_state_controller,
                 target: Some(
-                    rpc::forge::update_component_firmware_request::Target::PowerShelves(
+                    rpc::forge::update_component_firmware_request::Target::PowerShelves({
+                        let (power_shelf_ids, pmc_macs) = match target.ids.into_selection() {
+                            PowerShelfSelection::PowerShelfIds(list) => (Some(list), None),
+                            PowerShelfSelection::Macs(macs) => (None, Some(macs)),
+                        };
                         rpc::forge::UpdatePowerShelfFirmwareTarget {
-                            power_shelf_ids: Some(target.ids.into()),
+                            power_shelf_ids,
+                            pmc_macs,
                             components: target
                                 .components
                                 .into_iter()
@@ -267,8 +292,8 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                                     rpc::forge::PowerShelfComponent::from(component) as i32
                                 })
                                 .collect(),
-                        },
-                    ),
+                        }
+                    }),
                 ),
             }),
             Target::ComputeTray(target) => {
@@ -280,9 +305,14 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
-                        rpc::forge::update_component_firmware_request::Target::ComputeTrays(
+                        rpc::forge::update_component_firmware_request::Target::ComputeTrays({
+                            let (machine_ids, bmc_macs) = match target.ids.into_selection() {
+                                ComputeTraySelection::MachineIds(list) => (Some(list), None),
+                                ComputeTraySelection::Macs(macs) => (None, Some(macs)),
+                            };
                             rpc::forge::UpdateComputeTrayFirmwareTarget {
-                                machine_ids: Some(target.ids.into()),
+                                machine_ids,
+                                bmc_macs,
                                 components: target
                                     .components
                                     .into_iter()
@@ -290,8 +320,8 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                                         rpc::forge::ComputeTrayComponent::from(component) as i32
                                     })
                                     .collect(),
-                            },
-                        ),
+                            }
+                        }),
                     ),
                 })
             }
@@ -447,6 +477,7 @@ mod tests {
     fn update_firmware_commands_build_requests_for_every_target() {
         const CONFIG_JSON: &str = r#"{"Id":"fw-object","Version":"1.2.3"}"#;
         const MACHINE_ID: &str = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
+        const MAC_ADDRESS: &str = "00:11:22:33:44:55";
         const POWER_SHELF_ID: &str = "ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
         const RACK_ID: &str = "rack-test";
         const SWITCH_ID: &str = "sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
@@ -487,6 +518,10 @@ mod tests {
 
         assert_eq!(switch_ids.ids.len(), 1);
         assert_eq!(switch_ids.ids[0].to_string(), SWITCH_ID);
+        assert!(
+            target.bmc_macs.is_none(),
+            "switch-id target must not also set bmc_macs",
+        );
 
         assert_eq!(
             target.components,
@@ -495,6 +530,34 @@ mod tests {
                 rpc::forge::NvSwitchComponent::Nvos as i32,
             ]
         );
+
+        let switch_mac_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
+            Args::try_parse_from([
+                "update-firmware",
+                "switch",
+                "--mac-address",
+                MAC_ADDRESS,
+                "--target-version",
+                "fw-1.2.3",
+            ])
+            .expect("switch MAC command should parse"),
+        )
+        .expect("switch MAC command should build a request");
+
+        let Some(rpc::forge::update_component_firmware_request::Target::Switches(target)) =
+            switch_mac_request.target
+        else {
+            panic!("switch MAC command should build a switch target");
+        };
+
+        let Some(bmc_macs) = target.bmc_macs else {
+            panic!("switch MAC command should build a bmc-macs target");
+        };
+        assert!(
+            target.switch_ids.is_none(),
+            "MAC target must not also set switch_ids",
+        );
+        assert_eq!(bmc_macs.mac_addresses, [MAC_ADDRESS]);
 
         let compute_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
             Args::try_parse_from([
@@ -523,7 +586,13 @@ mod tests {
             panic!("compute-tray command should build a compute-tray target");
         };
 
-        let machine_ids = target.machine_ids.expect("machine IDs");
+        let Some(machine_ids) = target.machine_ids else {
+            panic!("compute-tray command should build a machine-id target");
+        };
+        assert!(
+            target.bmc_macs.is_none(),
+            "machine-id target must not also set bmc_macs",
+        );
 
         assert_eq!(machine_ids.machine_ids.len(), 1);
         assert_eq!(machine_ids.machine_ids[0].to_string(), MACHINE_ID);
@@ -535,6 +604,35 @@ mod tests {
                 rpc::forge::ComputeTrayComponent::Bios as i32,
             ]
         );
+
+        let compute_mac_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
+            Args::try_parse_from([
+                "update-firmware",
+                "compute-tray",
+                "--mac-address",
+                MAC_ADDRESS,
+                "--target-version",
+                "fw-1.2.3",
+            ])
+            .expect("compute-tray MAC command should parse"),
+        )
+        .expect("compute-tray MAC command should build a request");
+
+        let Some(rpc::forge::update_component_firmware_request::Target::ComputeTrays(target)) =
+            compute_mac_request.target
+        else {
+            panic!("compute-tray MAC command should build a compute-tray target");
+        };
+
+        let Some(bmc_macs) = target.bmc_macs else {
+            panic!("compute-tray MAC command should build a bmc-macs target");
+        };
+        assert!(
+            target.machine_ids.is_none(),
+            "MAC target must not also set machine_ids",
+        );
+
+        assert_eq!(bmc_macs.mac_addresses, [MAC_ADDRESS]);
 
         let power_shelf_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
             Args::try_parse_from([
@@ -567,6 +665,10 @@ mod tests {
 
         assert_eq!(power_shelf_ids.ids.len(), 1);
         assert_eq!(power_shelf_ids.ids[0].to_string(), POWER_SHELF_ID);
+        assert!(
+            target.pmc_macs.is_none(),
+            "power-shelf-id target must not also set pmc_macs",
+        );
 
         assert_eq!(
             target.components,
@@ -575,6 +677,34 @@ mod tests {
                 rpc::forge::PowerShelfComponent::Psu as i32,
             ]
         );
+
+        let power_shelf_mac_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
+            Args::try_parse_from([
+                "update-firmware",
+                "power-shelf",
+                "--mac-address",
+                MAC_ADDRESS,
+                "--target-version",
+                "fw-1.2.3",
+            ])
+            .expect("power-shelf MAC command should parse"),
+        )
+        .expect("power-shelf MAC command should build a request");
+
+        let Some(rpc::forge::update_component_firmware_request::Target::PowerShelves(target)) =
+            power_shelf_mac_request.target
+        else {
+            panic!("power-shelf MAC command should build a power-shelf target");
+        };
+
+        let Some(pmc_macs) = target.pmc_macs else {
+            panic!("power-shelf MAC command should build a pmc-macs target");
+        };
+        assert!(
+            target.power_shelf_ids.is_none(),
+            "MAC target must not also set power_shelf_ids",
+        );
+        assert_eq!(pmc_macs.mac_addresses, [MAC_ADDRESS]);
 
         let rack_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
             Args::try_parse_from([

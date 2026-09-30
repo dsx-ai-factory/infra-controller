@@ -23,7 +23,7 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required for PKI (certificate signing) and secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components.
+Required for PKI (certificate signing) and, by default, secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components. NICo can keep the credentials it manages in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
 
 - Vault must be deployed and unsealed.
 - A PKI secrets engine must be configured for certificate signing.

@@ -101,6 +101,7 @@ images:
         - include
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.api
@@ -121,6 +122,7 @@ images:
         - crates
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.bmc-proxy
@@ -140,6 +142,7 @@ images:
         - include
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.machine-a-tron
@@ -322,7 +325,9 @@ hooks:
         aarch64|arm64) BUILD_ARCH=aarch64 ;;
         *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
       esac
+      KEA_VERSION=$(cat dev/docker/kea.version)
       docker build --pull=false \
+        --build-arg KEA_VERSION="$KEA_VERSION" \
         -t build-container-localdev \
         -f "dev/docker/Dockerfile.build-container-$BUILD_ARCH" .
   - name: load-images-into-local-cluster

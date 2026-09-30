@@ -10,8 +10,13 @@ and Golang that provides site-local, zero-trust, bare-metal lifecycle
 management with DPU-enforced isolation. It automates the complexity of the
 bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
+
+The canonical GitHub repository is
+[dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller/).
+Use this organization for links to the repository, its files, issues, and pull
+requests.
 
 ### Key Responsibilities
 
@@ -210,18 +215,21 @@ Published container artifacts must pin external base images by immutable
 digest. When architecture-specific targets share a base image, define one
 overridable variable so their versions cannot drift independently.
 
-Before review, verify every Dockerfile-specific allowlist contains each source
-consumed by `COPY`, build scripts, and compile-time macros. Run one clean-context
-container build when persistent cache mounts could hide a missing input.
+## Agent Work Scope
 
-When a Helm component value falls back to a global value, leave the component
-default unset and test both the fallback and explicit override paths.
+Agents may carry out user-requested work throughout the repository under the
+applicable guidelines. Agents may not change any `AGENTS.md` file or
+`STYLE_GUIDE.md` unless the user specifically requests changes to those files.
 
 ## Coding Conventions
 
 Follow the shared [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines)
 for scope control, reuse-before-new-code, evidence-backed assumptions, and
 verification expectations.
+
+Agents must never commit credentials, API keys, secrets, or local environment
+files. Keep local secrets in the gitignored `.local_envrc` file and follow the
+[secret-scanning guidance](CONTRIBUTING.md#secret-scanning).
 
 See [`STYLE_GUIDE.md`](STYLE_GUIDE.md) for detailed Rust coding conventions.
 Make sure to review it to ensure changes meet the expected style of the codebase.
@@ -362,6 +370,8 @@ check before requesting review.
     - global versus subcommand position and required order
     - omission or fallback behavior
     - observable output, side effects, errors, and unsupported paths
+    - for repeated or list fields, membership, ordering, and whether omitted and
+      empty values have the same meaning
   - Exercise each changed CLI example at the PR revision on an authorized local
     or test target and compare it with real `--help` output. Verify changed API,
     configuration, environment-variable, and state contracts through schemas,
@@ -380,9 +390,8 @@ check before requesting review.
   - For REST, use `rest-api/openapi/spec.yaml` for the contract and inspect the
     handler or model for conditional behavior the schema cannot express. When
     the spec changes, run `make rest-api/lint-openapi`,
-    `make rest-api/generate-sdk`, `make rest-api/publish-openapi`, and
-    `make openapi-breaking`; do not edit `rest-api/sdk/standard/` or
-    `rest-api/docs/index.html`.
+    `make rest-api/generate-sdk`, and `make openapi-breaking`; do not edit
+    `rest-api/sdk/standard/`.
 
 - **Workflow parity:** Make the documentation match the workflow that actually runs.
 

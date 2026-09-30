@@ -22,21 +22,18 @@ use mac_address::MacAddress;
 use prettytable::{Table, row};
 use rpc::forge::ExpectedMachineRequest;
 
-use super::args::Args;
 use crate::async_write;
 use crate::errors::CarbideCliResult;
 use crate::expected_machines::common::HostDpuPolicy;
 use crate::rpc::ApiClient;
 
 pub(super) async fn show_expected_machines(
-    expected_machine_query: &Args,
+    request: Option<ExpectedMachineRequest>,
     api_client: &ApiClient,
     output_format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> CarbideCliResult<()> {
-    let req: Option<ExpectedMachineRequest> = expected_machine_query.try_into()?;
-
-    if let Some(req) = req {
+    if let Some(req) = request {
         let expected_machine = api_client.0.get_expected_machine(req).await?;
         if output_format == OutputFormat::Json {
             async_write!(

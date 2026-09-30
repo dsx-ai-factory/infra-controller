@@ -1,7 +1,8 @@
 # NICo Core overlay — turn on the primary /metrics ServiceMonitor/PodMonitor of every subchart
 # that ships one, so the observability stack's Prometheus scrapes the carbide_* metrics.
-# (High-cardinality extras — nico-api per-object state metrics, hardware-health telemetry —
-# are separately gated and stay opt-in.)
+# Hardware-health additionally enables its Prometheus sink and /telemetry monitor. An OTLP target
+# remains an analyzer input; it must not relay those input metrics to the metrics backend. Other
+# high-cardinality extras, such as nico-api per-object state metrics, stay opt-in.
 #
 # The subcharts ship the monitor TEMPLATES but default them OFF, and none of the standard deploy
 # values enable them — without this overlay Prometheus discovers nothing from NICo. Apply it as
@@ -10,8 +11,8 @@
 #   helm upgrade nico <chart-ref> -n nico-system --reuse-values \
 #       -f observability/values-nico-servicemonitors.yaml
 #
-# (install-observability.sh applies this automatically in the setup.sh flow, and prints the
-# command above when running standalone.)
+# (install-observability.sh applies this automatically only when the same setup.sh run installed
+# Core, and prints the command above when running standalone or with --skip-core.)
 nico-api:
   serviceMonitor:
     enabled: true
@@ -28,7 +29,11 @@ nico-dsx-exchange-consumer:
   serviceMonitor:
     enabled: true
 nico-hardware-health:
+  env:
+    CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
   serviceMonitor:
+    enabled: true
+  telemetryServiceMonitor:
     enabled: true
 nico-machine-a-tron:
   serviceMonitor:

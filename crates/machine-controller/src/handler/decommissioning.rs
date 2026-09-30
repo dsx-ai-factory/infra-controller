@@ -18,18 +18,19 @@
 use std::collections::{HashMap, HashSet};
 
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{EnabledDisabled, JobState, PowerState, RedfishError, SystemPowerControl};
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
-    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, ManagedHostState,
+    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine, ManagedHostState,
     ManagedHostStateSnapshot,
 };
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -65,17 +66,9 @@ pub(super) async fn handle_suppressing_site_explorer(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine_id = state.host_snapshot.id;
     let mut bmc_mac_addresses = Vec::with_capacity(state.dpu_snapshots.len() + 1);
-    for machine in std::iter::once(&state.host_snapshot).chain(&state.dpu_snapshots) {
-        let bmc_mac_address =
-            machine
-                .status
-                .bmc_info
-                .mac
-                .ok_or_else(|| StateHandlerError::MissingData {
-                    object_id: machine.id.to_string(),
-                    missing: "bmc_mac",
-                })?;
-        bmc_mac_addresses.push(bmc_mac_address);
+    bmc_mac_addresses.push(bmc_mac_address(&state.host_snapshot)?);
+    for dpu in &state.dpu_snapshots {
+        bmc_mac_addresses.push(bmc_mac_address(dpu)?);
     }
 
     let mut txn = ctx.services.db_pool.begin().await?;
@@ -86,6 +79,7 @@ pub(super) async fn handle_suppressing_site_explorer(
             &NewBmcSuppression {
                 bmc_mac_address,
                 subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!("managed host {machine_id} is being decommissioned"),
             },
         )
@@ -278,17 +272,24 @@ pub(super) async fn handle_deconfiguring_host(
                         "failed to read UEFI password job {job_id}: {error}"
                     ))
                 })?;
-            if !matches!(job_state, JobState::Scheduled) {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for UEFI password job {job_id} to be scheduled; current state: {job_state:?}"
-                )));
-            }
+            let next = match job_state {
+                JobState::Scheduled => DeconfiguringHostState::RebootAfterUefiPassword {
+                    job_id: job_id.clone(),
+                },
+                // Some platforms skip Scheduled.
+                JobState::Completed => DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
+                    job_id: job_id.clone(),
+                },
+                _ => {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {job_state:?}"
+                    )));
+                }
+            };
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {
-                        deconfiguring_state: DeconfiguringHostState::RebootAfterUefiPassword {
-                            job_id: job_id.clone(),
-                        },
+                        deconfiguring_state: next,
                     },
                 },
             ))
@@ -371,7 +372,8 @@ pub(super) async fn handle_deconfiguring_host(
                     interface.controller_state.version.increment(),
                     &DpaInterfaceControllerState::Unlocking,
                 )
-                .await?;
+                .await?
+                .check_applied()?;
             }
             Ok(
                 StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
@@ -451,7 +453,7 @@ pub(super) async fn handle_deconfiguring_host(
 }
 
 pub(super) async fn handle_deconfiguring_dpus(
-    dpu_states: &HashMap<MachineId, DeconfiguringDpuState>,
+    dpu_states: &HashMap<DpuMachineId, DeconfiguringDpuState>,
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: Option<&dyn DpfOperations>,
@@ -632,6 +634,7 @@ async fn unacknowledged_dhcp_suppression_macs(
             &ctx.services.db_pool,
             mac_address,
             BmcSuppressionSubsystem::Dhcp,
+            BmcSuppressionSource::Decommissioning,
         )
         .await?;
         if suppression.is_none_or(|suppression| suppression.acknowledged_at.is_none()) {
@@ -644,19 +647,25 @@ async fn unacknowledged_dhcp_suppression_macs(
 fn bmc_mac_addresses(
     state: &ManagedHostStateSnapshot,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
-    std::iter::once(&state.host_snapshot)
-        .chain(&state.dpu_snapshots)
-        .map(|machine| {
-            machine
-                .status
-                .bmc_info
-                .mac
-                .ok_or_else(|| StateHandlerError::MissingData {
-                    object_id: machine.id.to_string(),
-                    missing: "bmc_mac",
-                })
+    let mut addresses = Vec::with_capacity(state.dpu_snapshots.len() + 1);
+    addresses.push(bmc_mac_address(&state.host_snapshot)?);
+    for dpu in &state.dpu_snapshots {
+        addresses.push(bmc_mac_address(dpu)?);
+    }
+    Ok(addresses)
+}
+
+fn bmc_mac_address(
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+) -> Result<mac_address::MacAddress, StateHandlerError> {
+    machine
+        .status
+        .bmc_info
+        .mac
+        .ok_or_else(|| StateHandlerError::MissingData {
+            object_id: machine.id.to_string(),
+            missing: "bmc_mac",
         })
-        .collect()
 }
 
 async fn oob_interface_mac_addresses(
@@ -683,8 +692,9 @@ async fn all_oob_interface_mac_addresses(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
     let mut mac_addresses = Vec::new();
-    for machine in std::iter::once(&state.host_snapshot).chain(&state.dpu_snapshots) {
-        mac_addresses.extend(oob_interface_mac_addresses(machine.id, ctx).await?);
+    mac_addresses.extend(oob_interface_mac_addresses(state.host_snapshot.id.into(), ctx).await?);
+    for dpu in &state.dpu_snapshots {
+        mac_addresses.extend(oob_interface_mac_addresses(dpu.id.into(), ctx).await?);
     }
     Ok(mac_addresses)
 }
@@ -701,6 +711,7 @@ pub(super) async fn handle_suppressing_oob_dhcp(
             &NewBmcSuppression {
                 bmc_mac_address: mac_address,
                 subsystem: BmcSuppressionSubsystem::Dhcp,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!(
                     "managed host {} is being decommissioned; suppressing OOB DHCP",
                     state.host_snapshot.id
@@ -842,6 +853,7 @@ pub(super) async fn handle_suppressing_bmc_dhcp(
             &NewBmcSuppression {
                 bmc_mac_address,
                 subsystem: BmcSuppressionSubsystem::Dhcp,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!(
                     "managed host {} is being decommissioned; suppressing BMC DHCP",
                     state.host_snapshot.id
@@ -868,16 +880,35 @@ pub(super) async fn handle_factory_resetting_bmcs(
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let Some(machine) = std::iter::once(&state.host_snapshot)
-        .chain(&state.dpu_snapshots)
-        .find(|machine| !completed.contains(&machine.id))
-    else {
+    let machine_id = if !completed.contains(&state.host_snapshot.id) {
+        factory_reset_bmc(&state.host_snapshot, ctx).await?
+    } else if let Some(dpu) = state
+        .dpu_snapshots
+        .iter()
+        .find(|dpu| !completed.contains(&dpu.id))
+    {
+        factory_reset_bmc(dpu, ctx).await?
+    } else {
         return Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
                 decommissioning_state: DecommissioningState::WaitingForBmcDhcpAcknowledgement,
             },
         ));
     };
+
+    let mut completed = completed.clone();
+    completed.insert(machine_id);
+    Ok(StateHandlerOutcome::transition(
+        ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::FactoryResettingBmcs { completed },
+        },
+    ))
+}
+
+async fn factory_reset_bmc(
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<MachineId, StateHandlerError> {
     ctx.services
         .create_redfish_client_from_machine(machine)
         .await?
@@ -889,13 +920,7 @@ pub(super) async fn handle_factory_resetting_bmcs(
                 machine.id
             ))
         })?;
-    let mut completed = completed.clone();
-    completed.insert(machine.id);
-    Ok(StateHandlerOutcome::transition(
-        ManagedHostState::Decommissioning {
-            decommissioning_state: DecommissioningState::FactoryResettingBmcs { completed },
-        },
-    ))
+    Ok(machine.id.into())
 }
 
 pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
@@ -925,63 +950,9 @@ pub(super) async fn handle_deleting_managed_credentials(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let mut rotation_cleanups = Vec::new();
-
-    for machine in std::iter::once(&state.host_snapshot).chain(&state.dpu_snapshots) {
-        let Some(bmc_mac_address) = machine.status.bmc_info.mac else {
-            return Err(StateHandlerError::MissingData {
-                object_id: machine.id.to_string(),
-                missing: "bmc_mac",
-            });
-        };
-
-        ctx.services
-            .credential_manager
-            .delete_credentials(&CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-            })
-            .await
-            .map_err(|error| {
-                StateHandlerError::GenericError(eyre::eyre!(
-                    "failed to delete managed BMC credentials for {}: {error}",
-                    machine.id
-                ))
-            })?;
-
-        rotation_cleanups.push((
-            bmc_mac_address,
-            db::credential_rotation::CredentialRotationType::Bmc,
-        ));
-
-        if machine.is_dpu() {
-            for credential_key in [
-                CredentialKey::DpuSsh {
-                    machine_id: machine.id,
-                },
-                CredentialKey::DpuHbn {
-                    machine_id: machine.id,
-                },
-            ] {
-                ctx.services
-                    .credential_manager
-                    .delete_credentials(&credential_key)
-                    .await
-                    .map_err(|error| {
-                        StateHandlerError::GenericError(eyre::eyre!(
-                            "failed to delete managed credential for DPU {}: {error}",
-                            machine.id
-                        ))
-                    })?;
-            }
-            rotation_cleanups.push((
-                bmc_mac_address,
-                db::credential_rotation::CredentialRotationType::DpuUefi,
-            ));
-        } else {
-            rotation_cleanups.push((
-                bmc_mac_address,
-                db::credential_rotation::CredentialRotationType::HostUefi,
-            ));
-        }
+    delete_managed_credentials(&state.host_snapshot, ctx, &mut rotation_cleanups).await?;
+    for dpu in &state.dpu_snapshots {
+        delete_managed_credentials(dpu, ctx, &mut rotation_cleanups).await?;
     }
 
     // NIC lockdown_ikm rows are keyed by the card's NIC MAC, not a BMC MAC,
@@ -1013,4 +984,63 @@ pub(super) async fn handle_deleting_managed_credentials(
         })
         .with_txn(txn),
     )
+}
+
+async fn delete_managed_credentials(
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    rotation_cleanups: &mut Vec<(
+        mac_address::MacAddress,
+        db::credential_rotation::CredentialRotationType,
+    )>,
+) -> Result<(), StateHandlerError> {
+    let bmc_mac_address = bmc_mac_address(machine)?;
+    ctx.services
+        .credential_manager
+        .delete_credentials(&CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        })
+        .await
+        .map_err(|error| {
+            StateHandlerError::GenericError(eyre::eyre!(
+                "failed to delete managed BMC credentials for {}: {error}",
+                machine.id
+            ))
+        })?;
+    rotation_cleanups.push((
+        bmc_mac_address,
+        db::credential_rotation::CredentialRotationType::Bmc,
+    ));
+
+    if machine.id.is_dpu() {
+        for credential_key in [
+            CredentialKey::DpuSsh {
+                machine_id: machine.id.into(),
+            },
+            CredentialKey::DpuHbn {
+                machine_id: machine.id.into(),
+            },
+        ] {
+            ctx.services
+                .credential_manager
+                .delete_credentials(&credential_key)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to delete managed credential for DPU {}: {error}",
+                        machine.id
+                    ))
+                })?;
+        }
+        rotation_cleanups.push((
+            bmc_mac_address,
+            db::credential_rotation::CredentialRotationType::DpuUefi,
+        ));
+    } else {
+        rotation_cleanups.push((
+            bmc_mac_address,
+            db::credential_rotation::CredentialRotationType::HostUefi,
+        ));
+    }
+    Ok(())
 }

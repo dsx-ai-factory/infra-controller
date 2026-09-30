@@ -3,8 +3,10 @@
 This toolchain provisions a BlueField DPU from scratch on a site controller host.
 It is designed to be run **manually** by an operator from the host's BMC remote console.
 
-> **Note:** This is for *initial DPU install* only — not for firmware upgrades on
-> already-running deployments. The host has no network at this stage; networking
+> **Note:** This is for *initial DPU install* only. For firmware upgrades on
+> already-running deployments, use the upgrade toolchain in
+> [`upgrade/README.md`](upgrade/README.md), which preserves the DPU's existing
+> configuration. The host has no network at this stage; networking
 > is established as part of the provisioning process.
 
 ---
@@ -38,32 +40,44 @@ The following tools must be installed on the build machine:
 | `curl`, `jq` | Download HBN config bundle from NGC |
 | `xxd` | Decode NGC's base64 SHA256 hashes for verification |
 | `zip`, `gzip` | Package artifacts |
-| `sha256sum` / `shasum` | Verify downloaded files |
+| `sha256sum` / `shasum` | Verify downloaded files; `shasum` also writes the manifest for `--encrypt-artifacts` |
+| `openssl` | Only with `--encrypt-artifacts`: encrypt `servers/`. Ships with Ubuntu (OpenSSL) and macOS (LibreSSL); no install needed |
 | `mkisofs` (Linux) or `xorrisofs` (macOS) | Build ISO |
 
 Install on Ubuntu:
+
 ```bash
 # yq (mikefarah v4) — do NOT use apt-get install yq, that installs the wrong one
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-sudo chmod +x /usr/local/bin/yq
+sudo chmod 755 /usr/local/bin/yq
 
 # gomplate
 sudo wget -qO /usr/local/bin/gomplate https://github.com/hairyhenderson/gomplate/releases/latest/download/gomplate_linux-amd64
-sudo chmod +x /usr/local/bin/gomplate
+sudo chmod 755 /usr/local/bin/gomplate
 
-sudo apt-get install wget curl jq zip gzip genisoimage
+sudo apt-get install wget curl jq zip gzip genisoimage xxd docker.io
+
+# verify — `yq --version` must mention mikefarah
+yq --version && gomplate --version
 ```
 
 Install on macOS:
+
 ```bash
-brew install yq gomplate wget curl jq zip xorriso
+brew install bash yq gomplate wget curl jq zip xorriso
 ```
+
+The build script needs bash 4 or newer (it uses associative arrays); macOS ships bash 3.2 as
+`/bin/bash`. Either put Homebrew's bash first on your `PATH` or invoke the script through it:
+`/opt/homebrew/bin/bash ./build-dpu-install-iso.sh ...`.
 
 ---
 
 ### Step 1 — Prepare the site config
 
-Copy `site-sample.yaml` and fill in the values for your site.
+Copy `site-sample.yaml` and fill in the values for your site. Where each value comes
+from, and what the datacenter fabric must provide before the site controllers can be
+brought up, is described in [Control Plane Networking](control-plane-network.md).
 
 Required fields: `datacenterAsn`, `siteControllerRoutesAsn`, `bgpAsnStart`, `siteControllerMtuSize`,
 `forgeDpuLoopbackPrefix`, `forgeServiceVipPrefix`, `forgeControlPlanePrefix`, `nameServer`,
@@ -71,8 +85,33 @@ Required fields: `datacenterAsn`, `siteControllerRoutesAsn`, `bgpAsnStart`, `sit
 
 Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When present,
 `fnn.controlPlaneVni`, `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
-and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` and
-`fnn.routeTargetsToImport` are optional.
+and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` is optional.
+`fnn.routeTargetsToImport` is optional only for a site with no tenant routing profile in
+use and `siteControllerRoutesAsn` equal to `datacenterAsn`; otherwise it must list every
+active profile's common tag and, when the ASNs differ, `<siteControllerRoutesAsn>:50100`
+(see the field notes below). No other field supplies these imports.
+
+Optional: `installWithLeafPassword: true` — for datacenters that enforce BGP TCP MD5
+authentication on DPU-facing ToR ports. The build asks for the leaf BGP password (or reads
+`BGP_LEAF_SESSION_PASSWORD`), renders it as the `password` of the two leaf-facing sessions
+(`p0_if`/`p1_if`, both templates) in every `startup.yaml`, and requires `--encrypt-artifacts`
+(below) so the rendered configs never sit in the ISO in plaintext. The password is never
+written to the site file; nothing is asked at install time beyond the artifact passphrase.
+Managed-host DPUs receive the site-wide leaf password the operator sets with
+`nico-admin-cli credential bgp set-sitewide`, enabled by `bgp_leaf_session_password = "site_wide"`
+in the nico-api config (that key only selects the credential source; the password itself
+never appears in the config). The two passwords must match when the same ToRs serve both.
+Maximum 80 bytes, the TCP MD5 key limit.
+
+**Encrypted artifacts (`--encrypt-artifacts`).** `servers/` is packed and encrypted as
+`servers.tar.enc` (AES-256-CBC, PBKDF2, with a SHA-256 manifest inside) using the passphrase
+from `DPU_ISO_ARTIFACT_PASSWORD` or a prompt, and the plaintext copies are removed from the
+ISO, the ZIP and the output directory. `install.sh` then asks for that passphrase once,
+decrypts and verifies the manifest first, before any package is installed or file copied;
+a wrong passphrase or a damaged ISO stops the install with nothing changed, and on a
+re-install the previous per-node configs stay in place until the new ones are verified. Required when
+`installWithLeafPassword` is true; usable on its own otherwise. The artifact passphrase and
+the leaf BGP password are independent and may be the same or different.
 
 ```yaml
 # yaml-language-server: $schema=
@@ -89,9 +128,13 @@ fnn:
   commonSiteControllerRouteTarget: 50100
   commonAdminNetworkTarget: 50400
   # Optional: additional EVPN route-targets to import (e.g. jumphosts, UFM, tenants).
+  # Keep this key INSIDE the fnn block, indented like the keys above. At the top
+  # level of the file it is rejected by the build ("Unsupported field in site
+  # config (top level)") and would not be rendered.
+  # Each key is the full numeric target <asn>:<n>; nothing is substituted.
   # routeTargetsToImport:
-  #   datacenterAsn:101: {}   # Jumphosts
-  #   datacenterAsn:1002: {}  # UFM
+  #   4266030000:101: {}   # Jumphosts
+  #   4266030000:1002: {}  # UFM
 
 forgeDpuLoopbackPrefix: 7.243.97.64/26
 forgeServiceVipPrefix: 7.243.86.224/27
@@ -118,6 +161,34 @@ siteControllerNodes:
 The `mac` field is the BlueField **p0** MAC address for each node. If you do not know
 it yet, you can use a placeholder (`aa:aa:aa:aa:aa:aa`) — `post-power-cycle.sh` will
 detect and apply the real MAC automatically at the end of provisioning.
+
+What the build does with each value:
+
+- `datacenterAsn` — the ASN half of every route target the datacenter originates; the three
+  fixed imports (`:900`, `:50400`, `:50100`) are rendered as `<datacenterAsn>:<n>`.
+- `siteControllerRoutesAsn` — the ASN under which the site controllers' routes are exported
+  (`<siteControllerRoutesAsn>:50100`). It may equal `datacenterAsn`. If it differs, add
+  `<siteControllerRoutesAsn>:50100` to `fnn.routeTargetsToImport`, because the fixed `:50100`
+  import is rendered under `datacenterAsn`.
+- `bgpAsnStart` — site controller node *n* (its `nodeId`) gets DPU ASN `bgpAsnStart + n`; the
+  host side of every `/31` peers as `bgpAsnStart`.
+- `forgeDpuLoopbackPrefix` — one `/32` per node, the DPU's VTEP address. It must lie in the same
+  supernet as the managed-host DPU loopback pool and must not overlap it.
+- `forgeControlPlanePrefix` — node *n* gets the *n*-th `/31`; the DPU takes the even address, the
+  host the odd one.
+- `forgeServiceVipPrefix` — split in half by the script: the first half becomes the internal
+  service VIP list (prefix-list rule 30), the second half the external list (rule 40). Only
+  `/32`s from these halves are advertised.
+- `fnn.controlPlaneVni` — the L3VNI of the control-plane VRF, one per site, from the NICo VNI
+  block and in no tenant pool.
+- `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
+  `fnn.commonAdminNetworkTarget` — the numbers of the three fixed imports (`900`, `50100`,
+  `50400`); the second is also the export number.
+- `fnn.routeTargetsToImport` — additional full route targets (`<asn>:<n>`) to import, for jump
+  hosts, rack devices, storage management and the tenant profiles' common tags. Never the site
+  controllers' own out-of-band segment (`:901`) or a tenant's native target.
+- `fnn.vpcVrfLoopbackPrefix` (optional) — a loopback inside the control-plane VRF for testing the
+  overlay from the DPU; must not overlap the managed-host per-VPC loopback pool.
 
 ---
 
@@ -210,6 +281,10 @@ dpu_install_3.2.2_3.2.2.iso
         └── 99_config.yaml
 ```
 
+Built with `--encrypt-artifacts`, the ISO has no `servers/` directory; in its place is
+`servers.tar.enc`, the same tree encrypted with a `SHA256SUMS` manifest inside, which
+`install.sh` decrypts after asking for the passphrase.
+
 ---
 
 ## Part 2 — Provision the site controller
@@ -223,6 +298,9 @@ Run these steps **on each site controller host** via its BMC remote console.
   been validated.
 - Access: BMC remote console (IPMI/iDRAC/iLO)
 - The host has **no network connectivity** at this stage — that is expected
+- For an ISO built with `--encrypt-artifacts`: `openssl` and `shasum`, both present on a
+  standard Ubuntu 24.04 install (`openssl` and `perl` packages); `install.sh` checks for
+  them before asking for the passphrase
 - `libc6` must be installed — it is a dependency of `libfuse2t64`, which in turn is
   required by `rshim`. A clean Ubuntu 24.04 install includes `libc6` by default.
 
@@ -273,6 +351,7 @@ Verify the mount:
 ```bash
 ls /mnt/dpu-install
 # Expected: install.sh  post-power-cycle.sh  servers/  ...
+# Encrypted ISO (--encrypt-artifacts): install.sh  post-power-cycle.sh  servers.tar.enc  ...  (no servers/)
 ```
 
 ---
@@ -378,7 +457,8 @@ Repeat **Part 2** (Steps 1–6) for each site controller host, substituting its 
 ```
 
 The same ISO is used for all nodes — each `--server-name` selects the correct
-per-node config from the `servers/` folder.
+per-node config from the `servers/` folder (on an encrypted ISO, `install.sh` decrypted it
+there from `servers.tar.enc`).
 
 ---
 
@@ -439,6 +519,7 @@ image over it is slow, and if the DPU is still busy with post-boot initialisatio
 the transfer starts, its receive buffers fill up and the transfer stalls indefinitely.
 
 The scripts mitigate this automatically:
+
 - A **20-second delay** is inserted after the DPU comes online before any file transfer
   begins, giving the DPU time to finish its boot activity
 - SSH keepalives (`ServerAliveInterval=30`, `ServerAliveCountMax=3`) detect a stalled

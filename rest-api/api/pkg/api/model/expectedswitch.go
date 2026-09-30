@@ -16,6 +16,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // nvosMacAddressRegexp matches the 6-octet, colon- or hyphen-separated MAC
@@ -136,7 +137,8 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 
 // APIExpectedSwitchUpdateRequest is the data structure to capture user request to update an ExpectedSwitch
 type APIExpectedSwitchUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// BmcMacAddress is the MAC address of the expected switch's BMC
 	BmcMacAddress *string `json:"bmcMacAddress"`
@@ -200,6 +202,10 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.When(esur.DefaultBmcPassword != nil && *esur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
 			validation.Length(1, 20).Error("BMC Password must be 1-20 characters")),
+		validation.Field(&esur.NvOsUsername,
+			validation.NilOrNotEmpty.Error("NVOS Username cannot be empty")),
+		validation.Field(&esur.NvOsPassword,
+			validation.NilOrNotEmpty.Error("NVOS Password cannot be empty")),
 		validation.Field(&esur.SwitchSerialNumber,
 			validation.NilOrNotEmpty.Error("Switch Serial Number cannot be empty"),
 			validation.When(esur.SwitchSerialNumber != nil && *esur.SwitchSerialNumber != "",
@@ -231,6 +237,35 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (esur *APIExpectedSwitchUpdateRequest) ToProto(entity *cdbm.ExpectedSwitch) *corev1.PatchExpectedSwitchRequest {
+	resource := entity.ToProto(cdbm.ExpectedSwitchCredentials{
+		BmcUsername:  esur.DefaultBmcUsername,
+		BmcPassword:  esur.DefaultBmcPassword,
+		NvosUsername: esur.NvOsUsername,
+		NvosPassword: esur.NvOsPassword,
+	})
+	return &corev1.PatchExpectedSwitchRequest{
+		ExpectedSwitch: resource,
+		UpdateMask: util.ExpectedComponentUpdateMask(
+			util.ExpectedComponentUpdateField{Path: "bmc_username", Present: esur.DefaultBmcUsername != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_password", Present: esur.DefaultBmcPassword != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_address", Present: esur.BmcIpAddress != nil},
+			util.ExpectedComponentUpdateField{Path: "rack_id", Present: esur.RackID != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.name", Present: esur.Name != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: esur.Description != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: esur.Labels != nil || esur.Manufacturer != nil || esur.Model != nil || esur.SlotID != nil || esur.TrayIdx != nil || esur.HostID != nil},
+			util.ExpectedComponentUpdateField{Path: "switch_serial_number", Present: esur.SwitchSerialNumber != nil},
+			util.ExpectedComponentUpdateField{Path: "nvos_mac_addresses", Present: esur.NvosMacAddresses != nil},
+			util.ExpectedComponentUpdateField{Path: "nvos_username", Present: esur.NvOsUsername != nil},
+			util.ExpectedComponentUpdateField{Path: "nvos_password", Present: esur.NvOsPassword != nil},
+		),
+	}
 }
 
 // APIExpectedSwitch is the data structure to capture API representation of an ExpectedSwitch
@@ -266,7 +301,7 @@ type APIExpectedSwitch struct {
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
 	// Labels is the labels of the expected switch
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the ExpectedSwitch was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the ExpectedSwitch was last updated
@@ -290,7 +325,7 @@ func NewAPIExpectedSwitch(dbModel *cdbm.ExpectedSwitch) *APIExpectedSwitch {
 		SlotID:             dbModel.SlotID,
 		TrayIdx:            dbModel.TrayIdx,
 		HostID:             dbModel.HostID,
-		Labels:             dbModel.Labels,
+		Labels:             APILabels(dbModel.Labels),
 		Created:            dbModel.Created,
 		Updated:            dbModel.Updated,
 	}

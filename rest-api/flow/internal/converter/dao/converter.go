@@ -98,6 +98,11 @@ func ComponentFrom(dao model.Component) *component.Component {
 		nvlDomainID = dao.Rack.NVLDomainID
 	}
 
+	rackExternalID := ""
+	if dao.Rack != nil && dao.Rack.ExternalID != nil {
+		rackExternalID = *dao.Rack.ExternalID
+	}
+
 	return &component.Component{
 		Type: ComponentTypeFrom(dao.Type),
 		Info: deviceinfo.DeviceInfo{
@@ -114,13 +119,15 @@ func ComponentFrom(dao model.Component) *component.Component {
 			TrayIndex: dao.TrayIndex,
 			HostID:    dao.HostID,
 		},
-		BmcsByType:  bmcsByType,
-		ComponentID: cutil.GetValueOrZero(dao.ComponentID),
-		RackID:      dao.RackID,
-		NVLDomainID: nvlDomainID,
-		PowerState:  powerStateFromDAO(dao.PowerState),
-		Status:      dao.Status,
-		LeakStatus:  dao.LeakStatus,
+		BmcsByType:     bmcsByType,
+		ComponentID:    cutil.GetValueOrZero(dao.ComponentID),
+		RackID:         dao.RackID,
+		RackExternalID: rackExternalID,
+		NVLDomainID:    nvlDomainID,
+		PowerState:     powerStateFromDAO(dao.PowerState),
+		Status:         dao.Status,
+		Health:         dao.Health,
+		LeakStatus:     dao.LeakStatus,
 	}
 }
 
@@ -134,6 +141,7 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 	components := make([]component.Component, 0, len(dao.Components))
 	for _, c := range dao.Components {
 		converted := ComponentFrom(c)
+		converted.RackExternalID = cutil.GetValueOrZero(dao.ExternalID)
 		if dao.NVLDomainID != uuid.Nil {
 			converted.NVLDomainID = dao.NVLDomainID
 		}
@@ -149,11 +157,14 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 			SerialNumber: dao.SerialNumber,
 			Description:  description,
 		},
+		ExternalID:    cutil.GetValueOrZero(dao.ExternalID),
+		RackProfileID: dao.RackProfileID,
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),
 		Components:  components,
 		NVLDomainID: dao.NVLDomainID,
+		Health:      dao.Health,
 	}
 }
 
@@ -304,6 +315,7 @@ func ComponentTo(c *component.Component, rackID uuid.UUID) *model.Component {
 		HostID:          c.Position.HostID,
 		RackID:          rackID,
 		ComponentID:     cutil.GetPtrIfNotZero(c.ComponentID),
+		Health:          c.Health,
 	}
 
 	for _, t := range devicetypes.BMCTypes() {
@@ -337,6 +349,7 @@ func RackTo(r *rack.Rack) *model.Rack {
 
 	return &model.Rack{
 		ID:           r.Info.ID,
+		ExternalID:   cutil.GetPtrIfNotZero(r.ExternalID),
 		Name:         r.Info.Name,
 		Manufacturer: r.Info.Manufacturer,
 		SerialNumber: r.Info.SerialNumber,
@@ -344,6 +357,7 @@ func RackTo(r *rack.Rack) *model.Rack {
 		Location:     r.Loc.ToMap(),
 		Components:   components,
 		NVLDomainID:  r.NVLDomainID,
+		Health:       r.Health,
 	}
 }
 

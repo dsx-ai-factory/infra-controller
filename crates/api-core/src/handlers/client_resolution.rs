@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
+use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use db::ObjectColumnFilter;
 use db::db_read::DbReader;
@@ -137,7 +138,7 @@ pub(super) fn is_same_host_inband_interface(
     machine_interface: &MachineInterfaceSnapshot,
     owner: &OverlayAddressOwner,
 ) -> bool {
-    machine_interface.machine_id == Some(owner.instance.machine_id)
+    machine_interface.machine_id == Some(owner.instance.machine_id.into())
         && machine_interface.interface_type == InterfaceType::Data
         && machine_interface.network_segment_type == Some(NetworkSegmentType::HostInband)
         && owner.segment_ids.contains(&machine_interface.segment_id)
@@ -241,7 +242,7 @@ pub(super) async fn resolve_machine_interface(
 async fn resolve_host_product_family(
     api: &Api,
     conn: &mut PgConnection,
-    host: &Machine,
+    host: &Machine<impl MachineIdSubtypeTrait>,
 ) -> Result<Option<RackProductFamily>, CarbideError> {
     if let Some(host_bmc_ip) = host.status.bmc_info.ip {
         let endpoints = db::explored_endpoints::find_by_ips(&mut *conn, vec![host_bmc_ip]).await?;
@@ -288,18 +289,18 @@ async fn resolve_dpu_nvconfig_profile(
     let Some(dpu_machine_id) = machine_interface.machine_id.as_ref() else {
         return Ok(None);
     };
-    if !dpu_machine_id.machine_type().is_dpu() {
+    let Ok(dpu_machine_id) = DpuMachineId::try_from(*dpu_machine_id) else {
         return Ok(None);
-    }
+    };
 
-    let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut *conn, dpu_machine_id).await?
+    let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut *conn, &dpu_machine_id).await?
     else {
         return Ok(None);
     };
     let product_family = resolve_host_product_family(api, conn, &host).await?;
 
     let Some(dpu) =
-        db::machine::find_one(&mut *conn, dpu_machine_id, MachineSearchConfig::default()).await?
+        db::machine::find_one(&mut *conn, &dpu_machine_id, MachineSearchConfig::default()).await?
     else {
         return Ok(None);
     };
@@ -328,7 +329,8 @@ pub(super) async fn resolve_cloud_init_instructions(
         // Is this an instance IP? If so, we use its cloud-init config *only* if it's Assigned/Ready.
         if let ResolvedClient::Instance(instance) = &resolved
             && let Some(managed_host_state) =
-                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id).await?
+                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id.into())
+                    .await?
         {
             let is_assigned_and_ready = matches!(
                 managed_host_state,

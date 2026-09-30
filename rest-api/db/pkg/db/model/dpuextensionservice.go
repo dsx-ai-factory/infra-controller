@@ -70,6 +70,12 @@ var (
 	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
 	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
 	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
 
 	// DpuExtensionServiceServiceTypeMap is a map of valid service types for the DpuExtensionService model
 	DpuExtensionServiceServiceTypeMap = map[string]bool{
@@ -80,6 +86,27 @@ var (
 
 // dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
 const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
+
+// DpuExtensionServiceDpuTargetFromProto maps Core's DPU target enum to its REST representation.
+func DpuExtensionServiceDpuTargetFromProto(target *corev1.DpuExtensionServiceDpuTarget) (*string, error) {
+	if target == nil {
+		return nil, nil
+	}
+
+	var value string
+	switch *target {
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY:
+		value = DpuExtensionServiceDpuTargetPrimary
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE:
+		value = DpuExtensionServiceDpuTargetAllActive
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL:
+		value = DpuExtensionServiceDpuTargetAll
+	default:
+		return nil, fmt.Errorf("unrecognized DPU target %d", *target)
+	}
+
+	return &value, nil
+}
 
 // DpuExtensionServiceStatusFromLifecycleStatus maps Core's reconciliation state
 // onto a DpuExtensionService status. Core carries the state as a JSON envelope
@@ -193,6 +220,7 @@ type DpuExtensionService struct {
 	Name            string                          `bun:"name,notnull"`
 	Description     *string                         `bun:"description"`
 	ServiceType     string                          `bun:"service_type,notnull"`
+	DpuTarget       *string                         `bun:"dpu_target"`
 	SiteID          uuid.UUID                       `bun:"site_id,type:uuid,notnull,pk"`
 	Site            *Site                           `bun:"rel:belongs-to,join:site_id=id"`
 	TenantID        uuid.UUID                       `bun:"tenant_id,type:uuid,notnull"`
@@ -256,6 +284,7 @@ type DpuExtensionServiceCreateInput struct {
 	Name                  string
 	Description           *string
 	ServiceType           string
+	DpuTarget             *string
 	SiteID                uuid.UUID
 	TenantID              uuid.UUID
 	Version               *string
@@ -282,6 +311,7 @@ type DpuExtensionServiceUpdateInput struct {
 	DpuExtensionServiceID uuid.UUID
 	Name                  *string
 	Description           *string
+	DpuTarget             *string
 	Version               *string
 	VersionInfo           *DpuExtensionServiceVersionInfo
 	ActiveVersions        []string
@@ -342,6 +372,7 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 		Name:           input.Name,
 		Description:    input.Description,
 		ServiceType:    input.ServiceType,
+		DpuTarget:      input.DpuTarget,
 		SiteID:         input.SiteID,
 		TenantID:       input.TenantID,
 		Version:        input.Version,
@@ -531,6 +562,11 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Description != nil {
 		des.Description = input.Description
 		updatedFields = append(updatedFields, "description")
+	}
+
+	if input.DpuTarget != nil {
+		des.DpuTarget = input.DpuTarget
+		updatedFields = append(updatedFields, "dpu_target")
 	}
 
 	if input.Version != nil {

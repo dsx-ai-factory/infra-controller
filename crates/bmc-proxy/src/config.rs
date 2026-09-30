@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::acl::AclConfig;
+use crate::class::ClassTable;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConfigError {
@@ -57,6 +58,10 @@ pub(crate) struct Config {
     pub(crate) bmc_proxy: Option<HostPortPair>,
     #[serde(default)]
     pub(crate) tracing: TracingConfig,
+    /// Request classes, written as `[[class]]` tables. Absent keeps every
+    /// request in the implicit default class.
+    #[serde(rename = "class", default)]
+    pub(crate) classes: ClassTable,
 }
 
 /// OpenTelemetry trace export settings for proxied BMC requests.
@@ -154,7 +159,8 @@ impl Config {
     pub(crate) fn parse(s: &str) -> Result<Config, ConfigError> {
         Figment::new()
             .merge(Toml::string(s))
-            .merge(Env::prefixed("CARBIDE_BMC_PROXY_"))
+            .merge(Env::prefixed("CARBIDE_BMC_PROXY_")) // legacy, will be deprecated
+            .merge(Env::prefixed("NICO_BMC_PROXY__").split("__"))
             .extract()
             .map_err(Into::into)
     }

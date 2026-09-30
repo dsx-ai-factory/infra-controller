@@ -125,6 +125,86 @@ spec:
                         type: object
                     type: object
                 type: object
+              coreDNS:
+                description: CoreDNS is the configuration for CoreDNS serving Kamaji
+                  DPU clusters with a Keepalived endpoint.
+                properties:
+                  deployment:
+                    description: |-
+                      Deployment contains the configuration for the CoreDNS deployment.
+                      It contains the image for the CoreDNS container and its resource requirements.
+                    properties:
+                      image:
+                        description: Image is a reference to a container image.
+                        pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
+                        type: string
+                      resources:
+                        description: |-
+                          Resources defines the memory and CPU resource requests and limits for the component.
+                          This field is optional, and if not set, the component will use the default resource.
+                        properties:
+                          limits:
+                            description: Limits defines the resource limits for the
+                              component.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU is the amount of CPU requested by
+                                  the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory is the amount of Memory requested
+                                  by the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          requests:
+                            description: Requests defines the resource requests for
+                              the component.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU is the amount of CPU requested by
+                                  the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory is the amount of Memory requested
+                                  by the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                        type: object
+                    type: object
+                  disable:
+                    description: Disable ensures the component is not deployed when
+                      set to true.
+                    type: boolean
+                  helmChart:
+                    description: |-
+                      HelmChart overrides the helm chart used by the ServiceSet controller.
+                      The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
+                      OCI registry or a web-based repository.
+                    pattern: ^(oci://|https://).+$
+                    type: string
+                  upstreamNameservers:
+                    description: |-
+                      UpstreamNameservers is passed to the CoreDNS forward plugin for names outside the cluster domain.
+                      It accepts the same space-separated nameserver or resolv.conf path syntax as the CoreDNS chart.
+                    minLength: 1
+                    type: string
+                type: object
               deploymentMode:
                 description: |-
                   DeploymentMode selects zero-trust vs host-trusted deployment alignment.
@@ -278,9 +358,16 @@ spec:
                     type: boolean
                   disableDPUReadyTaints:
                     description: |-
-                      DisableDPUReadyTaints disables the DPU ready taints feature in the DPU Service Controller.
-                      This feature adds taints to the worker nodes when the DPU is not ready.
-                      This is useful when the DPU is used for networking and the node should not be scheduled until the DPU is ready.
+                      DisableDPUReadyTaints is a full taint kill-switch for the DPUReady controller.
+                      When set to true, no taint managed by this controller (NoSchedule for critical
+                      DPUServices, or NoExecute for HostNetworkReady) is added, removed, or otherwise
+                      touched on host worker nodes.
+                    type: boolean
+                  disableHostNetworkReadyNoExecuteTaints:
+                    description: |-
+                      DisableHostNetworkReadyNoExecuteTaints disables NoExecute taints on host worker nodes
+                      based on HostNetworkReady. When unset or true, the feature is disabled (safe default).
+                      Set to false to enable NoExecute tainting when HostNetworkReady != True.
                     type: boolean
                   image:
                     description: |-
@@ -1553,6 +1640,16 @@ spec:
                               Deprecated: Use RegistryConfiguration instead.
                             minLength: 1
                             type: string
+                          discoveredDPUDeviceBMCFactoryResetPolicy:
+                            description: |-
+                              DiscoveredDPUDeviceBMCFactoryResetPolicy is the BMC factory reset policy DPUDiscovery
+                              sets on the DPUDevices it creates. It is applied at creation time only: changing it
+                              does not affect DPUDevices that already exist, and it is not consulted when a
+                              DPUDevice is reconciled. When unset, the discovery controller uses OnInitialization.
+                            enum:
+                            - OnInitialization
+                            - Never
+                            type: string
                           skipDPUNodeDiscovery:
                             default: true
                             description: SkipDPUNodeDiscovery is a flag to skip the
@@ -1598,6 +1695,14 @@ spec:
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
+                  osInstallRetries:
+                    description: |-
+                      OSInstallRetries is the maximum number of retryable OS installation attempts in zero-trust mode
+                      before the DPU transitions to Error. Attempts are counted in-process and reset on controller restart.
+                      When unset, the provisioning controller defaults to 2.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   osInstallTimeout:
                     description: |-
                       OSInstallTimeout is the maximum time allowed for OS installation in zero-trust mode.
@@ -1620,19 +1725,19 @@ spec:
                     properties:
                       address:
                         description: |-
-                          Address is the address used to access the BFB Registry. The address must start with "http://".
+                          Address is the address used to access the BFB Registry. The address must start with "http://" or "https://".
                           By default, the BFB Registry can be accessed via its Service.
                           For non-kubernetes environments, this must be set due to the lack of kubelet on worker nodes.
                           For zero-trust environments, this must be set so that the BFB Registry can be accessed from DPU BMC.
                           Deprecated: Address is deprecated and will be removed in a future release.
-                        pattern: ^http://
+                        pattern: ^https?://
                         type: string
                       loadBalancerAddress:
                         description: |-
                           LoadBalancerAddress is the address of the load balancer for the BFB Registry which the hostagent/redfish use to fetch the BFB and generated bf.cfg.
                           To enable the load balancer, you need to deploy your own load balancer controller and configure the LoadBalancerAddress field.
                           Then check the bfb-registry nodeport service and make your load balancer controller to distribute the requests to the bfb-registry nodeport.
-                        pattern: ^http://
+                        pattern: ^https?://
                         type: string
                       port:
                         description: |-
@@ -1745,6 +1850,49 @@ spec:
                       spiffe configures the SPIFFE-based DPU Agent identity flow. Edits are accepted post-bootstrap
                       but do NOT retro-apply to already-provisioned DPUs.
                     properties:
+                      dpuAgentExchangedSPIFFEIDTemplate:
+                        description: |-
+                          DPUAgentExchangedSPIFFEIDTemplate renders the post-exchange SPIFFE ID subject. It receives
+                          the same Go template data as DPUAgentSPIFFEIDTemplate.
+                          The rendered identity may use a different trust domain and must depend on the DPU serial.
+                        maxLength: 2048
+                        minLength: 1
+                        type: string
+                      dpuAgentSPIFFEIDTemplate:
+                        description: |-
+                          DPUAgentSPIFFEIDTemplate renders the local SPIFFE workload identity registered with SPIRE.
+                          It uses Go text/template syntax and receives TrustDomain, normalized SerialNumber, DPUMeta,
+                          DPUSpec, DPUDeviceMeta, and DPUDeviceSpec. Metadata labels and annotations can be accessed
+                          with the built-in index function.
+                          The rendered identity must use SPIRETrustDomain and depend on the DPU serial.
+                        maxLength: 2048
+                        minLength: 1
+                        type: string
+                      dpuServiceExchangedSPIFFEIDTemplate:
+                        description: |-
+                          DPUServiceExchangedSPIFFEIDTemplate renders the post-exchange DPUService subject. It
+                          receives the same template data as DPUServiceSPIFFEIDTemplate and may use a different trust
+                          domain.
+                          DPF renders and validates it so the identity layout is declared in one place, but does not
+                          consume it: unlike the DPU Agent, a DPUService identity is never presented back to DPF.
+                        maxLength: 2048
+                        minLength: 1
+                        type: string
+                      dpuServiceSPIFFEIDTemplate:
+                        description: |-
+                          DPUServiceSPIFFEIDTemplate renders the identity registered with SPIRE for a DPUService that
+                          opts in through its own spec.security.spiffe. It receives TrustDomain, normalized
+                          SerialNumber, Namespace and ServiceID, plus DPUMeta, DPUSpec, DPUServiceMeta and
+                          DPUServiceSpec.
+                          The rendered identity must use SPIRETrustDomain and depend on the namespace, the service ID
+                          and the DPU serial, which together identify one DPUService workload. Dropping any of them
+                          hands a single SVID to distinct workloads, and nothing detects that later: SPIRE keys
+                          entries on the identity, the parent and the selectors, so two DPUServices differing only in
+                          namespace produce two entries carrying the same identity. A label cannot stand in for the
+                          namespace, since nothing ties one to the other.
+                        maxLength: 2048
+                        minLength: 1
+                        type: string
                       kubeAPIAudience:
                         description: |-
                           KubeAPIAudience is the audience claim the DPU Agent's JWT-SVID must carry; it must match an
@@ -1780,6 +1928,15 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      tokenExchangeEndpoint:
+                        description: |-
+                          tokenExchangeEndpoint exchanges the SPIRE JWT-SVID before the DSX SPIFFE Helper writes it.
+                          When omitted, the DSX SPIFFE Helper writes the SPIRE JWT-SVID directly.
+                          The returned token's audience must match kubeAPIAudience, or the kube-apiserver rejects the
+                          DPU Agent. Only https: the JWT-SVID is sent here as a bearer credential.
+                        maxLength: 2048
+                        pattern: ^https://[^[:space:]"\\]+$
                         type: string
                       trustBundle:
                         description: trustBundle references a ConfigMap holding the
@@ -2544,6 +2701,13 @@ spec:
               rule: '!has(self.deploymentMode) || self.deploymentMode != ''zero-trust''
                 || !has(self.networking) || !has(self.networking.controlPlaneMTU)
                 || self.networking.controlPlaneMTU <= 1500'
+            - message: 'deploymentMode is immutable after creation: it cannot be changed
+                once set, because already provisioned DPUs keep the trust boundary
+                they were provisioned under. Switch the cluster to another deploymentMode
+                by deleting and recreating DPFOperatorConfig (DR escape hatch); existing
+                DPUs require re-provisioning.'
+              rule: '!has(oldSelf.deploymentMode) || (has(self.deploymentMode) &&
+                self.deploymentMode == oldSelf.deploymentMode)'
             - message: spiffe configuration requires deploymentMode=zero-trust
               rule: '!has(self.security) || !has(self.security.spiffe) || self.deploymentMode
                 == ''zero-trust'''
@@ -2624,6 +2788,11 @@ spec:
                   the object the last time it was patched.
                 format: int64
                 type: integer
+              targetVersion:
+                description: |-
+                  TargetVersion is the version of the DPF Operator that is being deployed. It differs from
+                  Version while an upgrade is in progress.
+                type: string
               version:
                 description: Version is the version of the DPF Operator that is currently
                   deployed.

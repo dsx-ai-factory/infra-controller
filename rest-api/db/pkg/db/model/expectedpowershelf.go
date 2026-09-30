@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -263,10 +264,16 @@ func (eps *ExpectedPowerShelf) BeforeCreateTable(ctx context.Context, query *bun
 type ExpectedPowerShelfDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (*ExpectedPowerShelf, error)
+	// CreateMultiple creates multiple rows in input order
+	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error)
 	// Update used to update row
 	Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error)
 	// GetAll returns all the rows based on the filter and page inputs
@@ -330,6 +337,60 @@ func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, inpu
 	}
 
 	return &result, nil
+}
+
+// CreateMultiple creates ExpectedPowerShelves in input order in the caller's
+// transaction.
+func (epsd ExpectedPowerShelfSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error) {
+	ctx, span := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.CreateMultiple")
+	if span != nil {
+		defer span.End()
+		epsd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	if len(inputs) == 0 {
+		return []ExpectedPowerShelf{}, nil
+	}
+
+	expectedPowerShelves := make([]ExpectedPowerShelf, 0, len(inputs))
+	ids := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		expectedPowerShelves = append(expectedPowerShelves, ExpectedPowerShelf{
+			ID: input.ExpectedPowerShelfID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
+			ShelfSerialNumber: input.ShelfSerialNumber, BmcIpAddress: input.BmcIpAddress,
+			RackID: input.RackID, Name: input.Name, Manufacturer: input.Manufacturer,
+			Model: input.Model, Description: input.Description, SlotID: input.SlotID,
+			TrayIdx: input.TrayIdx, HostID: input.HostID, Labels: input.Labels,
+			CreatedBy: input.CreatedBy,
+		})
+		ids = append(ids, input.ExpectedPowerShelfID)
+	}
+	_, err := db.GetIDB(tx, epsd.dbSession).NewInsert().Model(&expectedPowerShelves).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []ExpectedPowerShelf
+	err = db.GetIDB(tx, epsd.dbSession).NewSelect().Model(&result).Where("eps.id IN (?)", bun.In(ids)).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(ids) {
+		return nil, fmt.Errorf("unexpected result count: got %d, expected %d", len(result), len(ids))
+	}
+	idToIndex := make(map[uuid.UUID]int, len(ids))
+	for i, id := range ids {
+		idToIndex[id] = i
+	}
+	sorted := make([]ExpectedPowerShelf, len(result))
+	for _, item := range result {
+		index, ok := idToIndex[item.ID]
+		if !ok {
+			return nil, fmt.Errorf("unexpected ExpectedPowerShelf ID returned: %s", item.ID)
+		}
+		sorted[index] = item
+	}
+	return sorted, nil
 }
 
 // Get returns an ExpectedPowerShelf by ID
@@ -657,6 +718,59 @@ func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expe
 	}
 
 	return nil
+}
+
+// DeleteAll deletes all ExpectedPowerShelves matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (epsd ExpectedPowerShelfSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) error {
+	ctx, span := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.DeleteAll")
+	if span != nil {
+		defer span.End()
+	}
+
+	query := db.GetIDB(tx, epsd.dbSession).NewDelete().Model((*ExpectedPowerShelf)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedPowerShelfIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedPowerShelfIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.ShelfSerialNumbers != nil {
+		query = query.Where("shelf_serial_number IN (?)", bun.In(filter.ShelfSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedPowerShelves and creates
+// the supplied replacement set in the caller's transaction.
+func (epsd ExpectedPowerShelfSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error) {
+	ctx, span := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.ReplaceAll")
+	if span != nil {
+		defer span.End()
+		epsd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	err := epsd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedPowerShelf{}, nil
+	}
+	return epsd.CreateMultiple(ctx, tx, inputs)
 }
 
 // NewExpectedPowerShelfDAO returns a new ExpectedPowerShelfDAO

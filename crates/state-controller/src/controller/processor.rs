@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::db;
+use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
 use crate::io::StateControllerIO;
@@ -43,6 +44,9 @@ use crate::state_handler::{
     FromStateHandlerResult, StateHandler, StateHandlerContext, StateHandlerContextObjects,
     StateHandlerError, StateHandlerOutcome,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// The `missing` token used when an object's state row is gone from the
 /// database; the per-object metrics clear path matches on it.
@@ -398,13 +402,16 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     ) -> Result<usize, IterationError> {
         // Determine how many new objects can still be processed and dequeue that amount
         let capacity = self.remaining_capacity();
-        let objects = if capacity > 0 {
-            // Acquire new object handling tasks
-            // If processing of an object was already start by another state controller
-            // but not committed, it can be acquired after a certain amount of time.
-            // The time is higher than the task handling timeout on each state controller.
-            // This guarantees that the task is no longer processed by the original owner.
-            let capacity = capacity.min(u32::MAX as usize) as u32;
+        if capacity == 0 {
+            return Ok(0);
+        }
+
+        // PostgreSQL starts the reservation clock at transaction start. Claiming,
+        // dispatching, and handling must share a deadline that starts earlier,
+        // so a delayed claim cannot outlive the reservation and start new work.
+        let deadline = tokio::time::Instant::now() + self.iteration_config.max_object_handling_time;
+        let capacity = capacity.min(u32::MAX as usize) as u32;
+        let objects = tokio::time::timeout_at(deadline, async {
             let mut txn = self.pool.begin().await?;
             let queued = db::acquire_queued_objects(
                 &mut txn,
@@ -415,10 +422,17 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             )
             .await?;
             txn.commit().await?;
-            queued
-        } else {
-            Vec::new()
-        };
+            Ok::<_, IterationError>(queued)
+        })
+        .await
+        .map_err(|_| IterationError::QueueClaimTimeout)??;
+
+        // A ready future can win over Tokio's timeout even after its deadline.
+        // Leave any committed reservation for expiry rather than dispatching it
+        // or deleting work whose ownership may already have changed.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(IterationError::QueueClaimTimeout);
+        }
 
         let objects: Vec<IO::ObjectId> = objects
             .into_iter()
@@ -440,7 +454,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Send off the new objects for processing
         for object_id in objects {
-            self.dispatch_object_handling_task(object_id);
+            self.dispatch_object_handling_task(object_id, deadline);
         }
 
         if let Some(emitter) = &self.metric_emitter
@@ -455,13 +469,16 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     }
 
     // Executes the state handling function for all objects for a single queued object
-    fn dispatch_object_handling_task(&mut self, object_id: IO::ObjectId) {
+    fn dispatch_object_handling_task(
+        &mut self,
+        object_id: IO::ObjectId,
+        deadline: tokio::time::Instant,
+    ) {
         let cloned_object_id = object_id.clone();
         let pool = self.pool.clone();
         let services = self.handler_services.as_ref().clone();
         let io = self.io.clone();
         let handler = self.state_handler.clone();
-        let max_object_handling_time = self.iteration_config.max_object_handling_time;
         let metrics_emitter = self.metric_holder.emitter.clone();
         let state_change_emitter = self.state_change_emitter.clone();
         let per_object_state = self.per_object_state.clone();
@@ -476,7 +493,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                         services,
                         io,
                         handler,
-                        max_object_handling_time,
+                        deadline,
                         metrics_emitter,
                         state_change_emitter,
                         per_object_state,
@@ -547,12 +564,11 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         // is a transient database error
         self.completed_objects.insert(task_result.object_id.clone());
         // If the state handler returned `Transition`, then run the handler again
-        // as soon as possible. A transition that lost the optimistic version
-        // check is requeued too: the object must promptly re-read the state
-        // the concurrent writer committed.
+        // as soon as possible. An invalidated iteration also needs a fresh
+        // snapshot before it can make progress.
         if allow_requeue
             && (task_result.metrics.common.next_state.is_some()
-                || task_result.metrics.common.transition_conflict)
+                || task_result.metrics.common.iteration_invalidated)
         {
             self.requeue_objects.insert(task_result.object_id.clone());
         }
@@ -612,6 +628,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum IterationError {
+    #[error("queue claim exceeded the object handling deadline")]
+    QueueClaimTimeout,
     #[error("unable to perform database transaction: {0}")]
     TransactionError(#[from] sqlx::Error),
     #[error("unable to perform database transaction: {0}")]
@@ -636,7 +654,7 @@ async fn process_object<IO: StateControllerIO>(
                 ObjectId = IO::ObjectId,
             >,
     >,
-    max_object_handling_time: std::time::Duration,
+    deadline: tokio::time::Instant,
     metrics_emitter: Option<Arc<StateProcessorMetricEmitter<IO>>>,
     state_change_emitter: Arc<StateChangeEmitter<IO::ObjectId, IO::ControllerState>>,
     per_object_state: Option<PerObjectStateRecorder>,
@@ -651,7 +669,15 @@ async fn process_object<IO: StateControllerIO>(
     let result: Result<
         Result<StateHandlerOutcome<_>, StateHandlerError>,
         tokio::time::error::Elapsed,
-    > = tokio::time::timeout(max_object_handling_time, async {
+    > = tokio::time::timeout_at(deadline, async {
+        // Task scheduling consumes the same budget as the claim. Do not even
+        // load a snapshot if the task first runs after that budget is gone.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StateHandlerError::Timeout {
+                object_id: object_id.to_string(),
+                state: String::new(),
+            });
+        }
         let mut txn = pool.begin().await?;
         let mut snapshot = io
             .load_object_state(&mut txn, &object_id)
@@ -701,12 +727,17 @@ async fn process_object<IO: StateControllerIO>(
                     pool.begin().await?
                 };
                 if let Err(e) = pending_db_writes.apply_all(&mut txn).await {
+                    if matches!(e, StateHandlerError::IterationInvalidated { .. }) {
+                        txn.rollback().await?;
+                        return Err(e);
+                    }
                     // If there's an error running the writes, count that as the handler outcome
                     (Err(e), txn)
                 } else {
                     (Ok(outcome), txn)
                 }
             }
+            Err(e @ StateHandlerError::IterationInvalidated { .. }) => return Err(e),
             Err(e) => (Err(e), pool.begin().await?),
         };
 
@@ -714,8 +745,8 @@ async fn process_object<IO: StateControllerIO>(
         let mut next_state_entered_at = None;
         let mut next_state_sla = None;
         if let Ok(StateHandlerOutcome::Transition {
-                      next_state: next, ..
-                  }) = &handler_outcome
+            next_state: next, ..
+        }) = &handler_outcome
         {
             next_state = Some(next.clone());
 
@@ -729,7 +760,7 @@ async fn process_object<IO: StateControllerIO>(
             next_state_sla = io
                 .state_sla(&Versioned::new(next.clone(), new_version), &snapshot)
                 .sla;
-            if io
+            if let Err(error) = io
                 .persist_controller_state(
                     &mut txn,
                     &object_id,
@@ -738,21 +769,15 @@ async fn process_object<IO: StateControllerIO>(
                     next,
                 )
                 .await?
+                .check_applied()
             {
-                io.persist_state_history(&mut txn, &object_id, new_version, next)
-                    .await?;
-            } else {
-                // Optimistic-lock loss: a concurrent writer changed the state
-                // between load and persist, so this transition never happened
-                // — don't emit it, or the metrics/hooks would report a state
-                // the database doesn't hold. The object is still requeued
-                // (via the flag) to promptly act on the winner's state.
-                tracing::info!(state=?next, %object_id, "Transition skipped: state version changed concurrently");
-                metrics.common.transition_conflict = true;
-                next_state = None;
-                next_state_entered_at = None;
-                next_state_sla = None;
+                // The state transition did not apply, so roll back the handler's
+                // other writes too, including queued observations.
+                txn.rollback().await?;
+                return Err(error);
             }
+            io.persist_state_history(&mut txn, &object_id, new_version, next)
+                .await?;
         }
 
         let is_success = handler_outcome.is_ok();
@@ -802,7 +827,7 @@ async fn process_object<IO: StateControllerIO>(
 
         handler_outcome
     })
-        .await;
+    .await;
     metrics.common.handler_latency = start.elapsed();
 
     // Emit the state changed event to registered hooks
@@ -824,6 +849,11 @@ async fn process_object<IO: StateControllerIO>(
     let deleted = matches!(&result, Ok(Ok(StateHandlerOutcome::Deleted { .. })));
     let result = match result {
         Ok(Ok(_result)) => Ok(()),
+        Ok(Err(StateHandlerError::IterationInvalidated { source_ref })) => {
+            tracing::info!(%object_id, %source_ref, "Controller iteration invalidated");
+            metrics.common.iteration_invalidated = true;
+            Ok(())
+        }
         Ok(Err(err)) => Err(err),
         Err(_timeout) => Err(StateHandlerError::Timeout {
             object_id: object_id.to_string(),
@@ -856,7 +886,7 @@ async fn process_object<IO: StateControllerIO>(
     if let Some(recorder) = &per_object_state {
         if object_gone {
             recorder.clear(&object_id.to_string());
-        } else if !metrics.common.transition_conflict
+        } else if !metrics.common.iteration_invalidated
             && let (Some(final_state), Some(entered)) = (
                 metrics
                     .common
@@ -894,13 +924,10 @@ async fn process_object<IO: StateControllerIO>(
                 manual_intervention,
             );
         } else {
-            // The object's current state is unknowable this iteration: either
-            // it could not be loaded (e.g. a DB error or timeout during
-            // load), or the optimistic version check failed — positive
-            // evidence a concurrent writer replaced the state this iteration
-            // observed. Keep existing series alive instead of asserting stale
-            // facts or letting triage alerts flap; the requeued/next pass
-            // records the current state.
+            // The state could not be loaded, or a conditional write rejected
+            // this iteration. A prerequisite rejection need not mean the
+            // object's own state changed. Keep existing series alive until
+            // the requeued/next pass can record a fresh observation.
             recorder.touch(&object_id.to_string());
         }
     }

@@ -625,6 +625,16 @@ impl DpuServiceInterfaceRepository for KubeRepository {
             )
             .await?)
     }
+
+    async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
+        let api: Api<DPUServiceInterface> = self.api(namespace);
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]

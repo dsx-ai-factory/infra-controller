@@ -7,10 +7,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
@@ -27,8 +28,12 @@ import (
 	echo "github.com/labstack/echo/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // Test_ProxyTimeoutsFitWriteTimeout guards the ceiling that the gRPC proxy
@@ -88,37 +93,45 @@ func Test_InitAPIServer(t *testing.T) {
 }
 
 func Test_InitTemporalClients(t *testing.T) {
-	keyPath, certPath := config.SetupTestCerts(t)
-	defer os.Remove(keyPath)
-	defer os.Remove(certPath)
-
-	cfg := common.GetTestConfig()
-	cfg.SetTemporalCertPath(certPath)
-	cfg.SetTemporalKeyPath(keyPath)
-	cfg.SetTemporalCaPath(certPath)
-
-	tcfg, err := cfg.GetTemporalConfig()
-	assert.NoError(t, err)
-	defer cfg.Close()
-
-	type args struct {
-		tConfig *cconfig.TemporalConfig
-	}
-
 	tests := []struct {
 		name string
-		args args
+		host string
 	}{
-		{
-			name: "test initTemporalClient success",
-			args: args{
-				tConfig: tcfg,
-			},
-		},
+		{name: "IPv6 connection", host: "::1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InitTemporalClients(tt.args.tConfig, true)
+			listener, err := net.Listen("tcp", net.JoinHostPort(tt.host, "0"))
+			require.NoError(t, err)
+
+			grpcServer := grpc.NewServer()
+			healthServer := health.NewServer()
+			healthServer.SetServingStatus("temporal.api.workflowservice.v1.WorkflowService", healthpb.HealthCheckResponse_SERVING)
+			healthpb.RegisterHealthServer(grpcServer, healthServer)
+			serverDone := make(chan error, 1)
+			go func() {
+				serverDone <- grpcServer.Serve(listener)
+			}()
+			t.Cleanup(func() {
+				grpcServer.Stop()
+				assert.NoError(t, <-serverDone)
+			})
+
+			tcfg := &cconfig.TemporalConfig{
+				Host:      tt.host,
+				Port:      listener.Addr().(*net.TCPAddr).Port,
+				Namespace: "cloud",
+			}
+			client, namespaceClient, err := InitTemporalClients(tcfg, true)
+			require.NoError(t, err)
+			t.Cleanup(client.Close)
+			t.Cleanup(namespaceClient.Close)
+
+			// Lazy construction alone does not check the connection target.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err = client.CheckHealth(ctx, &temporalClient.CheckHealthRequest{})
+			require.NoError(t, err)
 		})
 	}
 }

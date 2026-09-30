@@ -236,14 +236,23 @@ Source: https://stackoverflow.com/a/52024583/3027614
 {{- $global := index . 0 -}}
 {{- $store := index . 1 -}}
 {{- $storeConfig := index $global.Values.server.config.persistence $store -}}
+{{- $host := "" -}}
 {{- if $storeConfig.sql.host -}}
-{{- $storeConfig.sql.host -}}
+{{- $host = $storeConfig.sql.host | toString -}}
 {{- else if and $global.Values.mysql.enabled (and (eq (include "temporal.persistence.driver" (list $global $store)) "sql") (eq (include "temporal.persistence.sql.driver" (list $global $store)) "mysql8")) -}}
-{{- include "mysql.host" $global -}}
+{{- $host = include "mysql.host" $global -}}
 {{- else if and $global.Values.postgresql.enabled (and (eq (include "temporal.persistence.driver" (list $global $store)) "sql") (eq (include "temporal.persistence.sql.driver" (list $global $store)) "postgres12")) -}}
-{{- include "postgresql.host" $global -}}
+{{- $host = include "postgresql.host" $global -}}
 {{- else -}}
-{{- required (printf "Please specify sql host for %s store" $store) $storeConfig.sql.host -}}
+{{- $host = required (printf "Please specify sql host for %s store" $store) $storeConfig.sql.host -}}
+{{- end -}}
+{{/*
+Server configuration and schema tools append :port to this host, so IPv6 needs brackets here.
+*/}}
+{{- if and (contains ":" $host) (not (hasPrefix "[" $host)) -}}
+{{- printf "[%s]" $host -}}
+{{- else -}}
+{{- $host -}}
 {{- end -}}
 {{- end -}}
 
@@ -342,6 +351,15 @@ Source: https://stackoverflow.com/a/52024583/3027614
 {{- $global := index . 0 -}}
 {{- $store := index . 1 -}}
 {{- include (printf "temporal.persistence.%s.secretKey" (include "temporal.persistence.driver" (list $global $store))) (list $global $store) -}}
+{{- end -}}
+
+{{/* IPv6 literals need brackets before the port in Elasticsearch URLs. */}}
+{{- define "temporal.elasticsearch.address" -}}
+{{- $host := .Values.elasticsearch.host | toString -}}
+{{- if and (contains ":" $host) (not (hasPrefix "[" $host)) -}}
+{{- $host = printf "[%s]" $host -}}
+{{- end -}}
+{{- printf "%s:%v" $host .Values.elasticsearch.port -}}
 {{- end -}}
 
 {{/*

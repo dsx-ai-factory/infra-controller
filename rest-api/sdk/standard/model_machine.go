@@ -31,7 +31,7 @@ type Machine struct {
 	SiteId *string `json:"siteId,omitempty"`
 	// ID of the Instance Type, if assigned
 	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
-	// ID of the Instance if this Machine is assigned to one
+	// ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
 	InstanceId NullableString `json:"instanceId,omitempty"`
 	// ID of the Tenant that owns the Instance if the Machine is assigned to one
 	TenantId NullableString `json:"tenantId,omitempty"`
@@ -65,9 +65,8 @@ type Machine struct {
 	Metadata *MachineMetadata `json:"metadata,omitempty"`
 	// User-specified Machine labels
 	Labels map[string]string `json:"labels,omitempty"`
-	// Status represents the status of the machine
-	Status *MachineStatus `json:"status,omitempty"`
-	// Indicates whether the machine is usable by or currently in use by a tenant.
+	Status *MachineStatus    `json:"status,omitempty"`
+	// Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a Machine is available for Instance creation.
 	IsUsableByTenant *bool `json:"isUsableByTenant,omitempty"`
 	// Chronological status history for the Machine
 	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
@@ -853,7 +852,7 @@ func (o *Machine) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *Machine) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

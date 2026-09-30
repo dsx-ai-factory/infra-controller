@@ -1,0 +1,62 @@
+suite: hardware-health extra containers and volumes
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: renders only the nico-hardware-health container and spiffe volume by default
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: nico-hardware-health
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: spiffe
+
+  - it: appends extraContainers and extraVolumes after the built-in entries
+    set:
+      extraContainers:
+        - name: collector
+          image: registry.example.com/collector:latest
+          args: ["--config=/etc/collector/config.yaml"]
+          volumeMounts:
+            - name: collector-config
+              mountPath: /etc/collector
+              readOnly: true
+      extraVolumes:
+        - name: collector-config
+          configMap:
+            name: collector-config
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: nico-hardware-health
+      - equal:
+          path: spec.template.spec.containers[1]
+          value:
+            name: collector
+            image: registry.example.com/collector:latest
+            args: ["--config=/etc/collector/config.yaml"]
+            volumeMounts:
+              - name: collector-config
+                mountPath: /etc/collector
+                readOnly: true
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: spiffe
+      - equal:
+          path: spec.template.spec.volumes[1]
+          value:
+            name: collector-config
+            configMap:
+              name: collector-config

@@ -2247,7 +2247,7 @@ async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) 
         .await
         .expect("load switch")
         .expect("switch");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -2256,6 +2256,7 @@ async fn create_rack_switch_for_nmxc_simulator(env: &TestEnv, rack_id: &RackId) 
     )
     .await
     .expect("set switch ready");
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_fabric_manager_status(
         txn.as_mut(),
         switch_id,
@@ -2381,7 +2382,11 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     .await
     .expect("create managed host");
     let mh = TestManagedHost {
-        id: mh_snapshot.host_snapshot.id,
+        id: mh_snapshot
+            .host_snapshot
+            .id
+            .try_into()
+            .expect("host snapshot ID should be a valid HostMachineId"),
         dpu_ids: mh_snapshot
             .dpu_snapshots
             .into_iter()
@@ -2520,7 +2525,11 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
     )
     .await
     .expect("set rack ready");
-    assert!(updated, "rack should transition to Ready for rotation");
+    assert_eq!(
+        updated,
+        db::ConditionalWrite::Applied(()),
+        "rack should transition to Ready for rotation"
+    );
     txn.commit().await.expect("commit rack");
 
     let switch_id = create_rack_switch_for_nmxc_simulator(&env, &rack_id).await;

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 
 	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
@@ -50,16 +51,19 @@ type RedfishClient struct {
 	gofish.ClientConfig
 }
 
+func buildEndpoint(ip net.IP) string {
+	port := "443"
+	// TODO: remove this--hack for running the service from my macbook
+	if ip.String() == "127.0.0.1" {
+		port = "8443"
+	}
+	return "https://" + net.JoinHostPort(ip.String(), port)
+}
+
 // New creates a RedfishClient for the given PMC and context.
 func New(ctx context.Context, pmc *pmc.PMC, reuse_connections bool) (*RedfishClient, error) {
-	endpoint := fmt.Sprintf("https://%s", pmc.IP.String())
-	// TODO: remove this--hack for running the service from my macbook
-	if pmc.IP.String() == "127.0.0.1" {
-		endpoint = endpoint + ":8443"
-	}
-
 	client_config := gofish.ClientConfig{
-		Endpoint:         endpoint,
+		Endpoint:         buildEndpoint(pmc.IP),
 		Username:         pmc.Credential.User,
 		Password:         pmc.Credential.Password.Value,
 		Insecure:         true,

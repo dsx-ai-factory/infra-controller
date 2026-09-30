@@ -97,7 +97,10 @@ impl RackStateHandler {
                 handle_validating(id, state, validating_state, ctx).await
             }
             RackState::Ready => handle_ready(id, state, &config, ctx).await,
-            RackState::Error { cause } => handle_error(id, state, &config, cause, ctx).await,
+            RackState::Error {
+                cause,
+                recovery_policy,
+            } => handle_error(id, state, &config, cause, *recovery_policy, ctx).await,
             RackState::Deleting => handle_deleting().await,
         }
     }

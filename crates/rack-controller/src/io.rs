@@ -22,7 +22,9 @@ use carbide_rack_controller::metrics::RackMetricsEmitter;
 use carbide_uuid::rack::RackId;
 use config_version::{ConfigVersion, Versioned};
 use db::rack::IdColumn;
-use db::{DatabaseError, ObjectColumnFilter, rack as db_rack};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter, rack as db_rack,
+};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{
@@ -94,7 +96,7 @@ impl StateControllerIO for RackStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_rack::try_update_controller_state(txn, rack_id, old_version, new_version, new_state)
             .await
     }

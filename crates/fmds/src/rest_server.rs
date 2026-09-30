@@ -386,6 +386,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use axum::http;
+    use carbide_instrument::testing::MetricsCapture;
     use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
@@ -831,12 +832,17 @@ mod tests {
             asn: 12345,
             machine_identity: Some(MachineIdentityParams::default().into()),
         };
-        grpc_server
-            .update_config(Request::new(UpdateConfigRequest {
-                config_update: Some(update),
-            }))
-            .await
-            .unwrap();
+        {
+            // The gRPC handler emits into the process-global test registry, so
+            // participate in the metric-capture lock while driving it.
+            let _metrics = MetricsCapture::start();
+            grpc_server
+                .update_config(Request::new(UpdateConfigRequest {
+                    config_update: Some(update),
+                }))
+                .await
+                .unwrap();
+        }
 
         // Read via REST
         let (server, port) = setup_server(state).await;

@@ -49,9 +49,10 @@ from that IR.
     -> one protoc invocation
     -> serialized FileDescriptorSet
     -> shared Schema
-        -> prost/tonic Rust generation
-        -> Forge wrapper generation
-        -> NMX-C wrapper generation
+        -> Rust-only descriptor substitutions
+            -> prost/tonic Rust generation
+            -> Forge wrapper generation
+            -> NMX-C wrapper generation
         -> runtime gRPC reflection descriptor
 ```
 
@@ -60,11 +61,18 @@ order:
 
 1. Compile the complete RPC schema once.
 2. Write the exact serialized descriptor bytes to `OUT_DIR/forge.bin`.
-3. Let the Forge and NMX-C wrapper generators borrow the decoded descriptor
-   set.
-4. Transfer ownership of the decoded descriptor set to
+3. Collect and validate Rust-only type substitutions, then apply them to a
+   clone of the decoded descriptor set.
+4. Let the Forge and NMX-C wrapper generators borrow the Rust descriptor view.
+5. Transfer ownership of the Rust descriptor view to
    `tonic-prost-build::compile_fds`, which generates prost messages and tonic
    services without invoking `protoc` again.
+
+The public descriptor continues to name the source-schema types. A field or
+RPC method may use the options from `codegen/v1/rust_type.proto` to select a
+wire-compatible message declaration for Rust generation only. This lets Rust
+use domain-specific newtypes without changing reflection or generated clients
+in other languages.
 
 The wrapper generators need the complete descriptor set to resolve message
 types imported from any schema file. Their `root_files` configuration has a

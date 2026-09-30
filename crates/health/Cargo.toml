@@ -88,6 +88,8 @@ nv-redfish = { workspace = true, features = [
   "log-services",
   "managers",
   "memory",
+  "oem-delta",
+  "oem-liteon",
   "oem-nvidia",
   "power-supplies",
   "processors",

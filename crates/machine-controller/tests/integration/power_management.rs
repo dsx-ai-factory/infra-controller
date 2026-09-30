@@ -375,7 +375,7 @@ async fn desired_off_persists_observed_off_state(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Enable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
@@ -440,7 +440,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Enable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
@@ -458,7 +458,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Disable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
@@ -488,7 +488,8 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         matches!(
             machine.state.value,
             ManagedHostState::Maintenance {
-                operation: MachineMaintenanceOperation::PowerOff
+                operation: MachineMaintenanceOperation::PowerOff,
+                ..
             }
         ),
         "expected Maintenance(PowerOff) after one iteration, got {:?}",

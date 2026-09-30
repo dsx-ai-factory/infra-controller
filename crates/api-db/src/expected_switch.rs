@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest, LinkedExpectedSwitch};
@@ -551,6 +551,49 @@ pub async fn create_missing_from(
     }
 
     Ok(())
+}
+
+/// RMS rack identity for a switch that does not yet have a `switches` row,
+/// resolved from the expected inventory. Every switch is rack-scale
+/// (RMS-managed), so this serves the pre-ingestion firmware and power paths for
+/// any switch.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionSwitchRmsIdentity {
+    pub bmc_mac_address: MacAddress,
+    pub rack_id: RackId,
+    pub rack_profile_id: Option<RackProfileId>,
+}
+
+/// Resolve RMS rack identities for pre-ingestion switches by BMC MAC.
+///
+/// Every switch is rack-scale (RMS-managed), so its expected record is expected
+/// to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. The rack profile is taken from the live `racks` row when it
+/// exists and otherwise from the `expected_racks` declaration, so the descriptor
+/// resolves before the rack row is created. Rows missing a `rack_id` are a
+/// misconfiguration and are omitted (they cannot resolve an RMS identity).
+/// Mirrors `expected_machine::find_rms_identities_by_bmc_macs`.
+pub async fn find_rms_identities_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    bmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionSwitchRmsIdentity>> {
+    let sql = r#"
+        SELECT
+            es.bmc_mac_address AS bmc_mac_address,
+            es.rack_id AS rack_id,
+            COALESCE(r.rack_profile_id, er.rack_profile_id) AS rack_profile_id
+        FROM expected_switches es
+        LEFT JOIN racks r ON r.id = es.rack_id
+        LEFT JOIN expected_racks er ON er.rack_id = es.rack_id
+        WHERE es.bmc_mac_address = ANY($1)
+          AND es.rack_id IS NOT NULL
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| DatabaseError::new("expected_switch::find_rms_identities_by_bmc_macs", err))
 }
 
 #[cfg(test)]

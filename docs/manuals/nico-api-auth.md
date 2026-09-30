@@ -243,7 +243,7 @@ With this configuration, a client certificate with subject
 5. Be authorized according to whatever casbin policy rules match that
    principal
 
-You can see an example of a complete nico-api configuration file in [full_config.toml](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-core/src/cfg/test_data/full_config.toml)
+You can see an example of a complete nico-api configuration file in [full_config.toml](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/test_data/full_config.toml)
 
 ### Permissive mode
 

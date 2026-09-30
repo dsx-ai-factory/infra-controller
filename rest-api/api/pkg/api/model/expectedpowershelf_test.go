@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,8 +13,11 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
@@ -315,7 +319,7 @@ func TestNewAPIExpectedPowerShelf(t *testing.T) {
 			assert.Equal(t, tc.dbObj.BmcMacAddress, got.BmcMacAddress)
 			assert.Equal(t, tc.dbObj.ShelfSerialNumber, got.ShelfSerialNumber)
 			assert.Equal(t, tc.dbObj.BmcIpAddress, got.BmcIpAddress)
-			assert.Equal(t, map[string]string(tc.dbObj.Labels), got.Labels)
+			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
 		})
@@ -410,6 +414,7 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber:  &validShelfSerial,
 				DefaultBmcUsername: &emptyString,
+				DefaultBmcPassword: &validPassword,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -419,6 +424,7 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 			obj: APIExpectedPowerShelfUpdateRequest{
 				ShelfSerialNumber:  &validShelfSerial,
 				DefaultBmcPassword: &emptyString,
+				DefaultBmcUsername: &validUsername,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -572,7 +578,7 @@ func TestNewAPIExpectedPowerShelfEdgeCases(t *testing.T) {
 
 		got := NewAPIExpectedPowerShelf(dbEPS)
 		assert.NotNil(t, got)
-		assert.Equal(t, map[string]string(dbEPS.Labels), got.Labels)
+		assert.Equal(t, APILabels(dbEPS.Labels), got.Labels)
 		assert.Equal(t, "cloud-api", got.Labels["app.kubernetes.io/name"])
 	})
 
@@ -663,4 +669,46 @@ func TestNewAPIExpectedPowerShelfWithSite(t *testing.T) {
 		assert.NotNil(t, apiEPS)
 		assert.Nil(t, apiEPS.Site)
 	})
+}
+
+func TestAPIExpectedPowerShelfUpdateRequest_ToProto(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantPaths []string
+	}{
+		{name: "omitted fields preserve Core state", body: `{}`},
+		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null}`},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{}}`, wantPaths: []string{"metadata.labels"}},
+		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
+		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request APIExpectedPowerShelfUpdateRequest
+			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
+			require.NoError(t, request.Validate())
+			patch := request.ToProto(&cdbm.ExpectedPowerShelf{SlotID: cutil.GetPtr(int32(0))})
+			encoded, err := protojson.Marshal(patch)
+			require.NoError(t, err)
+			var decoded corev1.PatchExpectedPowerShelfRequest
+			require.NoError(t, protojson.Unmarshal(encoded, &decoded))
+			require.NotNil(t, decoded.UpdateMask)
+			assert.ElementsMatch(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
+			if request.SlotID != nil {
+				labels := decoded.GetExpectedPowerShelf().GetMetadata().GetLabels()
+				require.Len(t, labels, 1)
+				assert.Equal(t, "slot_id", labels[0].GetKey())
+				assert.Equal(t, "0", labels[0].GetValue())
+			}
+			if request.DefaultBmcUsername != nil {
+				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedPowerShelf().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
+				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedPowerShelf().GetBmcPassword())
+			}
+		})
+	}
 }

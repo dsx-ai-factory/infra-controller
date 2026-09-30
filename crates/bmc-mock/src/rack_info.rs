@@ -22,7 +22,6 @@ use crate::hw::rack::{RackElevation, RackPlacement};
 use crate::hw::wiwynn_gb200_nvl72_rack::WiwynnGB200Nvl72Rack;
 use crate::{HardwareType, RackType};
 
-const NVL72_TOPOLOGY_ID: u32 = 128;
 const RACK_POSITION_MIN: u8 = 1;
 const RACK_POSITION_MAX: u8 = 48;
 const COMPUTE_TRAY_COUNT: usize = 18;
@@ -43,7 +42,10 @@ impl RackInfo {
     }
 
     pub fn placement(&self, position: u8) -> RackPlacement {
-        RackPlacement::new(position, self.topology_id())
+        match self.rack_type {
+            RackType::WiwynnGb200Nvl72 => self.wiwynn_gb200_nvl72_rack().placement(position),
+            RackType::LenovoGb300Nvl72 => self.lenovo_gb300_nvl72_rack().placement(position),
+        }
     }
 
     fn wiwynn_gb200_nvl72_rack(&self) -> WiwynnGB200Nvl72Rack {
@@ -52,12 +54,6 @@ impl RackInfo {
 
     fn lenovo_gb300_nvl72_rack(&self) -> LenovoGB300Nvl72Rack {
         LenovoGB300Nvl72Rack
-    }
-
-    fn topology_id(&self) -> u32 {
-        match self.rack_type {
-            RackType::WiwynnGb200Nvl72 | RackType::LenovoGb300Nvl72 => NVL72_TOPOLOGY_ID,
-        }
     }
 
     fn compute_tray_hardware_type(&self) -> HardwareType {

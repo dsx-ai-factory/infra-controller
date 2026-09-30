@@ -18,7 +18,7 @@
 //! Durable markers for work carbide still owes an external system per machine,
 //! and a bounded history of the work already done.
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use model::machine_pending_action::{
     MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
 };
@@ -135,7 +135,7 @@ pub async fn find_outstanding_machine_ids(
 pub async fn find_outstanding_by_machine_ids(
     db: impl DbReader<'_>,
     kind: MachinePendingActionKind,
-    machine_ids: &[MachineId],
+    machine_ids: &[impl MachineIdSubtypeTrait],
 ) -> DatabaseResult<Vec<MachinePendingAction>> {
     const QUERY: &str = "SELECT
         machine_id,

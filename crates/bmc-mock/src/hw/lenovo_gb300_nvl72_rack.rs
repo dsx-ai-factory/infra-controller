@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use crate::hw::rack::RackElevation;
+use crate::hw::rack::{RackElevation, RackPlacement};
 use crate::{HardwareType, hw};
 
 pub(crate) struct LenovoGB300Nvl72Rack;
@@ -27,6 +27,10 @@ impl LenovoGB300Nvl72Rack {
             HardwareType::LiteOnPowerShelf,
             HardwareType::NvidiaSwitchN5700Ld,
         )
+    }
+
+    pub(crate) fn placement(&self, position: u8) -> RackPlacement {
+        hw::nvidia_gbx00::nvl72_placement(position)
     }
 }
 

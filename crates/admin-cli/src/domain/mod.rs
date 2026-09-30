@@ -16,6 +16,7 @@
  */
 
 mod show;
+mod update;
 
 // Cross-module re-exports for jump module
 use clap::Parser;
@@ -28,4 +29,6 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Display Domain information")]
     Show(show::Args),
+    #[clap(about = "Update domain default TTL")]
+    Update(update::Args),
 }

@@ -119,6 +119,7 @@ async fn error_with_power_on_maintenance_request_transitions_to_maintenance(
             transition,
             PowerShelfControllerState::Maintenance {
                 operation: PowerShelfMaintenanceOperation::PowerOn,
+                ..
             }
         ),
         "expected transition to Maintenance {{ PowerOn }}, got {:?}",
@@ -160,6 +161,7 @@ async fn error_with_power_off_maintenance_request_transitions_to_maintenance(
             transition,
             PowerShelfControllerState::Maintenance {
                 operation: PowerShelfMaintenanceOperation::PowerOff,
+                ..
             }
         ),
         "expected transition to Maintenance {{ PowerOff }}, got {:?}",

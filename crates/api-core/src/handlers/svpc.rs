@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use ::rpc::protos::mlx_device as mlx_device_pb;
 use carbide_host_support::dpa_cmds::{DpaCommand, DpaDeviceCommand, OpCode};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use db::dpa_interface;
 use eyre::eyre;
 use libmlx::device::report::MlxDeviceReport;
@@ -48,7 +48,7 @@ use crate::{CarbideError, CarbideResult};
 /// If there is work to be done, return an MLX action with per-device commands.
 pub(super) async fn process_scout_req(
     api: &Api,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
 ) -> CarbideResult<fac::Action> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_svpc_enabled() {
         tracing::info!(
@@ -168,7 +168,7 @@ pub(super) async fn process_scout_req(
 /// The gate is checked first so the host-scoped DB read is skipped whenever the
 /// gate is on (the answer is already `true`); the force flag is only consulted
 /// when the gate is off.
-async fn resolve_rotate_lockdown_key(api: &Api, machine_id: MachineId) -> CarbideResult<bool> {
+async fn resolve_rotate_lockdown_key(api: &Api, machine_id: HostMachineId) -> CarbideResult<bool> {
     if api.runtime_config.nic_lockdown_ikm_rotation_enabled {
         return Ok(true);
     }
@@ -214,10 +214,9 @@ async fn resolve_rotate_lockdown_key(api: &Api, machine_id: MachineId) -> Carbid
 /// The two branches resolve their fallback differently on purpose. The site-wide
 /// `lockdown_ikm` target row is seeded for every site by the backfill migration
 /// (and by `set_initial_target_version` on the first `RotateCredential`), so a
-/// missing target is a corrupted invariant we surface rather than paper over --
-/// mirroring `record_device_converged`. A per-card row, by contrast, is created
-/// lazily on first lock and only backfilled for already-locked cards, so a card
-/// with no row / no tracked version legitimately falls back to the seed version.
+/// missing target returns `MissingSitewideRotationTarget`. A per-card row is
+/// created lazily on first lock and only backfilled for already-locked cards,
+/// so a card with no row / no tracked version falls back to the seed version.
 async fn resolve_lock_ikm_version(
     api: &Api,
     mac: MacAddress,
@@ -294,7 +293,7 @@ async fn resolve_unlock_ikm_version(api: &Api, mac: MacAddress) -> CarbideResult
 async fn build_unlock_command(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> CarbideResult<DpaCommand<'static>> {
     // DB-native `i32`; converted to the `u32` the derivation layer uses. The
@@ -333,7 +332,7 @@ async fn build_unlock_command(
 fn build_apply_firmware_command<'a>(
     api: &'a Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> DpaCommand<'a> {
     // Look up a FirmwareFlasherProfile for the device's PN:PSID
@@ -418,7 +417,7 @@ fn build_apply_firmware_command<'a>(
 fn build_apply_profile_command(
     api: &Api,
     interface: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> CarbideResult<DpaCommand<'static>> {
     let Some(profile_name) = &interface.mlxconfig_profile else {
@@ -477,7 +476,7 @@ fn build_apply_profile_command(
 async fn build_lock_command(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     migrate_to_target: bool,
 ) -> CarbideResult<DpaCommand<'static>> {
@@ -490,7 +489,7 @@ async fn build_lock_command(
 async fn lock_command_for_target(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     target_version: i32,
 ) -> CarbideResult<DpaCommand<'static>> {
@@ -578,8 +577,14 @@ async fn process_mlx_observation(
         only_astra: false,
     };
 
-    let dpa_snapshots =
-        db::dpa_interface::find_by_machine_id(&mut txn, machine_id, dpa_search_config).await?;
+    let dpa_snapshots = db::dpa_interface::find_by_machine_id(
+        &mut txn,
+        machine_id.try_into().map_err(|error| {
+            CarbideError::InvalidArgument(format!("invalid host machine ID: {error}"))
+        })?,
+        dpa_search_config,
+    )
+    .await?;
 
     if dpa_snapshots.is_empty() {
         tracing::error!(
@@ -701,12 +706,31 @@ pub(crate) async fn publish_mlx_device_report(
     request: Request<mlx_device_pb::PublishMlxDeviceReportRequest>,
 ) -> Result<Response<mlx_device_pb::PublishMlxDeviceReportResponse>, Status> {
     log_request_data(&request);
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
+
+    // Generic observations do not depend on SVPC. Legacy admin/simulator
+    // callers can still publish DPA data, but cannot replace host observations.
+    // A failed snapshot statement must not skip independent DPA writes.
+    // Return that error after processing the DPA report; reject invalid input now.
+    let observation_result = if let (Some(machine_id), Some(report)) =
+        (authenticated_machine_id, req.report.as_ref())
+    {
+        match super::mlx_device_report::persist(&api.database_connection, machine_id, report).await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ CarbideError::DBError(_)) => Err(error),
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        Ok(())
+    };
 
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_svpc_enabled() {
         tracing::info!(
             "DPA is not enabled or SVPC is not enabled, skipping SVPC publish_mlx_device_report"
         );
+        observation_result?;
         return Ok(Response::new(
             mlx_device_pb::PublishMlxDeviceReportResponse {},
         ));
@@ -750,7 +774,9 @@ pub(crate) async fn publish_mlx_device_report(
                 let device_description = device_info.device_description.clone();
 
                 let Some(new_interface) = NewDpaInterface::from_device_info(
-                    machine_id,
+                    machine_id.try_into().map_err(|error| {
+                        CarbideError::InvalidArgument(format!("invalid host machine ID: {error}"))
+                    })?,
                     device_info.base_mac,
                     device_type,
                     pci_name.clone(),
@@ -849,6 +875,7 @@ pub(crate) async fn publish_mlx_device_report(
         tracing::warn!("no embedded MlxDeviceReport published");
     }
 
+    observation_result?;
     Ok(Response::new(
         mlx_device_pb::PublishMlxDeviceReportResponse {},
     ))

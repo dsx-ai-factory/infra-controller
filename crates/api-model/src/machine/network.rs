@@ -16,7 +16,7 @@
  */
 use std::net::{IpAddr, Ipv6Addr};
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Duration, Utc};
 use config_version::ConfigVersion;
 use health_report::HealthReport;
@@ -46,7 +46,7 @@ pub struct DpuLinkStatusObservation {
 /// Stored in a Postgres JSON field so new fields have to be Option until fully deployed
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineNetworkStatusObservation {
-    pub machine_id: MachineId,
+    pub machine_id: DpuMachineId,
     pub agent_version: Option<String>,
     pub observed_at: DateTime<Utc>,
     pub network_config_version: Option<ConfigVersion>,
@@ -201,8 +201,9 @@ mod tests {
 
     // A stable MachineId for status observations; `any_observed_version_changed`
     // never inspects it, so any valid id does.
-    fn machine_id() -> MachineId {
-        MachineId::from_str("fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg").unwrap()
+    fn machine_id() -> DpuMachineId {
+        DpuMachineId::from_str("fm100dt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+            .unwrap()
     }
 
     // A fixed timestamp so observations built in tests compare deterministically.

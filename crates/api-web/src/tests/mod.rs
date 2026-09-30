@@ -26,6 +26,7 @@ pub(super) mod env;
 mod explored_endpoint;
 mod firmware;
 mod health;
+mod ipam;
 mod managed_host;
 mod network_segment;
 mod vpc;

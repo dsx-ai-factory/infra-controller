@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 
 use crate::SecretsError;
-use crate::credentials::{CredentialKey, CredentialReader, Credentials};
+use crate::credentials::{BmcCredentialType, CredentialKey, CredentialReader, Credentials};
 
 pub struct ChainedCredentialReader(Vec<Box<dyn CredentialReader>>);
 
@@ -32,19 +32,52 @@ pub const UFM_LOCAL_CREDENTIAL_REMEDIATION: &str =
 pub const UFM_BACKEND_SOURCE_REMEDIATION: &str = "to restore persistent backend ownership for all UFM fabrics, set \
      credentials.ufm_source = \"backend\" and restart NICo";
 
+/// Operator action when local sources own version 0 of the site-wide BMC root.
+pub const BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION: &str =
+    // xtask:allow-error-case: NICo is a product name
+    "before any managed device uses version 0, add or correct bmc_site_wide_root in the \
+     configured environment or watched credential file (environment changes require a NICo \
+     restart); after ingestion, keep version 0 unchanged; coordinated BMC credential rotation is \
+     not safe while DPF manages DPUs with one shared BMC Secret; see \
+     https://github.com/NVIDIA/infra-controller/issues/6147";
+
+/// Operator action for returning version 0 of the site-wide BMC root to the
+/// persistent backend.
+pub const BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION: &str =
+    // xtask:allow-error-case: NICo is a product name
+    "to restore persistent backend ownership for version 0, set \
+     credentials.bmc_site_wide_root_source = \"backend\" and restart NICo";
+
 /// Stops UFM credential lookup before the persistent backend portion of a
 /// reader chain when local sources own UFM credentials. Place this after local
 /// environment and file readers.
 #[derive(Debug)]
 pub struct UfmBackendCredentialBlocker;
 
+/// Stops version 0 site-wide BMC root lookup before the persistent backend
+/// when local sources own it. Versioned roots and all other BMC credentials
+/// continue through the chain.
+#[derive(Debug)]
+pub struct BmcSiteWideRootV0BackendCredentialBlocker;
+
 /// Delegates every non-UFM lookup while making local UFM entries invisible.
 /// Place this around the environment/file chain when the persistent backend
 /// owns UFM credentials.
 pub struct NonUfmCredentialReader<R>(R);
 
+/// Delegates every lookup except the version 0 site-wide BMC root, making that
+/// local entry invisible when the persistent backend owns it.
+pub struct NonBmcSiteWideRootV0CredentialReader<R>(R);
+
 impl<R> NonUfmCredentialReader<R> {
     /// Wraps a reader and suppresses its `CredentialKey::UfmAuth` lookups.
+    pub fn new(reader: R) -> Self {
+        Self(reader)
+    }
+}
+
+impl<R> NonBmcSiteWideRootV0CredentialReader<R> {
+    /// Wraps a reader and suppresses only the unversioned site-wide BMC root.
     pub fn new(reader: R) -> Self {
         Self(reader)
     }
@@ -57,6 +90,24 @@ impl<R: CredentialReader> CredentialReader for NonUfmCredentialReader<R> {
         key: &CredentialKey,
     ) -> Result<Option<Credentials>, SecretsError> {
         if matches!(key, CredentialKey::UfmAuth { .. }) {
+            return Ok(None);
+        }
+        self.0.get_credentials(key).await
+    }
+}
+
+#[async_trait]
+impl<R: CredentialReader> CredentialReader for NonBmcSiteWideRootV0CredentialReader<R> {
+    async fn get_credentials(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        if matches!(
+            key,
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            }
+        ) {
             return Ok(None);
         }
         self.0.get_credentials(key).await
@@ -77,6 +128,29 @@ impl CredentialReader for UfmBackendCredentialBlocker {
         Err(SecretsError::UfmCredentialReadBlocked {
             fabric: fabric.clone(),
         })
+    }
+}
+
+#[async_trait]
+impl CredentialReader for BmcSiteWideRootV0BackendCredentialBlocker {
+    async fn get_credentials(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        if !matches!(
+            key,
+            CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::SiteWideRoot,
+            }
+        ) {
+            return Ok(None);
+        }
+
+        // A local-only root may intentionally be supplied after startup. The
+        // callers that require it decide whether and how to report the missing
+        // credential, so keep this policy-chain signal below alerting levels.
+        tracing::debug!("local site-wide BMC root version 0 credential is missing");
+        Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked)
     }
 }
 
@@ -109,7 +183,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::credentials::CredentialType;
+    use crate::credentials::{BmcCredentialType, CredentialType};
     use crate::local_credentials::{
         EnvCredentials, EnvCredentialsConfig, FileCredentialsConfig, FileCredentialsWatcher,
     };
@@ -234,6 +308,63 @@ mod tests {
 
         assert_eq!(ufm_value, None);
         assert_eq!(non_ufm_value, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn bmc_site_wide_root_v0_backend_blocker_is_exact() {
+        let expected = Credentials::new("backend-user", "backend-password");
+        let backend = Arc::new(TestCredentialManager::new(expected.clone()));
+        let chain: ChainedCredentialReader = vec![
+            Box::new(BmcSiteWideRootV0BackendCredentialBlocker) as Box<dyn CredentialReader>,
+            Box::new(backend),
+        ]
+        .into();
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+
+        assert!(matches!(
+            chain.get_credentials(&v0).await,
+            Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked)
+        ));
+        assert_eq!(
+            chain
+                .get_credentials(&v1)
+                .await
+                .expect("versioned BMC root lookup must continue to the backend"),
+            Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_bmc_site_wide_root_v0_reader_is_exact() {
+        let expected = Credentials::new("local-user", "local-password");
+        let reader =
+            NonBmcSiteWideRootV0CredentialReader::new(TestCredentialManager::new(expected.clone()));
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+
+        assert_eq!(
+            reader
+                .get_credentials(&v0)
+                .await
+                .expect("ignore local version 0"),
+            None
+        );
+        assert_eq!(
+            reader
+                .get_credentials(&v1)
+                .await
+                .expect("read local versioned BMC root"),
+            Some(expected)
+        );
     }
 
     #[tokio::test]

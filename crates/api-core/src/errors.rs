@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::panic::Location;
 use std::sync::Arc;
@@ -206,6 +207,19 @@ pub enum CarbideError {
     #[error("tenant SitePrefix quota reached: {used} of {limit} retained SitePrefixes are in use")]
     TenantSitePrefixQuotaExceeded { used: u32, limit: u32 },
 
+    /// New tenant SitePrefixes are blocked by the site's legacy isolation input budget.
+    #[error(
+        "SitePrefix isolation rule limit reached: rules in use {used}, after creation {requested}, limit {limit}"
+    )]
+    SitePrefixIsolationLimitExceeded {
+        /// Number of compacted configured and retained tenant prefixes in the legacy input.
+        used: usize,
+        /// Number of compacted prefixes if the new root were admitted.
+        requested: usize,
+        /// Configured maximum for admitting new tenant roots.
+        limit: u32,
+    },
+
     #[error("host is not available for allocation due to health probe alert")]
     UnhealthyHost,
 
@@ -262,6 +276,20 @@ pub enum CarbideError {
     AttestationError(String),
 }
 
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for CarbideError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
 impl From<InvalidMachineType> for CarbideError {
     fn from(err: InvalidMachineType) -> Self {
         Self::InvalidArgument(err.to_string())
@@ -286,6 +314,7 @@ impl From<ModelError> for CarbideError {
             ModelError::MissingArgument(e) => Self::MissingArgument(e),
             ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
             ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
+            ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
         }
     }
 }
@@ -441,9 +470,9 @@ impl OperatorError for CarbideError {
             CarbideError::ClientCertificateMissingInformation(_) => ErrorCode::nico(Api, 401),
             CarbideError::PermissionDeniedError(_) => ErrorCode::nico(Api, 403),
             CarbideError::NotFoundError { .. } => ErrorCode::nico(Api, 404),
-            CarbideError::AlreadyFoundError { .. } | CarbideError::AlreadyInProgress(_) => {
-                ErrorCode::nico(Api, 409)
-            }
+            CarbideError::AlreadyFoundError { .. }
+            | CarbideError::AlreadyInProgress(_)
+            | CarbideError::ExpectedHostDuplicateMacAddress(_) => ErrorCode::nico(Api, 409),
             CarbideError::MaintenanceMode
             | CarbideError::UnhealthyHost
             | CarbideError::ConcurrentModificationError(_, _)
@@ -452,6 +481,7 @@ impl OperatorError for CarbideError {
             | CarbideError::AddressAlreadyInUse(_) => ErrorCode::nico(Api, 412),
             CarbideError::ResourceExhausted(_)
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
             CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
@@ -483,6 +513,10 @@ impl OperatorError for CarbideError {
             CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(
                 "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix \
                  or increase max_site_prefixes_per_tenant if additional roots are intended.",
+            ),
+            CarbideError::SitePrefixIsolationLimitExceeded { .. } => Some(
+                "Review the configured and retained tenant SitePrefixes and max_site_prefix_isolation_rules; \
+                 existing protection is retained until prefixes can be safely removed.",
             ),
             _ => None,
         }
@@ -532,7 +566,8 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
-            error @ CarbideError::TenantSitePrefixQuotaExceeded { .. } => {
+            error @ (CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }) => {
                 Status::resource_exhausted(error.to_string())
             }
             error @ CarbideError::ConcurrentModificationError(_, _) => {
@@ -540,6 +575,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::already_exists(error.to_string())
             }
             error @ CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())
@@ -742,7 +780,7 @@ fn test_permission_denied_error_maps_to_permission_denied_status() {
 #[test]
 fn test_address_already_in_use_maps_to_failed_precondition_status() {
     use std::str::FromStr;
-    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError(
+    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError::active(
         "10.0.0.1".parse().unwrap(),
         MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
         uuid::Uuid::new_v4().into(),

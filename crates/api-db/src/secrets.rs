@@ -34,7 +34,7 @@ use model::secrets::SecretRow;
 use sqlx::{PgConnection, PgTransaction};
 
 use crate::db_read::DbReader;
-use crate::{BIND_LIMIT, DatabaseError, DatabaseResult};
+use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError, DatabaseResult};
 
 const SECRET_ENTRY_BINDS: usize = 7;
 
@@ -154,8 +154,12 @@ pub async fn lock_for_bulk_write(txn: &mut PgTransaction<'_>) -> DatabaseResult<
     Ok(())
 }
 
-/// Append a new journal entry only if the path has no entries yet. Returns
-/// true when the row was inserted, false when entries already existed.
+/// `SecretAlreadyExists` means the path already has a journal entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretAlreadyExists;
+
+/// `insert_if_missing` appends a journal entry only if the path has no entries.
+/// An existing path returns `NotApplied(SecretAlreadyExists)`.
 ///
 /// The check and the insert are two statements, so this takes a transaction
 /// and serializes concurrent callers on a per-path advisory lock -- without
@@ -164,13 +168,13 @@ pub async fn lock_for_bulk_write(txn: &mut PgTransaction<'_>) -> DatabaseResult<
 pub async fn insert_if_missing(
     txn: &mut PgTransaction<'_>,
     entry: &NewSecretEntry<'_>,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), SecretAlreadyExists>> {
     lock_path(txn, entry.path).await?;
     if exists(&mut **txn, entry.path).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(SecretAlreadyExists));
     }
     insert(txn, entry).await?;
-    Ok(true)
+    Ok(ConditionalWrite::Applied(()))
 }
 
 /// Serialize a check-then-write operation for one path. There is no unique

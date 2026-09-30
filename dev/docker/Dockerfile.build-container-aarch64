@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bookworm
+FROM arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+
+ARG KEA_VERSION
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -42,9 +44,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		iproute2 \
 		iputils-ping \
 		jq \
-		kea-dev \
-		kea-dhcp4-server \
-		kea-dhcp6-server \
+		kea-dev=${KEA_VERSION} \
+		kea-dhcp4-server=${KEA_VERSION} \
+		kea-dhcp6-server=${KEA_VERSION} \
 		libboost-dev \
 		libgrpc-dev \
 		libopenipmi-dev \
@@ -54,6 +56,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		libssl-dev \
 		libtss2-dev \
 		libudev-dev \
+		mold \
 		pandoc \
 		pkg-config \
 		tpm2-tools \
@@ -66,8 +69,15 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		git \
 	&& rm -rf /var/lib/apt/lists/*
 
-# make LLVM's linker lld the default, because ld crashes using too much memory
-RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
+RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
+	kea-dhcp6 -V
+
+# Keep the system linker for non-Rust builds such as iPXE, whose linker script
+# is not accepted by mold. Cargo uses this wrapper even outside the repository.
+RUN printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \
+		>/usr/local/bin/clang-mold && \
+	chmod 0755 /usr/local/bin/clang-mold
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
 RUN rustup component add rustfmt
 RUN cargo install cargo-cache cargo-make sccache --locked && \

@@ -342,10 +342,18 @@ type ExpectedMachineDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
+	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
+	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
+	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedMachine, error)
 	// LockForUpdate locks rows in canonical ID order for the transaction
@@ -664,6 +672,89 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	}
 
 	return expectedMachines, expectedMachinePaginator.Total, nil
+}
+
+// GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetDistinctLabelKeys")
+	if expectedMachineDAOSpan != nil {
+		defer expectedMachineDAOSpan.End()
+	}
+
+	keys := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return keys, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT label.key AS key").
+		Join("CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(em.labels) = 'object' THEN em.labels ELSE '{}'::jsonb END) AS label(key)")
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_keys", distinctQuery).
+		Column("key")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelKeyOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelKeyOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, labelPaginator.Total, nil
+}
+
+// GetDistinctLabelValues returns paginated, distinct ExpectedMachine label values for a label key.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetDistinctLabelValues")
+	if expectedMachineDAOSpan != nil {
+		defer expectedMachineDAOSpan.End()
+		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "label_key", labelKey)
+	}
+
+	values := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return values, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT jsonb_extract_path_text(em.labels, ?) AS value", labelKey).
+		Where("jsonb_extract_path_text(em.labels, ?) IS NOT NULL", labelKey)
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_values", distinctQuery).
+		Column("value")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelValueOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelValueOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, labelPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing ExpectedMachine
@@ -994,6 +1085,59 @@ func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expecte
 	}
 
 	return nil
+}
+
+// DeleteAll deletes all ExpectedMachines matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (emsd ExpectedMachineSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error {
+	ctx, span := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.DeleteAll")
+	if span != nil {
+		defer span.End()
+	}
+
+	query := db.GetIDB(tx, emsd.dbSession).NewDelete().Model((*ExpectedMachine)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedMachineIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedMachineIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.ChassisSerialNumbers != nil {
+		query = query.Where("chassis_serial_number IN (?)", bun.In(filter.ChassisSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedMachines and creates the
+// supplied replacement set in the caller's transaction.
+func (emsd ExpectedMachineSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error) {
+	ctx, span := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.ReplaceAll")
+	if span != nil {
+		defer span.End()
+		emsd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	err := emsd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedMachine{}, nil
+	}
+	return emsd.CreateMultiple(ctx, tx, inputs)
 }
 
 // NewExpectedMachineDAO returns a new ExpectedMachineDAO

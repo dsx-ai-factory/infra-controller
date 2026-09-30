@@ -30,7 +30,7 @@ jobs:
   # ============================================================================
   prepare:
     # Production promotion never runs outside the canonical repo.
-    if: github.repository == 'NVIDIA/infra-controller'
+    if: github.repository == 'dsx-ai-factory/infra-controller'
     runs-on: linux-amd64-cpu4
     outputs:
       version: ${{ inputs.version }}

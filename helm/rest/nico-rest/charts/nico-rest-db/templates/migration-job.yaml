@@ -20,6 +20,10 @@ spec:
     metadata:
       labels:
         {{- include "nico-rest-db.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       restartPolicy: OnFailure
       {{- with .Values.global.imagePullSecrets }}

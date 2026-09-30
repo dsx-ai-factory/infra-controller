@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use carbide_uuid::nvlink::NvLinkDomainId;
+use carbide_uuid::power_shelf::PowerShelfId;
 use prometheus::{Histogram, HistogramOpts};
+use tokio::sync::Notify;
 
 use super::reachability::ReachabilitySpec;
 use crate::HealthError;
@@ -31,12 +33,14 @@ use crate::api_client::ApiClientWrapper;
 use crate::bmc::BmcClient;
 use crate::collectors::{Collector, LogDowngradeRegistry, NmxcSchemaOverride, SharedInventory};
 use crate::config::{
-    Config, Configurable, DiscoveryConfig, FirmwareCollectorConfig as FirmwareCollectorOptions,
-    GpuInventoryConfig, LeakDetectorCollectorConfig as LeakDetectorCollectorOptions,
-    LogsCollectorConfig as LogsCollectorOptions, MetricsCollectorConfig as MetricsCollectorOptions,
-    MtlsProfileConfig, NmxcCollectorConfig as NmxcCollectorOptions,
-    NmxtCollectorConfig as NmxtCollectorOptions, NvueCollectorConfig as NvueCollectorOptions,
-    ReachabilityCollectorConfig, SensorCollectorConfig as SensorCollectorOptions,
+    AttributesConfig, Config, Configurable, DiscoveryConfig,
+    FirmwareCollectorConfig as FirmwareCollectorOptions, GpuInventoryConfig,
+    LeakDetectorCollectorConfig as LeakDetectorCollectorOptions,
+    LogsCollectorConfig as LogsCollectorOptions, ManagerCollectorConfig as ManagerCollectorOptions,
+    MetricsCollectorConfig as MetricsCollectorOptions, MtlsProfileConfig,
+    NmxcCollectorConfig as NmxcCollectorOptions, NmxtCollectorConfig as NmxtCollectorOptions,
+    NvueCollectorConfig as NvueCollectorOptions, ReachabilityCollectorConfig,
+    SensorCollectorConfig as SensorCollectorOptions,
     TelemetryCollectorConfig as TelemetryCollectorOptions,
 };
 use crate::limiter::RateLimiter;
@@ -57,11 +61,12 @@ pub(super) enum CollectorKind {
     NvueRest,
     NvueGnmi,
     GpuInventory,
+    Manager,
     Reachability,
 }
 
 impl CollectorKind {
-    pub(super) const ALL: [CollectorKind; 12] = [
+    pub(super) const ALL: [CollectorKind; 13] = [
         CollectorKind::Discovery,
         CollectorKind::Sensor,
         CollectorKind::Metrics,
@@ -74,6 +79,7 @@ impl CollectorKind {
         CollectorKind::NvueRest,
         CollectorKind::NvueGnmi,
         CollectorKind::GpuInventory,
+        CollectorKind::Manager,
     ];
 }
 
@@ -90,13 +96,35 @@ pub(super) struct CollectorState {
     nvue_rest: HashMap<Cow<'static, str>, Collector>,
     nvue_gnmi: HashMap<Cow<'static, str>, Collector>,
     gpu_inventory: HashMap<Cow<'static, str>, Collector>,
+    manager: HashMap<Cow<'static, str>, Collector>,
     reachability: HashMap<Cow<'static, str>, Collector>,
     inventories: HashMap<Cow<'static, str>, SharedInventory<BmcClient>>,
+    machine_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
     switch_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
+    power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
     pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
 }
 
 impl CollectorState {
+    /// Stores the first value as a baseline and reports subsequent changes.
+    fn observe_value<T: PartialEq>(
+        values: &mut HashMap<Cow<'static, str>, Option<T>>,
+        key: &str,
+        value: Option<T>,
+    ) -> bool {
+        match values.get_mut(key) {
+            Some(previous) if previous != &value => {
+                *previous = value;
+                true
+            }
+            Some(_) => false,
+            None => {
+                values.insert(Cow::Owned(key.to_string()), value);
+                false
+            }
+        }
+    }
+
     fn new() -> Self {
         Self {
             discovery: HashMap::new(),
@@ -111,9 +139,12 @@ impl CollectorState {
             nvue_rest: HashMap::new(),
             nvue_gnmi: HashMap::new(),
             gpu_inventory: HashMap::new(),
+            manager: HashMap::new(),
             reachability: HashMap::new(),
             inventories: HashMap::new(),
+            machine_domain_uuids: HashMap::new(),
             switch_domain_uuids: HashMap::new(),
+            power_shelf_ids: HashMap::new(),
             reachability_specs: HashMap::new(),
         }
     }
@@ -132,6 +163,7 @@ impl CollectorState {
             CollectorKind::NvueRest => &self.nvue_rest,
             CollectorKind::NvueGnmi => &self.nvue_gnmi,
             CollectorKind::GpuInventory => &self.gpu_inventory,
+            CollectorKind::Manager => &self.manager,
             CollectorKind::Reachability => &self.reachability,
         }
     }
@@ -153,6 +185,7 @@ impl CollectorState {
             CollectorKind::NvueRest => &mut self.nvue_rest,
             CollectorKind::NvueGnmi => &mut self.nvue_gnmi,
             CollectorKind::GpuInventory => &mut self.gpu_inventory,
+            CollectorKind::Manager => &mut self.manager,
             CollectorKind::Reachability => &mut self.reachability,
         }
     }
@@ -172,6 +205,25 @@ impl CollectorState {
         self.inventories.remove(key);
     }
 
+    /// Records the latest machine domain and reports whether it changed.
+    ///
+    /// The first observation establishes a baseline without forcing a restart.
+    /// Later transitions between absent and present values, or between two UUIDs,
+    /// require a restart because running collectors retain their startup metadata.
+    pub(super) fn observe_machine_domain(
+        &mut self,
+        key: &str,
+        domain_uuid: Option<NvLinkDomainId>,
+    ) -> bool {
+        Self::observe_value(&mut self.machine_domain_uuids, key, domain_uuid)
+    }
+
+    /// Removes baselines for machines absent from the discovery pass.
+    pub(super) fn retain_machine_domains(&mut self, active_endpoints: &HashSet<Cow<'static, str>>) {
+        self.machine_domain_uuids
+            .retain(|key, _| active_endpoints.contains(key));
+    }
+
     /// Records the latest switch domain and reports whether it changed.
     ///
     /// The first observation establishes a baseline without forcing a restart.
@@ -182,18 +234,7 @@ impl CollectorState {
         key: &str,
         domain_uuid: Option<NvLinkDomainId>,
     ) -> bool {
-        match self.switch_domain_uuids.get_mut(key) {
-            Some(previous) if *previous != domain_uuid => {
-                *previous = domain_uuid;
-                true
-            }
-            Some(_) => false,
-            None => {
-                self.switch_domain_uuids
-                    .insert(Cow::Owned(key.to_string()), domain_uuid);
-                false
-            }
-        }
+        Self::observe_value(&mut self.switch_domain_uuids, key, domain_uuid)
     }
 
     pub(super) fn retain_switch_domains(
@@ -202,6 +243,27 @@ impl CollectorState {
     ) {
         self.switch_domain_uuids
             .retain(|key, _| active_switch_endpoints.contains(key));
+    }
+
+    /// Records the latest PowerShelf ID and reports whether it changed.
+    ///
+    /// Running collectors retain their startup metadata, so a changed ID
+    /// requires a restart before sinks can publish the updated identity.
+    pub(super) fn observe_power_shelf_id(
+        &mut self,
+        key: &str,
+        power_shelf_id: Option<PowerShelfId>,
+    ) -> bool {
+        Self::observe_value(&mut self.power_shelf_ids, key, power_shelf_id)
+    }
+
+    /// Removes saved PowerShelf IDs for endpoints absent from the discovery pass.
+    pub(super) fn retain_power_shelf_ids(
+        &mut self,
+        active_power_shelf_endpoints: &HashSet<Cow<'static, str>>,
+    ) {
+        self.power_shelf_ids
+            .retain(|key, _| active_power_shelf_endpoints.contains(key));
     }
 
     pub(super) fn contains(&self, kind: CollectorKind, key: &str) -> bool {
@@ -238,6 +300,7 @@ impl CollectorState {
             .chain(self.nvue_rest.keys())
             .chain(self.nvue_gnmi.keys())
             .chain(self.gpu_inventory.keys())
+            .chain(self.manager.keys())
             .filter(|key| !active_keys.contains(*key))
             .cloned()
             .collect()
@@ -271,6 +334,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
     pub(crate) nmxc_config: Configurable<NmxcCollectorOptions>,
@@ -294,8 +358,14 @@ pub struct DiscoveryLoopContext {
     pub(crate) api_client: Option<Arc<ApiClientWrapper>>,
     pub(crate) log_downgrade_registry: Arc<LogDowngradeRegistry>,
 
+    /// Wakes endpoint discovery when an auto-mode log collector changes mode.
+    pub(crate) collector_transition_notify: Arc<Notify>,
+
     /// Whether log collectors should attach diagnostic payload carriers.
     pub(crate) logs_include_diagnostics: bool,
+
+    /// Opt-in identity attributes attached to logs and metric datapoints.
+    pub(crate) attributes: AttributesConfig,
 }
 
 impl DiscoveryLoopContext {
@@ -368,6 +438,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
             nmxc_config: config.collectors.nmxc.clone(),
@@ -392,7 +463,9 @@ impl DiscoveryLoopContext {
                 _ => None,
             },
             log_downgrade_registry: Arc::new(LogDowngradeRegistry::new()),
+            collector_transition_notify: Arc::new(Notify::new()),
             logs_include_diagnostics: config.sinks.includes_log_diagnostics(),
+            attributes: config.attributes.clone(),
         })
     }
 }

@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: DNS listener address and transport ports
+templates:
+  - statefulset.yaml
+tests:
+  - it: uses the IPv6 wildcard listener for both binary layouts by default
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '(?m)^\s*exec /opt/nico/nico-dns .* --listen="\[::\]:53"\s*$'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '(?m)^\s*exec /opt/carbide/carbide-dns .* --listen="\[::\]:53"\s*$'
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: udp
+            containerPort: 53
+            protocol: UDP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: tcp
+            containerPort: 53
+            protocol: TCP
+
+  - it: honors an IPv4-only listener override for both binary layouts
+    set:
+      listenAddress: "0.0.0.0:53"
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '(?m)^\s*exec /opt/nico/nico-dns .* --listen="0\.0\.0\.0:53"\s*$'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '(?m)^\s*exec /opt/carbide/carbide-dns .* --listen="0\.0\.0\.0:53"\s*$'

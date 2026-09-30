@@ -23,7 +23,7 @@ use std::sync::Arc;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineType};
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use chrono::{DateTime, Utc};
@@ -33,6 +33,7 @@ use mac_address::MacAddress;
 #[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::Digest;
 
 use super::DpuModel;
 use super::bmc_info::BmcInfo;
@@ -48,11 +49,131 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Stands in for a field the BMC left empty, so every explored endpoint gets a
+/// class an operator can key a profile to rather than no class at all.
+const ABSENT_MANUFACTURER: &str = "unknown";
+const ABSENT_MODEL: &str = "nomodel";
+
+/// Derives an endpoint's hardware class from what its BMC reports about the
+/// host system: manufacturer and model, joined by `_`.
+///
+/// The service root's vendor and product stand in for the two fields it also
+/// reports, so one empty Redfish property does not sink the key. `_` cannot
+/// survive normalisation, so a class name parses back into exactly two fields,
+/// and since there are always two it can never collide with the reserved
+/// `any`.
+///
+/// `ComputerSystem.SKU` is deliberately not part of the key. Redfish leaves its
+/// meaning to the vendor, and vendors disagree: it is a service tag on Dell,
+/// a product part number on HPE, a machine type model on Lenovo, and empty on
+/// NVIDIA. Keying on it would mint a class per machine wherever it identifies
+/// a unit. Hardware of one model carrying different components is told apart by
+/// its attester set instead, which is measured rather than asserted.
+pub fn derive_hardware_class(
+    system: Option<&ComputerSystem>,
+    root_vendor: Option<&str>,
+    root_product: Option<&str>,
+) -> String {
+    let manufacturer = class_field(
+        system.and_then(|system| system.manufacturer.as_deref()),
+        root_vendor,
+        ABSENT_MANUFACTURER,
+    );
+    let model = class_field(
+        system.and_then(|system| system.model.as_deref()),
+        root_product,
+        ABSENT_MODEL,
+    );
+    format!("{manufacturer}_{model}")
+}
+
+/// The first source that normalises to something, or the absent marker. A field
+/// of only punctuation normalises to nothing, so it falls through rather than
+/// keying on an empty string.
+fn class_field(preferred: Option<&str>, fallback: Option<&str>, absent: &str) -> String {
+    [preferred, fallback]
+        .into_iter()
+        .flatten()
+        .map(normalize_class_field)
+        .find(|field| !field.is_empty())
+        .unwrap_or_else(|| absent.to_string())
+}
+
+/// Lowercases and joins the alphanumeric runs with `-`, which collapses every
+/// other character and drops leading and trailing separators.
+fn normalize_class_field(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|run| !run.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// How many explored endpoints carry one hardware class, or carry none.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct HardwareClassCount {
+    pub hardware_class: Option<String>,
+    pub endpoints: i64,
+}
+
+/// Filters explored endpoints by values in their exploration reports.
 #[derive(Clone, Debug, Default)]
-pub struct ExploredEndpointSearchFilter {}
+pub struct ExploredEndpointSearchFilter {
+    /// Match this machine ID; `None` includes reports with any or no machine ID.
+    pub machine_id: Option<MachineId>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ExploredManagedHostSearchFilter {}
+
+/// One member of a BMC's `ComponentIntegrity` collection: what the BMC says it
+/// can attest, before any eligibility filter. `ComponentIntegrityEnabled` is
+/// read-write, so a device switched off has to stay distinguishable from one
+/// that is absent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ComponentIntegrityEntry {
+    pub id: String,
+    pub component_integrity_type: String,
+    pub component_integrity_enabled: bool,
+}
+
+/// The `ComponentIntegrityType` of a member that speaks SPDM. A `TPM` member is
+/// never attested.
+const SPDM_INTEGRITY_TYPE: &str = "SPDM";
+
+/// The SPDM-capable attesters one endpoint reported, and a digest identifying
+/// the set. Hardware of one class carrying different attesters has different
+/// digests, which is the drift pattern matching alone cannot show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttesterSet {
+    pub digest: String,
+    pub ids: Vec<String>,
+}
+
+impl AttesterSet {
+    /// Selects the SPDM members and digests their IDs.
+    ///
+    /// Membership is scoped by type alone. `ComponentIntegrityEnabled` is
+    /// read-write, so filtering on it would put configuration inside the
+    /// identity: switching SPDM off on one GPU would read as hardware drift.
+    /// Measurements are left out for the same reason, since they move with
+    /// every firmware update.
+    fn of(entries: &[ComponentIntegrityEntry]) -> Self {
+        let ids: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.component_integrity_type == SPDM_INTEGRITY_TYPE)
+            .map(|entry| entry.id.clone())
+            .sorted()
+            .collect();
+
+        Self {
+            digest: hex::encode(sha2::Sha256::digest(ids.join("\n").as_bytes())),
+            ids,
+        }
+    }
+}
 
 /// Data that we gathered about a particular endpoint during site exploration
 /// This data is stored as JSON in the Database. Therefore the format can
@@ -70,6 +191,10 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The class [`derive_hardware_class`] derived from what the BMC reported.
+    /// `None` if no exploration has recorded one for this endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_class: Option<String>,
     /// `Managers` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managers: Vec<Manager>,
@@ -82,6 +207,18 @@ pub struct EndpointExplorationReport {
     /// `Service` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service: Vec<Service>,
+    /// The `ComponentIntegrity` collection reported by Redfish, recorded
+    /// unfiltered. `None` means the BMC reported no collection, which is
+    /// distinct from `Some([])` for one it reported empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_integrities: Option<Vec<ComponentIntegrityEntry>>,
+    /// Set when the BMC advertised a `ComponentIntegrity` collection that
+    /// could not be fetched, so `component_integrities` is absent for want of
+    /// an answer rather than because the BMC reports none. A transient BMC
+    /// failure must not read as hardware losing its attesters, so the endpoint
+    /// keeps the digest its last successful exploration recorded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub component_integrity_unavailable: bool,
     /// If the endpoint is a BMC that belongs to a Machine and enough data is
     /// available to calculate the `MachineId`, this field contains the `MachineId`
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,6 +609,17 @@ pub enum PreingestionState {
         #[serde(default)]
         attempt: u32,
     },
+
+    /// RMS firmware submission or its resulting job is pending for one rack
+    /// compute tray.
+    ///
+    /// `None` is persisted before dispatch. If NICo restarts before replacing it
+    /// with the RMS job ID, the submission outcome is ambiguous and preingestion
+    /// fails closed instead of submitting the update again.
+    RackFirmwareUpdateWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_job_id: Option<String>,
+    },
     UpgradeFirmwareWait {
         task_id: String,
         final_version: String,
@@ -498,6 +646,27 @@ pub enum PreingestionState {
         reason: String,
     },
     Complete,
+}
+
+impl PreingestionState {
+    /// Whether a `waiting_for_explorer_refresh` set in this state is a
+    /// preingestion park that only a fresh exploration report can end. These
+    /// are the states whose next step reads the report: the post-reset
+    /// inventory, the version check, and the two rechecks. Preingestion never
+    /// sets the flag in `Initial` or the other in-progress states; a flag there
+    /// came from a failed probe or an operator error clear, and the next
+    /// successful exploration lifts it. `Complete` and `Failed` waits have no
+    /// preingestion consumer.
+    pub fn parks_for_explorer_refresh(&self) -> bool {
+        matches!(
+            self,
+            Self::InitialBMCReset {
+                phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+            } | Self::RecheckVersions
+                | Self::NewFirmwareReportedWait { .. }
+                | Self::RecheckVersionsAfterFailure { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -600,8 +769,8 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
-    pub fn machine_id_if_valid_report(&self) -> ModelResult<&MachineId> {
-        let Some(machine_id) = self.report.machine_id.as_ref() else {
+    pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
+        let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));
         };
 
@@ -617,7 +786,7 @@ impl ExploredDpu {
             return Err(ModelError::MissingArgument("Missing Service Info"));
         }
 
-        Ok(machine_id)
+        Ok(machine_id.try_into()?)
     }
 
     pub fn bmc_firmware_version(&self) -> Option<String> {
@@ -828,7 +997,10 @@ impl EndpointExplorationReport {
             systems: Vec::new(),
             chassis: Vec::new(),
             service: Vec::new(),
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: None,
+            hardware_class: None,
             machine_id: None,
             versions: HashMap::default(),
             model: None,
@@ -843,6 +1015,17 @@ impl EndpointExplorationReport {
             revision_id: None,
             remediation_error: None,
         }
+    }
+
+    /// The SPDM-capable attesters this report recorded, or `None` when the BMC
+    /// reported no `ComponentIntegrity` collection at all.
+    ///
+    /// A collection reported empty, or one holding no SPDM member, is a set
+    /// like any other: a tray reporting none where its peers report eight is
+    /// drift worth seeing, so it gets a digest rather than being read as
+    /// nothing observed.
+    pub fn attester_set(&self) -> Option<AttesterSet> {
+        self.component_integrities.as_deref().map(AttesterSet::of)
     }
 
     pub fn bluefield_operating_mode(&self) -> Option<BlueFieldOperatingMode> {
@@ -1063,15 +1246,47 @@ impl EndpointExplorationReport {
         Ok(Some(self.power_shelf_id.insert(power_shelf_id)))
     }
 
+    /// Returns whether `chassis` reports a serial number usable for switch ID
+    /// generation.
+    ///
+    /// The serial is trimmed first; an empty or whitespace-only serial and the
+    /// literal `"NA"` are all treated the same as a missing serial because some
+    /// switch BMCs return these placeholders in error situations (see
+    /// [`switch_id::from_hardware_info_with_type`]). Rejecting them here lets
+    /// chassis selection fall through to a subsystem that reports a real serial.
+    fn is_switch_chassis_valid(chassis: &Chassis) -> bool {
+        matches!(
+            chassis.serial_number.as_deref().map(str::trim),
+            Some(serial) if !serial.is_empty() && serial != "NA"
+        )
+    }
+
+    /// Returns the chassis reported under the `id` subsystem (matched
+    /// case-insensitively) only when it carries a serial number usable for
+    /// switch ID generation, per [`Self::is_switch_chassis_valid`].
+    fn query_switch_chassis_subsystem(&self, id: &str) -> Option<&Chassis> {
+        let id = id.to_lowercase();
+        self.chassis
+            .iter()
+            .find(|c| c.id.to_lowercase() == id)
+            .filter(|c| Self::is_switch_chassis_valid(c))
+    }
+
     //TODO: refactor for common code with generate_power_shelf_id
     /// Tries to generate and store a MachineId for the discovered endpoint if
     /// enough data for generation is available
     pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
+        // On GB200 (N5200_LD) the switch serial is reported by the
+        // `MGX_NVSwitch_0` chassis. On Vera Rubin (N6100_LD) that chassis
+        // reports `"NA"` and the usable serial is surfaced by `Chassis_0`
+        // instead, so fall back to it when the primary chassis has no valid
+        // serial.
         let chassis = self
-            .chassis
-            .iter()
-            .find(|c| c.id.to_string().to_lowercase() == "mgx_nvswitch_0")
-            .unwrap();
+            .query_switch_chassis_subsystem("mgx_nvswitch_0")
+            .or_else(|| self.query_switch_chassis_subsystem("chassis_0"))
+            .ok_or(ModelError::HardwareInfo(
+                HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
+            ))?;
         let serial_number = chassis.serial_number.clone();
         let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
         let model = "Switch".to_string();
@@ -1112,6 +1327,32 @@ impl EndpointExplorationReport {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default()
+    }
+
+    /// BMC firmware observed directly from the exact `BMC` inventory entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.service
+            .iter()
+            .find(|service| service.id == "FirmwareInventory")
+            .and_then(|service| {
+                service
+                    .inventories
+                    .iter()
+                    .find(|inventory| inventory.id == "BMC")
+            })
+            .and_then(|inventory| inventory.version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS/UEFI version observed on the `System_0` resource.
+    pub fn system_bios_version(&self) -> Option<&str> {
+        self.systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .and_then(|system| system.bios_version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -1475,6 +1716,9 @@ pub struct ComputerSystem {
     pub sku: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_order: Option<BootOrder>,
+    /// Version reported by the Redfish `ComputerSystem.BiosVersion` property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bios_version: Option<String>,
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
@@ -2531,6 +2775,54 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    /// A class is the key an operator writes profiles against, so whatever the
+    /// BMC reports has to reduce to a name the API will accept, including when
+    /// it reports nothing usable.
+    #[test]
+    fn hardware_class_derivation() {
+        let system =
+            |manufacturer: Option<&str>, model: Option<&str>, sku: Option<&str>| ComputerSystem {
+                manufacturer: manufacturer.map(str::to_string),
+                model: model.map(str::to_string),
+                sku: sku.map(str::to_string),
+                ..ComputerSystem::default()
+            };
+
+        value_scenarios!(
+            run = |(system, root_vendor, root_product): (
+                ComputerSystem,
+                Option<&str>,
+                Option<&str>,
+            )| derive_hardware_class(Some(&system), root_vendor, root_product);
+
+            "reported fields lowercase and hyphenate into two" {
+                (system(Some("Dell Inc."), Some("PowerEdge R750"), None), None, None)
+                    => "dell-inc_poweredge-r750".to_string(),
+            }
+
+            // The service root reports a vendor and product of its own, which
+            // is a truer answer than the marker for an absent field.
+            "the service root stands in for what the system omits" {
+                (system(None, None, None), Some("NVIDIA"), Some("GB200 NVL"))
+                    => "nvidia_gb200-nvl".to_string(),
+            }
+
+            // A field that normalises to nothing is no more usable than an
+            // absent one, so it falls through rather than keying on empty.
+            "a field with nothing to normalise falls through" {
+                (system(Some("---"), None, None), None, None)
+                    => "unknown_nomodel".to_string(),
+            }
+
+            // Dell reports the service tag here, so a class carrying the SKU
+            // would name one machine rather than one kind of hardware.
+            "a reported SKU stays out of the key" {
+                (system(Some("Dell Inc."), Some("PowerEdge R750"), Some("CKNTC2J")), None, None)
+                    => "dell-inc_poweredge-r750".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn identify_dpu_recognizes_bluefield_model_variants() {
         value_scenarios!(
@@ -2710,6 +3002,127 @@ mod tests {
             "no stored target" {
                 (None, None) => None,
             }
+        );
+    }
+
+    /// The stored report has to keep three answers apart: a BMC that reported
+    /// no `ComponentIntegrity` collection, one that reported an empty
+    /// collection, and one that listed members. Absent and empty are the pair a
+    /// bare `Vec` would merge, and attestation coverage reads them differently.
+    #[test]
+    fn component_integrities_keep_unreported_apart_from_empty() {
+        value_scenarios!(run = |component_integrities| {
+            let report = EndpointExplorationReport {
+                component_integrities,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&report).expect("report serializes");
+            let round_trip: EndpointExplorationReport =
+                serde_json::from_value(json.clone()).expect("serialized report deserializes");
+            (
+                json.get("ComponentIntegrities").cloned(),
+                round_trip.component_integrities,
+            )
+        };
+            "a BMC that reported no collection stores no field" {
+                None => (None, None),
+            }
+
+            "a collection reported empty stores an empty list" {
+                Some(Vec::new()) => (Some(serde_json::json!([])), Some(Vec::new())),
+            }
+
+            "a listed member keeps its type and enabled flag" {
+                Some(vec![ComponentIntegrityEntry {
+                    id: "ERoT_BMC_0".to_string(),
+                    component_integrity_type: "SPDM".to_string(),
+                    component_integrity_enabled: false,
+                }]) => (
+                    Some(serde_json::json!([{
+                        "Id": "ERoT_BMC_0",
+                        "ComponentIntegrityType": "SPDM",
+                        "ComponentIntegrityEnabled": false,
+                    }])),
+                    Some(vec![ComponentIntegrityEntry {
+                        id: "ERoT_BMC_0".to_string(),
+                        component_integrity_type: "SPDM".to_string(),
+                        component_integrity_enabled: false,
+                    }]),
+                ),
+            }
+        );
+    }
+
+    /// The digest names which attesters a class carries, so it has to move with
+    /// membership and with nothing else. Enablement is read-write and a `TPM`
+    /// member is never attested, so neither belongs in the identity.
+    #[test]
+    fn the_attester_digest_follows_spdm_membership_alone() {
+        fn member(id: &str, integrity_type: &str) -> ComponentIntegrityEntry {
+            ComponentIntegrityEntry {
+                id: id.to_string(),
+                component_integrity_type: integrity_type.to_string(),
+                component_integrity_enabled: true,
+            }
+        }
+
+        fn set(members: Vec<ComponentIntegrityEntry>) -> AttesterSet {
+            EndpointExplorationReport {
+                component_integrities: Some(members),
+                ..Default::default()
+            }
+            .attester_set()
+            .expect("a reported collection yields a set")
+        }
+
+        let two_gpus = set(vec![
+            member("HGX_ERoT_GPU_0", "SPDM"),
+            member("HGX_ERoT_GPU_1", "SPDM"),
+        ]);
+
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_1", "SPDM"),
+                member("HGX_ERoT_GPU_0", "SPDM"),
+            ]),
+            two_gpus,
+            "the order a BMC happens to list its members in is not part of the set"
+        );
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_0", "SPDM"),
+                ComponentIntegrityEntry {
+                    component_integrity_enabled: false,
+                    ..member("HGX_ERoT_GPU_1", "SPDM")
+                },
+            ]),
+            two_gpus,
+            "switching SPDM off on one GPU is a configuration change, not hardware drift"
+        );
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_0", "SPDM"),
+                member("HGX_ERoT_GPU_1", "SPDM"),
+                member("TPM_0", "TPM"),
+            ]),
+            two_gpus,
+            "a TPM member is never attested, so it is not one of the attesters"
+        );
+        assert_ne!(
+            set(vec![member("HGX_ERoT_GPU_0", "SPDM")]).digest,
+            two_gpus.digest,
+            "a tray reporting one root of trust fewer has to read as a different set"
+        );
+
+        assert_eq!(
+            EndpointExplorationReport::default().attester_set(),
+            None,
+            "a BMC that reported no collection has no set, which is not an empty one"
+        );
+        assert_eq!(
+            set(vec![member("TPM_0", "TPM")]),
+            set(Vec::new()),
+            "a collection holding nothing that speaks SPDM is an observed empty set"
         );
     }
 
@@ -3476,7 +3889,10 @@ mod tests {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
@@ -3497,6 +3913,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3544,12 +3961,105 @@ mod tests {
     }
 
     #[test]
+    fn observed_host_bmc_version_requires_exact_non_blank_inventory() {
+        let report_with_inventory = |id: &str, version: &str| EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            report_with_inventory("BMC-Primary", "1.0.0").observed_host_bmc_version(),
+            None,
+            "only the exact Lenovo GB300 BMC inventory ID is accepted"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " \t ").observed_host_bmc_version(),
+            None,
+            "blank BMC versions are treated as absent"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " 1.0.0 ").observed_host_bmc_version(),
+            Some("1.0.0"),
+            "the exact BMC inventory version is trimmed"
+        );
+    }
+
+    #[test]
+    fn system_bios_version_selects_system_0_and_rejects_blank_values() {
+        let report = EndpointExplorationReport {
+            systems: vec![
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".to_string(),
+                    bios_version: Some("wrong-system-version".to_string()),
+                    ..Default::default()
+                },
+                ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: Some(" GBHC01A_01.05.0 ".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            report.system_bios_version(),
+            Some("GBHC01A_01.05.0"),
+            "System_0 must be selected even when the HGX baseboard appears first"
+        );
+
+        let blank_report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: Some("  ".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            blank_report.system_bios_version(),
+            None,
+            "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    #[test]
+    fn computer_system_bios_version_is_json_compatible() {
+        let system = ComputerSystem {
+            id: "System_0".to_string(),
+            bios_version: Some("GBHC01A_01.05.0".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&system).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ComputerSystem>(&json).unwrap(),
+            system,
+            "BiosVersion must round-trip through the exploration-report JSON"
+        );
+
+        let without_bios = serde_json::from_str::<ComputerSystem>(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(
+            without_bios.bios_version, None,
+            "older JSON without BiosVersion must remain deserializable"
+        );
+    }
+
+    #[test]
     fn generate_machine_id_for_dpu() {
         let mut report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
@@ -3570,6 +4080,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3834,6 +4345,68 @@ mod tests {
                     id: "chassis",
                     manufacturer: None,
                 } => false,
+            }
+        );
+    }
+
+    // `generate_switch_id` prefers the `MGX_NVSwitch_0` chassis serial (GB200)
+    // and otherwise falls back to `Chassis_0` (Vera Rubin). A primary serial
+    // that is missing, the `"NA"` placeholder, empty, or whitespace-only is
+    // unusable and must not block the fallback. Each row varies only the
+    // primary serial; `Chassis_0` always carries a real one, so the resulting
+    // `SwitchId` reveals which chassis was selected.
+    #[test]
+    fn generate_switch_id_falls_back_when_primary_serial_unusable() {
+        fn expected_switch_id(serial: &str) -> SwitchId {
+            switch_id::from_hardware_info_with_type(
+                serial,
+                "NVIDIA",
+                "Switch",
+                SwitchIdSource::ProductBoardChassisSerial,
+                SwitchType::NvLink,
+            )
+            .unwrap()
+        }
+
+        value_scenarios!(
+            run = |primary_serial: Option<&'static str>| {
+                EndpointExplorationReport {
+                    chassis: vec![
+                        Chassis {
+                            id: "MGX_NVSwitch_0".to_string(),
+                            serial_number: primary_serial.map(str::to_string),
+                            ..Default::default()
+                        },
+                        Chassis {
+                            id: "Chassis_0".to_string(),
+                            serial_number: Some("CHASSIS0".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
+                .generate_switch_id()
+                .unwrap()
+                .unwrap()
+            };
+            "valid primary serial is used" {
+                Some("MGX0") => expected_switch_id("MGX0"),
+            }
+
+            "missing primary serial falls back to Chassis_0" {
+                None => expected_switch_id("CHASSIS0"),
+            }
+
+            "NA primary serial falls back to Chassis_0" {
+                Some("NA") => expected_switch_id("CHASSIS0"),
+            }
+
+            "empty primary serial falls back to Chassis_0" {
+                Some("") => expected_switch_id("CHASSIS0"),
+            }
+
+            "whitespace-only primary serial falls back to Chassis_0" {
+                Some("   ") => expected_switch_id("CHASSIS0"),
             }
         );
     }

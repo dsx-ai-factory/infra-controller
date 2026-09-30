@@ -69,6 +69,10 @@ fi
 # authorization rules for SetDynamicConfig. The literal address also works on
 # AMD64.
 machine_a_tron_bmc_proxy="${machine_a_tron_bmc_ip}:1266"
+# Keep the port separate from an IPv6 address in both the config and URLs.
+if [[ "${machine_a_tron_bmc_ip}" == *:* ]]; then
+  machine_a_tron_bmc_proxy="[${machine_a_tron_bmc_ip}]:1266"
+fi
 if ! site_config_patch="$(kubectl get configmap "${CORE_SITE_CONFIG_MAP}" \
   -n "${CORE_NAMESPACE}" -o json | jq -c --arg proxy "${machine_a_tron_bmc_proxy}" '
     {data: (
@@ -101,14 +105,14 @@ expected_host_count=0
 for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
   if machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
     curl --fail --insecure --silent --max-time 5 \
-    "https://${machine_a_tron_bmc_ip}:1266/machines/status" 2>/dev/null)"; then
+    "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
     if ! expected_host_count="$(jq -er \
       'if type == "object" and (.machines | type) == "array" then
          .machines | length
        else 0 end' \
       <<<"${machine_status}")"; then
       printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
-        "${machine_a_tron_bmc_ip}:1266" >&2
+        "${machine_a_tron_bmc_proxy}" >&2
       exit 1
     fi
   else
@@ -119,7 +123,7 @@ for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
   fi
   if [[ "${attempt}" == "${verify_attempts}" ]]; then
     printf 'machine-a-tron at %s did not report any expected hosts after %s attempts\n' \
-      "${machine_a_tron_bmc_ip}:1266" "${verify_attempts}" >&2
+      "${machine_a_tron_bmc_proxy}" "${verify_attempts}" >&2
     exit 1
   fi
   sleep "${verify_sleep_seconds}"
@@ -266,9 +270,9 @@ inventory_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # expects the complete inventory rather than that earlier partial count.
 if ! machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
   curl --fail --insecure --silent --max-time 5 \
-  "https://${machine_a_tron_bmc_ip}:1266/machines/status" 2>/dev/null)"; then
+  "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
   printf 'machine-a-tron at %s did not return machine status before REST verification\n' \
-    "${machine_a_tron_bmc_ip}:1266" >&2
+    "${machine_a_tron_bmc_proxy}" >&2
   exit 1
 fi
 if ! expected_host_count="$(jq -er \
@@ -277,12 +281,12 @@ if ! expected_host_count="$(jq -er \
    else 0 end' \
   <<<"${machine_status}")"; then
   printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
-    "${machine_a_tron_bmc_ip}:1266" >&2
+    "${machine_a_tron_bmc_proxy}" >&2
   exit 1
 fi
 if [[ ! "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'machine-a-tron at %s did not report a valid expected host count before REST verification\n' \
-    "${machine_a_tron_bmc_ip}:1266" >&2
+    "${machine_a_tron_bmc_proxy}" >&2
   exit 1
 fi
 

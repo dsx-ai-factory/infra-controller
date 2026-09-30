@@ -56,7 +56,7 @@ type ExpectedMachineCreateRequest struct {
 	TrayIdx NullableInt32 `json:"trayIdx,omitempty"`
 	// Host ID within the tray
 	HostId NullableInt32 `json:"hostId,omitempty"`
-	// When true, this host is eligible for DPF-based provisioning.
+	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null uses an effective default of true. Set false explicitly to disable DPF-based provisioning.
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
 	Labels map[string]string `json:"labels,omitempty"`
@@ -255,7 +255,6 @@ func (o *ExpectedMachineCreateRequest) GetFallbackDPUSerialNumbers() []string {
 
 // GetFallbackDPUSerialNumbersOk returns a tuple with the FallbackDPUSerialNumbers field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineCreateRequest) GetFallbackDPUSerialNumbersOk() ([]string, bool) {
 	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
 		return nil, false
@@ -759,7 +758,7 @@ func (o *ExpectedMachineCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedMachineCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

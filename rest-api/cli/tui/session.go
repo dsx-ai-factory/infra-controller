@@ -85,6 +85,13 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("instance", s.fetchInstances)
 	s.Resolver.RegisterFetcher("operating-system", s.fetchOperatingSystems)
 	s.Resolver.RegisterFetcher("machine", s.fetchMachines)
+	s.Resolver.RegisterFetcher("dpu-machine", s.fetchDPUMachines)
+	s.Resolver.RegisterFetcher("machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("machine")
+	})
+	s.Resolver.RegisterFetcher("expected-machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("expected-machine")
+	})
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
 	s.Resolver.RegisterFetcher("audit", s.fetchAudits)
@@ -101,6 +108,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("expected-power-shelf", s.fetchExpectedPowerShelves)
 	s.Resolver.RegisterFetcher("infiniband-partition", s.fetchInfiniBandPartitions)
 	s.Resolver.RegisterFetcher("nvlink-logical-partition", s.fetchNVLinkLogicalPartitions)
+	s.Resolver.RegisterFetcher("spectrumx-partition", s.fetchSpectrumXPartitions)
 	s.Resolver.RegisterFetcher("instance-type", s.fetchInstanceTypes)
 	s.Resolver.RegisterFetcher("dpu-extension-service", s.fetchDPUExtensionServices)
 	s.Resolver.RegisterFetcher("tray", s.fetchTrays)
@@ -126,8 +134,9 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 			return nil, err
 		}
 		var items []map[string]interface{}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return all, nil
+		err = json.Unmarshal(body, &items)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s page %d: %w", path, page, err)
 		}
 		all = append(all, items...)
 		if pag := hdrs.Get("X-Pagination"); pag != "" {
@@ -543,7 +552,12 @@ func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) 
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
-		result[i] = NamedItem{Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"), Raw: m}
+		result[i] = NamedItem{
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
+			Extra:  map[string]string{"type": str(m, "type")}, Raw: m,
+		}
 	}
 	return result, nil
 }
@@ -1056,9 +1070,13 @@ func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, err
 }
 
 func (s *Session) fetchIPXETemplates(_ context.Context) ([]NamedItem, error) {
+	return s.fetchIPXETemplatesForSite(s.Scope.SiteID)
+}
+
+func (s *Session) fetchIPXETemplatesForSite(siteID string) ([]NamedItem, error) {
 	q := map[string]string{}
-	if s.Scope.SiteID != "" {
-		q["siteId"] = s.Scope.SiteID
+	if siteID != "" {
+		q["siteId"] = siteID
 	}
 	items, err := s.fetchAll(apiPath(s, "ipxe-template"), q)
 	if err != nil {

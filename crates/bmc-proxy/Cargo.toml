@@ -43,6 +43,7 @@ libc = { workspace = true }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized
+async-trait = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum = { workspace = true, features = ["http2"] }
 bytes = { workspace = true }
@@ -53,6 +54,7 @@ futures-util = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }
+humantime-serde = { workspace = true }
 hyper-rustls = { workspace = true }
 hyper-timeout = { workspace = true }
 hyper-util = { workspace = true }
@@ -111,6 +113,9 @@ carbide-version = { path = "../version" }
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
+tonic-prost = { workspace = true }
 
 [lints]
 workspace = true

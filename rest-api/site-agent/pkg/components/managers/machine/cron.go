@@ -17,8 +17,6 @@ const (
 	InventoryQueuePrefix = "inventory-"
 	// InventoryCarbidePageSize is the number of items to be fetched from Carbide API at a time
 	InventoryCarbidePageSize = 100
-	// InventoryCloudPageSize is the number of items to be sent to Cloud at a time
-	InventoryCloudPageSize = 25
 )
 
 // RegisterCron - Register Cron

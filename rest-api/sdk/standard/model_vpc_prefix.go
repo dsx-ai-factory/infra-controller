@@ -35,7 +35,7 @@ type VpcPrefix struct {
 	IpBlockId NullableString `json:"ipBlockId,omitempty"`
 	// The network prefix including prefix length in CIDR notation
 	Prefix NullableString `json:"prefix,omitempty"`
-	// Length of the prefix. Valid range is 8 to 31, and max usable value depends on prefix length of parent IP Block.
+	// Length of the returned prefix. A VPC Prefix reported by a Site may fall outside the bounds for REST create requests.
 	PrefixLength *int32 `json:"prefixLength,omitempty"`
 	// Status of the VPC Prefix
 	Status *VpcPrefixStatus `json:"status,omitempty"`

@@ -185,6 +185,7 @@ impl TryFrom<rpc::DpuExtensionServiceStatusObservation> for ExtensionServiceStat
         })?;
 
         Ok(Self {
+            dpu_target: None,
             service_id,
             service_type,
             service_name: observation.service_name,

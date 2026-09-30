@@ -17,7 +17,7 @@
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -288,6 +288,17 @@ pub enum ModelError {
     HardwareInfo(#[from] HardwareInfoError),
     #[error("argument is invalid: {0}")]
     InvalidArgument(String),
+    #[error("{0}")]
+    InvalidMachindId(String),
+}
+
+impl From<InvalidMachineType> for ModelError {
+    #[track_caller]
+    fn from(err: InvalidMachineType) -> Self {
+        // Having a wrong machine type represents a bug in the code, so track the caller
+        let caller = std::panic::Location::caller();
+        ModelError::InvalidMachindId(format!("bug: wrong machine type at {caller}: {err}"))
+    }
 }
 
 pub type ModelResult<T> = Result<T, ModelError>;

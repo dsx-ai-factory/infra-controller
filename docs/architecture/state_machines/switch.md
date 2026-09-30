@@ -74,7 +74,7 @@ stateDiagram-v2
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`RotateOsPassword`) | No `rack_id` or no component manager (skip certificate step) |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Configuring (`RotateOsPassword`) | RMS job `Completed` |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Error | RMS job `Failed` |
-| Configuring (`RotateOsPassword`) | FetchInfo | NVOS credentials stored or already in Vault |
+| Configuring (`RotateOsPassword`) | FetchInfo | NVOS credentials stored or already in the credential store |
 | Configuring (`RotateOsPassword`) | Error | No expected switch or missing BMC MAC |
 | FetchInfo | Validating (`ValidationComplete`) | Slot/tray lookup attempted (always advances) |
 | Validating (`ValidationComplete`) | BomValidating (`BomValidationComplete`) | Validation complete |

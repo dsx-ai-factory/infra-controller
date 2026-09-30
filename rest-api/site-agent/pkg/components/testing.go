@@ -24,6 +24,7 @@ import (
 
 	"gopkg.in/yaml.v2"
 
+	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
@@ -344,7 +345,7 @@ func simulateMountedSecretFile(t *testing.T, secretFilePath string) error {
 		return err
 	}
 
-	log.Info().Msgf("Read bootstrap secret file: %s", string(cfgFile))
+	log.Info().Msgf("Read bootstrap secret file: %v bytes", len(cfgFile))
 
 	err = yaml.Unmarshal(cfgFile, result)
 	if err != nil {
@@ -359,8 +360,8 @@ func simulateMountedSecretFile(t *testing.T, secretFilePath string) error {
 
 	log.Info().Msg("Successfully read bootstrap secret from file:")
 	log.Info().Msgf("UUID: %v", bCfg.UUID)
-	log.Info().Msgf("OTP: %v", bCfg.OTP)
-	log.Info().Msgf("CACert: %v", bCfg.CACert)
+	log.Info().Msgf("OTP: %v", cutils.RedactSecret(bCfg.OTP, cutils.SecretLogPrefixLen))
+	log.Info().Msgf("CACert: %v", cutils.RedactSecret(bCfg.CACert, cutils.CertLogPrefixLen))
 	log.Info().Msgf("CredsURL: %v", bCfg.CredsURL)
 
 	err = os.WriteFile(filepath.Join(secretDir, bootstraptypes.TagUUID), []byte(bCfg.UUID), 0644)

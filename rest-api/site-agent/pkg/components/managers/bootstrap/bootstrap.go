@@ -21,10 +21,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/rs/zerolog/log"
 
+	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
@@ -44,10 +44,6 @@ import (
 var (
 	// ErrInvalidBootstrapSecret invalid bootstrap secret
 	ErrInvalidBootstrapSecret = errors.New("invalid bootstrap secret")
-	// CertExpirationMetric is a prometheus metric for Site Agent Temporal
-	// certificate expiration. Registered in Init rather than here, because the
-	// namespace comes from config that is not loaded yet at package init.
-	CertExpirationMetric prometheus.Gauge
 )
 
 const (
@@ -100,7 +96,12 @@ func newBootstrapConfig(dir string) error {
 	if bCfg.CACert == "" || bCfg.CredsURL == "" || bCfg.OTP == "" || bCfg.UUID == "" {
 		return ErrInvalidBootstrapSecret
 	}
-	log.Info().Msgf("Bootstrap: Read %v %v %v %v", bCfg.UUID, bCfg.OTP, bCfg.CredsURL, bCfg.CACert)
+	// The OTP is named to report that it was read, with no value of any kind. It
+	// is a live credential from the moment the secret is read until the handshake
+	// consumes it, and every Site Agent start reaches this point whether or not a
+	// handshake follows.
+	log.Info().Msgf("Bootstrap: Read Site: %v, OTP, credentials URL: %v, CA certificate: %v",
+		bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.CACert, cutils.CertLogPrefixLen))
 
 	return nil
 }
@@ -123,7 +124,7 @@ func initK8sClient(ns string) coreV1Types.SecretInterface {
 			)
 		}
 		if kubeconfig == "" {
-			err = fmt.Errorf("Bootstrap: could not find kubeconfig")
+			err = fmt.Errorf("bootstrap: could not find kubeconfig")
 			panic(err.Error())
 		}
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -142,14 +143,6 @@ func initK8sClient(ns string) coreV1Types.SecretInterface {
 // Init - initialize the bootstrap manager
 func (bs *BoostrapAPI) Init() {
 	ManagerAccess.Data.EB.Log.Info().Msg("Boostrap: Initializing the Site bootstrap manager")
-
-	// Registered ahead of the early returns below so every pod exposes the
-	// series, which is what a package-level promauto var used to do.
-	CertExpirationMetric = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-		Name:      "temporal_cert_expiration",
-		Help:      "The expiration date of the Temporal certificate",
-	})
 
 	// Only master pod of the statefulset should run the bootstrap
 	if !ManagerAccess.Conf.EB.IsMasterPod {
@@ -237,7 +230,8 @@ func (bs *BoostrapAPI) watchSecretFiles(files map[string]bool, path *string) err
 				continue
 			}
 			log.Info().Msgf("Bootstrap: File updated %s", e.String())
-			bs.DownloadAndStoreCreds(nil)
+			// DownloadAndStoreCreds logs its own failures, and the next file event tries again.
+			_ = bs.DownloadAndStoreCreds(nil)
 			log.Info().Msgf("Bootstrap: back to Watching secret %s ", e.String())
 		}
 	}
@@ -253,7 +247,8 @@ func (bs *BoostrapAPI) Start() {
 	}
 
 	log.Info().Msgf("Bootstrap: trigger workflow")
-	bs.DownloadAndStoreCreds(nil)
+	// DownloadAndStoreCreds logs its own failures, and the Site Agent keeps its existing certificates.
+	_ = bs.DownloadAndStoreCreds(nil)
 	go bs.watchBootstrapFile()
 }
 
@@ -264,7 +259,7 @@ func (bs *BoostrapAPI) GetState() []string {
 	strs = append(strs, fmt.Sprintln("Creds Download Attempted: ", bt.State.DownloadAttempted.Load()))
 	strs = append(strs, fmt.Sprintln("Creds Download Succeeded: ", bt.State.DownloadSucceeded.Load()))
 	strs = append(strs, fmt.Sprintln("URL: ", bt.Config.CredsURL))
-	strs = append(strs, fmt.Sprintln("OTP: ", bt.Config.OTP))
+	strs = append(strs, fmt.Sprintln("OTP: ", cutils.RedactSecret(bt.Config.OTP, cutils.SecretLogPrefixLen)))
 	strs = append(strs, fmt.Sprintln("UUID: ", bt.Config.UUID))
 
 	return strs
@@ -315,7 +310,10 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	credsResponse, err := bs.downloadCredentials(ctx)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		log.Info().Msgf("Bootstrap: Download Credentials Response %v", err.Error())
+		// A stale OTP is the usual cause, so the prefix identifies which one the
+		// Site sent.
+		log.Error().Err(err).Msgf("Bootstrap: Download Credentials failed for Site %v from %v with OTP %v",
+			bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.OTP, cutils.SecretLogPrefixLen))
 		return err
 	}
 	err = bs.storeCredentials(ctx, credsResponse)
@@ -350,7 +348,10 @@ func saveToFile(credsResponse *bootstraptypes.SiteCredsResponse) error {
 	// Note: without this there is a 10-15% flakiness on tests...
 	otpFile, err := os.OpenFile(pathOTP, os.O_RDWR, 0644)
 	if err == nil {
-		otpFile.Sync()
+		err = otpFile.Sync()
+		if err != nil {
+			log.Warn().Err(err).Msg("Bootstrap: failed to sync OTP file to disk")
+		}
 		otpFile.Close()
 	}
 
@@ -376,7 +377,7 @@ func (bs *BoostrapAPI) storeCredentials(ctx context.Context, credsResponse *boot
 	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap-store")
 	defer span.End()
 	if credsResponse == nil {
-		return fmt.Errorf("Bootstrap: credsResponse is nil")
+		return fmt.Errorf("bootstrap: credsResponse is nil")
 	}
 	if ManagerAccess.Conf.EB.RunningIn != conftypes.RunningInK8s {
 		err := saveToFile(credsResponse)
@@ -387,7 +388,7 @@ func (bs *BoostrapAPI) storeCredentials(ctx context.Context, credsResponse *boot
 	}
 	secretIf := ManagerAccess.Data.EB.Managers.Bootstrap.Secret
 	if secretIf == nil {
-		return fmt.Errorf("Bootstrap: secretIf is nil")
+		return fmt.Errorf("bootstrap: secretIf is nil")
 	}
 	// Update a secret via Update
 	secret, err := secretIf.Get(ctx, ManagerAccess.Conf.EB.TemporalSecret, metav1.GetOptions{})
@@ -432,7 +433,6 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 		log.Error().Msgf("Bootstrap: req %v", err.Error())
 		return nil, err
 	}
-	log.Info().Msgf("Bootstrap: body %v", string(m))
 	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap-client")
 	span.SetAttributes(attribute.String("url", bCfg.CredsURL))
 	defer span.End()
@@ -494,15 +494,15 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 	block, _ := pem.Decode([]byte(credsResponse.CACertificate))
 	if block == nil {
 		log.Error().Msgf("Bootstrap: failed to decode certificate PEM")
-		return nil, fmt.Errorf("failed to decode certificate PEM CACertificate %v", credsResponse.CACertificate)
+		return nil, fmt.Errorf("failed to decode certificate PEM CACertificate %v",
+			cutils.RedactSecret(credsResponse.CACertificate, cutils.CertLogPrefixLen))
 	}
 
-	cert, err := x509.ParseCertificate(block.Bytes)
+	_, err = x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		log.Error().Err(err).Msgf("Bootstrap: failed to parse certificate")
 		return nil, fmt.Errorf("failed to parse certificate %w", err)
 	}
 
-	CertExpirationMetric.Set(float64(cert.NotAfter.UTC().Unix()))
 	return credsResponse, nil
 }

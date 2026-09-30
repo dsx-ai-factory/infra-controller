@@ -16,12 +16,14 @@
  */
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
+use model::resource_pool::OwnerType;
 use model::vpc::VpcDpuLoopback;
 use sqlx::PgConnection;
 
-use crate::DatabaseError;
+use crate::resource_pool::ResourcePoolAllocationNotOwned;
+use crate::{ConditionalWrite, DatabaseError};
 
 pub async fn persist(
     value: VpcDpuLoopback,
@@ -40,7 +42,7 @@ pub async fn persist(
 
 pub async fn delete_and_deallocate(
     common_pools: &model::resource_pool::common::CommonPools,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     txn: &mut PgConnection,
     delete_admin_loopback_also: bool,
 ) -> Result<(), DatabaseError> {
@@ -81,13 +83,19 @@ pub async fn delete_and_deallocate(
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
     for value in deleted_loopbacks {
-        // We deleted a IP from vpc_dpu_loopback table. Deallocate this IP from common pool.
-        crate::resource_pool::release(
+        // The deleted loopback needs no release if its IP is free or reassigned.
+        match crate::resource_pool::release(
             &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
             txn,
             value.loopback_ip,
+            OwnerType::Machine,
+            &value.dpu_id.to_string(),
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        }
     }
 
     Ok(())
@@ -96,7 +104,7 @@ pub async fn delete_and_deallocate(
 /// Deletes and deallocates loopbacks for a DPU scoped to specific VPCs.
 pub async fn delete_and_deallocate_for_vpcs(
     common_pools: &model::resource_pool::common::CommonPools,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     vpc_ids: &[VpcId],
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
@@ -118,13 +126,19 @@ pub async fn delete_and_deallocate_for_vpcs(
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
     for value in deleted_loopbacks {
-        // Return each deleted loopback IP to the shared VPC loopback pool.
-        crate::resource_pool::release(
+        // The deleted loopback needs no release if its IP is free or reassigned.
+        match crate::resource_pool::release(
             &common_pools.ethernet.pool_vpc_dpu_loopback_ip,
             txn,
             value.loopback_ip,
+            OwnerType::Machine,
+            &value.dpu_id.to_string(),
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        }
     }
 
     Ok(())
@@ -132,7 +146,7 @@ pub async fn delete_and_deallocate_for_vpcs(
 
 pub async fn find(
     txn: &mut PgConnection,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<Option<VpcDpuLoopback>, DatabaseError> {
     let query = "SELECT * from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2";
@@ -150,7 +164,7 @@ pub async fn find(
 pub async fn get_or_allocate_loopback_ip_for_vpc(
     common_pools: &model::resource_pool::common::CommonPools,
     txn: &mut PgConnection,
-    dpu_id: &MachineId,
+    dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<IpAddr, DatabaseError> {
     let loopback_ip = match find(txn, dpu_id, vpc_id).await? {

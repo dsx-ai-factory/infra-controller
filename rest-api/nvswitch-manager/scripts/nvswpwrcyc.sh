@@ -20,9 +20,15 @@ fi
 echo "Issuing Redfish PowerCycle to ${BMC_IP}..."
 
 resp_json="$(mktemp)"
+# IPv6 hosts need brackets in URLs; ping uses the original address.
+URL_HOST="$BMC_IP"
+if [[ "$URL_HOST" == *:* && "$URL_HOST" != \[*\] ]]; then
+  URL_HOST="[$URL_HOST]"
+fi
+
 if ! curl -ksu "${USER}:${PASS}" \
       -H "Content-Type: application/json" \
-      -X POST "https://${BMC_IP}/redfish/v1/Systems/System_0/Actions/ComputerSystem.Reset" \
+      -X POST "https://${URL_HOST}/redfish/v1/Systems/System_0/Actions/ComputerSystem.Reset" \
       -d '{"ResetType": "PowerCycle"}' \
       -o "$resp_json"; then
   echo "Redfish PowerCycle POST failed (curl error)"

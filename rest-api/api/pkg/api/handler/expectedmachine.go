@@ -740,21 +740,10 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			}
 		}
 
-		updateExpectedMachineRequest := em.ToProto(cdbm.ExpectedMachineCredentials{
-			Username: apiRequest.DefaultBmcUsername,
-			Password: apiRequest.DefaultBmcPassword,
-		})
-		// REST storage keeps its current value when this PATCH omits the
-		// address. Core needs the request value instead: nil preserves its
-		// current HostBmc configuration, while an empty string clears it.
-		updateExpectedMachineRequest.BmcIpAddress = apiRequest.BmcIpAddress
-
-		logger.Info().Msg("triggering ExpectedMachine update workflow")
-
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       "expected-machine-update-" + expectedMachine.ID.String(),
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchExpectedMachineRequest := apiRequest.ToProto(em)
+		var secretFields []string
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil {
+			secretFields = []string{"expectedMachine"}
 		}
 
 		stc, err := uemh.scp.GetClientByID(site.ID)
@@ -763,7 +752,9 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "UpdateExpectedMachine", workflowOptions, updateExpectedMachineRequest); apiErr != nil {
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachine_FullMethodName, patchExpectedMachineRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machine")
 			return nil, apiErr
 		}
 		return em, nil
@@ -1235,8 +1226,11 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		Int("SuccessCount", len(createdExpectedMachines)).
 		Msg("finishing CreateExpectedMachines API handler")
 
-	// Return only successful machines
-	return c.JSON(http.StatusCreated, createdExpectedMachines)
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(createdExpectedMachines))
+	for i := range createdExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&createdExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusCreated, apiExpectedMachines)
 }
 
 // ~~~~~ Batch Update Handler ~~~~~ //
@@ -1597,12 +1591,9 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
 	}
 
-	// Build the inputs and a credentials lookup keyed by the ExpectedMachineID
-	// from each request. After UpdateMultiple returns we look credentials up
-	// by the DB record's ID rather than by slice index, so correlation
-	// doesn't depend on the DAO preserving input order.
-	credsByID := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(apiRequests))
-	bmcIPRequestsByID := make(map[uuid.UUID]*string, len(apiRequests))
+	// The DAO returns rows in its own order. Match each row to the request
+	// by ID so its credentials and field mask stay together.
+	requestsByID := make(map[uuid.UUID]model.APIExpectedMachineUpdateRequest, len(apiRequests))
 	updateInputs := make([]cdbm.ExpectedMachineUpdateInput, 0, len(apiRequests))
 	bmcIPClearIDs := make(map[uuid.UUID]struct{})
 	for _, machineReq := range apiRequests {
@@ -1613,11 +1604,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		}
 
 		emID, _ := uuid.Parse(*machineReq.ID)
-		credsByID[emID] = cdbm.ExpectedMachineCredentials{
-			Username: machineReq.DefaultBmcUsername,
-			Password: machineReq.DefaultBmcPassword,
-		}
-		bmcIPRequestsByID[emID] = machineReq.BmcIpAddress
+		requestsByID[emID] = machineReq
 		bmcIPAddress := machineReq.BmcIpAddress
 		if bmcIPAddress != nil && *bmcIPAddress == "" {
 			bmcIPClearIDs[emID] = struct{}{}
@@ -1681,39 +1668,22 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
 		}
 
-		workflowMachines := make([]*corev1.ExpectedMachine, 0, len(updatedMachines))
+		patches := make([]*corev1.PatchExpectedMachineRequest, 0, len(updatedMachines))
 		for i := range updatedMachines {
 			em := &updatedMachines[i]
-			creds, ok := credsByID[em.ID]
+			request, ok := requestsByID[em.ID]
 			if !ok {
-				// UpdateMultiple returned an ID we didn't ask it to create.
-				// This shouldn't actually happen, so fail loudly instead of
-				// attaching the wrong credentials to a machine.
 				logger.Error().Str("ExpectedMachineID", em.ID.String()).Msg("UpdateMultiple returned a machine with an unrecognized ID")
 				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to correlate updated Expected Machine to request", nil)
 			}
-			workflowMachine := em.ToProto(creds)
-			// Use the PATCH value at the workflow boundary instead of the REST
-			// row, which may contain an address this request did not touch.
-			workflowMachine.BmcIpAddress = bmcIPRequestsByID[em.ID]
-			workflowMachines = append(workflowMachines, workflowMachine)
+			patches = append(patches, request.ToProto(em))
 		}
-
-		logger.Info().Int("Count", len(workflowMachines)).Msg("triggering Expected Machine update workflow")
-
-		// Create workflow request
-		workflowRequest := &corev1.BatchExpectedMachineOperationRequest{
-			ExpectedMachines:     &corev1.ExpectedMachineList{ExpectedMachines: workflowMachines},
-			AcceptPartialResults: false,
-		}
-
-		// Create workflow options. Include a UUID suffix so concurrent batches
-		// of the same size on the same Site don't collide on a single ID.
-		workflowID := fmt.Sprintf("expected-machines-update-batch-%s-%s", site.ID.String(), uuid.New().String())
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       workflowID,
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchRequest := &corev1.PatchExpectedMachinesRequest{Patches: patches}
+		var secretFields []string
+		if slices.ContainsFunc(apiRequests, func(request model.APIExpectedMachineUpdateRequest) bool {
+			return request.DefaultBmcUsername != nil || request.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"patches"}
 		}
 
 		// Get the Temporal client for the site we are working with
@@ -1723,31 +1693,10 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		// Execute workflow and get results
-		workflowRun, werr := stc.ExecuteWorkflow(ctx, workflowOptions, "UpdateExpectedMachines", workflowRequest)
-		if werr != nil {
-			logger.Error().Err(werr).Msg("failed to schedule batch Expected Machine update workflow on Site")
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to schedule batch Expected Machine update workflow on Site: %v", werr), nil)
-		}
-
-		workflowRunID := workflowRun.GetID()
-		logger = logger.With().Str("WorkflowID", workflowRunID).Logger()
-		logger.Info().Msg("executing Expected Machine update workflow on Site")
-
-		// Get workflow results
-		var workflowResult corev1.BatchExpectedMachineOperationResponse
-
-		werr = workflowRun.Get(ctx, &workflowResult)
-		if werr != nil {
-			logger.Error().Err(werr).Msg("error executing batch Expected Machine update workflow on Site")
-			// Workflow failed entirely - don't commit transaction, changes will be rolled back
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute batch Expected Machine update workflow on Site: %v", werr), nil)
-		}
-
-		// sanity checks since this is all-or-nothing
-		if len(workflowResult.GetResults()) != len(updatedMachines) {
-			logger.Error().Msgf("workflow returned a different number of Expected Machines (expected %d but got %d)", len(updatedMachines), len(workflowResult.GetResults()))
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify batch Expected Machine update workflow results", nil)
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachines_FullMethodName, patchRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machines")
+			return nil, apiErr
 		}
 
 		return updatedMachines, nil
@@ -1760,6 +1709,159 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		Int("SuccessCount", len(updatedExpectedMachines)).
 		Msg("finishing UpdateExpectedMachines API handler")
 
-	// Return only successful machines
-	return c.JSON(http.StatusOK, updatedExpectedMachines)
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(updatedExpectedMachines))
+	for i := range updatedExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&updatedExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusOK, apiExpectedMachines)
+}
+
+// ReplaceAllExpectedMachinesHandler replaces the complete ExpectedMachine set
+// for one Site.
+type ReplaceAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+
+// NewReplaceAllExpectedMachinesHandler creates a full-Site ExpectedMachine replacement handler.
+func NewReplaceAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedMachinesHandler {
+	return ReplaceAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Replace all ExpectedMachines for a Site
+// @Description Replace the full set of ExpectedMachines for a Site; an empty list clears the set
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIReplaceAllExpectedMachinesRequest true "ExpectedMachine replace-all request"
+// @Success 200 {object} []model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine/all [put]
+func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, span := common.SetupHandler("ExpectedMachine", "ReplaceAll", c, h.tracerSpan)
+	if span != nil {
+		defer span.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	request := model.APIReplaceAllExpectedMachinesRequest{}
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ReplaceAllExpectedMachines request data", err)
+	}
+	logger = logger.With().Str("SiteID", request.SiteID).Int("MachineCount", len(request.ExpectedMachines)).Logger()
+	h.tracerSpan.SetAttribute(span, attribute.String("site_id", request.SiteID), logger)
+
+	site, apiErr := h.resolveSite(ctx, logger, org, dbUser, request.SiteID, true)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+
+	requestedSKUs := make(map[string]bool)
+	for _, machine := range request.ExpectedMachines {
+		if machine.SkuID != nil {
+			requestedSKUs[*machine.SkuID] = true
+		}
+	}
+	if len(requestedSKUs) > 0 {
+		skuIDs := make([]string, 0, len(requestedSKUs))
+		for skuID := range requestedSKUs {
+			skuIDs = append(skuIDs, skuID)
+		}
+		skus, _, derr := cdbm.NewSkuDAO(h.dbSession).GetAll(ctx, nil, cdbm.SkuFilterInput{SiteIDs: []uuid.UUID{site.ID}, SkuIDs: skuIDs}, paginator.PageInput{Limit: cutil.GetPtr(len(skuIDs))})
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error retrieving SKUs for ExpectedMachine replacement")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SKUs due to DB error", nil)
+		}
+		existing := make(map[string]bool, len(skus))
+		for _, sku := range skus {
+			existing[sku.ID] = true
+		}
+		for skuID := range requestedSKUs {
+			if !existing[skuID] {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SkuID specified for an Expected Machine does not exist on the Site", nil)
+			}
+		}
+	}
+
+	inputs := make([]cdbm.ExpectedMachineCreateInput, 0, len(request.ExpectedMachines))
+	credentials := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(request.ExpectedMachines))
+	for _, machine := range request.ExpectedMachines {
+		id := uuid.New()
+		credentials[id] = cdbm.ExpectedMachineCredentials{Username: machine.DefaultBmcUsername, Password: machine.DefaultBmcPassword}
+		inputs = append(inputs, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID: id, SiteID: site.ID, BmcMacAddress: machine.BmcMacAddress,
+			BmcIpAddress: machine.BmcIpAddress, ChassisSerialNumber: machine.ChassisSerialNumber,
+			SkuID: machine.SkuID, FallbackDpuSerialNumbers: machine.FallbackDPUSerialNumbers,
+			RackID: machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
+			Model: machine.Model, Description: machine.Description, SlotID: machine.SlotID,
+			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
+			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
+		})
+	}
+
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	dao := cdbm.NewExpectedMachineDAO(h.dbSession)
+	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Machines due to DB error", nil)
+		}
+		protos := make([]*corev1.ExpectedMachine, 0, len(machines))
+		for i := range machines {
+			protos = append(protos, machines[i].ToProto(credentials[machines[i].ID]))
+		}
+		coreRequest := &corev1.ExpectedMachineList{ExpectedMachines: protos}
+		var secretFields []string
+		if slices.ContainsFunc(request.ExpectedMachines, func(machine *model.APIExpectedMachineCreateRequest) bool {
+			return machine.DefaultBmcUsername != nil || machine.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"expectedMachines"}
+		}
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		return machines, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to replace Expected Machines due to DB transaction error")
+	}
+
+	response := make([]*model.APIExpectedMachine, 0, len(replaced))
+	for i := range replaced {
+		response = append(response, model.NewAPIExpectedMachine(&replaced[i]))
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+// DeleteAllExpectedMachinesHandler deletes the complete ExpectedMachine set for one Site.
+type DeleteAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+
+// NewDeleteAllExpectedMachinesHandler creates a full-Site ExpectedMachine deletion handler.
+func NewDeleteAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedMachinesHandler {
+	return DeleteAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Delete all ExpectedMachines for a Site
+// @Tags ExpectedMachine
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site whose ExpectedMachines should be deleted"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-machine/all [delete]
+func (h DeleteAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	return h.deleteAll(c, "ExpectedMachine", corev1.Forge_DeleteAllExpectedMachines_FullMethodName, func(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID) error {
+		return cdbm.NewExpectedMachineDAO(h.dbSession).DeleteAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+	})
 }

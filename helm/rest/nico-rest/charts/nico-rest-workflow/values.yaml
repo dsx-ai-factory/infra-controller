@@ -4,6 +4,8 @@
 nameOverride: ""
 namespaceOverride: ""
 
+podAnnotations: {}
+
 image:
   name: nico-rest-workflow
 
@@ -70,6 +72,9 @@ config:
       caPath: /var/secrets/temporal/certs/ca.crt
       disableHostVerification: false
     encryptionKeyPath: /var/secrets/temporal/encryption-key
+  # Site Manager endpoint the cloud worker calls to rotate Site Agent Temporal certificates.
+  siteManager:
+    svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
   ngc:
     api:
       baseUrl: ""
@@ -80,5 +85,8 @@ config:
     enabled: true
     port: 9360
   tracing:
-    enabled: false
+    enabled: true
     serviceName: nico-rest-workflow
+
+# -- Extra container environment, name->value. Mainly for OTEL_* variables.
+extraEnv: {}

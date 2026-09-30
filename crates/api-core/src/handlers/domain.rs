@@ -18,7 +18,6 @@ use ::rpc::protos::dns::{
     CreateDomainRequest, Domain, DomainDeletionRequest, DomainDeletionResult, DomainList,
     DomainSearchQuery, UpdateDomainRequest,
 };
-use carbide_uuid::domain::DomainId;
 use db::dns::domain;
 use db::{self, ObjectColumnFilter};
 use model::dns::NewDomain;
@@ -27,29 +26,27 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::Api;
 
-/// Locks every reverse-zone identity affected by a domain write, then rejects
-/// a proposed name already used by another live domain. Updates may retain
-/// their own normalized name, while creates have no domain to exclude.
-async fn lock_and_ensure_reverse_zone_name_available(
-    txn: &mut db::Transaction<'_>,
-    names_to_lock: &[String],
-    proposed_name: &str,
-    current_domain_id: Option<DomainId>,
-) -> Result<(), CarbideError> {
-    db::dns::lock_reverse_zone_names(txn, names_to_lock).await?;
+/// Validates a caller-supplied default TTL into the zone's range.
+fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, CarbideError> {
+    secs.map(model::dns::ZoneTtl::try_from)
+        .transpose()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
+}
 
-    let Some(reverse_zone_name) = db::dns::normalize_reverse_zone_name(proposed_name) else {
-        return Ok(());
-    };
-    let domains = domain::find_reverse_zone_by_normalized_name(txn, &reverse_zone_name).await?;
-    if domains
-        .iter()
-        .any(|existing| Some(existing.id) != current_domain_id)
+/// Rejects a proposed domain name at or below either reverse-DNS tree root.
+///
+/// Reverse lookups derive PTRs from inventory, not stored zones. Accepting
+/// a zone write would imply support for reverse authority that is not served.
+/// Network lifecycle maintains compatibility rows directly for rollback;
+/// this validation applies to explicit domain API creation.
+fn ensure_not_reverse_zone_name(proposed_name: &str) -> Result<(), CarbideError> {
+    let normalized = db::dns::normalize_domain(proposed_name.trim());
+    if matches!(normalized.as_str(), "in-addr.arpa" | "ip6.arpa")
+        || db::dns::normalize_reverse_zone_name(&normalized).is_some()
     {
-        return Err(CarbideError::AlreadyFoundError {
-            kind: "reverse DNS zone",
-            id: reverse_zone_name,
-        });
+        return Err(CarbideError::InvalidArgument(format!(
+            "{proposed_name} is a reverse DNS zone; only inventory-derived PTR records are supported, not reverse domain creation"
+        )));
     }
 
     Ok(())
@@ -64,14 +61,11 @@ pub(crate) async fn create(
     let mut txn = api.txn_begin().await?;
 
     let req = request.into_inner();
-    lock_and_ensure_reverse_zone_name_available(
-        &mut txn,
-        std::slice::from_ref(&req.name),
-        &req.name,
-        None,
-    )
-    .await?;
-    let new_domain = NewDomain::new(req.name);
+    ensure_not_reverse_zone_name(&req.name)?;
+    let new_domain = NewDomain {
+        default_ttl: zone_ttl_argument(req.default_ttl)?,
+        ..NewDomain::new(req.name)
+    };
 
     let domain = domain::persist(new_domain, &mut txn).await?;
 
@@ -105,17 +99,20 @@ pub(crate) async fn update(
                 id: uuid.to_string(),
             })?;
 
-    let previous_name = domain.name.clone();
-    domain.name = domain_proto.name;
-
-    let reverse_zone_names = [previous_name, domain.name.clone()];
-    lock_and_ensure_reverse_zone_name_available(
-        &mut txn,
-        &reverse_zone_names,
-        &domain.name,
-        Some(domain.id),
-    )
-    .await?;
+    // Renaming a domain is not supported. The name may be omitted or sent
+    // back unchanged so a caller updating another field need not read the
+    // row first.
+    if !domain_proto.name.is_empty() && domain_proto.name != domain.name {
+        return Err(CarbideError::InvalidArgument(format!(
+            "renaming domain {} to {} is not supported; delete it and create a new domain",
+            domain.name, domain_proto.name
+        ))
+        .into());
+    }
+    // Omission preserves the stored default; the wire cannot clear it.
+    if let Some(default_ttl) = zone_ttl_argument(domain_proto.default_ttl)? {
+        domain.default_ttl = Some(default_ttl);
+    }
 
     domain.increment_serial();
 
@@ -219,6 +216,7 @@ pub(crate) async fn create_legacy_compat(
     // Convert legacy Domain to CreateDomainRequest
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
+        default_ttl: None,
     };
 
     // Call the new handler
@@ -256,6 +254,7 @@ pub(crate) async fn update_legacy_compat(
             deleted: domain_legacy.deleted,
             metadata: None, // Legacy doesn't have metadata
             soa: None,      // Legacy doesn't have SOA
+            default_ttl: None,
         }),
     };
 

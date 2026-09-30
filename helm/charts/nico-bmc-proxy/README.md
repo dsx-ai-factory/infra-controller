@@ -10,7 +10,7 @@ That section maps a caller principal such as `spiffe-service-id/nv-dps` to an or
 of ACL entries.
 
 By default the chart ships a baseline config at
-[`files/nico-bmc-proxy.toml`](files/nico-bmc-proxy.toml). To replace it from Helm values,
+[`files/carbide-bmc-proxy.toml`](files/carbide-bmc-proxy.toml). To replace it from Helm values,
 set `configFiles.nicoBmcProxyConfig` to the full TOML contents:
 
 ```yaml
@@ -76,3 +76,11 @@ Path wildcards:
 
 When converting Redfish-style documented endpoints to ACLs, replace templated path components
 like `{id}` or `{session_id}` with `*`.
+
+## Request Classes
+
+The same TOML also takes `[[class]]` tables, which set how long the proxy waits
+on the BMC for groups of requests. The baseline config declares none, so every
+request gets the default 60-second budget. See
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class)
+for the format.

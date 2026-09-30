@@ -4,7 +4,9 @@
 
 This is a **prescriptive, BYO-Kubernetes bring-up guide** for the NICo REST cloud components. It encodes the **order of operations**, the **exact manifest paths** from this repository, and what you must configure for your environment.
 
-> **Experimental:** This software is a preview release. Features, APIs, and configurations may change without notice. Thoroughly test in non-critical environments before production use.
+> The software is provided "as is" without warranties of any kind. Features,
+> APIs, and configurations may change in future releases. For production
+> deployments, please test thoroughly in non-critical environments first.
 
 ### Deployment topology
 
@@ -203,7 +205,7 @@ kubectl rollout status statefulset/postgres -n postgres
 
 Keycloak is the **reference OIDC identity provider** for the NICo REST API. It handles authentication and issues JWTs that the API validates on every request. It is pre-loaded with the `nico-dev` realm via an imported realm ConfigMap, which includes the `nico-api` client, realm roles, and a set of pre-seeded dev users.
 
-Users of NICo can also bring their own OpenID/OAuth JWT Provider, see [Auth docs](https://github.com/NVIDIA/infra-controller/tree/main/rest-api/auth) for more details.
+Users of NICo can also bring their own OpenID/OAuth JWT Provider, see [Auth docs](https://github.com/dsx-ai-factory/infra-controller/tree/main/rest-api/auth) for more details.
 
 ### Manifests
 
@@ -650,9 +652,14 @@ temporal:
     keyPath: /var/secrets/temporal/certs/tls.key
     caPath: /var/secrets/temporal/certs/ca.crt
   encryptionKeyPath: /var/secrets/temporal/encryption-key
+
+siteManager:
+  svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
 ```
 
 Each deployment sets `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE` environment variables that override the config file values at runtime.
+
+The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its Site Agent Temporal certificate is within `10` days of expiry. If it is empty, the daily rotation run fails without rotating any Site.
 
 ### Secrets mounted at runtime
 
@@ -714,6 +721,7 @@ The site agent bootstrap flow is:
 | `TEMPORAL_SUBSCRIBE_QUEUE` | `00000000-0000-4000-8000-000000000001` | Per-site Temporal queue — **must match site UUID** |
 | `TEMPORAL_INVENTORY_SCHEDULE` | `@every 3m` | How often the agent reports hardware inventory, as an `@every <duration>` schedule. The agent reports this interval to Cloud as staleness window. A schedule slower than `5m`, or in any other format, is rejected at startup |
 | `TEMPORAL_CERT_PATH` | `/etc/temporal-certs` | Path to mounted Temporal TLS certs |
+| `BOOTSTRAP_SECRET_NAME` | `site-registration` | Name of the registration Secret mounted at `/etc/sitereg`. When Cloud rotates the Temporal certificate, the Site Agent writes the new OTP to this Secret's `otp` key. The binary falls back to `bootstrap-info` when it is unset |
 
 ### Secrets mounted at runtime
 

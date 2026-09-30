@@ -19,7 +19,7 @@ use core::fmt;
 use std::fmt::Display;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
@@ -120,7 +120,7 @@ impl<'r> FromRow<'r, PgRow> for NetworkDevice {
 // debugging.
 #[derive(Debug, Clone, FromRow)]
 pub struct DpuToNetworkDeviceMap {
-    pub dpu_id: MachineId,
+    pub dpu_id: DpuMachineId,
     pub local_port: DpuLocalPorts,
     pub remote_port: String,
     pub network_device_id: String,

@@ -455,6 +455,41 @@ mod tests {
         }
     }
 
+    /// Verify identical discovery identity fields cannot collide across IP families.
+    ///
+    /// The shared hook process serves either protocol, so family must remain a
+    /// first-class cache namespace even when all other key fields match.
+    #[test]
+    fn cache_key_separates_address_families() {
+        let mac_address = "02:00:00:00:00:ac".parse::<MacAddress>().unwrap();
+        let link_address = IpAddr::V6("2001:db8::1".parse().unwrap());
+        let circuit_id = Some("65746830".to_string());
+        let remote_id = Some("7261636b2d61".to_string());
+
+        // Hold identity, routing, cache class, and vendor constant so only
+        // the protocol-family discriminator can separate the entries.
+        let v4_key = key(
+            rpc::AddressFamily::V4,
+            CacheClass::Lease,
+            mac_address,
+            link_address,
+            &circuit_id,
+            &remote_id,
+            "HTTPClient",
+        );
+        let v6_key = key(
+            rpc::AddressFamily::V6,
+            CacheClass::Lease,
+            mac_address,
+            link_address,
+            &circuit_id,
+            &remote_id,
+            "HTTPClient",
+        );
+
+        assert_ne!(v4_key, v6_key);
+    }
+
     #[test]
     fn invalidated_v6_lease_blocks_stale_positive_cache_reinsert() {
         let mac_address = "02:00:00:00:00:aa".parse::<MacAddress>().unwrap();

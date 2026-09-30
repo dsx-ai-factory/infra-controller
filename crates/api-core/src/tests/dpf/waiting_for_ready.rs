@@ -26,13 +26,13 @@ use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
 use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
 use tokio::time::timeout;
 
-use super::{dpf_config, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
     create_test_env_with_overrides, get_config, reboot_completed,
@@ -61,14 +61,15 @@ fn expect_provisioning(mock: &mut MockDpfOperations) {
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(mock);
 }
 
 /// Persists one DPU's DPF substate directly so tests can isolate a handler
 /// transition without replaying the preceding operator workflow.
 async fn reset_host_to_dpf_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
     dpf_state: DpfState,
 ) {
     let state = ManagedHostState::DPUInit {
@@ -101,8 +102,8 @@ async fn reset_host_to_dpf_state(
 /// decisions after their initial DPF ingestion has completed.
 async fn reset_host_to_waiting_for_ready(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     reset_host_to_dpf_state(
         pool,
@@ -714,8 +715,8 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
 /// a stale/invalid state stored by a previous implementation.
 async fn write_unknown_dpf_init_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state_json: serde_json::Value = serde_json::json!({
         "state": "dpuinit",

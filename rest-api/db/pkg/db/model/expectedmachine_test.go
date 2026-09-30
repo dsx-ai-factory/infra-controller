@@ -508,6 +508,100 @@ func testExpectedMachineSQLDAOCreateExpectedMachines(ctx context.Context, t *tes
 	return
 }
 
+func TestExpectedMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"environment", "location", "nvidia.com/failure-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"location"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestExpectedMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+	created := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	_, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: created[0].ID,
+		Labels: map[string]string{
+			"environment":               "test",
+			"location":                  "datacenter1",
+			"nvidia.com/failure-domain": "fd-a",
+		},
+	})
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    ExpectedMachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "environment", want: []string{"production", "test"}, wantTotal: 2},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-a"}, wantTotal: 1},
+		{name: "site scope", labelKey: "location", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{created[0].SiteID}}, want: []string{"datacenter1"}, wantTotal: 1},
+		{
+			name: "descending second result", labelKey: "environment",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"production"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "environment", filter: ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
 func TestExpectedMachineSQLDAO_GetByID(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
@@ -2065,4 +2159,41 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile(t *testing.T)
 	assert.NoError(t, err)
 	assert.Equal(t, Labels{"env": "test"}, gotC.Labels)
 	assert.Nil(t, gotC.HostLifecycleProfile.DisableLockdown, "omitted profile (unset) must stay unset")
+}
+
+func TestExpectedMachineSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	require.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedMachineCreateInput{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:11:ee:01", ChassisSerialNumber: "other-site", CreatedBy: user.ID})
+	require.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedMachineCreateInput{
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:01", ChassisSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:02", ChassisSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "replacement-1", result[0].ChassisSerialNumber)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedMachineFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
 }

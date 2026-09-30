@@ -32,15 +32,53 @@ use crate::db_read::DbReader;
 #[cfg(test)]
 mod test_find_by_address;
 
-/// Returned when an address is already held by an interface.
+/// Returned when an address is already held by another owner.
+///
+/// The owner is normally an active interface, so `segment_id` and
+/// `interface_id` are populated. A reservation owns its address by MAC with no
+/// active interface row, so both are `None` and the MAC identifies the owner
+/// instead.
 #[derive(thiserror::Error, Debug)]
-#[error("address already in use: {0} by {1} in network segment {2} (interface: {3})")]
-pub struct AddressAlreadyInUseError(
-    pub IpAddr,
-    pub MacAddress,
-    pub NetworkSegmentId,
-    pub MachineInterfaceId,
-);
+pub struct AddressAlreadyInUseError {
+    pub address: IpAddr,
+    pub mac_address: MacAddress,
+    pub segment_id: Option<NetworkSegmentId>,
+    pub interface_id: Option<MachineInterfaceId>,
+}
+
+impl AddressAlreadyInUseError {
+    /// Build a conflict against an active interface owner.
+    pub fn active(
+        address: IpAddr,
+        mac_address: MacAddress,
+        segment_id: NetworkSegmentId,
+        interface_id: MachineInterfaceId,
+    ) -> Self {
+        Self {
+            address,
+            mac_address,
+            segment_id: Some(segment_id),
+            interface_id: Some(interface_id),
+        }
+    }
+}
+
+impl std::fmt::Display for AddressAlreadyInUseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "address already in use: {} by {}",
+            self.address, self.mac_address,
+        )?;
+        if let Some(segment_id) = self.segment_id {
+            write!(formatter, " in network segment {segment_id}")?;
+        }
+        match self.interface_id {
+            Some(interface_id) => write!(formatter, " (interface: {interface_id})"),
+            None => write!(formatter, " (reserved address)"),
+        }
+    }
+}
 
 #[derive(Debug, FromRow, Clone)]
 pub struct MachineInterfaceAddress {
@@ -90,17 +128,89 @@ pub async fn find_by_address(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// The current owner of an address, whether an active interface or a MAC
+/// reservation. Unlike [`find_by_address`], this reports a parked owner so
+/// conflict handling can identify it without an active interface row.
+#[derive(Debug, FromRow)]
+struct AddressOwner {
+    interface_id: Option<MachineInterfaceId>,
+    mac_address: MacAddress,
+    segment_id: Option<NetworkSegmentId>,
+    allocation_type: AllocationType,
+}
+
+/// Look up which owner currently holds `address`, including a reservation that
+/// has no active interface row. Used by the insert paths to turn a
+/// unique-constraint conflict into an actionable owner.
+async fn find_address_owner(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<Option<AddressOwner>, DatabaseError> {
+    let query = "SELECT mia.interface_id,
+                COALESCE(mi.mac_address, mia.reserved_by_mac) AS mac_address,
+                mi.segment_id, mia.allocation_type
+            FROM machine_interface_addresses mia
+            LEFT JOIN machine_interfaces mi ON mi.id = mia.interface_id
+            WHERE mia.address = $1::inet";
+    sqlx::query_as(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Return the address already reserved for a MAC in the given family, if any.
+/// A MAC may hold at most one reservation per family.
+async fn find_reserved_for_mac_family(
+    txn: &mut PgConnection,
+    reserved_by_mac: MacAddress,
+    family: IpAddressFamily,
+) -> Result<Option<IpAddr>, DatabaseError> {
+    let query = "SELECT address FROM machine_interface_addresses
+        WHERE reserved_by_mac = $1::macaddr AND family(address) = $2";
+    sqlx::query_scalar(query)
+        .bind(reserved_by_mac)
+        .bind(family.pg_family())
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// `delete` removes all addresses during interface teardown. The caller must
+/// delete the interface in the same transaction; use a scoped deletion helper
+/// when the interface remains so its allocation removal is recorded.
 pub async fn delete(
     txn: &mut PgConnection,
     interface_id: &MachineInterfaceId,
 ) -> Result<(), DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, *interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1";
+    let removed = sqlx::query(query)
+        .bind(interface_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    // The interface row still exists here; the caller deletes it afterwards.
+    if removed.rows_affected() > 0 {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(())
+}
+
+/// Lock the parent before touching its address rows. Unlike assignment,
+/// deletion still succeeds when the interface has already disappeared.
+/// Must run inside a transaction that remains open through the following address delete.
+async fn lock_interface_for_deletion(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
     sqlx::query(query)
         .bind(interface_id)
         .execute(txn)
         .await
         .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Find all addresses for an interface, including their allocation type.
@@ -136,21 +246,30 @@ pub async fn find_allocation_type_for_family(
 
 /// Delete the address for a given interface, address family, and
 /// allocation type. Returns true if a row was deleted.
+/// Locks the interface before deleting its address and recording the removal.
 pub async fn delete_by_interface_family(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = $2 AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(family.pg_family())
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(txn, interface_id, family).await?;
+    }
+    Ok(removed)
 }
 
 /// Delete a specific address from a specific interface. Returns true if a
@@ -163,15 +282,28 @@ pub async fn delete_by_interface_and_address(
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND address = $2::inet AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(address)
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(
+            txn,
+            interface_id,
+            address.address_family(),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 /// `insert` assigns an unowned address to an interface.
@@ -203,10 +335,11 @@ pub async fn insert(
         .map_err(|e| DatabaseError::query(query, e))?
         .is_some();
     if address_inserted {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
         return Ok(());
     }
 
-    let Some(address_owner) = find_by_address(&mut *txn, address).await? else {
+    let Some(address_owner) = find_address_owner(&mut *txn, address).await? else {
         if let Some(existing_in_family) = find_for_interface(&mut *txn, interface_id)
             .await?
             .into_iter()
@@ -225,16 +358,266 @@ pub async fn insert(
             "address {address} could not be assigned to interface {interface_id}, and no conflicting assignment was found"
         )));
     };
-    if address_owner.id == interface_id && address_owner.allocation_type == allocation_type {
+    if address_owner.interface_id == Some(interface_id)
+        && address_owner.allocation_type == allocation_type
+    {
         return Ok(());
     }
-    Err(AddressAlreadyInUseError(
+    Err(AddressAlreadyInUseError {
         address,
-        address_owner.mac_address,
-        address_owner.segment_id,
-        address_owner.id,
-    )
+        mac_address: address_owner.mac_address,
+        segment_id: address_owner.segment_id,
+        interface_id: address_owner.interface_id,
+    }
     .into())
+}
+
+/// Insert a parked address reservation owned by a MAC with no active interface
+/// row.
+///
+/// The reservation still participates in the site-wide `UNIQUE (address)`
+/// ownership check, so a conflict with an active interface or another
+/// reservation returns [`AddressAlreadyInUseError`]. Re-inserting the same
+/// `(MAC, address)` reservation is idempotent. A MAC that already holds a
+/// reservation in the same family returns [`DatabaseError::FailedPrecondition`].
+/// Like [`insert`], this keeps the caller's transaction usable so the owner can
+/// be identified.
+pub async fn insert_reserved(
+    txn: &mut PgConnection,
+    reserved_by_mac: MacAddress,
+    address: IpAddr,
+    allocation_type: AllocationType,
+) -> Result<(), DatabaseError> {
+    let query =
+        "INSERT INTO machine_interface_addresses (address, allocation_type, reserved_by_mac)
+        VALUES ($1::inet, $2, $3::macaddr)
+        ON CONFLICT DO NOTHING";
+    let inserted = sqlx::query(query)
+        .bind(address)
+        .bind(allocation_type)
+        .bind(reserved_by_mac)
+        .execute(&mut *txn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if inserted {
+        return Ok(());
+    }
+
+    // The address is already owned, or this MAC already reserves an address in
+    // the same family. Distinguish the two so callers get an actionable error.
+    if let Some(owner) = find_address_owner(&mut *txn, address).await? {
+        if owner.interface_id.is_none()
+            && owner.mac_address == reserved_by_mac
+            && owner.allocation_type == allocation_type
+        {
+            return Ok(());
+        }
+        return Err(AddressAlreadyInUseError {
+            address,
+            mac_address: owner.mac_address,
+            segment_id: owner.segment_id,
+            interface_id: owner.interface_id,
+        }
+        .into());
+    }
+
+    if let Some(existing) =
+        find_reserved_for_mac_family(&mut *txn, reserved_by_mac, address.address_family()).await?
+    {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "MAC {reserved_by_mac} already has a reserved address {existing} in the same family as {address}"
+        )));
+    }
+
+    Err(DatabaseError::internal(format!(
+        "reserved address {address} for MAC {reserved_by_mac} could not be inserted, and no conflicting reservation was found"
+    )))
+}
+
+/// A parked address reservation with no active interface, owned by its MAC.
+#[derive(Debug, FromRow, Clone, PartialEq, Eq)]
+pub struct ReservedAddress {
+    pub address: IpAddr,
+    pub reserved_by_mac: MacAddress,
+    pub allocation_type: AllocationType,
+}
+
+/// Mark an interface's address in `family` for cross-lifetime preservation by
+/// recording the interface's own MAC in `reserved_by_mac`.
+///
+/// The row stays active (its `interface_id` is unchanged); the marker records
+/// the intent so a later teardown parks the address regardless of the current
+/// `ExpectedMachine` declaration. Returns whether a row was marked. Idempotent:
+/// re-marking an already-marked row is a no-op that still reports success.
+///
+/// The interface is locked first, on the same row lock [`park_reserved`] and
+/// interface teardown take. Without it a mark could commit between a concurrent
+/// teardown's park and its address delete: the mark would report success while
+/// the delete removed the freshly marked row, silently losing the reservation.
+/// Holding the lock forces the mark to either land before teardown (so the park
+/// preserves it) or observe the deleted interface and report `false`.
+pub async fn mark_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    family: IpAddressFamily,
+) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
+    let query = "UPDATE machine_interface_addresses AS mia
+        SET reserved_by_mac = mi.mac_address
+        FROM machine_interfaces AS mi
+        WHERE mia.interface_id = $1 AND mi.id = $1 AND family(mia.address) = $2";
+    sqlx::query(query)
+        .bind(interface_id)
+        .bind(family.pg_family())
+        .execute(txn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Park every marked address of an interface before its row is deleted,
+/// converting each to a reservation owned by its MAC with no active interface.
+///
+/// Unmarked addresses are left in place for the caller's own row deletion. The
+/// interface is locked first so the park and the following delete see a stable
+/// row set. Returns the parked addresses.
+pub async fn park_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
+    let query = "UPDATE machine_interface_addresses
+        SET interface_id = NULL
+        WHERE interface_id = $1 AND reserved_by_mac IS NOT NULL
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Re-own a parked reservation for `mac` in `family` by attaching it to a newly
+/// ingested interface.
+///
+/// The reservation keeps its MAC marker so it stays preserved across future
+/// teardowns. Callers must confirm the parked address is compatible with the
+/// interface's selected segment before restoring it. Returns the restored
+/// address if a parked reservation existed for the MAC and family.
+pub async fn restore_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    mac_address: MacAddress,
+    family: IpAddressFamily,
+) -> Result<Option<IpAddr>, DatabaseError> {
+    let query = "UPDATE machine_interface_addresses
+        SET interface_id = $1
+        WHERE reserved_by_mac = $2::macaddr
+          AND family(address) = $3
+          AND interface_id IS NULL
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .bind(mac_address)
+        .bind(family.pg_family())
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// List parked reservations, optionally narrowed to one MAC and/or address.
+///
+/// Only parked rows are returned (`interface_id IS NULL`); active interface
+/// addresses never appear. Ordered by MAC then family then address for a
+/// deterministic operator listing.
+pub async fn find_reserved(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<ReservedAddress>, DatabaseError> {
+    let query = "SELECT address, reserved_by_mac, allocation_type
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_as(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// List the addresses (ids) of parked reservations matching the filter.
+///
+/// The address is the stable id used to page a listing: callers fetch the full
+/// rows in bounded chunks via [`find_reserved_by_ids`]. Only parked rows
+/// (`interface_id IS NULL`) are returned, ordered by MAC then family then
+/// address so the paged listing is deterministic.
+pub async fn find_reserved_ids(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    let query = "SELECT address
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Fetch full parked reservations for a page of address ids.
+///
+/// Only parked rows (`interface_id IS NULL`) are returned, so an id that has
+/// since been re-owned or released is silently dropped. Ordered by MAC then
+/// family then address to match [`find_reserved_ids`].
+pub async fn find_reserved_by_ids(
+    txn: &mut PgConnection,
+    addresses: &[IpAddr],
+) -> Result<Vec<ReservedAddress>, DatabaseError> {
+    let query = "SELECT address, reserved_by_mac, allocation_type
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND address = ANY($1)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_as(query)
+        .bind(addresses)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Release parked reservations matching the filter, making their addresses
+/// available to allocators again.
+///
+/// Only parked rows (`interface_id IS NULL`) are affected; active interface
+/// addresses are never released. At least one of `mac_address`/`address` should
+/// be supplied by callers to scope the release. Returns the released addresses.
+pub async fn release_reserved(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    let query = "DELETE FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Assign a static address to an interface. If the interface already
@@ -244,11 +627,16 @@ pub async fn insert(
 /// - `Static`: the old static address is replaced.
 /// - `Dhcp` or `Slaac`: the managed allocation is removed and
 ///   replaced with the static assignment.
+///
+/// Must run inside a transaction. This locks the interface before selecting an
+/// address. Callers with their own address-dependent skip or conflict rules must
+/// acquire that lock before reading the state used by those rules.
 pub async fn assign_static(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     address: IpAddr,
 ) -> Result<AssignStaticResult, DatabaseError> {
+    crate::machine_interface::lock_for_address_assignment(&mut *txn, interface_id).await?;
     let family = address.address_family();
 
     let existing = find_allocation_type_for_family(&mut *txn, interface_id, family).await?;
@@ -274,18 +662,15 @@ pub async fn assign_static(
 /// Delete an address allocation of the given type. Returns at most one owning
 /// interface in a vector so callers can share the hostname-resync path with
 /// MAC-scoped deletion.
+///
+/// If the matching allocation moves to another interface while this waits for
+/// its original owner, leave it allocated and return an empty vector.
 pub async fn delete_by_address(
     txn: &mut PgConnection,
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses WHERE address = $1::inet AND allocation_type = $2 RETURNING interface_id";
-    sqlx::query_scalar(query)
-        .bind(address)
-        .bind(allocation_type)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
+    delete_address_allocation(txn, address, None, allocation_type).await
 }
 
 /// Delete an address allocation for a given (ip, mac) pair, which
@@ -294,26 +679,46 @@ pub async fn delete_by_address(
 /// Returns the interfaces that owned the deleted allocations (normally one,
 /// empty if the pair matched nothing) so callers can resync each one's hostname
 /// against the authoritative deleted rows rather than a separate lookup.
+/// A matching allocation moved to another interface while waiting for its
+/// original owner is left allocated, returning an empty vector.
 pub async fn delete_by_address_and_mac(
     txn: &mut PgConnection,
     address: IpAddr,
     mac_address: mac_address::MacAddress,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses mia
-        USING machine_interfaces mi
-        WHERE mia.interface_id = mi.id
-          AND mia.address = $1::inet
+    delete_address_allocation(txn, address, Some(mac_address), allocation_type).await
+}
+
+async fn delete_address_allocation(
+    txn: &mut PgConnection,
+    address: IpAddr,
+    mac_address: Option<MacAddress>,
+    allocation_type: AllocationType,
+) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
+    let query = "SELECT mi.id
+        FROM machine_interfaces mi
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE mia.address = $1::inet
           AND mia.allocation_type = $2
-          AND mi.mac_address = $3::macaddr
-        RETURNING mia.interface_id";
-    sqlx::query_scalar(query)
+          AND ($3::macaddr IS NULL OR mi.mac_address = $3::macaddr)
+        FOR UPDATE OF mi";
+    let Some(interface_id) = sqlx::query_scalar::<_, MachineInterfaceId>(query)
         .bind(address)
         .bind(allocation_type)
         .bind(mac_address)
-        .fetch_all(txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|error| DatabaseError::query(query, error))?
+    else {
+        return Ok(Vec::new());
+    };
+
+    // Read again after the parent lock, but keep the selected owner. An
+    // address moved to another interface while we waited must survive.
+    let removed =
+        delete_by_interface_and_address(txn, interface_id, address, allocation_type).await?;
+    Ok(removed.then_some(interface_id).into_iter().collect())
 }
 
 /// Check whether an interface has any address assigned for the
@@ -355,6 +760,7 @@ pub struct MachineInterfaceSearchResult {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -398,7 +804,101 @@ mod tests {
         }
     }
 
+    async fn wait_for_interface_lock(
+        pool: &sqlx::PgPool,
+        holder_pid: i32,
+        waiter_pid: i32,
+    ) -> Result<(), sqlx::Error> {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE pid = $2
+                      AND $1 = ANY(pg_blocking_pids(pid))
+                      AND strpos(lower(query), 'from machine_interfaces') > 0
+                      AND strpos(lower(query), 'for update') > 0
+                )",
+            )
+            .bind(holder_pid)
+            .bind(waiter_pid)
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Verifies the new SLAAC allocation type survives a database round trip.
+    /// The stored SOA serial of a zone.
+    async fn zone_serial(
+        txn: &mut PgConnection,
+        domain_id: carbide_uuid::domain::DomainId,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT (soa->>'serial')::bigint FROM domains WHERE id = $1")
+            .bind(domain_id)
+            .fetch_one(txn)
+            .await
+    }
+
+    // Address ownership is the inventory write that most often changes what a
+    // zone publishes. Prove the insert and delete paths advance the owning
+    // zone's serial; `bump_serial` itself is covered in `dns::domain`.
+    #[crate::sqlx_test]
+    async fn address_changes_advance_the_zone_serial(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let zone = crate::dns::domain::persist(
+            model::dns::NewDomain::new("serial-wiring.example"),
+            txn.as_mut(),
+        )
+        .await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, subdomain_id) VALUES ($1, 'V1-T0', $2)
+             RETURNING id",
+        )
+        .bind("serial-wiring")
+        .bind(zone.id)
+        .fetch_one(txn.as_mut())
+        .await?;
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                (segment_id, mac_address, primary_interface, hostname, domain_id)
+             VALUES ($1, '02:00:00:00:00:02'::macaddr, true, 'serial-wiring', $2)
+             RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(zone.id)
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        let created = zone_serial(txn.as_mut(), zone.id).await?;
+        insert(
+            txn.as_mut(),
+            interface_id,
+            "10.5.5.5".parse()?,
+            AllocationType::Dhcp,
+        )
+        .await?;
+        let after_insert = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(
+            after_insert > created,
+            "inserting an address advances the zone serial: {created} -> {after_insert}"
+        );
+
+        delete(txn.as_mut(), &interface_id).await?;
+        let after_delete = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(
+            after_delete > after_insert,
+            "deleting an address advances the zone serial: {after_insert} -> {after_delete}"
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn slaac_allocation_type_round_trips(
         pool: sqlx::PgPool,
@@ -436,6 +936,242 @@ mod tests {
         assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn static_assignment_rechecks_slaac_after_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('static-after-slaac', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:15".parse()?,
+            "static-after-slaac",
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .fetch_one(&mut *holder)
+            .await?;
+        insert(
+            &mut holder,
+            interface_id,
+            "2001:db8::15".parse()?,
+            AllocationType::Slaac,
+        )
+        .await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+        let static_address: IpAddr = "2001:db8::16".parse()?;
+
+        // The SLAAC row is uncommitted when static assignment starts. Wait for
+        // PostgreSQL to confirm the blocked writer before making it visible.
+        let assign_address = async {
+            let result = assign_static(&mut waiter, interface_id, static_address).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_observation = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (assignment, observation) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(assign_address, commit_observation)
+        })
+        .await?;
+        observation?;
+        assert_eq!(assignment?, AssignStaticResult::ReplacedDhcp);
+
+        let mut connection = pool.acquire().await?;
+        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, static_address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn address_deletion_preserves_owner_changed_while_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('expiry-after-owner-move', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let source_interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:16".parse()?,
+            "expiry-source",
+        )
+        .await?;
+        let destination_interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:17".parse()?,
+            "expiry-destination",
+        )
+        .await?;
+        let address: IpAddr = "2001:db8::20".parse()?;
+        insert(
+            &mut setup,
+            source_interface_id,
+            address,
+            AllocationType::Dhcp,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        let mut interface_ids = [source_interface_id, destination_interface_id];
+        interface_ids.sort();
+        for interface_id in interface_ids {
+            sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+                .bind(interface_id)
+                .fetch_one(&mut *holder)
+                .await?;
+        }
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let expire_address = async {
+            let deleted = delete_by_address(&mut waiter, address, AllocationType::Dhcp).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(deleted)
+        };
+        let move_address = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            // Admin reconciliation can move an existing DHCP row between
+            // interfaces. Expiry must not follow it to its new owner.
+            let moved = sqlx::query(
+                "UPDATE machine_interface_addresses SET interface_id = $1
+                 WHERE interface_id = $2 AND address = $3::inet AND allocation_type = 'dhcp'",
+            )
+            .bind(destination_interface_id)
+            .bind(source_interface_id)
+            .bind(address)
+            .execute(&mut *holder)
+            .await?;
+            assert_eq!(moved.rows_affected(), 1);
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (deletion, movement) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(expire_address, move_address)
+        })
+        .await?;
+        movement?;
+        assert!(deletion?.is_empty());
+
+        let mut connection = pool.acquire().await?;
+        assert!(
+            find_for_interface(&mut connection, source_interface_id)
+                .await?
+                .is_empty()
+        );
+        let addresses = find_for_interface(&mut connection, destination_interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn static_removal_preserves_replacement_after_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('static-removal-after-replacement', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:18".parse()?,
+            "static-removal-after-replacement",
+        )
+        .await?;
+        let original_address: IpAddr = "2001:db8::30".parse()?;
+        let replacement_address: IpAddr = "2001:db8::31".parse()?;
+        insert(
+            &mut setup,
+            interface_id,
+            original_address,
+            AllocationType::Static,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .fetch_one(&mut *holder)
+            .await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let remove_address = async {
+            let deleted = delete_by_interface_and_address(
+                &mut waiter,
+                interface_id,
+                original_address,
+                AllocationType::Static,
+            )
+            .await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(deleted)
+        };
+        let replace_address = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            let result = assign_static(&mut holder, interface_id, replacement_address).await?;
+            holder.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let (removal, replacement) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(remove_address, replace_address)
+        })
+        .await?;
+        assert_eq!(replacement?, AssignStaticResult::ReplacedStatic);
+        assert!(!removal?);
+
+        let mut connection = pool.acquire().await?;
+        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, replacement_address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
         Ok(())
     }
 
@@ -495,16 +1231,16 @@ mod tests {
             results => panic!("expected one address owner and one conflict, got {results:?}"),
         };
         match conflict {
-            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError(
-                conflict_address,
-                conflict_mac,
-                conflict_segment_id,
-                conflict_interface_id,
-            )) => {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address: conflict_address,
+                mac_address: conflict_mac,
+                segment_id: conflict_segment_id,
+                interface_id: conflict_interface_id,
+            }) => {
                 assert_eq!(conflict_address, address);
                 assert_eq!(conflict_mac, owner_mac);
-                assert_eq!(conflict_segment_id, segment_id);
-                assert_eq!(conflict_interface_id, owner_id);
+                assert_eq!(conflict_segment_id, Some(segment_id));
+                assert_eq!(conflict_interface_id, Some(owner_id));
             }
             error => panic!("expected an address-in-use error, got {error:?}"),
         }
@@ -645,6 +1381,450 @@ mod tests {
         }
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Old-shaped inserts that predate the reserved column keep working: an
+    /// interface-owned row needs no `reserved_by_mac`, and `allocation_type`
+    /// still defaults to `dhcp`.
+    #[crate::sqlx_test]
+    async fn active_interface_rows_insert_without_reserved_column(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('legacy-active-insert', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let interface_id =
+            create_test_interface(&mut txn, segment_id, "02:00:00:00:00:20".parse()?, "legacy")
+                .await?;
+
+        // Old two-column shape (no allocation_type, no reserved_by_mac).
+        sqlx::query(
+            "INSERT INTO machine_interface_addresses (interface_id, address)
+             VALUES ($1, '192.0.2.51'::inet)",
+        )
+        .bind(interface_id)
+        .execute(&mut *txn)
+        .await?;
+
+        let addresses = find_for_interface(&mut txn, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A row that names neither an active interface nor a reserved MAC has no
+    /// owner and is rejected by the ownership check.
+    #[crate::sqlx_test]
+    async fn ownerless_unreserved_row_rejected(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let error = sqlx::query(
+            "INSERT INTO machine_interface_addresses (address, allocation_type)
+             VALUES ('192.0.2.52'::inet, 'static')",
+        )
+        .execute(&mut *txn)
+        .await
+        .expect_err("an address with no interface and no reserved MAC should be rejected");
+        match error {
+            sqlx::Error::Database(error) => assert_eq!(
+                error.constraint(),
+                Some("machine_interface_addresses_owner_check"),
+            ),
+            error => panic!("expected a check-constraint error, got {error:?}"),
+        }
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A reservation persists with no interface row, still reserves its address
+    /// against allocators, and stays out of active-interface and discovery-style
+    /// joins.
+    #[crate::sqlx_test]
+    async fn reserved_address_persists_without_interface(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:21".parse()?;
+        let address: IpAddr = "192.0.2.53".parse()?;
+        insert_reserved(&mut txn, reserved_mac, address, AllocationType::Static).await?;
+
+        // Re-inserting the identical reservation is idempotent.
+        insert_reserved(&mut txn, reserved_mac, address, AllocationType::Static).await?;
+
+        // It reserves the address against the address-keyed allocator set.
+        let owner_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM machine_interface_addresses WHERE address = $1::inet",
+        )
+        .bind(address)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(owner_count, 1);
+
+        // It is invisible to active-interface lookups and discovery-style joins.
+        assert!(find_by_address(txn.as_mut(), address).await?.is_none());
+        let active_join: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM machine_interface_addresses mia
+             JOIN machine_interfaces mi ON mi.id = mia.interface_id
+             WHERE mia.address = $1::inet",
+        )
+        .bind(address)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(active_join, 0);
+
+        // Conflict handling can still name the reserved MAC owner.
+        let owner = find_address_owner(&mut txn, address)
+            .await?
+            .expect("reserved owner should be found");
+        assert_eq!(owner.interface_id, None);
+        assert_eq!(owner.mac_address, reserved_mac);
+        assert_eq!(owner.segment_id, None);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A MAC may hold at most one reservation per address family.
+    #[crate::sqlx_test]
+    async fn duplicate_reservation_for_mac_family_rejected(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:22".parse()?;
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "192.0.2.54".parse()?,
+            AllocationType::Static,
+        )
+        .await?;
+
+        let error = insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "192.0.2.55".parse()?,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("a second reserved IPv4 address for the same MAC should be rejected");
+        match error {
+            DatabaseError::FailedPrecondition(message) => {
+                assert!(message.contains("192.0.2.54"), "{message}");
+                assert!(message.contains(&reserved_mac.to_string()), "{message}");
+            }
+            error => panic!("expected a failed-precondition error, got {error:?}"),
+        }
+
+        // A different family for the same MAC is allowed.
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "2001:db8::54".parse()?,
+            AllocationType::Static,
+        )
+        .await?;
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A reservation and an active interface cannot both own one address, in
+    /// either order, and the conflict names the other owner.
+    #[crate::sqlx_test]
+    async fn reserved_and_active_ownership_conflict(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('reserved-active-conflict', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let interface_mac: MacAddress = "02:00:00:00:00:23".parse()?;
+        let interface_id =
+            create_test_interface(&mut txn, segment_id, interface_mac, "conflict-active").await?;
+
+        // Active first, then reserved: the reserved insert reports the active
+        // interface owner.
+        let active_address: IpAddr = "192.0.2.56".parse()?;
+        insert(
+            &mut txn,
+            interface_id,
+            active_address,
+            AllocationType::Static,
+        )
+        .await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:24".parse()?;
+        let error = insert_reserved(
+            &mut txn,
+            reserved_mac,
+            active_address,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("reserving an actively owned address should be rejected");
+        match error {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address,
+                mac_address,
+                segment_id: conflict_segment,
+                interface_id: conflict_interface,
+            }) => {
+                assert_eq!(address, active_address);
+                assert_eq!(mac_address, interface_mac);
+                assert_eq!(conflict_segment, Some(segment_id));
+                assert_eq!(conflict_interface, Some(interface_id));
+            }
+            error => panic!("expected an address-in-use error, got {error:?}"),
+        }
+
+        // Reserved first, then active: the active insert reports the reserved
+        // MAC owner with no interface id.
+        let reserved_address: IpAddr = "192.0.2.57".parse()?;
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            reserved_address,
+            AllocationType::Static,
+        )
+        .await?;
+        let error = insert(
+            &mut txn,
+            interface_id,
+            reserved_address,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("claiming a reserved address for an interface should be rejected");
+        match error {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address,
+                mac_address,
+                segment_id: conflict_segment,
+                interface_id: conflict_interface,
+            }) => {
+                assert_eq!(address, reserved_address);
+                assert_eq!(mac_address, reserved_mac);
+                assert_eq!(conflict_segment, None);
+                assert_eq!(conflict_interface, None);
+            }
+            error => panic!("expected an address-in-use error, got {error:?}"),
+        }
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// The full marker-driven lifecycle: mark one family, delete the interface
+    /// so the marked address parks while the unmarked one is removed, then
+    /// restore the parked address onto a re-ingested interface for the same MAC.
+    #[crate::sqlx_test]
+    async fn mark_park_and_restore_lifecycle(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('mark-park-restore', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:30".parse()?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "lifecycle").await?;
+
+        let v4: IpAddr = "192.0.2.60".parse()?;
+        let v6: IpAddr = "2001:db8::60".parse()?;
+        insert(&mut txn, interface_id, v4, AllocationType::Static).await?;
+        insert(&mut txn, interface_id, v6, AllocationType::Static).await?;
+
+        // Mark only the IPv6 address; IPv4 stays unmarked.
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);
+
+        // Deleting the interface parks the marked IPv6 and removes the IPv4.
+        crate::machine_interface::delete(&interface_id, &mut txn, false).await?;
+
+        assert!(find_by_address(txn.as_mut(), v4).await?.is_none());
+        let reserved = find_reserved(&mut txn, Some(mac), None).await?;
+        assert_eq!(
+            reserved,
+            vec![ReservedAddress {
+                address: v6,
+                reserved_by_mac: mac,
+                allocation_type: AllocationType::Static,
+            }]
+        );
+
+        // Another MAC cannot claim the parked reservation.
+        let other_segment_interface =
+            create_test_interface(&mut txn, segment_id, "02:00:00:00:00:31".parse()?, "other")
+                .await?;
+        assert!(
+            restore_reserved(
+                &mut txn,
+                other_segment_interface,
+                "02:00:00:00:00:31".parse()?,
+                IpAddressFamily::Ipv6,
+            )
+            .await?
+            .is_none()
+        );
+
+        // The same MAC re-ingests and reclaims its parked address.
+        let reingested = create_test_interface(&mut txn, segment_id, mac, "reingested").await?;
+        let restored = restore_reserved(&mut txn, reingested, mac, IpAddressFamily::Ipv6).await?;
+        assert_eq!(restored, Some(v6));
+        assert!(find_reserved(&mut txn, Some(mac), None).await?.is_empty());
+        let addresses = find_for_interface(&mut txn, reingested).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, v6);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Releasing by MAC frees only that MAC's parked reservation; an active
+    /// marked address on the same MAC keeps its interface and is never released.
+    #[crate::sqlx_test]
+    async fn release_reserved_frees_parked_addresses(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('release-parked-only', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:32".parse()?;
+        let parked: IpAddr = "192.0.2.61".parse()?;
+        let active: IpAddr = "2001:db8::32".parse()?;
+
+        // Parked IPv4 reservation (no interface) and an active, marked IPv6 on the
+        // same MAC (interface attached). Both carry the MAC as owner.
+        insert_reserved(&mut txn, mac, parked, AllocationType::Static).await?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "release").await?;
+        insert(&mut txn, interface_id, active, AllocationType::Static).await?;
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);
+
+        // Only the parked row is a reservation; the active marked row is not.
+        assert_eq!(
+            find_reserved(&mut txn, None, None).await?,
+            vec![ReservedAddress {
+                address: parked,
+                reserved_by_mac: mac,
+                allocation_type: AllocationType::Static,
+            }]
+        );
+
+        let released = release_reserved(&mut txn, Some(mac), None).await?;
+        assert_eq!(released, vec![parked]);
+
+        // The parked address is gone; the active IPv6 keeps its interface.
+        assert!(find_reserved(&mut txn, None, None).await?.is_empty());
+        assert!(find_by_address(txn.as_mut(), parked).await?.is_none());
+        // find_by_address only resolves active interface addresses, so a match
+        // proves the marked IPv6 still has its interface.
+        let active_row = find_by_address(txn.as_mut(), active)
+            .await?
+            .expect("active marked address must survive a release by MAC");
+        assert_eq!(active_row.id, interface_id);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A force wipe deletes the interface and releases its marked addresses
+    /// instead of parking them.
+    #[crate::sqlx_test]
+    async fn force_wipe_releases_marked_addresses(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('force-wipe-release', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:33".parse()?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "wipe").await?;
+        let v4: IpAddr = "192.0.2.62".parse()?;
+        insert(&mut txn, interface_id, v4, AllocationType::Static).await?;
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv4).await?);
+
+        crate::machine_interface::delete(&interface_id, &mut txn, true).await?;
+
+        assert!(find_reserved(&mut txn, None, None).await?.is_empty());
+        assert!(find_by_address(txn.as_mut(), v4).await?.is_none());
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A mark that races an interface teardown must serialize behind the same
+    /// interface lock the teardown holds. Once the teardown commits, the mark
+    /// observes the deleted interface, reports `false`, and creates no
+    /// reservation, so the wiped address cannot reappear as a parked owner.
+    #[crate::sqlx_test]
+    async fn mark_blocks_on_concurrent_interface_deletion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('mark-races-deletion', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:34".parse()?;
+        let interface_id = create_test_interface(&mut setup, segment_id, mac, "mark-race").await?;
+        let address: IpAddr = "192.0.2.63".parse()?;
+        insert(&mut setup, interface_id, address, AllocationType::Static).await?;
+        setup.commit().await?;
+
+        // The teardown holds the interface lock through its park and delete.
+        let mut holder = pool.begin().await?;
+        crate::machine_interface::delete(&interface_id, &mut holder, false).await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let mark = async {
+            let marked = mark_reserved(&mut waiter, interface_id, IpAddressFamily::Ipv4).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(marked)
+        };
+        let teardown = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (mark_result, teardown_result) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(mark, teardown)
+        })
+        .await?;
+        teardown_result?;
+        // The interface is gone, so nothing was marked.
+        assert!(!mark_result?);
+
+        let mut connection = pool.acquire().await?;
+        assert!(find_reserved(&mut connection, None, None).await?.is_empty());
+        assert!(find_by_address(&mut *connection, address).await?.is_none());
         Ok(())
     }
 }

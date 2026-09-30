@@ -258,6 +258,27 @@ impl UpstreamStatus {
     }
 }
 
+/// The BMC rejected the proxy's cached credential (typically an expired
+/// Redfish session), so the proxy re-resolved credentials and replayed the
+/// request once. Callers never see the stale-session 401; a second rejection
+/// is returned to them as-is.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_upstream_auth_retried",
+    metric_name = "carbide_bmc_proxy_upstream_auth_retries_total",
+    component = "nico-bmc-proxy",
+    log = info,
+    metric = counter,
+    message = "upstream rejected cached BMC credentials; retrying with fresh credentials",
+    describe = "Number of forwarded requests replayed once with freshly resolved BMC credentials after the BMC rejected the proxy's cached credential, by HTTP method"
+)]
+pub(crate) struct UpstreamAuthRetried {
+    #[label]
+    pub(crate) method: MethodLabel,
+    #[context]
+    pub(crate) bmc_ip_address: String,
+}
+
 /// A request the proxy forwarded to a BMC completed, successfully or not.
 /// The duration covers the upstream leg through the response headers;
 /// response bodies stream back separately. One send may follow up to five
@@ -288,7 +309,7 @@ mod tests {
     use std::time::Duration;
 
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use opentelemetry::StringValue;
     use tokio::time::timeout;
@@ -741,9 +762,10 @@ mod tests {
             "carbide_bmc_proxy_upstream_request_duration_milliseconds",
             &[("method", "patch"), ("status", "http5xx")],
         );
-        assert!(
-            (sum - 2000.0).abs() < 1e-9,
-            "1500ms + 500ms record as milliseconds, got {sum}"
+        assert_eq!(
+            sum,
+            ApproxHistogramSum(2000.0),
+            "1500ms + 500ms record as milliseconds"
         );
         assert_eq!(
             metrics.histogram_count_delta(

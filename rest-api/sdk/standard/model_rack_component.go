@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the RackComponent type satisfies the MappedNullable interface at compile time
@@ -22,11 +24,9 @@ var _ MappedNullable = &RackComponent{}
 
 // RackComponent A component within a Rack (e.g. compute node, switch, PDU)
 type RackComponent struct {
-	// Unique identifier of the component
+	// Component ID
 	Id *string `json:"id,omitempty"`
-	// ID of the component
-	ComponentId *string `json:"componentId,omitempty"`
-	// ID of the rack this component belongs to
+	// ID of the Rack this component belongs to
 	RackId *string `json:"rackId,omitempty"`
 	// Type of the component (e.g. Compute, NVSwitch, PowerShelf)
 	Type *string `json:"type,omitempty"`
@@ -55,15 +55,21 @@ type RackComponent struct {
 	// Flow-derived operability phase of the component
 	OperationStatus *string `json:"operationStatus,omitempty"`
 	// Whether the component is considered leaking coolant
-	LeakStatus *string `json:"leakStatus,omitempty"`
+	LeakStatus         *string             `json:"leakStatus,omitempty"`
+	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
+	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+	Health NullableAggregateHealth `json:"health"`
 }
+
+type _RackComponent RackComponent
 
 // NewRackComponent instantiates a new RackComponent object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackComponent() *RackComponent {
+func NewRackComponent(health NullableAggregateHealth) *RackComponent {
 	this := RackComponent{}
+	this.Health = health
 	return &this
 }
 
@@ -105,38 +111,6 @@ func (o *RackComponent) HasId() bool {
 // SetId gets a reference to the given string and assigns it to the Id field.
 func (o *RackComponent) SetId(v string) {
 	o.Id = &v
-}
-
-// GetComponentId returns the ComponentId field value if set, zero value otherwise.
-func (o *RackComponent) GetComponentId() string {
-	if o == nil || IsNil(o.ComponentId) {
-		var ret string
-		return ret
-	}
-	return *o.ComponentId
-}
-
-// GetComponentIdOk returns a tuple with the ComponentId field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *RackComponent) GetComponentIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ComponentId) {
-		return nil, false
-	}
-	return o.ComponentId, true
-}
-
-// HasComponentId returns a boolean if a field has been set.
-func (o *RackComponent) HasComponentId() bool {
-	if o != nil && !IsNil(o.ComponentId) {
-		return true
-	}
-
-	return false
-}
-
-// SetComponentId gets a reference to the given string and assigns it to the ComponentId field.
-func (o *RackComponent) SetComponentId(v string) {
-	o.ComponentId = &v
 }
 
 // GetRackId returns the RackId field value if set, zero value otherwise.
@@ -619,6 +593,64 @@ func (o *RackComponent) SetLeakStatus(v string) {
 	o.LeakStatus = &v
 }
 
+// GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
+func (o *RackComponent) GetLeakHandlingStatus() LeakHandlingStatus {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		var ret LeakHandlingStatus
+		return ret
+	}
+	return *o.LeakHandlingStatus
+}
+
+// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *RackComponent) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		return nil, false
+	}
+	return o.LeakHandlingStatus, true
+}
+
+// HasLeakHandlingStatus returns a boolean if a field has been set.
+func (o *RackComponent) HasLeakHandlingStatus() bool {
+	if o != nil && !IsNil(o.LeakHandlingStatus) {
+		return true
+	}
+
+	return false
+}
+
+// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+func (o *RackComponent) SetLeakHandlingStatus(v LeakHandlingStatus) {
+	o.LeakHandlingStatus = &v
+}
+
+// GetHealth returns the Health field value
+// If the value is explicit nil, the zero value for AggregateHealth will be returned
+func (o *RackComponent) GetHealth() AggregateHealth {
+	if o == nil || o.Health.Get() == nil {
+		var ret AggregateHealth
+		return ret
+	}
+
+	return *o.Health.Get()
+}
+
+// GetHealthOk returns a tuple with the Health field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RackComponent) GetHealthOk() (*AggregateHealth, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Health.Get(), o.Health.IsSet()
+}
+
+// SetHealth sets field value
+func (o *RackComponent) SetHealth(v AggregateHealth) {
+	o.Health.Set(&v)
+}
+
 func (o RackComponent) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -631,9 +663,6 @@ func (o RackComponent) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	if !IsNil(o.Id) {
 		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.ComponentId) {
-		toSerialize["componentId"] = o.ComponentId
 	}
 	if !IsNil(o.RackId) {
 		toSerialize["rackId"] = o.RackId
@@ -680,7 +709,47 @@ func (o RackComponent) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.LeakStatus) {
 		toSerialize["leakStatus"] = o.LeakStatus
 	}
+	if !IsNil(o.LeakHandlingStatus) {
+		toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
+	}
+	toSerialize["health"] = o.Health.Get()
 	return toSerialize, nil
+}
+
+func (o *RackComponent) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"health",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varRackComponent := _RackComponent{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varRackComponent)
+
+	if err != nil {
+		return err
+	}
+
+	*o = RackComponent(varRackComponent)
+
+	return err
 }
 
 type NullableRackComponent struct {

@@ -16,6 +16,7 @@
  */
 
 mod chassis;
+mod component_integrity;
 mod computer_system;
 mod error;
 pub mod hw;
@@ -37,8 +38,8 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
-    EndpointExplorationReport, EndpointType, InternalLockdownStatus, LockdownStatus,
-    MachineSetupDiff, MachineSetupStatus,
+    ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -51,10 +52,9 @@ use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
 use nv_redfish::oem::lenovo::security_service::FwRollbackState;
 use nv_redfish::oem::supermicro::Privilege as SupermicroPrivilege;
-use nv_redfish::resource::{ResourceIdRef, ResourceNameRef};
 pub use nv_redfish::service_root::Product;
 use nv_redfish::service_root::Vendor;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 #[derive(PartialEq, Eq)]
 pub enum ErrorClass {
@@ -64,8 +64,8 @@ pub enum ErrorClass {
 
 pub type ErrorClassifier<'a, B> = &'a (dyn Fn(&<B as Bmc>::Error) -> Option<ErrorClass> + Sync);
 
-fn is_bluefield_system_id(id: ResourceIdRef<'_>) -> bool {
-    matches!(id.into_inner(), "Bluefield" | "BlueField_0")
+fn is_bluefield_system_id(id: &str) -> bool {
+    matches!(id, "Bluefield" | "BlueField_0")
 }
 
 pub struct Config<'a, B: Bmc> {
@@ -103,7 +103,7 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
         need_assembly_sn: |id| {
             // For GB200 and Vera Rubin hosts, use the Chassis_0 assembly serial
             // number to match Nautobot / expected-machine inventory serials.
-            (*id.inner() == "Chassis_0").then_some(|model| {
+            (id == "Chassis_0").then_some(|model| {
                 model.is_some_and(|model| {
                     hw::vera_rubin::chassis_assembly_serial_model(model.into_inner())
                 }) || model == Some(AssemblyModel::new("GB200 NVL"))
@@ -124,7 +124,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// `bmc` is the client `root` was fetched through. It is passed separately
+/// because nv-redfish keeps the service root's client private, and the
+/// `ComponentIntegrity` collection is a resource nv-redfish does not model.
 pub async fn nv_generate_exploration_report<B: Bmc>(
+    bmc: &B,
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
@@ -132,13 +136,20 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
+    let component_integrities = component_integrity::explore(bmc, &root).await;
 
     // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
     // report no vendor in the service root, so nv-redfish fabricates the path
     // and gets a 404). Detect them from the chassis and synthesize the report
     // from chassis + manager data instead of fetching a ComputerSystem.
     if explored_chassis.is_delta_powershelf() {
-        return build_delta_powershelf_report(&root, explored_chassis, explored_inventories).await;
+        return build_delta_powershelf_report(
+            &root,
+            explored_chassis,
+            explored_inventories,
+            component_integrities,
+        )
+        .await;
     }
 
     if explored_chassis.is_bluefield2() {
@@ -173,7 +184,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .next()
         .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
 
-    let is_bluefield_system = is_bluefield_system_id(system.id());
+    let is_bluefield_system = is_bluefield_system_id(&system.raw().id);
     let system_explore_config = computer_system::Config {
         need_oem_nvidia_bluefield: is_bluefield_system,
         ignore_500_on_bios_fetch: is_bluefield_system,
@@ -236,7 +247,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let pcie_devices = explored_chassis
         .pcie_devices(|chassis| match hw_type {
             Some(hw::HwType::Viking) => {
-                let chassis_id = chassis.chassis.id().into_inner();
+                let chassis_id = chassis.chassis.raw().id.clone();
                 chassis_id.starts_with("HGX_GPU_SXM") || chassis_id.starts_with("HGX_NVSwitch")
             }
             // When needed Chassis Id is equal to System Id.
@@ -246,7 +257,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 | hw::HwType::Hpe
                 | hw::HwType::Lenovo
                 | hw::HwType::Supermicro,
-            ) => chassis.chassis.id().into_inner() == explored_system.system.id().into_inner(),
+            ) => chassis.chassis.raw().id == explored_system.system.raw().id,
             // Provides only one Chassis.
             Some(hw::HwType::LenovoAmi) => true,
             Some(
@@ -254,7 +265,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 | hw::HwType::DgxGb300
                 | hw::HwType::SupermicroGb300
                 | hw::HwType::VeraRubin,
-            ) => chassis.chassis.id().into_inner().starts_with("HGX_GPU_"),
+            ) => chassis.chassis.raw().id.starts_with("HGX_GPU_"),
             // No meaningful PCIeDevices.
             Some(
                 hw::HwType::Bluefield
@@ -279,10 +290,17 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .transpose()?
         .and_then(identity);
 
-    let secure_boot_status = explored_system
-        .secure_boot_status()
-        .inspect_err(|error| tracing::warn!(%error, "Failed to fetch forge secure boot status."))
-        .ok();
+    let secure_boot_status = match hw_type {
+        Some(hw::HwType::LiteonPowerShelf | hw::HwType::DeltaPowerShelf | hw::HwType::NvSwitch) => {
+            None
+        }
+        _ => explored_system
+            .secure_boot_status()
+            .inspect_err(
+                |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
+            )
+            .ok(),
+    };
 
     let machine_setup_status = hw_type
         .map(|hw_type| {
@@ -308,6 +326,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let system = explored_system.to_model(hw_type, &explored_chassis, &pcie_devices)?;
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
+    let hardware_class = hardware_class(&root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -318,7 +337,10 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service,
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -367,6 +389,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
+    component_integrities: component_integrity::Observation,
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let hw_type = hw::HwType::DeltaPowerShelf;
 
@@ -384,6 +407,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     let explored_manager = ExploredManager::explore(manager, &manager::Config::default()).await?;
 
     let system = explored_chassis.synthesized_powershelf_system();
+    let hardware_class = hardware_class(root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -394,7 +418,10 @@ async fn build_delta_powershelf_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -414,13 +441,29 @@ async fn build_delta_powershelf_report<B: Bmc>(
     })
 }
 
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
+fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
+    derive_hardware_class(
+        Some(system),
+        root.vendor().map(Vendor::into_inner),
+        root.product().map(Product::into_inner),
+    )
+}
+
 pub(crate) fn hw_type<B: Bmc>(
     root: &nv_redfish::ServiceRoot<B>,
     explored_system: &ExploredComputerSystem<B>,
     explored_chassis: &ExploredChassisCollection<B>,
 ) -> Option<hw::HwType> {
     let system = &explored_system.system;
-    let oem_id = root.oem_id().map(|v| v.into_inner());
+    let oem_id = root
+        .root
+        .oem
+        .as_ref()
+        .and_then(|oem| oem.additional_properties.as_object())
+        .and_then(|properties| properties.keys().next())
+        .map(String::as_str);
 
     // GB300 is an NVIDIA HGX platform identity, recognized by the NVIDIA "NVIDIA GB300"
     // GPU chassis (`is_gb300()`) independent of the host BMC vendor. Resolve it before the
@@ -449,14 +492,14 @@ pub(crate) fn hw_type<B: Bmc>(
         .map(|v| v.into_inner())
         .or_else(|| (oem_id == Some("Supermicro")).then_some("Supermicro"))
         .and_then(|vendor_id| match vendor_id {
-            "AMI" if system.id().into_inner() == "DGX" => Some(hw::HwType::Viking),
+            "AMI" if system.raw().id == "DGX" => Some(hw::HwType::Viking),
             "AMI" => Some(hw::HwType::Ami),
             "Dell" => Some(hw::HwType::Dell),
             "Lenovo" if oem_id == Some("Ami") => Some(hw::HwType::LenovoAmi),
             "Lenovo" if oem_id != Some("Ami") => Some(hw::HwType::Lenovo),
             "Supermicro" => Some(hw::HwType::Supermicro),
             "HPE" => Some(hw::HwType::Hpe),
-            "Nvidia" if is_bluefield_system_id(system.id()) => Some(hw::HwType::Bluefield),
+            "Nvidia" if is_bluefield_system_id(&system.raw().id) => Some(hw::HwType::Bluefield),
             "NVIDIA" if root.product() == Some(Product::new("VR NVL72")) => {
                 Some(hw::HwType::VeraRubin)
             }
@@ -657,7 +700,7 @@ fn lockdown_status<B: Bmc>(
             let eth_usb = explored_manager
                 .eth_interfaces
                 .iter()
-                .find(|iface| *iface.id().inner() == "ToHost")
+                .find(|iface| iface.raw().id == "ToHost")
                 .and_then(|iface| iface.interface_enabled())
                 .ok_or(Error::BmcNotProvided(
                     "Lenovo manager ethernet interfaces: enabled property",
@@ -903,11 +946,11 @@ fn machine_setup_status<B: Bmc>(
                         .bios
                         .as_ref()
                         .and_then(|bios| bios.attribute("HttpDev1Interface"))
-                        && actual.str_value() != Some(function.id().into_inner())
+                        && actual.str_value() != Some(&function.raw().id)
                     {
                         diffs.push(MachineSetupDiff {
                             key: "HttpDev1Interface".to_string(),
-                            expected: function.id().into_inner().to_string(),
+                            expected: function.raw().id.clone(),
                             actual: actual.str_value().unwrap_or("unexpected type").to_string(),
                         })
                     }
@@ -917,7 +960,7 @@ fn machine_setup_status<B: Bmc>(
                             .related_item
                             .iter()
                             .flatten()
-                            .any(|v| &v.odata_id == function.odata_id())
+                            .any(|v| v.odata_id == function.raw().odata_id)
                     })
                 } else {
                     None
@@ -939,14 +982,14 @@ fn machine_setup_status<B: Bmc>(
             );
 
             // Boot order:
-            let expected_name = ResourceNameRef::new("Network");
+            let expected_name = "Network";
             if let Some(actual_opt) = explored_system.boot_order_first_option()
-                && actual_opt.name() != expected_name
+                && actual_opt.raw().name != expected_name
             {
                 diffs.push(MachineSetupDiff {
                     key: "boot_first_type".to_string(),
                     expected: expected_name.to_string(),
-                    actual: actual_opt.name().to_string(),
+                    actual: actual_opt.raw().name.clone(),
                 });
             }
         }
@@ -1173,25 +1216,25 @@ fn compare_boot_options<B: Bmc>(
     expected: Option<&BootOption<B>>,
     actual: Option<&BootOption<B>>,
 ) -> Option<MachineSetupDiff> {
-    if expected.is_none() || actual.map(|v| v.id()) != expected.map(|v| v.id()) {
+    if expected.is_none()
+        || actual.map(|v| v.raw().id.clone()) != expected.map(|v| v.raw().id.clone())
+    {
         Some(MachineSetupDiff {
             key: "boot_first".to_string(),
             expected: expected
                 .map(|v| {
                     v.display_name()
-                        .map(|v| v.into_inner())
-                        .unwrap_or(v.id().into_inner())
+                        .map(|v| v.into_inner().to_string())
+                        .unwrap_or_else(|| v.raw().id.clone())
                 })
-                .unwrap_or("Not found")
-                .to_string(),
+                .unwrap_or_else(|| "Not found".to_string()),
             actual: actual
                 .map(|v| {
                     v.display_name()
-                        .map(|v| v.into_inner())
-                        .unwrap_or(v.id().into_inner())
+                        .map(|v| v.into_inner().to_string())
+                        .unwrap_or_else(|| v.raw().id.clone())
                 })
-                .unwrap_or("Not found")
-                .to_string(),
+                .unwrap_or_else(|| "Not found".to_string()),
         })
     } else {
         None

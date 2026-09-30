@@ -23,7 +23,9 @@ import (
 	operationrunmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
@@ -393,13 +395,22 @@ func TestListOperationRunsRejectsInvalidFilter(t *testing.T) {
 
 func TestListOperationRunTargetsReturnsTargets(t *testing.T) {
 	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	target := testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusBlocked)
 	manager := &mockOperationRunManager{
 		listTargets: []*operationrun.OperationRunTarget{
-			testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusBlocked),
+			target,
 		},
 		listTargetsTotal: 2,
 	}
-	server := &FlowServerImpl{operationRunManager: manager}
+	inventory := newMockManager()
+	inventory.racks[target.RackID] = &rack.Rack{
+		Info:       deviceinfo.DeviceInfo{ID: target.RackID},
+		ExternalID: "rack-01",
+	}
+	server := &FlowServerImpl{
+		operationRunManager: manager,
+		inventoryManager:    inventory,
+	}
 
 	resp, err := server.ListOperationRunTargets(
 		context.Background(),
@@ -429,6 +440,17 @@ func TestListOperationRunTargetsReturnsTargets(t *testing.T) {
 		pb.OperationRunTargetStatus_OPERATION_RUN_TARGET_STATUS_BLOCKED,
 		resp.GetTargets()[0].GetStatus(),
 	)
+	require.Equal(t, "rack-01", resp.GetTargets()[0].GetRackExternalId())
+
+	t.Run("rack without recoverable external ID is rejected", func(t *testing.T) {
+		delete(inventory.racks, target.RackID)
+		resp, err := server.ListOperationRunTargets(
+			context.Background(),
+			&pb.ListOperationRunTargetsRequest{OperationRunId: protobuf.UUIDTo(runID)},
+		)
+		require.Nil(t, resp)
+		require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	})
 }
 
 func TestListOperationRunTargetsRejectsInvalidID(t *testing.T) {

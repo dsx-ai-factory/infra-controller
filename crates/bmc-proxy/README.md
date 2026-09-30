@@ -29,6 +29,8 @@ Important configuration fields:
 - `auth.acls`: per-principal ACL rules for HTTP method and path authorization
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
 - `bmc_proxy`: optional upstream override for dev/test chaining
+- `class`: optional request classes that set how long the proxy waits on the
+  BMC; see [`class`](#class)
 
 Example shape:
 
@@ -94,6 +96,9 @@ Path matching syntax:
 - `prefix*` matches one path component with the given prefix.
 - `*suffix` matches one path component with the given suffix.
 - `**` matches zero or more path components.
+- A single trailing slash does not create another path component. For example,
+  `/redfish/v1/` matches `/redfish/v1`. Some clients include this slash when
+  requesting the Redfish service root.
 - A single `*` may appear by itself, at the beginning, or at the end of a path component.
   Valid: `/redfish/v1/Systems/*/SecureBoot/**`
   Valid: `/redfish/v1/Systems/system*/SecureBoot`
@@ -115,6 +120,50 @@ Examples:
 If you are translating endpoint docs into ACLs, replace templated path components such as
 `{id}`, `{session_id}`, or `{policy_id}` with `*`.
 
+### `class`
+
+Each `[[class]]` table groups proxied requests that share an upstream budget:
+
+```toml
+[[class]]
+name = "inventory"
+match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
+upstream_timeout = "3m"
+
+[[class]]
+name = "default"
+upstream_timeout = "90s"
+```
+
+- `name`: the class's name on the request's trace span, as `bmc_proxy.class`.
+  A lowercase letter followed by lowercase letters, digits, or `_`, at most
+  32 characters in all, and unique across the tables.
+- `match`: an array of the requests the class takes, each written like an ACL
+  entry without a leading `!`: optional comma-separated methods (`GET`,
+  `HEAD`, `POST`, `PUT`, `PATCH`, or `DELETE`, in any case), then a path in
+  the syntax above. Required for every class but `default`.
+- `upstream_timeout`: how long one exchange with the BMC may take, as a
+  duration string such as `"500ms"`, `"45s"`, or `"5m"`, above zero and at
+  most 30 minutes. A class that omits it gets 60 seconds, not the `default`
+  class's budget.
+
+The budget runs from connecting to the BMC until the proxy has read the last
+byte of the BMC's response body, redirects the proxy follows included. Most
+bodies are passed on to the caller as they are read, so a slow caller spends
+the budget too. When the budget runs out before the BMC answers, the caller
+gets `502`; when it runs out while the body is being passed on, the body is
+cut off. A request the proxy replays with fresh credentials gets a budget of
+its own. A streamed upload (a body over 8 MiB that declares its length)
+ignores its class's budget and scales its own from its declared size: 60
+seconds plus the transfer at 10 kB/s, at most four hours.
+
+A request belongs to the first class, in file order, with a matching pattern.
+A request no class matches belongs to `default`, whose budget is 60 seconds;
+declare `default`, without `match`, only to change that. A budget longer than
+the caller's own deadline does not help that caller. A `[[class]]` table that
+breaks these rules, or has a key not listed here, stops the proxy from
+starting.
+
 ## Example Request
 
 ```bash
@@ -126,7 +175,6 @@ curl --http2 \
 ```
 
 The client chooses the BMC by IP. The proxy performs authentication, credential lookup, and backend authentication.
-
 
 ## Why?
 
@@ -141,19 +189,17 @@ An alternative approach is to have nico-api be the only service that talks to BM
 
 ## What's Using It?
 
-Currently (as of 2026-04-10), nothing yet.
+nico-api routes its own eligible BMC Redfish traffic through nico-bmc-proxy when its static `[bmc_proxy]` configuration section is enabled: machine-lifecycle traffic and the credentialed exploration of endpoints whose stored root credential is established. Credential-subject operations (credential setup, BMC session minting, password rotation, UEFI password management) and the other documented exceptions stay direct, so nico-api still holds BMC credentials. The routing contract, including every direct-path exception, is in [`crates/api-core/src/cfg/README.md`](../api-core/src/cfg/README.md#bmcproxyconfig--bmc_proxy).
 
 We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMC's. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
 
-nico-api itself is *not* using this, yet. But it does support configuring a bmc-proxy URL via the `bmc_proxy` config setting, which will work if pointed at a running instance of this crate.
-
-Future work can implement a mode in nico-api where it doesn't know about any BMC credentials, and would make all calls through nico-bmc-proxy instead.
+Future work can move the remaining direct paths behind the proxy so that nico-api no longer holds BMC credentials at all.
 
 ## Architecture
 
 Today, the proxy reuses existing NICo-adjacent building blocks:
 
-- `nico-authn`:  mTLS and SPIFFE principal extraction
+- `nico-authn`: mTLS and SPIFFE principal extraction
 - `nico-rpc`: nico-api gRPC client used for BMC IP resolution and credential lookup
 
 ### Dependency View
@@ -171,7 +217,7 @@ flowchart LR
     Proxy --> BMC
 ```
 
-The important point in this picture is that both `nico-api` and external peers can consume the same proxy. Neither needs direct access to BMC passwords.
+The important point in this picture is that both `nico-api` and external peers consume the same proxy. External peers never need BMC passwords. nico-api still holds them: it is the proxy's credential source, and its credential-subject operations dial BMCs directly.
 
 ### Trust Boundary View
 

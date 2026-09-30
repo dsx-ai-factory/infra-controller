@@ -107,7 +107,13 @@ pub async fn save(
     let execute_in_host = req.execute_in_host.unwrap_or(false);
     let timeout = req.timeout.unwrap_or(7200);
     let read_only = req.read_only.unwrap_or(false);
-    let is_enabled = req.is_enabled.unwrap_or(true);
+    // Plugin revisions must be explicitly verified before they can be enabled.
+    let is_enabled = if req.plugin.is_some() {
+        false
+    } else {
+        req.is_enabled.unwrap_or(true)
+    };
+    let plugin = req.plugin.clone().map(sqlx::types::Json);
     let img_name = req.img_name.clone();
     let container_arg = req.container_arg.clone();
     let external_config_file = req.external_config_file.clone();
@@ -147,9 +153,10 @@ pub async fn save(
             read_only,
             custom_tags,
             components,
-            is_enabled
+            is_enabled,
+            plugin
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
         )
         RETURNING test_id
         "#,
@@ -176,6 +183,7 @@ pub async fn save(
     .bind(custom_tags.as_ref())
     .bind(&components)
     .bind(is_enabled)
+    .bind(plugin)
     .fetch_one(txn)
     .await
     .map_err(|e| DatabaseError::query("INSERT machine_validation_tests", e))?;
@@ -305,6 +313,7 @@ pub async fn clone(
         custom_tags: test.custom_tags.clone().unwrap_or_default(),
         components: test.components.clone(),
         is_enabled: Some(test.is_enabled),
+        plugin: test.plugin.clone(),
     };
     let next_version = test.version.increment();
     let test_id = save(txn, add_req, next_version).await?;
@@ -333,10 +342,33 @@ pub async fn enable_disable(
     version: ConfigVersion,
     is_enabled: bool,
     is_verified: bool,
+    is_plugin: bool,
 ) -> DatabaseResult<String> {
+    let version = version.version_string();
+    let is_enabled = is_enabled && (!is_plugin || is_verified);
+    if is_enabled && is_plugin {
+        // Run items are keyed by test ID. Keep one enabled revision for a
+        // plugin family so later selection has one unambiguous definition.
+        sqlx::query("SELECT 1 FROM machine_validation_tests WHERE test_id = $1 FOR UPDATE")
+            .bind(&test_id)
+            .execute(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::query("lock machine validation plugin revisions", e))?;
+        sqlx::query(
+            "UPDATE machine_validation_tests SET is_enabled = FALSE \
+             WHERE test_id = $1 AND version <> $2 AND plugin IS NOT NULL AND is_enabled = TRUE",
+        )
+        .bind(&test_id)
+        .bind(&version)
+        .execute(&mut *txn)
+        .await
+        .map_err(|e| {
+            DatabaseError::query("disable previous machine validation plugin revisions", e)
+        })?;
+    }
     let req = MachineValidationTestUpdateRequest {
         test_id,
-        version: version.version_string(),
+        version,
         payload: Some(MachineValidationTestUpdatePayload {
             is_enabled: Some(is_enabled),
             verified: Some(is_verified),
@@ -344,6 +376,30 @@ pub async fn enable_disable(
         }),
     };
     update(txn, req).await
+}
+
+/// Record the separate, revision-scoped approval required for a plugin with a
+/// writable host-root mount. The API validates eligibility before calling this.
+pub async fn approve_full_host(
+    txn: &mut PgConnection,
+    test_id: String,
+    version: ConfigVersion,
+) -> DatabaseResult<String> {
+    let version = version.version_string();
+    sqlx::query_scalar::<Postgres, String>(
+        "UPDATE machine_validation_tests SET full_host_approved = TRUE \
+         WHERE test_id = $1 AND version = $2 RETURNING test_id",
+    )
+    .bind(&test_id)
+    .bind(&version)
+    .fetch_optional(txn)
+    .await
+    .map_err(|e| DatabaseError::query("approve machine validation full-host access", e))?
+    .ok_or_else(|| {
+        DatabaseError::InvalidArgument(format!(
+            "machine validation test revision not found: {test_id} {version}"
+        ))
+    })
 }
 
 #[cfg(test)]

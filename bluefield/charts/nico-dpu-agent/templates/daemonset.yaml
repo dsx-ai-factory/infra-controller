@@ -8,12 +8,13 @@
 {{- if hasKey $bootstrapCaObject "key" -}}
 {{- $bootstrapCaObjectKey = get $bootstrapCaObject "key" -}}
 {{- end -}}
-{{- $certsDir := .Values.certsDir | default "/opt/nico" -}}
+{{- $certsDir := .Values.certsDir | default "/opt/forge" -}}
 {{- $supplementalNetworkConfig := default (dict) .Values.supplementalNetworkConfig -}}
 {{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
-{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName -}}
+{{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
+{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled -}}
 {{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
 {{- if $agentConfigEnabled -}}
 {{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}
@@ -128,7 +129,7 @@ spec:
             - name: proc-mem-info
               mountPath: /host-mem-info
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: host-resolv-conf
               mountPath: /host-resolv.conf
               readOnly: true
@@ -155,6 +156,16 @@ spec:
             - "--dhcp-server-interface-prepend={{ .Values.dhcp_server.interface_prepend }}"
             {{ end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if not $prometheusDisabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "nico-dpu-agent.metricsPort" . | int }}
+              protocol: TCP
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
           {{- with toYaml .Values.serviceDaemonSet.resources }}
           resources:
             limits:
@@ -214,7 +225,7 @@ spec:
               readOnly: true
             {{- end }}
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: hw-cache
               mountPath: /data
               readOnly: true
@@ -277,7 +288,7 @@ spec:
         {{- end }}
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/nico" }}
+            path: {{ .Values.certsDir | default "/opt/forge" }}
             type: DirectoryOrCreate
         - name: hw-cache
           emptyDir: {}

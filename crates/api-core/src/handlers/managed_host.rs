@@ -16,7 +16,7 @@
  */
 
 use ::rpc::forge as rpc;
-use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
+use carbide_uuid::machine::{HostMachineId, StableHostMachineId};
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::{Request, Response, Status};
@@ -32,13 +32,8 @@ pub(crate) async fn decommission_managed_host(
     request: Request<rpc::DecommissionManagedHostRequest>,
 ) -> Result<Response<rpc::DecommissionManagedHostResponse>, Status> {
     log_request_data(&request);
-    let machine_id = convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
-    if machine_id.machine_type().is_dpu() {
-        return Err(CarbideError::InvalidArgument(format!(
-            "machine {machine_id} is a DPU, not a managed host"
-        ))
-        .into());
-    }
+    let machine_id: StableHostMachineId =
+        convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
     let machine = db::machine::find_one(
@@ -112,21 +107,17 @@ pub(crate) async fn set_primary_dpu(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let host_machine_id: StableHostMachineId = request
+    let host_machine_id = request
         .host_machine_id
-        .ok_or_else(|| CarbideError::InvalidArgument("host machine ID is required".to_string()))?
-        .try_into()
-        .map_err(CarbideError::from)?;
-    let dpu_machine_id: DpuMachineId = request
+        .ok_or_else(|| CarbideError::InvalidArgument("host machine ID is required".to_string()))?;
+    let dpu_machine_id = request
         .dpu_machine_id
-        .ok_or_else(|| CarbideError::InvalidArgument("DPU machine ID is required".to_string()))?
-        .try_into()
-        .map_err(CarbideError::from)?;
+        .ok_or_else(|| CarbideError::InvalidArgument("DPU machine ID is required".to_string()))?;
     // `reboot` is only a compatibility alias for `force_reconcile`.
     #[allow(deprecated)]
     let force_reconcile = request.force_reconcile || request.reboot;
 
-    log_machine_id(host_machine_id.as_machine_id());
+    log_machine_id(&host_machine_id);
 
     set_primary_interface_and_enqueue_reconciliation(
         api,
@@ -147,11 +138,9 @@ pub(crate) async fn set_primary_interface(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let host_machine_id: StableHostMachineId = request
+    let host_machine_id = request
         .host_machine_id
-        .ok_or_else(|| CarbideError::InvalidArgument("host machine ID is required".to_string()))?
-        .try_into()
-        .map_err(CarbideError::from)?;
+        .ok_or_else(|| CarbideError::InvalidArgument("host machine ID is required".to_string()))?;
     let interface_id = request
         .interface_id
         .ok_or_else(|| CarbideError::InvalidArgument("interface ID is required".to_string()))?;
@@ -159,7 +148,7 @@ pub(crate) async fn set_primary_interface(
     #[allow(deprecated)]
     let force_reconcile = request.force_reconcile || request.reboot;
 
-    log_machine_id(host_machine_id.as_machine_id());
+    log_machine_id(&host_machine_id);
 
     set_primary_interface_and_enqueue_reconciliation(
         api,
@@ -207,17 +196,11 @@ pub(crate) async fn set_maintenance(
         .and_then(|ctx| ctx.get_external_user_name())
         .map(String::from);
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id(req.host_id.as_ref())?;
+    let machine_id: HostMachineId = convert_and_log_machine_id(req.host_id.as_ref())?;
 
-    let (host_machine, mut txn) = api
+    let (_, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
         .await?;
-    if host_machine.is_dpu() {
-        return Err(CarbideError::InvalidArgument(
-            "DPU ID provided. need managed host".to_string(),
-        )
-        .into());
-    }
     let dpu_machines = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
     txn.commit().await?;
 

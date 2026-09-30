@@ -23,6 +23,20 @@ var protoJsonUnmarshalOptions = protojson.UnmarshalOptions{
 // keeping a free function in this package.
 type Labels map[string]string
 
+const (
+	// LabelKeyOrderByDefault is the default ordering field for label-key lists.
+	LabelKeyOrderByDefault = "key"
+	// LabelValueOrderByDefault is the default ordering field for label-value lists.
+	LabelValueOrderByDefault = "value"
+)
+
+var (
+	// LabelKeyOrderByFields contains the supported label-key ordering fields.
+	LabelKeyOrderByFields = []string{LabelKeyOrderByDefault}
+	// LabelValueOrderByFields contains the supported label-value ordering fields.
+	LabelValueOrderByFields = []string{LabelValueOrderByDefault}
+)
+
 // ToProto converts the labels into the workflow proto repeated Label
 // representation. Returns nil for a nil map; an empty map yields a
 // non-nil empty slice so callers can distinguish "labels explicitly

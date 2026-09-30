@@ -16,7 +16,7 @@
  */
 
 use ::rpc::forge::HostReprovisioningRequest;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use prettytable::{Table, row};
 
 use super::args::{ReprovisionClear, ReprovisionSet};
@@ -24,7 +24,6 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::machine::{HealthReportTemplates, get_health_report};
 use crate::rpc::ApiClient;
 
-#[allow(deprecated)]
 pub(super) async fn trigger_reprovisioning_set(
     data: ReprovisionSet,
     api_client: &ApiClient,
@@ -40,10 +39,12 @@ pub(super) async fn trigger_reprovisioning_set(
             .next();
 
         if let Some(host_machine) = host_machine
-            && host_machine
-                .health_sources
-                .iter()
-                .any(|or| or.source == "host-update")
+            && host_machine.status.as_ref().is_some_and(|status| {
+                status
+                    .health_sources
+                    .iter()
+                    .any(|origin| origin.source == "host-update")
+            })
         {
             return Err(CarbideCliError::GenericError(format!(
                 "Host machine: {:?} already has a \"host-update\" health report entry.",
@@ -54,7 +55,7 @@ pub(super) async fn trigger_reprovisioning_set(
         let report = get_health_report(HealthReportTemplates::HostUpdate, Some(update_message));
 
         api_client
-            .machine_insert_health_report_override(data.id, report.into(), false)
+            .machine_insert_health_report_override(data.id.as_machine_id(), report.into(), false)
             .await?;
     }
 
@@ -79,7 +80,7 @@ pub(super) async fn list_hosts_pending(api_client: &ApiClient) -> CarbideCliResu
 }
 
 pub(super) async fn mark_manual_firmware_upgrade_complete(
-    machine_id: MachineId,
+    machine_id: StableHostMachineId,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     api_client
