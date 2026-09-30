@@ -22,6 +22,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
@@ -53,6 +54,41 @@ func ExecuteCoreGRPC(
 ) *cutil.APIError {
 	workflowID := fmt.Sprintf("core-grpc-%s-%s", path.Base(fullMethod), uuid.NewString())
 	return executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, secretKey, secretFields...)
+}
+
+// ReservedDomainRejectionFence reconciles a definitive failure of ONE create
+// invocation without assuming earlier proxy executions with the same reserved
+// ID have stopped. A prior successful create is returned as Ready. Otherwise
+// Core's cancellation is serialized under that reserved ID and either deletes
+// a previously committed zone or tombstones an as-yet-absent ID. Only its
+// confirmed success permits the REST reservation to become terminal Error.
+// An uncertain read/cancel result leaves the reservation Pending for recovery.
+func ReservedDomainRejectionFence(ctx context.Context, stc tclient.Client, id uuid.UUID, name, siteID string) (ready bool, confirmed bool) {
+	idProto := &corev1.DomainId{Value: id.String()}
+	result := &corev1.DomainList{}
+	if err := ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindDomain_FullMethodName,
+		&corev1.DomainSearchQuery{Id: idProto}, result, siteID); err != nil {
+		return false, false
+	}
+	if len(result.GetDomains()) != 0 {
+		if len(result.GetDomains()) != 1 || result.GetDomains()[0].GetId().GetValue() != id.String() || result.GetDomains()[0].GetName() != name {
+			return false, false
+		}
+		// FindDomain does not expose Core's reserved-create provenance. A
+		// matching legacy/admin row at the same UUID must never be adopted:
+		// replay the exact immutable create and require Core's under-ID-lock
+		// reserved-intent match before reporting this row Ready.
+		replayed := &corev1.Domain{}
+		err := ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName,
+			&corev1.CreateDomainRequest{Name: name, ReservedId: idProto}, replayed, siteID)
+		if err == nil && replayed.GetId().GetValue() == id.String() && replayed.GetName() == name {
+			return true, true
+		}
+		return false, false
+	}
+	err := ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName,
+		&corev1.DomainDeletionRequest{Id: idProto, CancelReservedId: true}, nil, siteID)
+	return false, err == nil
 }
 
 // ExecuteFlowGRPC proxies one already-validated Flow (v1.Flow) gRPC request via

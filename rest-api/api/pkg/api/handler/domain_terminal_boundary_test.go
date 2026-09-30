@@ -43,6 +43,8 @@ func TestDomainCreateTerminalCoreReply_RetainsOneReservedIdentity(t *testing.T) 
 			require.NoError(t, err)
 			forwarded := f.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, nil,
 				tp.NewNonRetryableApplicationError("Core rejected reserved name", tc.errorType, errors.New("Core rejected reserved name")))
+			f.expectCore(t, corev1.Forge_FindDomain_FullMethodName, &corev1.DomainList{}, nil)
+			f.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
 			request := model.APIDomainCreateRequest{Name: "reserved.example.com", SiteID: f.site.ID.String()}
 			response := f.request(t, NewCreateDomainHandler(f.dbSession, f.scp).Handle, http.MethodPost, "/", "", request)
 			require.Equal(t, tc.httpStatus, response.Code, response.Body.String())
@@ -60,7 +62,7 @@ func TestDomainCreateTerminalCoreReply_RetainsOneReservedIdentity(t *testing.T) 
 			after, err := cdbm.NewDomainDAO(f.dbSession).GetByID(t.Context(), nil, stored.ID, nil)
 			require.NoError(t, err)
 			require.Equal(t, stored.ControllerDomainID, after.ControllerDomainID)
-			f.siteClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+			f.siteClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
 		})
 	}
 }

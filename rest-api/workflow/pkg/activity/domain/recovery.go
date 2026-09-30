@@ -83,10 +83,19 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 			// this intent. A proxy timeout or transport failure leaves the same
 			// reserved ID Pending for safe replay on a later sweep.
 			if apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusPreconditionFailed {
-				changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusPending, cdbm.DomainStatusError, false)
-				if err != nil || !changed {
-					return fmt.Errorf("Domain rejection CAS failed: changed=%t err=%v", changed, err)
+				resolution, err := cdb.WithTxResult(ctx, m.DB, func(tx *cdb.Tx) (struct{ ready, finalized bool }, error) {
+					ready, finalized, err := dao.FinalizeRejectedOwned(ctx, tx, d.ID, *d.ControllerDomainID, d.RecoveryToken, func(ctx context.Context) (bool, bool) {
+						return common.ReservedDomainRejectionFence(ctx, stc, *d.ControllerDomainID, d.Hostname, d.SiteID.String())
+					})
+					return struct{ ready, finalized bool }{ready, finalized}, err
+				})
+				if err != nil {
+					return fmt.Errorf("Core rejection reconciliation unconfirmed: %w", err)
 				}
+				if !resolution.finalized {
+					return fmt.Errorf("Domain recovery claim superseded before cancellation")
+				}
+
 				return nil
 			}
 			return fmt.Errorf("reserved Core create unconfirmed: %s", apiErr.Message)

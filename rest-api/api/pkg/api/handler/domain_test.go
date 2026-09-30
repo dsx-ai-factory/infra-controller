@@ -54,6 +54,8 @@ func TestCreateDomainHandler_Handle(t *testing.T) {
 					errors.New("Domain rejected"),
 				))
 
+				fixture.expectCore(t, corev1.Forge_FindDomain_FullMethodName, &corev1.DomainList{}, nil)
+				fixture.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
 				recorder := fixture.request(t, NewCreateDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodPost, "/", "", model.APIDomainCreateRequest{
 					Name:   "rejected.example.com",
 					SiteID: fixture.site.ID.String(),

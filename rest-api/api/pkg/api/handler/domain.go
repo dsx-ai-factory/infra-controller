@@ -118,12 +118,20 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 		if apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusPreconditionFailed {
 			// These definitive Core validation/conflict responses may be surfaced;
 			// retain a durable Error row so a retry cannot adopt by DNS name.
-			changed, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {
-				return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, cdbm.DomainStatusPending, cdbm.DomainStatusError)
+			resolution, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (struct{ ready, finalized bool }, error) {
+				ready, finalized, err := domainDAO.FinalizeRejectedOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, nil, func(ctx context.Context) (bool, bool) {
+					return common.ReservedDomainRejectionFence(ctx, stc, *domain.ControllerDomainID, domain.Hostname, site.ID.String())
+				})
+				return struct{ ready, finalized bool }{ready, finalized}, err
 			})
-			if transitionErr == nil && changed {
+			if transitionErr == nil && resolution.finalized {
+				if resolution.ready {
+					domain.Status = cdbm.DomainStatusReady
+					return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
+				}
 				return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 			}
+
 			logger.Error().Err(transitionErr).Str("domainID", domain.ID.String()).Msg("could not persist rejected Domain intent")
 		}
 		// A 504 does not cancel an in-flight Site workflow. Keep the durable

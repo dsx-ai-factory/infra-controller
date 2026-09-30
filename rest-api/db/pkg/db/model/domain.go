@@ -126,6 +126,7 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 type DomainDAO interface {
 	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
 	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
+	FinalizeRejectedOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID, reconcile func(context.Context) (bool, bool)) (bool, bool, error)
 	ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error)
 	CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error)
 	DeferRecovery(ctx context.Context, id, token uuid.UUID, delay time.Duration) (bool, error)
@@ -255,6 +256,60 @@ func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, core
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// FinalizeRejectedOwned locks the owned Pending reservation BEFORE making a
+// potentially destructive Core cancellation. A stale worker cannot cancel a
+// Domain another worker already made Ready, even if its own completion CAS
+// would later fail. The callback must only operate on the persisted reserved
+// ID; an unconfirmed Core result rolls the transaction back, retaining Pending.
+// Holding this row lock across the Core RPC is intentional and bounded by the
+// caller context; it serializes competing Ready, Error and Deleting transitions.
+func (dsd DomainSQLDAO) FinalizeRejectedOwned(
+	ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID,
+	reconcile func(context.Context) (ready, confirmed bool),
+) (ready, finalized bool, err error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || reconcile == nil {
+		return false, false, fmt.Errorf("invalid rejected Domain intent")
+	}
+	row := &Domain{}
+	query := db.GetIDB(tx, dsd.dbSession).NewSelect().Model(row).
+		Where("d.id = ? AND d.controller_domain_id = ? AND d.status = ? AND d.deleted IS NULL", id, coreID, DomainStatusPending).
+		For("UPDATE")
+	if token != nil {
+		if *token == uuid.Nil {
+			return false, false, fmt.Errorf("invalid Domain recovery token")
+		}
+		query = query.Where("d.recovery_token = ? AND d.recovery_lease_until > current_timestamp", *token)
+	}
+	if err := query.Scan(ctx); err != nil {
+		if err == sql.ErrNoRows {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	// A direct handler must not steal an actively leased worker intent. The
+	// worker's callback may already have dispatched another Core operation.
+	if token == nil && row.RecoveryToken != nil && row.RecoveryLeaseUntil != nil && row.RecoveryLeaseUntil.After(time.Now()) {
+		return false, false, nil
+	}
+	ready, confirmed := reconcile(ctx)
+	if !confirmed {
+		return false, false, fmt.Errorf("Core reserved-ID reconciliation unconfirmed")
+	}
+	target := DomainStatusError
+	if ready {
+		target = DomainStatusReady
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", target).Set("updated = current_timestamp").
+		Set("recovery_token = NULL").Set("recovery_lease_until = NULL").Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND deleted IS NULL", id, coreID, DomainStatusPending).Exec(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	n, err := result.RowsAffected()
+	return ready, n == 1, err
 }
 
 // ClaimRecovery leases only previously reserved REST-owned intents. SKIP LOCKED
