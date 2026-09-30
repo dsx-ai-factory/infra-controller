@@ -393,6 +393,7 @@ pub enum SwitchDecommissioningState {
     RebootingSwitch,
     /// Waits for NVOS DHCP suppression acknowledgement after requesting the reboot,
     /// then advances to [`Self::SuppressingBmcDhcp`].
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
     WaitingForNvosDhcpAcknowledgement,
     /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
     /// without waiting for suppression acknowledgement.
@@ -402,6 +403,7 @@ pub enum SwitchDecommissioningState {
     FactoryResetBmc,
     /// Waits for BMC DHCP suppression acknowledgement, then advances to
     /// [`Self::DeletingManagedCredentials`].
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
     WaitingForBmcDhcpAcknowledgement,
     /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
     /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
