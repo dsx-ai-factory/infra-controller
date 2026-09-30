@@ -1,8 +1,8 @@
 {{/*
-Resolve an init container image from repository + tag, falling back to image.
+Resolve a container image from repository + tag, falling back to image.
 Arguments: container (the values entry), path (its chart-qualified values path).
-Symlinked into nico-api and nico-pxe so standalone charts share the same helper;
-Helm includes the file contents when packaging each chart.
+Symlinked into nico-api, nico-pxe, and nico-hardware-health so standalone charts
+share the same helper; Helm includes the file contents when packaging each chart.
 */}}
 {{- define "nico.containerImage" -}}
 {{- if and .container.repository .container.tag -}}
