@@ -976,6 +976,7 @@ impl InternalRBACRules {
         x.perm("MlxAdminLockdownStatus", vec![ForgeAdminCLI]);
         x.perm("MlxAdminShowDevice", vec![ForgeAdminCLI]);
         x.perm("MlxAdminShowMachine", vec![ForgeAdminCLI]);
+        x.perm("MlxAdminShowDeviceIdentities", vec![ForgeAdminCLI]);
         x.perm("MlxAdminRegistryList", vec![ForgeAdminCLI]);
         x.perm("MlxAdminRegistryShow", vec![ForgeAdminCLI]);
         x.perm("MlxAdminConfigQuery", vec![ForgeAdminCLI]);
