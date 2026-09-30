@@ -192,15 +192,23 @@ func TestIpamer_ReleaseIPFromPrefix(t *testing.T) {
 	tests := []struct {
 		name    string
 		address string
+		host    string
 		wantErr error
 	}{
 		{
 			name:    "equivalent IPv6 spelling",
 			address: "2001:0DB8:0000:0000:0000:0000:0000:0001",
+			host:    "2001:db8::1",
+		},
+		{
+			name:    "IPv6 final address",
+			address: "2001:db8::ff",
+			host:    "2001:db8::ff",
 		},
 		{
 			name:    "malformed address",
 			address: "not-an-address",
+			host:    "2001:db8::1",
 			wantErr: ErrNotFound,
 		},
 	}
@@ -210,7 +218,7 @@ func TestIpamer_ReleaseIPFromPrefix(t *testing.T) {
 			ipam := New(ctx)
 			prefix, err := ipam.NewPrefix(ctx, "2001:db8::/120")
 			require.NoError(t, err)
-			allocated, err := ipam.AcquireSpecificIP(ctx, prefix.Cidr, "2001:db8::1")
+			allocated, err := ipam.AcquireSpecificIP(ctx, prefix.Cidr, test.host)
 			require.NoError(t, err)
 
 			err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, test.address)
@@ -220,6 +228,46 @@ func TestIpamer_ReleaseIPFromPrefix(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				require.ErrorIs(t, err, ErrAlreadyAllocated)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		cidr    string
+		address string
+		host    string
+	}{
+		{name: "IPv4 network", cidr: "192.168.0.0/24", address: "192.168.0.0", host: "192.168.0.1"},
+		{name: "IPv4 broadcast", cidr: "192.168.0.0/24", address: "192.168.0.255", host: "192.168.0.1"},
+		{name: "expanded IPv6 network", cidr: "2001:db8::/120", address: "2001:0DB8:0000:0000:0000:0000:0000:0000", host: "2001:db8::1"},
+		{name: "IPv4 singleton", cidr: "192.168.0.1/32", address: "192.168.0.1"},
+		{name: "IPv6 singleton", cidr: "2001:db8::1/128", address: "2001:db8::1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ipam := New(ctx)
+			prefix, err := ipam.NewPrefix(ctx, test.cidr)
+			require.NoError(t, err)
+			if test.host != "" {
+				_, err = ipam.AcquireSpecificIP(ctx, prefix.Cidr, test.host)
+				require.NoError(t, err)
+			}
+			before := ipam.PrefixFrom(ctx, prefix.Cidr)
+			require.NotNil(t, before)
+
+			err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, test.address)
+			require.ErrorContains(t, err, "because it is reserved in prefix:"+prefix.Cidr)
+			require.Equal(t, before, ipam.PrefixFrom(ctx, prefix.Cidr))
+			_, err = ipam.AcquireSpecificIP(ctx, prefix.Cidr, test.address)
+			require.ErrorIs(t, err, ErrAlreadyAllocated)
+
+			if test.host != "" {
+				_, err = ipam.DeletePrefix(ctx, prefix.Cidr)
+				require.ErrorContains(t, err, "has ips")
+				childLength := uint8(netip.MustParsePrefix(prefix.Cidr).Bits() + 1)
+				_, err = ipam.AcquireChildPrefix(ctx, prefix.Cidr, childLength)
+				require.ErrorContains(t, err, "has ips")
+				require.Equal(t, before, ipam.PrefixFrom(ctx, prefix.Cidr))
 			}
 		})
 	}

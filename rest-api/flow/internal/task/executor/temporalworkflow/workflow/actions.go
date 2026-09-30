@@ -28,25 +28,34 @@ type actionExecutionContext struct {
 	target          common.Target
 	allTargets      map[devicetypes.ComponentType]common.Target
 	operationInfo   any
+	maxParallel     int
 }
 
 // actionExecutor defines the signature for action execution functions
 type actionExecutor func(actx actionExecutionContext) error
 
-// actionExecutorRegistry maps action names to their executor functions
-var actionExecutorRegistry = map[string]actionExecutor{
-	operationrules.ActionSleep:                     executeSleepAction,
-	operationrules.ActionPowerControl:              executePowerControlAction,
-	operationrules.ActionVerifyPowerStatus:         executeVerifyPowerStatusAction,
-	operationrules.ActionVerifyReachability:        executeVerifyReachabilityAction,
-	operationrules.ActionGetPowerStatus:            executeGetPowerStatusAction,
-	operationrules.ActionFirmwareControl:           executeFirmwareControlAction,
-	operationrules.ActionBringUpControl:            executeBringUpControlAction,
-	operationrules.ActionWaitBringUp:               executeWaitBringUpAction,
-	operationrules.ActionInjectExpectation:         executeInjectExpectationAction,
-	operationrules.ActionVerifyFirmwareConsistency: executeVerifyFirmwareConsistencyAction,
-	operationrules.ActionDecommissionControl:       executeDecommissionControlAction,
-	operationrules.ActionWaitDecommissioned:        executeWaitDecommissionedAction,
+type actionExecutorDefinition struct {
+	execute            actionExecutor
+	batchByMaxParallel bool
+}
+
+// actionExecutorRegistry maps action names to their executor and dispatch
+// scope. Component operations are partitioned by max_parallel; step-wide
+// coordination and group validation actions execute once with their full
+// context.
+var actionExecutorRegistry = map[string]actionExecutorDefinition{
+	operationrules.ActionSleep:                     {execute: executeSleepAction},
+	operationrules.ActionPowerControl:              {execute: executePowerControlAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyPowerStatus:         {execute: executeVerifyPowerStatusAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyReachability:        {execute: executeVerifyReachabilityAction},
+	operationrules.ActionGetPowerStatus:            {execute: executeGetPowerStatusAction, batchByMaxParallel: true},
+	operationrules.ActionFirmwareControl:           {execute: executeFirmwareControlAction, batchByMaxParallel: true},
+	operationrules.ActionBringUpControl:            {execute: executeBringUpControlAction, batchByMaxParallel: true},
+	operationrules.ActionWaitBringUp:               {execute: executeWaitBringUpAction, batchByMaxParallel: true},
+	operationrules.ActionInjectExpectation:         {execute: executeInjectExpectationAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyFirmwareConsistency: {execute: executeVerifyFirmwareConsistencyAction},
+	operationrules.ActionDecommissionControl:       {execute: executeDecommissionControlAction, batchByMaxParallel: true},
+	operationrules.ActionWaitDecommissioned:        {execute: executeWaitDecommissionedAction, batchByMaxParallel: true},
 }
 
 // executeActionList executes a list of actions sequentially
@@ -56,9 +65,12 @@ func executeActionList(
 	target common.Target,
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
+	maxParallel int,
 ) error {
 	for i, action := range actions {
-		if err := executeAction(ctx, action, target, allTargets, operationInfo); err != nil {
+		if err := executeActionBatches(
+			ctx, action, target, allTargets, operationInfo, maxParallel,
+		); err != nil {
 			return fmt.Errorf("action %d (%s) failed: %w", i, action.Name, err)
 		}
 	}
@@ -72,8 +84,9 @@ func executeAction(
 	target common.Target,
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
+	maxParallel int,
 ) error {
-	executor, ok := actionExecutorRegistry[config.Name]
+	definition, ok := actionExecutorRegistry[config.Name]
 	if !ok {
 		return fmt.Errorf("unknown action: %s", config.Name)
 	}
@@ -84,9 +97,66 @@ func executeAction(
 		target:          target,
 		allTargets:      allTargets,
 		operationInfo:   operationInfo,
+		maxParallel:     maxParallel,
 	}
 
-	return executor(actx)
+	return definition.execute(actx)
+}
+
+// actionBatchCount returns how many sequential dispatches an action requires.
+// Step-wide actions and max_parallel=0 always execute once.
+func actionBatchCount(
+	action operationrules.ActionConfig,
+	maxParallel int,
+	componentCount int,
+) int {
+	definition, ok := actionExecutorRegistry[action.Name]
+	if !ok || !definition.batchByMaxParallel || maxParallel <= 0 || componentCount <= maxParallel {
+		return 1
+	}
+
+	return (componentCount + maxParallel - 1) / maxParallel
+}
+
+// executeActionBatches limits each component-scoped action dispatch to
+// max_parallel targets. Batches run sequentially; step-wide actions execute
+// once with their complete context.
+func executeActionBatches(
+	ctx workflow.Context,
+	action operationrules.ActionConfig,
+	target common.Target,
+	allTargets map[devicetypes.ComponentType]common.Target,
+	operationInfo any,
+	maxParallel int,
+) error {
+	batchCount := actionBatchCount(action, maxParallel, target.Len())
+	if batchCount == 1 {
+		return executeAction(
+			ctx, action, target, allTargets, operationInfo, maxParallel,
+		)
+	}
+
+	for batchIndex := range batchCount {
+		start := batchIndex * maxParallel
+		end := min(start+maxParallel, target.Len())
+		batchTarget := target
+		batchTarget.Identifiers = target.Identifiers[start:end]
+
+		log.Debug().
+			Str("action", action.Name).
+			Int("batch_number", batchIndex+1).
+			Int("batch_count", batchCount).
+			Int("batch_size", batchTarget.Len()).
+			Msg("Executing component action batch")
+
+		if err := executeAction(
+			ctx, action, batchTarget, allTargets, operationInfo, maxParallel,
+		); err != nil {
+			return fmt.Errorf("batch %d of %d failed: %w", batchIndex+1, batchCount, err)
+		}
+	}
+
+	return nil
 }
 
 // executeSleepAction handles Sleep action
@@ -167,6 +237,7 @@ func executeVerifyReachabilityAction(actx actionExecutionContext) error {
 		actx.config.Timeout,
 		actx.config.PollInterval,
 		requireAll,
+		actx.maxParallel,
 	)
 }
 
@@ -509,6 +580,7 @@ func verifyReachability(
 	timeout time.Duration,
 	pollInterval time.Duration,
 	requireAll bool,
+	maxParallel int,
 ) error {
 	typesToCheck := make([]devicetypes.ComponentType, 0, len(componentTypes))
 	for _, ctStr := range componentTypes {
@@ -545,30 +617,58 @@ func verifyReachability(
 				continue
 			}
 
-			var statusMap map[string]operations.PowerStatus
-			err := workflow.ExecuteActivity(
-				ctx,
-				activity.NameGetPowerStatus,
-				target,
-			).Get(ctx, &statusMap)
-
-			if err != nil {
-				log.Debug().
-					Str("component_type", devicetypes.ComponentTypeToString(ct)).
-					Err(err).
-					Msg("Component type not yet reachable")
-				continue
-			}
-
 			responding := 0
-			for _, identifier := range target.Identifiers {
-				if _, present := statusMap[identifier]; present {
-					responding++
+			activityFailed := false
+			batchSize := target.Len()
+			if maxParallel > 0 && maxParallel < batchSize {
+				batchSize = maxParallel
+			}
+			for start := 0; start < target.Len(); start += batchSize {
+				if workflow.Now(ctx).After(deadline) {
+					break
 				}
+
+				end := min(start+batchSize, target.Len())
+				batchTarget := target
+				batchTarget.Identifiers = target.Identifiers[start:end]
+
+				var statusMap map[string]operations.PowerStatus
+				err := workflow.ExecuteActivity(
+					ctx,
+					activity.NameGetPowerStatus,
+					batchTarget,
+				).Get(ctx, &statusMap)
+				if err != nil {
+					log.Debug().
+						Str("component_type", devicetypes.ComponentTypeToString(ct)).
+						Err(err).
+						Msg("Component type not yet reachable")
+					activityFailed = true
+					break
+				}
+
+				if workflow.Now(ctx).After(deadline) {
+					break
+				}
+
+				if !checkRequested {
+					responding += len(statusMap)
+					continue
+				}
+				for _, identifier := range batchTarget.Identifiers {
+					if _, present := statusMap[identifier]; present {
+						responding++
+					}
+				}
+			}
+			if workflow.Now(ctx).After(deadline) {
+				break
+			}
+			if activityFailed {
+				continue
 			}
 			notReady := responding == 0 || (requireAll && responding < target.Len())
 			if !checkRequested {
-				responding = len(statusMap)
 				notReady = requireAll && responding < target.Len()
 			}
 			if notReady {

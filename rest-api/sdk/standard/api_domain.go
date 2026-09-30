@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -45,7 +46,7 @@ func (r ApiFirmwareUpdateNvlinkDomainRequest) Execute() (*FirmwareUpdateResponse
 /*
 FirmwareUpdateNvlinkDomain Firmware update an NVLink Domain
 
-Update firmware for an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+Update firmware for an NVLink Domain identified by its case-sensitive ID.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -86,6 +87,9 @@ func (a *DomainAPIService) FirmwareUpdateNvlinkDomainExecute(r ApiFirmwareUpdate
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
+	if strlen(r.id) < 1 {
+		return localVarReturnValue, nil, reportError("id must have at least 1 elements")
+	}
 	if r.nVLinkDomainFirmwareUpdateRequest == nil {
 		return localVarReturnValue, nil, reportError("nVLinkDomainFirmwareUpdateRequest is required and must be specified")
 	}
@@ -230,7 +234,7 @@ func (r ApiFirmwareUpdateNvlinkDomainsRequest) Execute() (*FirmwareUpdateRespons
 /*
 FirmwareUpdateNvlinkDomains Firmware update NVLink Domains
 
-Update firmware for one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+Update firmware for one or more NVLink Domains identified by their case-sensitive IDs.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -393,6 +397,424 @@ func (a *DomainAPIService) FirmwareUpdateNvlinkDomainsExecute(r ApiFirmwareUpdat
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetAllNvlinkDomainRequest struct {
+	ctx               context.Context
+	ApiService        *DomainAPIService
+	siteId            *string
+	org               string
+	includeComponents *bool
+	name              *[]string
+	pageNumber        *int32
+	pageSize          *int32
+	orderBy           *string
+}
+
+// ID of the Site
+func (r ApiGetAllNvlinkDomainRequest) SiteId(siteId string) ApiGetAllNvlinkDomainRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Include component details in the response.
+func (r ApiGetAllNvlinkDomainRequest) IncludeComponents(includeComponents bool) ApiGetAllNvlinkDomainRequest {
+	r.includeComponents = &includeComponents
+	return r
+}
+
+// Filter by Domain name. Repeated values are ORed.
+func (r ApiGetAllNvlinkDomainRequest) Name(name []string) ApiGetAllNvlinkDomainRequest {
+	r.name = &name
+	return r
+}
+
+// Page number
+func (r ApiGetAllNvlinkDomainRequest) PageNumber(pageNumber int32) ApiGetAllNvlinkDomainRequest {
+	r.pageNumber = &pageNumber
+	return r
+}
+
+// Number of results per page
+func (r ApiGetAllNvlinkDomainRequest) PageSize(pageSize int32) ApiGetAllNvlinkDomainRequest {
+	r.pageSize = &pageSize
+	return r
+}
+
+// Order by name; immutable Rack UUID ascending breaks ties.
+func (r ApiGetAllNvlinkDomainRequest) OrderBy(orderBy string) ApiGetAllNvlinkDomainRequest {
+	r.orderBy = &orderBy
+	return r
+}
+
+func (r ApiGetAllNvlinkDomainRequest) Execute() ([]NVLinkDomain, *http.Response, error) {
+	return r.ApiService.GetAllNvlinkDomainExecute(r)
+}
+
+/*
+GetAllNvlinkDomain Retrieve all NVLink Domains
+
+Retrieve NVLink Domains for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiGetAllNvlinkDomainRequest
+*/
+func (a *DomainAPIService) GetAllNvlinkDomain(ctx context.Context, org string) ApiGetAllNvlinkDomainRequest {
+	return ApiGetAllNvlinkDomainRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []NVLinkDomain
+func (a *DomainAPIService) GetAllNvlinkDomainExecute(r ApiGetAllNvlinkDomainRequest) ([]NVLinkDomain, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []NVLinkDomain
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.GetAllNvlinkDomain")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain/nvlink"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+
+	if r.includeComponents != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeComponents", r.includeComponents, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeComponents", defaultValue, "form", "")
+		r.includeComponents = &defaultValue
+	}
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	if r.name != nil {
+		t := *r.name
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "name", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "name", t, "form", "multi")
+		}
+	}
+	if r.pageNumber != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
+	}
+	if r.pageSize != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", r.pageSize, "form", "")
+	} else {
+		var defaultValue int32 = 20
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", defaultValue, "form", "")
+		r.pageSize = &defaultValue
+	}
+	if r.orderBy != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "NAME_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
+	}
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiGetNvlinkDomainRequest struct {
+	ctx               context.Context
+	ApiService        *DomainAPIService
+	siteId            *string
+	org               string
+	id                string
+	includeComponents *bool
+}
+
+// ID of the Site
+func (r ApiGetNvlinkDomainRequest) SiteId(siteId string) ApiGetNvlinkDomainRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Include component details in the response.
+func (r ApiGetNvlinkDomainRequest) IncludeComponents(includeComponents bool) ApiGetNvlinkDomainRequest {
+	r.includeComponents = &includeComponents
+	return r
+}
+
+func (r ApiGetNvlinkDomainRequest) Execute() (*NVLinkDomain, *http.Response, error) {
+	return r.ApiService.GetNvlinkDomainExecute(r)
+}
+
+/*
+GetNvlinkDomain Retrieve an NVLink Domain
+
+Retrieve an NVLink Domain for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id Case-sensitive NVLink Domain ID
+	@return ApiGetNvlinkDomainRequest
+*/
+func (a *DomainAPIService) GetNvlinkDomain(ctx context.Context, org string, id string) ApiGetNvlinkDomainRequest {
+	return ApiGetNvlinkDomainRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+	}
+}
+
+// Execute executes the request
+//
+//	@return NVLinkDomain
+func (a *DomainAPIService) GetNvlinkDomainExecute(r ApiGetNvlinkDomainRequest) (*NVLinkDomain, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *NVLinkDomain
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.GetNvlinkDomain")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain/nvlink/{id}"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+	if strlen(r.id) < 1 {
+		return localVarReturnValue, nil, reportError("id must have at least 1 elements")
+	}
+
+	if r.includeComponents != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeComponents", r.includeComponents, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeComponents", defaultValue, "form", "")
+		r.includeComponents = &defaultValue
+	}
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiPowerControlNvlinkDomainRequest struct {
 	ctx                     context.Context
 	ApiService              *DomainAPIService
@@ -413,7 +835,7 @@ func (r ApiPowerControlNvlinkDomainRequest) Execute() (*UpdatePowerStateResponse
 /*
 PowerControlNvlinkDomain Power control an NVLink Domain
 
-Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+Power control an NVLink Domain identified by its case-sensitive ID.
 
 Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
 Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -457,6 +879,9 @@ func (a *DomainAPIService) PowerControlNvlinkDomainExecute(r ApiPowerControlNvli
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
+	if strlen(r.id) < 1 {
+		return localVarReturnValue, nil, reportError("id must have at least 1 elements")
+	}
 	if r.updatePowerStateRequest == nil {
 		return localVarReturnValue, nil, reportError("updatePowerStateRequest is required and must be specified")
 	}
@@ -601,7 +1026,7 @@ func (r ApiPowerControlNvlinkDomainsRequest) Execute() (*UpdatePowerStateRespons
 /*
 PowerControlNvlinkDomains Power control NVLink Domains
 
-Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+Power control one or more NVLink Domains identified by their case-sensitive IDs.
 
 Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
 Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.

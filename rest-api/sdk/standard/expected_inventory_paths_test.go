@@ -14,15 +14,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExpectedInventoryReplaceAllPaths(t *testing.T) {
+func TestExpectedInventoryBulkPaths(t *testing.T) {
+	const siteID = "f97df110-f4de-492e-8849-4a6af68026b0"
 	tests := []struct {
 		name    string
+		method  string
 		path    string
+		body    string
 		execute func(*APIClient) (*http.Response, error)
 	}{
 		{
-			name: "Expected Rack uses explicit all path",
-			path: "/v2/org/test-org/nico/expected-rack/all",
+			name:   "Expected Rack uses explicit all path",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-rack/all",
 			execute: func(client *APIClient) (*http.Response, error) {
 				_, response, err := client.ExpectedRackAPI.ReplaceAllExpectedRack(context.Background(), "test-org").
 					ExpectedRackList(ExpectedRackList{}).Execute()
@@ -30,8 +34,9 @@ func TestExpectedInventoryReplaceAllPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "Expected Rack legacy method remains compatible",
-			path: "/v2/org/test-org/nico/expected-rack",
+			name:   "Expected Rack legacy method remains compatible",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-rack",
 			execute: func(client *APIClient) (*http.Response, error) {
 				_, response, err := client.ExpectedRackAPI.ReplaceAllExpectedRackLegacy(context.Background(), "test-org").
 					ExpectedRackList(ExpectedRackList{}).Execute()
@@ -39,8 +44,9 @@ func TestExpectedInventoryReplaceAllPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "Expected Rack Group uses explicit all path",
-			path: "/v2/org/test-org/nico/expected-rack-group/all",
+			name:   "Expected Rack Group uses explicit all path",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-rack-group/all",
 			execute: func(client *APIClient) (*http.Response, error) {
 				_, response, err := client.ExpectedRackGroupAPI.ReplaceAllExpectedRackGroup(context.Background(), "test-org").
 					ExpectedRackGroupList(ExpectedRackGroupList{}).Execute()
@@ -48,12 +54,70 @@ func TestExpectedInventoryReplaceAllPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "Expected Rack Group legacy method remains compatible",
-			path: "/v2/org/test-org/nico/expected-rack-group",
+			name:   "Expected Rack Group legacy method remains compatible",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-rack-group",
 			execute: func(client *APIClient) (*http.Response, error) {
 				_, response, err := client.ExpectedRackGroupAPI.ReplaceAllExpectedRackGroupLegacy(context.Background(), "test-org").
 					ExpectedRackGroupList(ExpectedRackGroupList{}).Execute()
 				return response, err
+			},
+		},
+		{
+			name:   "Expected Machine replace-all uses explicit all path",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-machine/all",
+			body:   `{"siteId":"f97df110-f4de-492e-8849-4a6af68026b0","expectedMachines":[]}`,
+			execute: func(client *APIClient) (*http.Response, error) {
+				_, response, err := client.ExpectedMachineAPI.ReplaceAllExpectedMachine(context.Background(), "test-org").
+					ExpectedMachineList(ExpectedMachineList{SiteId: siteID, ExpectedMachines: []ExpectedMachineCreateRequest{}}).Execute()
+				return response, err
+			},
+		},
+		{
+			name:   "Expected Machine delete-all uses explicit all path",
+			method: http.MethodDelete,
+			path:   "/v2/org/test-org/nico/expected-machine/all",
+			execute: func(client *APIClient) (*http.Response, error) {
+				return client.ExpectedMachineAPI.DeleteAllExpectedMachine(context.Background(), "test-org").SiteId("site-id").Execute()
+			},
+		},
+		{
+			name:   "Expected Switch replace-all uses explicit all path",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-switch/all",
+			body:   `{"siteId":"f97df110-f4de-492e-8849-4a6af68026b0","expectedSwitches":[]}`,
+			execute: func(client *APIClient) (*http.Response, error) {
+				_, response, err := client.ExpectedSwitchAPI.ReplaceAllExpectedSwitch(context.Background(), "test-org").
+					ExpectedSwitchList(ExpectedSwitchList{SiteId: siteID, ExpectedSwitches: []ExpectedSwitchCreateRequest{}}).Execute()
+				return response, err
+			},
+		},
+		{
+			name:   "Expected Switch delete-all uses explicit all path",
+			method: http.MethodDelete,
+			path:   "/v2/org/test-org/nico/expected-switch/all",
+			execute: func(client *APIClient) (*http.Response, error) {
+				return client.ExpectedSwitchAPI.DeleteAllExpectedSwitch(context.Background(), "test-org").SiteId("site-id").Execute()
+			},
+		},
+		{
+			name:   "Expected Power Shelf replace-all uses explicit all path",
+			method: http.MethodPut,
+			path:   "/v2/org/test-org/nico/expected-power-shelf/all",
+			body:   `{"siteId":"f97df110-f4de-492e-8849-4a6af68026b0","expectedPowerShelves":[]}`,
+			execute: func(client *APIClient) (*http.Response, error) {
+				_, response, err := client.ExpectedPowerShelfAPI.ReplaceAllExpectedPowerShelf(context.Background(), "test-org").
+					ExpectedPowerShelfList(ExpectedPowerShelfList{SiteId: siteID, ExpectedPowerShelves: []ExpectedPowerShelfCreateRequest{}}).Execute()
+				return response, err
+			},
+		},
+		{
+			name:   "Expected Power Shelf delete-all uses explicit all path",
+			method: http.MethodDelete,
+			path:   "/v2/org/test-org/nico/expected-power-shelf/all",
+			execute: func(client *APIClient) (*http.Response, error) {
+				return client.ExpectedPowerShelfAPI.DeleteAllExpectedPowerShelf(context.Background(), "test-org").SiteId("site-id").Execute()
 			},
 		},
 	}
@@ -70,17 +134,28 @@ func TestExpectedInventoryReplaceAllPaths(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, response)
 			require.NotNil(t, transport.req)
-			assert.Equal(t, http.MethodPut, transport.req.Method)
+			assert.Equal(t, tt.method, transport.req.Method)
 			assert.Equal(t, tt.path, transport.req.URL.Path)
+			if tt.body != "" {
+				assert.JSONEq(t, tt.body, string(transport.body))
+			}
 		})
 	}
 }
 
 type captureExpectedInventoryTransport struct {
-	req *http.Request
+	req  *http.Request
+	body []byte
 }
 
 func (t *captureExpectedInventoryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		var err error
+		t.body, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+	}
 	t.req = req.Clone(req.Context())
 	return &http.Response{
 		StatusCode: http.StatusOK,

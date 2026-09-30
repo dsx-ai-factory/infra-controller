@@ -19,6 +19,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // These tests exercise the mirror's write paths against a real database —
@@ -420,6 +421,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	domain := model.NVLDomain{Name: "domain-a"}
 	require.NoError(t, domain.Create(ctx, pool.DB))
 	ingestedAt := time.Now().UTC().Truncate(time.Microsecond)
+	health := &types.HealthReport{Source: "rack-aggregate-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 
 	r := model.Rack{
 		Name:         "rack-a12",
@@ -431,6 +433,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 		NVLDomainID:  domain.ID,
 		Status:       model.RackStatusIngested,
 		IngestedAt:   &ingestedAt,
+		Health:       health,
 	}
 	require.NoError(t, r.Create(ctx, pool.DB))
 
@@ -463,6 +466,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	}, got.Location)
 	assert.Equal(t, domain.ID, got.NVLDomainID)
 	assert.Equal(t, model.RackStatusIngested, got.Status)
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
 	require.NotNil(t, got.IngestedAt)
 	assert.Equal(t, ingestedAt, got.IngestedAt.UTC())
 }
@@ -702,11 +706,12 @@ func TestMirrorComponents_ResurrectOnReReport(t *testing.T) {
 }
 
 // #5: an UPDATE must touch only mirror-managed columns and leave runtime-owned
-// columns (external_id, power_state, firmware_version) intact.
+// columns (external_id, power_state, firmware_version, health) intact.
 func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	ctx, pool := mirrorTestPool(t)
 
 	on := nicoapi.PowerStateOn
+	health := &types.HealthReport{Source: "aggregate-host-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 	c := model.Component{
 		Type:            compType(),
 		Manufacturer:    "Mfg",
@@ -715,6 +720,7 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 		ComponentID:     strPtr("runtime-ext-id"),
 		PowerState:      &on,
 		FirmwareVersion: "9.9.9",
+		Health:          health,
 	}
 	require.NoError(t, c.Create(ctx, pool.DB))
 	hostBMC := model.BMC{
@@ -738,6 +744,7 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	require.NotNil(t, got.PowerState)
 	assert.Equal(t, nicoapi.PowerStateOn, *got.PowerState, "power_state is runtime-owned, must survive")
 	assert.Equal(t, "9.9.9", got.FirmwareVersion, "firmware_version is runtime-owned, must survive")
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
 }
 
 func TestMirrorComponents_PositionPresence(t *testing.T) {

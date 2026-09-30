@@ -43,7 +43,7 @@ type Manager interface {
 	PatchRack(ctx context.Context, rack *rack.Rack) (string, error)
 	DeleteRack(ctx context.Context, id uuid.UUID) error
 	PurgeRack(ctx context.Context, id uuid.UUID) error
-	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents bool) ([]*rack.Rack, int32, error)
+	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents, withExternalIDOnly bool) ([]*rack.Rack, int32, error)
 
 	// Component operations
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*component.Component, error)
@@ -65,7 +65,7 @@ type Manager interface {
 	AttachRacksToNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, rackIDs []identifier.Identifier) error
 	DetachRacksFromNVLDomain(ctx context.Context, rackIDs []identifier.Identifier) error
 	GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination) ([]*nvldomain.NVLDomain, int32, error)
-	GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier) ([]*rack.Rack, error)
+	GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
 }
 
 // ManagerImpl implements the Manager interface.
@@ -145,8 +145,8 @@ func (m *ManagerImpl) PatchRack(ctx context.Context, rack *rack.Rack) (string, e
 }
 
 // GetListOfRacks lists racks matching the given criteria.
-func (m *ManagerImpl) GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents bool) ([]*rack.Rack, int32, error) {
-	return m.store.GetListOfRacks(ctx, info, manufacturerFilter, modelFilter, pagination, orderBy, withComponents)
+func (m *ManagerImpl) GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents, withExternalIDOnly bool) ([]*rack.Rack, int32, error) {
+	return m.store.GetListOfRacks(ctx, info, manufacturerFilter, modelFilter, pagination, orderBy, withComponents, withExternalIDOnly)
 }
 
 // GetListOfComponents lists components matching the given criteria.
@@ -195,8 +195,8 @@ func (m *ManagerImpl) GetListOfNVLDomains(ctx context.Context, info dbquery.Stri
 }
 
 // GetRacksForNVLDomain retrieves all racks belonging to an NVL domain.
-func (m *ManagerImpl) GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier) ([]*rack.Rack, error) {
-	return m.store.GetRacksForNVLDomain(ctx, nvlDomainID)
+func (m *ManagerImpl) GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, withComponents bool) ([]*rack.Rack, error) {
+	return m.store.GetRacksForNVLDomain(ctx, nvlDomainID, withComponents)
 }
 
 // AddComponent creates a single component in the database and returns its UUID.

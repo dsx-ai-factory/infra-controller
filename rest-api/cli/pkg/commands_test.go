@@ -473,7 +473,7 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
-func TestGeneratedCommandInfos_ExpectedInventoryReplaceAllPaths(t *testing.T) {
+func TestGeneratedCommandInfos_ExpectedInventoryBulkPaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)
 
@@ -484,21 +484,30 @@ func TestGeneratedCommandInfos_ExpectedInventoryReplaceAllPaths(t *testing.T) {
 
 	tests := []struct {
 		operationID string
+		method      string
 		path        string
 	}{
 		{
 			operationID: "replace-all-expected-rack",
+			method:      http.MethodPut,
 			path:        "/v2/org/{org}/nico/expected-rack/all",
 		},
 		{
 			operationID: "replace-all-expected-rack-group",
+			method:      http.MethodPut,
 			path:        "/v2/org/{org}/nico/expected-rack-group/all",
 		},
+		{operationID: "replace-all-expected-machine", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-machine/all"},
+		{operationID: "delete-all-expected-machine", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-machine/all"},
+		{operationID: "replace-all-expected-switch", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-switch/all"},
+		{operationID: "delete-all-expected-switch", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-switch/all"},
+		{operationID: "replace-all-expected-power-shelf", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+		{operationID: "delete-all-expected-power-shelf", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
 	}
 	for _, tt := range tests {
 		operation, ok := operations[tt.operationID]
 		require.True(t, ok, "missing %s", tt.operationID)
-		assert.Equal(t, http.MethodPut, operation.Method)
+		assert.Equal(t, tt.method, operation.Method)
 		assert.Equal(t, tt.path, operation.Path)
 	}
 

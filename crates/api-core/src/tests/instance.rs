@@ -5759,6 +5759,283 @@ async fn test_slaac_network_update_locks_instance_before_releasing_segment(pool:
     txn.rollback().await.unwrap();
 }
 
+/// A removed DPU's failed Admin apply must retain its old network resources,
+/// including after `ReleaseOldResources` is persisted.
+#[crate::sqlx_test]
+async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    let env = &fixture.env;
+    let mh = create_managed_host_multi_dpu(env, 2).await;
+    let mut network = dual_physical_network_config_with_vpc_prefixes(
+        fixture.lower_ipv4_prefix_id,
+        fixture.higher_ipv4_prefix_id,
+    );
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    for (interface, dpu_id) in network.interfaces.iter_mut().zip(&mh.dpu_ids) {
+        let locator = host.get_device_locator_for_dpu_id(dpu_id).unwrap();
+        interface.device = Some(locator.device);
+        interface.device_instance = locator.device_instance as u32;
+    }
+    txn.commit().await.unwrap();
+    let tinstance = mh
+        .instance_builer(env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(network)
+        .build()
+        .await;
+    let instance = tinstance.rpc_instance().await;
+    let mut config = instance.config().inner().clone();
+    let interfaces = &mut config.network.as_mut().unwrap().interfaces;
+    let removed_segment_id = interfaces.pop().unwrap().network_segment_id.unwrap();
+    let retained_segment_id = interfaces[0].network_segment_id.unwrap();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(config),
+            metadata: Some(instance.metadata().clone()),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap();
+    let waiting = ManagedHostState::Assigned {
+        instance_state: InstanceState::NetworkConfigUpdate {
+            network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
+        },
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(&mh.host().id, 10, waiting)
+        .await;
+
+    // Find the removed DPU through the config the API actually serves it.
+    let mut removed_dpu_id = None;
+    for dpu_id in &mh.dpu_ids {
+        let response = env
+            .api
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(*dpu_id),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        if response.use_admin_network {
+            assert!(
+                removed_dpu_id.is_none(),
+                "only one DPU should lose its interfaces"
+            );
+            removed_dpu_id = Some(*dpu_id);
+            assert!(response.tenant_interfaces.is_empty());
+            assert!(response.instance_network_config_version.is_empty());
+        } else {
+            assert_eq!(response.tenant_interfaces.len(), 1);
+            network_configured_with_health(env, dpu_id, None).await;
+        }
+    }
+    let removed_dpu_id = removed_dpu_id.expect("removed DPU must receive Admin config");
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let pending = snapshot.instance.as_ref().unwrap();
+    assert_eq!(pending.observations.network.len(), 2);
+    let update_request = pending.update_network_config_request.clone().unwrap();
+    let old_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &tinstance.id,
+        &removed_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|allocation| allocation.address)
+    .collect_vec();
+    assert_eq!(old_addresses.len(), 1);
+    txn.commit().await.unwrap();
+
+    for phase in [
+        NetworkConfigUpdateState::WaitingForConfigSynced,
+        NetworkConfigUpdateState::ReleaseOldResources,
+    ] {
+        if phase == NetworkConfigUpdateState::ReleaseOldResources {
+            // Establish the normal transition, then lose the acknowledgement
+            // before the next iteration handles the persisted release phase.
+            network_configured_with_health(env, &removed_dpu_id, None).await;
+            env.run_machine_state_controller_iteration().await;
+        }
+        let expected_state = ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: phase,
+            },
+        };
+        let mut txn = env.db_txn().await;
+        assert_eq!(mh.snapshot(&mut txn).await.managed_state, expected_state);
+        txn.commit().await.unwrap();
+
+        // Inject the report emitted after a failed Admin apply: both version
+        // stamps are absent, although NVUE/uplink health can still be clear.
+        env.api
+            .record_dpu_network_status(Request::new(rpc::forge::DpuNetworkStatus {
+                dpu_machine_id: Some(removed_dpu_id),
+                network_config_version: None,
+                instance_network_config_version: None,
+                network_config_error: Some(
+                    "network update failed: injected Admin apply failure".to_string(),
+                ),
+                dpu_health: Some(
+                    health_report::HealthReport::empty("forge-dpu-agent".to_string()).into(),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, expected_state);
+        assert!(
+            matches!(
+                &snapshot.host_snapshot.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                    if reason == "Waiting for DPU agent(s) to apply network config and report healthy network"
+            ),
+            "expected the managed-host version wait, got {:?}",
+            snapshot.host_snapshot.controller_state_outcome
+        );
+        assert!(!snapshot.managed_host_network_config_version_synced());
+        let pending = snapshot.instance.as_ref().unwrap();
+        // The remaining Instance receipts are current; the missing Admin
+        // receipt, not Instance-version mismatch or health, must block cleanup.
+        assert_eq!(pending.observations.network.len(), 1);
+        assert!(!pending.observations.network.contains_key(&removed_dpu_id));
+        assert!(
+            pending.observations.network.values().all(|observation| {
+                observation.config_version == pending.network_config_version
+            })
+        );
+        assert_eq!(pending.config.network, update_request.new_config);
+        assert_eq!(
+            pending.update_network_config_request.as_ref(),
+            Some(&update_request)
+        );
+        let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &tinstance.id,
+            &removed_segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|allocation| allocation.address)
+        .collect_vec();
+        assert_eq!(addresses, old_addresses);
+        let segments = db::network_segment::find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &removed_segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(segments.len(), 1);
+        assert!(!segments[0].is_marked_as_deleted());
+        txn.commit().await.unwrap();
+    }
+
+    // A lifecycle-blocking alert can arrive after the healthy transition to
+    // `ReleaseOldResources`. Current receipts alone must not bypass that alert.
+    let mut blocking_health = health_report::HealthReport::empty("forge-dpu-agent".to_string());
+    blocking_health
+        .alerts
+        .push(health_report::HealthProbeAlert {
+            id: health_report::HealthProbeId::post_config_check_wait(),
+            target: None,
+            in_alert_since: None,
+            message: "injected health change before resource release".to_string(),
+            tenant_message: None,
+            classifications: vec![
+                health_report::HealthAlertClassification::prevent_host_state_changes(),
+            ],
+        });
+    network_configured_with_health(env, &removed_dpu_id, Some(blocking_health.into())).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources,
+            },
+        }
+    );
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains("health")
+        ),
+        "expected the existing health error, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    assert!(
+        snapshot
+            .instance
+            .as_ref()
+            .unwrap()
+            .update_network_config_request
+            .is_some()
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+            .await
+            .unwrap(),
+        1
+    );
+    txn.commit().await.unwrap();
+
+    network_configured_with_health(env, &removed_dpu_id, None).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready
+        }
+    );
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert!(
+        snapshot
+            .instance
+            .as_ref()
+            .unwrap()
+            .update_network_config_request
+            .is_none()
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &removed_segment_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &retained_segment_id)
+            .await
+            .unwrap(),
+        1
+    );
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &removed_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(segments.len(), 1);
+    assert!(segments[0].is_marked_as_deleted());
+    txn.commit().await.unwrap();
+}
+
 #[crate::sqlx_test]
 async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     _: PgPoolOptions,

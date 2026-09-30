@@ -432,12 +432,21 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  mc.ID,
 				IsAssigned: cutil.GetPtr(true),
+				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
 			}
 
 			// return the updated machine
 			mcu, err := mcDAO.Update(ctx, tx, updateInput)
 			if err != nil {
 				continue
+			}
+			_, err = cdbm.NewStatusDetailDAO(dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: mc.ID,
+				Status:   cdbm.MachineStatusInUse,
+				Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+			})
+			if err != nil {
+				return nil, err
 			}
 			return mcu, nil
 		}

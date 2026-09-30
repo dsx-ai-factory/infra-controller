@@ -24,10 +24,21 @@ func TestAPITrayJSONContract(t *testing.T) {
 	value, ok := got["nvLinkDomainId"]
 	assert.True(t, ok)
 	assert.Nil(t, value)
+	health, ok := got["health"]
+	assert.True(t, ok)
+	assert.Nil(t, health)
 	assert.Equal(t, map[string]any{
 		"pendingTaskCount": float64(0),
 		"activeTaskCount":  float64(0),
 	}, got["taskStats"])
+}
+
+func TestAPITrayFromProtoClearsMissingHealth(t *testing.T) {
+	var tray APITray
+	tray.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, tray.Health)
+	tray.FromProto(&flowv1.Component{})
+	assert.Nil(t, tray.Health)
 }
 
 func TestProtoToAPIComponentTypeName(t *testing.T) {

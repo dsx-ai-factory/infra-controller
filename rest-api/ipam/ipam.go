@@ -56,10 +56,12 @@ type Ipamer interface {
 	AcquireIP(ctx context.Context, prefixCidr string) (*IP, error)
 	// ReleaseIP will release the given IP for later usage and returns the updated Prefix.
 	// If the IP is not found an NotFoundError is returned.
+	// Reserved network and IPv4 broadcast addresses cannot be released.
 	// This operation is scoped to the root namespace unless a different namespace is provided in the context.
 	ReleaseIP(ctx context.Context, ip *IP) (*Prefix, error)
 	// ReleaseIPFromPrefix will release the given IP for later usage.
 	// If the Prefix or the IP is not found an NotFoundError is returned.
+	// Reserved network and IPv4 broadcast addresses cannot be released.
 	// This operation is scoped to the root namespace unless a different namespace is provided in the context.
 	ReleaseIPFromPrefix(ctx context.Context, prefixCidr, ip string) error
 	// Dump all stored prefixes as json formatted string

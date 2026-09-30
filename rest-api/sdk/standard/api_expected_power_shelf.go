@@ -166,6 +166,134 @@ func (a *ExpectedPowerShelfAPIService) CreateExpectedPowerShelfExecute(r ApiCrea
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiDeleteAllExpectedPowerShelfRequest struct {
+	ctx        context.Context
+	ApiService *ExpectedPowerShelfAPIService
+	siteId     *string
+	org        string
+}
+
+// ID of the Site whose Expected Power Shelves should be deleted
+func (r ApiDeleteAllExpectedPowerShelfRequest) SiteId(siteId string) ApiDeleteAllExpectedPowerShelfRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiDeleteAllExpectedPowerShelfRequest) Execute() (*http.Response, error) {
+	return r.ApiService.DeleteAllExpectedPowerShelfExecute(r)
+}
+
+/*
+DeleteAllExpectedPowerShelf Delete all Expected Power Shelves
+
+Delete the complete Expected Power Shelf set for the Site identified by `siteId`.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiDeleteAllExpectedPowerShelfRequest
+*/
+func (a *ExpectedPowerShelfAPIService) DeleteAllExpectedPowerShelf(ctx context.Context, org string) ApiDeleteAllExpectedPowerShelfRequest {
+	return ApiDeleteAllExpectedPowerShelfRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+func (a *ExpectedPowerShelfAPIService) DeleteAllExpectedPowerShelfExecute(r ApiDeleteAllExpectedPowerShelfRequest) (*http.Response, error) {
+	var (
+		localVarHTTPMethod = http.MethodDelete
+		localVarPostBody   interface{}
+		formFiles          []formFile
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedPowerShelfAPIService.DeleteAllExpectedPowerShelf")
+	if err != nil {
+		return nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-power-shelf/all"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarHTTPResponse, newErr
+	}
+
+	return localVarHTTPResponse, nil
+}
+
 type ApiDeleteExpectedPowerShelfRequest struct {
 	ctx                  context.Context
 	ApiService           *ExpectedPowerShelfAPIService
@@ -613,6 +741,148 @@ func (a *ExpectedPowerShelfAPIService) GetExpectedPowerShelfExecute(r ApiGetExpe
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiReplaceAllExpectedPowerShelfRequest struct {
+	ctx                    context.Context
+	ApiService             *ExpectedPowerShelfAPIService
+	org                    string
+	expectedPowerShelfList *ExpectedPowerShelfList
+}
+
+func (r ApiReplaceAllExpectedPowerShelfRequest) ExpectedPowerShelfList(expectedPowerShelfList ExpectedPowerShelfList) ApiReplaceAllExpectedPowerShelfRequest {
+	r.expectedPowerShelfList = &expectedPowerShelfList
+	return r
+}
+
+func (r ApiReplaceAllExpectedPowerShelfRequest) Execute() ([]ExpectedPowerShelf, *http.Response, error) {
+	return r.ApiService.ReplaceAllExpectedPowerShelfExecute(r)
+}
+
+/*
+ReplaceAllExpectedPowerShelf Replace all Expected Power Shelves
+
+Replace the complete Expected Power Shelf set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedPowerShelves` array may be empty to clear the Site's set.
+
+Every entry must use the top-level `siteId`. BMC MAC addresses and shelf serial numbers must be unique within the replacement set.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiReplaceAllExpectedPowerShelfRequest
+*/
+func (a *ExpectedPowerShelfAPIService) ReplaceAllExpectedPowerShelf(ctx context.Context, org string) ApiReplaceAllExpectedPowerShelfRequest {
+	return ApiReplaceAllExpectedPowerShelfRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []ExpectedPowerShelf
+func (a *ExpectedPowerShelfAPIService) ReplaceAllExpectedPowerShelfExecute(r ApiReplaceAllExpectedPowerShelfRequest) ([]ExpectedPowerShelf, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPut
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []ExpectedPowerShelf
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedPowerShelfAPIService.ReplaceAllExpectedPowerShelf")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-power-shelf/all"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.expectedPowerShelfList == nil {
+		return localVarReturnValue, nil, reportError("expectedPowerShelfList is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.expectedPowerShelfList
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

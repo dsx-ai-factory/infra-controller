@@ -18,7 +18,9 @@ import (
 	"fmt"
 )
 
-// DpuExtensionServiceDpuTarget DPU placement policy. Primary targets the host's primary attached DPU; AllActive targets DPUs used by instance networking, including legacy fallbacks; All targets every attached DPU.
+// DpuExtensionServiceDpuTarget DPU placement policy. Primary targets the host's primary attached
+// DPU; AllActive targets DPUs used by instance networking, including legacy fallbacks; All targets
+// every attached DPU.
 type DpuExtensionServiceDpuTarget string
 
 // List of DpuExtensionServiceDpuTarget

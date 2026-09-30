@@ -4,11 +4,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -822,4 +824,119 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// ReplaceAllExpectedSwitchesHandler replaces the complete ExpectedSwitch set for one Site.
+type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+
+// NewReplaceAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch replacement handler.
+func NewReplaceAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedSwitchesHandler {
+	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Replace all ExpectedSwitches for a Site
+// @Tags ExpectedSwitch
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIReplaceAllExpectedSwitchesRequest true "ExpectedSwitch replace-all request"
+// @Success 200 {object} []model.APIExpectedSwitch
+// @Router /v2/org/{org}/nico/expected-switch/all [put]
+func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, span := common.SetupHandler("ExpectedSwitch", "ReplaceAll", c, h.tracerSpan)
+	if span != nil {
+		defer span.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+	request := model.APIReplaceAllExpectedSwitchesRequest{}
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ReplaceAllExpectedSwitches request data", err)
+	}
+	site, apiErr := h.resolveSite(ctx, logger, org, dbUser, request.SiteID, true)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+	logger = logger.With().Str("SiteID", site.ID.String()).Logger()
+
+	inputs := make([]cdbm.ExpectedSwitchCreateInput, 0, len(request.ExpectedSwitches))
+	credentials := make(map[uuid.UUID]cdbm.ExpectedSwitchCredentials, len(request.ExpectedSwitches))
+	for _, expectedSwitch := range request.ExpectedSwitches {
+		id := uuid.New()
+		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
+		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
+			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
+			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
+			NvosMacAddresses: expectedSwitch.NvosMacAddresses, RackID: expectedSwitch.RackID,
+			Name: expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
+			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
+			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
+		})
+	}
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	dao := cdbm.NewExpectedSwitchDAO(h.dbSession)
+	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedSwitch, error) {
+		switches, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error replacing ExpectedSwitch records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Switches due to DB error", nil)
+		}
+		protos := make([]*corev1.ExpectedSwitch, 0, len(switches))
+		for i := range switches {
+			protos = append(protos, switches[i].ToProto(credentials[switches[i].ID]))
+		}
+		coreRequest := &corev1.ExpectedSwitchList{ExpectedSwitches: protos}
+		var secretFields []string
+		if slices.ContainsFunc(request.ExpectedSwitches, func(expectedSwitch *model.APIExpectedSwitchCreateRequest) bool {
+			return expectedSwitch.DefaultBmcUsername != nil || expectedSwitch.DefaultBmcPassword != nil || expectedSwitch.NvOsUsername != nil || expectedSwitch.NvOsPassword != nil
+		}) {
+			secretFields = []string{"expectedSwitches"}
+		}
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		return switches, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to replace Expected Switches due to DB transaction error")
+	}
+	response := make([]*model.APIExpectedSwitch, 0, len(replaced))
+	for i := range replaced {
+		response = append(response, model.NewAPIExpectedSwitch(&replaced[i]))
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+// DeleteAllExpectedSwitchesHandler deletes the complete ExpectedSwitch set for one Site.
+type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+
+// NewDeleteAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch deletion handler.
+func NewDeleteAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedSwitchesHandler {
+	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Delete all ExpectedSwitches for a Site
+// @Tags ExpectedSwitch
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site whose ExpectedSwitches should be deleted"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-switch/all [delete]
+func (h DeleteAllExpectedSwitchesHandler) Handle(c echo.Context) error {
+	return h.deleteAll(c, "ExpectedSwitch", corev1.Forge_DeleteAllExpectedSwitches_FullMethodName, func(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID) error {
+		return cdbm.NewExpectedSwitchDAO(h.dbSession).DeleteAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+	})
 }

@@ -6,14 +6,14 @@ tests:
     asserts:
       - equal:
           path: spec.template.metadata.annotations["checksum/config"]
-          value: 27d4f9e07ce351611c7ba58a327ae9ed3075410c76b0304f4251e760091fdef7
+          value: 34353eb3260c1f509e6ad0ac79c62cf0777cff01c05a6f9683c322b763da32be
   - it: changes the checksum when the BMC credential source changes
     set:
       credentials.bmcSiteWideRootSource: local
     asserts:
       - notEqual:
           path: spec.template.metadata.annotations["checksum/config"]
-          value: 27d4f9e07ce351611c7ba58a327ae9ed3075410c76b0304f4251e760091fdef7
+          value: 34353eb3260c1f509e6ad0ac79c62cf0777cff01c05a6f9683c322b763da32be
       - matchRegex:
           path: spec.template.metadata.annotations["checksum/config"]
           pattern: '^[a-f0-9]{64}$'
@@ -23,4 +23,11 @@ tests:
     asserts:
       - notEqual:
           path: spec.template.metadata.annotations["checksum/config"]
-          value: 27d4f9e07ce351611c7ba58a327ae9ed3075410c76b0304f4251e760091fdef7
+          value: 34353eb3260c1f509e6ad0ac79c62cf0777cff01c05a6f9683c322b763da32be
+  - it: changes the checksum when the SSH console address changes
+    set:
+      sshConsole.port: 1080
+    asserts:
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: 34353eb3260c1f509e6ad0ac79c62cf0777cff01c05a6f9683c322b763da32be

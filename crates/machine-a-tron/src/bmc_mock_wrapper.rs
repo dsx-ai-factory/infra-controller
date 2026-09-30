@@ -64,7 +64,7 @@ impl<C: Callbacks> BmcMockWrapper<C> {
         hostname: Arc<dyn HostnameQuerying>,
         host_id: Uuid,
         injection: Arc<InjectionStore>,
-        bmc_reset: Option<std::time::Duration>,
+        timings: Option<&crate::lifecycle_timings::LifecycleTimings>,
     ) -> Self {
         let (bmc_mock_router, bmc_mock_state) = bmc_mock::machine_router_with_injection_store(
             machine_info,
@@ -73,7 +73,8 @@ impl<C: Callbacks> BmcMockWrapper<C> {
             true,
             injection,
             bmc_mock::MachineRouterOptions {
-                bmc_reset_duration: bmc_reset,
+                bmc_reset_duration: timings.map(|t| t.bmc_reset),
+                firmware_upgrade_duration: timings.map(|t| t.firmware_upgrade),
                 ..Default::default()
             },
         );

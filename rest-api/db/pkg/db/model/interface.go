@@ -127,6 +127,7 @@ type Interface struct {
 	RequestedIpAddress   *string                        `bun:"requested_ip_address"`
 	MacAddress           *string                        `bun:"mac_address"`
 	IPAddresses          []string                       `bun:"ip_addresses,type:text[]"`
+	IPPrefixes           []string                       `bun:"ip_prefixes,type:text[]"`
 	InlineRoutingProfile *InterfaceInlineRoutingProfile `bun:"inline_routing_profile,type:jsonb"`
 	Status               string                         `bun:"status,notnull"`
 	Created              time.Time                      `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -220,6 +221,7 @@ type InterfaceUpdateInput struct {
 	InlineRoutingProfile *InterfaceInlineRoutingProfile
 	MacAddress           *string
 	IpAddresses          []string
+	IPPrefixes           []string // Nil preserves stored prefixes; an empty slice clears them.
 	Status               *string
 }
 
@@ -586,6 +588,17 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 		if interfaceDAOSpan != nil {
 			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "ip_addresses", input.IpAddresses)
 		}
+	}
+	if input.IPPrefixes != nil {
+		for _, prefix := range input.IPPrefixes {
+			_, parseErr := netip.ParsePrefix(prefix)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid Interface IP prefix %q: %w", prefix, parseErr)
+			}
+		}
+
+		is.IPPrefixes = input.IPPrefixes
+		updatedFields = append(updatedFields, "ip_prefixes")
 	}
 	if input.Status != nil {
 		is.Status = *input.Status

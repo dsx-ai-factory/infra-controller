@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,12 @@ var defaultRackPagination = dbquery.Pagination{
 	Offset: 0,
 	Limit:  100,
 	Total:  0,
+}
+
+// GetAllRacks returns every non-deleted rack without relations.
+func GetAllRacks(ctx context.Context, idb bun.IDB) (ret []Rack, err error) {
+	err = idb.NewSelect().Model(&ret).Scan(ctx)
+	return ret, err
 }
 
 var defaultRackOrderBy = []dbquery.OrderBy{
@@ -46,15 +53,16 @@ type Rack struct {
 	// (ExpectedRack.rack_id, e.g. "a12") populated by the expected-inventory
 	// mirror. NULL on racks that the mirror has never adopted (e.g. legacy
 	// ingestion-gRPC rows on first run).
-	ExternalID    *string     `bun:"external_id"`
-	RackProfileID *string     `bun:"rack_profile_id"`
-	Status        RackStatus  `bun:"status,type:varchar(16),default:'new'"`
-	CreatedAt     time.Time   `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt     time.Time   `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
-	IngestedAt    *time.Time  `bun:"ingested_at"`
-	DeletedAt     *time.Time  `bun:"deleted_at,soft_delete"`
-	Components    []Component `bun:"rel:has-many,join:id=rack_id"`
-	NVLDomain     *NVLDomain  `bun:"rel:belongs-to,join:nvldomain_id=id"`
+	ExternalID    *string             `bun:"external_id"`
+	RackProfileID *string             `bun:"rack_profile_id"`
+	Status        RackStatus          `bun:"status,type:varchar(16),default:'new'"`
+	Health        *types.HealthReport `bun:"health,type:jsonb,nullzero"`
+	CreatedAt     time.Time           `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt     time.Time           `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	IngestedAt    *time.Time          `bun:"ingested_at"`
+	DeletedAt     *time.Time          `bun:"deleted_at,soft_delete"`
+	Components    []Component         `bun:"rel:has-many,join:id=rack_id"`
+	NVLDomain     *NVLDomain          `bun:"rel:belongs-to,join:nvldomain_id=id"`
 }
 
 type RackStatus string
@@ -149,6 +157,19 @@ func (rd *Rack) Patch(ctx context.Context, idb bun.IDB) error {
 	return err
 }
 
+// SetHealthByExternalID writes the latest aggregate health snapshot for the
+// rack identified by Core's external ID.
+func (rd *Rack) SetHealthByExternalID(ctx context.Context, idb bun.IDB) error {
+	if rd.ExternalID == nil || *rd.ExternalID == "" {
+		return errors.New("rack external ID not set")
+	}
+	_, err := idb.NewUpdate().Model(rd).
+		Set("health = ?", rd.Health).
+		Where("external_id = ?", *rd.ExternalID).
+		Exec(ctx)
+	return err
+}
+
 // BuildPatch builds a patched rack from the current rack and the
 // input rack. It goes through the patchable fields and builds the patched
 // rack. If there is no change on patchable fields, it returns nil.
@@ -206,6 +227,7 @@ func GetListOfRacks(
 	pagination *dbquery.Pagination,
 	orderBy *dbquery.OrderBy,
 	withComponents bool,
+	withExternalIDOnly bool,
 ) ([]Rack, int32, error) {
 	var racks []Rack
 	conf := &dbquery.Config{
@@ -221,6 +243,11 @@ func GetListOfRacks(
 
 	// Build filterables list from all provided filters
 	filterables := make([]dbquery.Filterable, 0)
+	if withExternalIDOnly {
+		filterables = append(filterables, &dbquery.Filter{
+			Column: "external_id", Operator: dbquery.OperatorNotEqual, Value: "",
+		})
+	}
 
 	if filterable := info.ToFilterable("name"); filterable != nil {
 		filterables = append(filterables, filterable)
@@ -300,9 +327,13 @@ func GetRacksForNVLDomain(
 	ctx context.Context,
 	idb bun.IDB,
 	nvlDomainID uuid.UUID,
+	withComponents bool,
 ) ([]Rack, error) {
 	var racks []Rack
 	q := idb.NewSelect().Model(&racks).Where("nvldomain_id = ?", nvlDomainID)
+	if withComponents {
+		q = q.Relation("Components").Relation("Components.BMCs")
+	}
 
 	if err := q.Scan(ctx); err != nil {
 		return nil, err

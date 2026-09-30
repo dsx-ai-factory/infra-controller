@@ -286,3 +286,109 @@ async fn default_ttl_column_rejects_out_of_range_values(pool: sqlx::PgPool) {
         );
     }
 }
+
+/// The stored SOA serial of a domain, read straight from the row.
+async fn stored_serial(
+    txn: &mut sqlx::PgConnection,
+    domain_id: carbide_uuid::domain::DomainId,
+) -> u32 {
+    let serial: i64 =
+        sqlx::query_scalar("SELECT (soa->>'serial')::bigint FROM domains WHERE id = $1")
+            .bind(domain_id)
+            .fetch_one(txn)
+            .await
+            .expect("read stored serial");
+    u32::try_from(serial).expect("serial fits u32")
+}
+
+// Every inventory write that changes what a zone publishes advances that
+// zone's serial, and only that zone's. The bump is a single SQL statement, so
+// two changes in one second still yield two distinct, increasing serials.
+#[crate::sqlx_test]
+async fn zone_serial_advances_with_zone_content(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let zone = db::dns::domain::persist(NewDomain::new("serial.example"), txn.as_mut())
+        .await
+        .expect("create zone");
+    let bystander = db::dns::domain::persist(NewDomain::new("bystander.example"), txn.as_mut())
+        .await
+        .expect("create unrelated zone");
+    let initial = stored_serial(txn.as_mut(), zone.id).await;
+    let bystander_initial = stored_serial(txn.as_mut(), bystander.id).await;
+
+    db::dns::domain::bump_serial(txn.as_mut(), &[zone.id])
+        .await
+        .expect("first bump");
+    let first = stored_serial(txn.as_mut(), zone.id).await;
+    assert!(first > initial, "serial advances: {initial} -> {first}");
+
+    db::dns::domain::bump_serial(txn.as_mut(), &[zone.id])
+        .await
+        .expect("second bump in the same second");
+    let second = stored_serial(txn.as_mut(), zone.id).await;
+    assert!(
+        second > first,
+        "a second change within one second still advances"
+    );
+
+    assert_eq!(
+        stored_serial(txn.as_mut(), bystander.id).await,
+        bystander_initial,
+        "unrelated zones are untouched"
+    );
+
+    // A zone whose SOA predates serial storage is skipped rather than given a
+    // partial SOA.
+    sqlx::query("UPDATE domains SET soa = '{}'::jsonb WHERE id = $1")
+        .bind(bystander.id)
+        .execute(txn.as_mut())
+        .await
+        .expect("strip SOA");
+    db::dns::domain::bump_serial(txn.as_mut(), &[bystander.id])
+        .await
+        .expect("bump tolerates a missing SOA");
+    let soa: serde_json::Value = sqlx::query_scalar("SELECT soa FROM domains WHERE id = $1")
+        .bind(bystander.id)
+        .fetch_one(txn.as_mut())
+        .await
+        .expect("read SOA");
+    assert_eq!(soa, serde_json::json!({}));
+}
+
+// The serial is a u32 in Rust, so a stored value past that would make the row
+// undecodable and the zone unservable. The CHECK turns a bump at the maximum
+// into a write-time error instead; a row without a serial key is unaffected.
+#[crate::sqlx_test]
+async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let zone = db::dns::domain::persist(NewDomain::new("serial-max.example"), txn.as_mut())
+        .await
+        .expect("create zone");
+    sqlx::query("UPDATE domains SET soa = jsonb_set(soa, '{serial}', '4294967295') WHERE id = $1")
+        .bind(zone.id)
+        .execute(txn.as_mut())
+        .await
+        .expect("the maximum serial is still in range");
+
+    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    let error = db::dns::domain::bump_serial(attempt.as_mut(), &[zone.id])
+        .await
+        .expect_err("a bump past the maximum is rejected");
+    attempt.rollback().await.expect("release savepoint");
+    let DatabaseError::Sqlx(annotated) = &error else {
+        panic!("expected a database error, got {error:?}");
+    };
+    let sqlx::Error::Database(db_error) = &annotated.source else {
+        panic!("expected a database error, got {error:?}");
+    };
+    assert_eq!(
+        db_error.constraint(),
+        Some("domains_soa_serial_range_check"),
+        "{error}"
+    );
+    assert_eq!(
+        stored_serial(txn.as_mut(), zone.id).await,
+        u32::MAX,
+        "the rejected bump left the stored serial alone"
+    );
+}

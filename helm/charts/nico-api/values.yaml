@@ -172,6 +172,10 @@ service:
   profiler:
     port: 1081
 
+sshConsole:
+  serviceName: nico-ssh-console-rs
+  port: 1079
+
 certificate:
   ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on global.namespace
   serviceName: ""

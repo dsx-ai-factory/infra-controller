@@ -166,7 +166,7 @@ func validRackHealthReportRequest(siteID string) model.APIRackHealthReportEntryR
 		APIMachineHealthReportEntryRequest: model.APIMachineHealthReportEntryRequest{
 			Source:    "overrides.sre",
 			Mode:      model.MachineHealthReportModeMerge,
-			Successes: []model.APIMachineHealthProbeSuccess{{ID: "probe.ok"}},
+			Successes: []model.APIHealthProbeSuccess{{ID: "probe.ok"}},
 		},
 	}
 }

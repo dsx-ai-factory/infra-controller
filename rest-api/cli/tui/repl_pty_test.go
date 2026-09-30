@@ -237,15 +237,21 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "fnn-instance\r")
 		terminal.waitFor(t, "VPC prefix for DPU 0 physical interface:")
 		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
+		terminal.send(t, "10.0.0.11\r")
 		terminal.waitFor(t, "Add a virtual function for DPU 0 (configured functions: 1)?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for DPU 0 virtual interface:")
 		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
+		terminal.send(t, "10.0.0.13\r")
 		terminal.waitFor(t, "Virtual function ID for DPU 0 (0-15)")
 		terminal.send(t, "3\r")
 		terminal.waitFor(t, "Add a virtual function for DPU 0 (configured functions: 2)?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for DPU 0 virtual interface:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Virtual function ID for DPU 0 (0-15)")
 		terminal.send(t, "4\r")
@@ -254,6 +260,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Configure DPU 1?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for DPU 1 physical interface:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Add a virtual function for DPU 1 (configured functions: 1)?")
 		terminal.send(t, "n\r")
@@ -278,9 +286,13 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "fnn-fallback-instance\r")
 		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
 		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
+		terminal.send(t, "\r")
 		terminal.waitFor(t, "Add another Ethernet interface (have 1)?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Virtual function ID (0-15)")
 		terminal.send(t, "5\r")
@@ -539,8 +551,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"machineId":"machine-1",
 				"vpcId":"vpc-2",
 				"interfaces":[
-					{"vpcPrefixId":"vpc-prefix-1","device":"dual-dpu-network","deviceInstance":0,"isPhysical":true},
-					{"vpcPrefixId":"vpc-prefix-1","device":"dual-dpu-network","deviceInstance":0,"isPhysical":false,"virtualFunctionId":3},
+					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.11","device":"dual-dpu-network","deviceInstance":0,"isPhysical":true},
+					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.13","device":"dual-dpu-network","deviceInstance":0,"isPhysical":false,"virtualFunctionId":3},
 					{"vpcPrefixId":"vpc-prefix-1","device":"dual-dpu-network","deviceInstance":0,"isPhysical":false,"virtualFunctionId":4},
 					{"vpcPrefixId":"vpc-prefix-1","device":"dual-dpu-network","deviceInstance":1,"isPhysical":true}
 				]

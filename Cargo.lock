@@ -3399,10 +3399,12 @@ dependencies = [
 name = "carbide-ssh-console"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bmc-mock",
  "bmc-vendor",
  "bytes",
  "carbide-api-test-helper",
+ "carbide-authn",
  "carbide-instrument",
  "carbide-machine-a-tron",
  "carbide-rpc",
@@ -3433,6 +3435,8 @@ dependencies = [
  "rand 0.10.1",
  "ringbuf",
  "russh",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "size",
  "strip-ansi-escapes",
@@ -3440,6 +3444,9 @@ dependencies = [
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -3465,6 +3472,7 @@ dependencies = [
  "carbide-uuid",
  "carbide-version",
  "eyre",
+ "futures",
  "prost",
  "prost-types",
  "rustls",
@@ -7615,6 +7623,14 @@ dependencies = [
  "uuid",
  "x509-parser",
  "zip",
+]
+
+[[package]]
+name = "nico-machine-validation-default-plugin"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
