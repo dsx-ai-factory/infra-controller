@@ -76,9 +76,6 @@ def check_vips(stream, metallb_stream=None):
                 raise ValueError(f"{component}.{name} must be a mapping")
             if not service.get("enabled"):
                 continue
-            # externalService honors type; the DHCPv6 template always renders LoadBalancer.
-            if name == "externalService" and (service.get("type") or "LoadBalancer") != "LoadBalancer":
-                continue
             # The v6 external flag alone cannot create a DHCPv6 workload.
             if name == "v6ExternalService":
                 dhcp = config.get("dhcp")
@@ -88,6 +85,28 @@ def check_vips(stream, metallb_stream=None):
                     raise ValueError(f"{component}.dhcp must be a mapping")
                 if not dhcp.get("v6Enabled"):
                     continue
+
+            families = None
+            family_policy = None
+            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp") and name == "externalService":
+                families = service.get("ipFamilies")
+                family_policy = service.get("ipFamilyPolicy")
+                if family_policy is None or family_policy == "":
+                    family_policy = "SingleStack"
+                if families is not None and not isinstance(families, list):
+                    raise ValueError(f"{component}.{name}.ipFamilies must be a list")
+                if family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
+                    raise ValueError(f"{component}.{name}.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
+                if families:
+                    if (any(family not in ("IPv4", "IPv6") for family in families)
+                            or len(set(families)) != len(families)):
+                        raise ValueError(f"{component}.{name}.ipFamilies must contain unique IPv4 or IPv6 entries")
+                    if family_policy == "SingleStack" and len(families) != 1:
+                        raise ValueError(f"{component}.{name}.ipFamilies must contain one family for SingleStack")
+
+            # externalService honors type; the DHCPv6 template always renders LoadBalancer.
+            if name == "externalService" and (service.get("type") or "LoadBalancer") != "LoadBalancer":
+                continue
 
             # Only DNS and NTP render per-pod annotations; other charts ignore that field.
             annotations = (service.get("perPodAnnotations")
@@ -122,6 +141,12 @@ def check_vips(stream, metallb_stream=None):
                         # These external Services explicitly render SingleStack IPv4.
                         if name == "externalService" and component in ("nico-dhcp", "unbound") and address.version != 4:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv4 address")
+                            continue
+                        # These charts can select a family explicitly. Dual-stack policies
+                        # may add the other family, and omitted families depend on the cluster.
+                        if (families and family_policy == "SingleStack"
+                                and f"IPv{address.version}" not in families):
+                            errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {families}")
                             continue
                         # Normalize addresses, but do not count annotation aliases as separate Services.
                         if seen_vips.get(address) == owner:

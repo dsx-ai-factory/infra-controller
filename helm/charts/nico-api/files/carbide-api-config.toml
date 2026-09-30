@@ -5,9 +5,12 @@
 # for the respective environment
 
 listen = "[::]:1079"
+# Required: the chart's readinessProbe and livenessProbe target this port.
+# Removing metrics_endpoint leaves the pod permanently un-Ready.
 metrics_endpoint = "[::]:1080"
 alt_metric_prefix = "nico_"
 database_url = "postgres://replaced-by-env-var"
+ssh_console_url = "https://{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"
 asn = 4294967000
 initial_dpu_agent_upgrade_policy = "up_only"
 max_concurrent_machine_updates = 10
@@ -126,6 +129,13 @@ poll_interval = {{ required "nico-api.credentials.file.pollInterval is required 
 
 [machine_state_controller]
 failure_retry_time = "90m"
+
+{{- $maxConcurrency := .Values.machineStateController.maxConcurrency }}
+{{- if or (ne (printf "%v" $maxConcurrency) (printf "%d" ($maxConcurrency | int))) (lt ($maxConcurrency | int) 1) }}
+{{- fail "nico-api.machineStateController.maxConcurrency must be a positive integer" }}
+{{- end }}
+[machine_state_controller.controller]
+max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
 
 [vpc_prefix_state_controller]
 vpc_prefix_drain_time = "5m"

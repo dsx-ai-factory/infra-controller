@@ -75,6 +75,15 @@ pub(crate) struct ResetSet {
 
     #[clap(
         long,
+        action,
+        requires = "allow_reset_with_instance",
+        help = "Skip host cleanup after the live instance is deleted. The previous tenant's data \
+                stays on the host."
+    )]
+    pub(super) ignore_cleanup: bool,
+
+    #[clap(
+        long,
         help = "If set, a HostUpdateInProgress health alert with this message is applied to the \
                 host. The alert is a precondition for the reset."
     )]
@@ -88,6 +97,7 @@ impl From<&ResetSet> for ManagedHostResetRequest {
             mode: Mode::Set as i32,
             initiator: UpdateInitiator::AdminCli as i32,
             allow_reset_with_instance: args.allow_reset_with_instance,
+            ignore_cleanup: args.ignore_cleanup,
         }
     }
 }
@@ -115,6 +125,7 @@ impl From<ResetClear> for ManagedHostResetRequest {
             mode: Mode::Clear as i32,
             initiator: UpdateInitiator::AdminCli as i32,
             allow_reset_with_instance: false,
+            ignore_cleanup: false,
         }
     }
 }

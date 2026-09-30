@@ -166,6 +166,134 @@ func (a *ExpectedSwitchAPIService) CreateExpectedSwitchExecute(r ApiCreateExpect
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiDeleteAllExpectedSwitchRequest struct {
+	ctx        context.Context
+	ApiService *ExpectedSwitchAPIService
+	siteId     *string
+	org        string
+}
+
+// ID of the Site whose Expected Switches should be deleted
+func (r ApiDeleteAllExpectedSwitchRequest) SiteId(siteId string) ApiDeleteAllExpectedSwitchRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiDeleteAllExpectedSwitchRequest) Execute() (*http.Response, error) {
+	return r.ApiService.DeleteAllExpectedSwitchExecute(r)
+}
+
+/*
+DeleteAllExpectedSwitch Delete all Expected Switches
+
+Delete the complete Expected Switch set for the Site identified by `siteId`.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Switches if they have an account with the Site's Infrastructure Provider.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiDeleteAllExpectedSwitchRequest
+*/
+func (a *ExpectedSwitchAPIService) DeleteAllExpectedSwitch(ctx context.Context, org string) ApiDeleteAllExpectedSwitchRequest {
+	return ApiDeleteAllExpectedSwitchRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+func (a *ExpectedSwitchAPIService) DeleteAllExpectedSwitchExecute(r ApiDeleteAllExpectedSwitchRequest) (*http.Response, error) {
+	var (
+		localVarHTTPMethod = http.MethodDelete
+		localVarPostBody   interface{}
+		formFiles          []formFile
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedSwitchAPIService.DeleteAllExpectedSwitch")
+	if err != nil {
+		return nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-switch/all"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarHTTPResponse, newErr
+	}
+
+	return localVarHTTPResponse, nil
+}
+
 type ApiDeleteExpectedSwitchRequest struct {
 	ctx              context.Context
 	ApiService       *ExpectedSwitchAPIService
@@ -637,6 +765,148 @@ func (a *ExpectedSwitchAPIService) GetExpectedSwitchExecute(r ApiGetExpectedSwit
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiReplaceAllExpectedSwitchRequest struct {
+	ctx                context.Context
+	ApiService         *ExpectedSwitchAPIService
+	org                string
+	expectedSwitchList *ExpectedSwitchList
+}
+
+func (r ApiReplaceAllExpectedSwitchRequest) ExpectedSwitchList(expectedSwitchList ExpectedSwitchList) ApiReplaceAllExpectedSwitchRequest {
+	r.expectedSwitchList = &expectedSwitchList
+	return r
+}
+
+func (r ApiReplaceAllExpectedSwitchRequest) Execute() ([]ExpectedSwitch, *http.Response, error) {
+	return r.ApiService.ReplaceAllExpectedSwitchExecute(r)
+}
+
+/*
+ReplaceAllExpectedSwitch Replace all Expected Switches
+
+Replace the complete Expected Switch set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedSwitches` array may be empty to clear the Site's set.
+
+Every entry must use the top-level `siteId`. BMC MAC addresses, switch serial numbers, and NVOS MAC addresses must be unique within the replacement set.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Switches if they have an account with the Site's Infrastructure Provider.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiReplaceAllExpectedSwitchRequest
+*/
+func (a *ExpectedSwitchAPIService) ReplaceAllExpectedSwitch(ctx context.Context, org string) ApiReplaceAllExpectedSwitchRequest {
+	return ApiReplaceAllExpectedSwitchRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []ExpectedSwitch
+func (a *ExpectedSwitchAPIService) ReplaceAllExpectedSwitchExecute(r ApiReplaceAllExpectedSwitchRequest) ([]ExpectedSwitch, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPut
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []ExpectedSwitch
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedSwitchAPIService.ReplaceAllExpectedSwitch")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-switch/all"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.expectedSwitchList == nil {
+		return localVarReturnValue, nil, reportError("expectedSwitchList is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.expectedSwitchList
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiUpdateExpectedSwitchRequest struct {
 	ctx                         context.Context
 	ApiService                  *ExpectedSwitchAPIService
@@ -645,7 +915,7 @@ type ApiUpdateExpectedSwitchRequest struct {
 	expectedSwitchUpdateRequest *ExpectedSwitchUpdateRequest
 }
 
-// Expected Switch update request.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
+// Expected Switch update request.  Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported.
 func (r ApiUpdateExpectedSwitchRequest) ExpectedSwitchUpdateRequest(expectedSwitchUpdateRequest ExpectedSwitchUpdateRequest) ApiUpdateExpectedSwitchRequest {
 	r.expectedSwitchUpdateRequest = &expectedSwitchUpdateRequest
 	return r

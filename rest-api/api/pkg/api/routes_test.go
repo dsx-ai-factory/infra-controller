@@ -55,10 +55,11 @@ func TestNewAPIRoutes(t *testing.T) {
 		"spectrumx-partition":       4,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
-		"expected-machine":          9,
-		"expected-power-shelf":      5,
-		"expected-rack":             7,
-		"expected-switch":           5,
+		"expected-machine":          11,
+		"expected-power-shelf":      7,
+		"expected-rack":             8,
+		"expected-rack-group":       8,
+		"expected-switch":           7,
 		"instance-type":             5,
 		"machine":                   21,
 		"allocation":                6,
@@ -79,8 +80,8 @@ func TestNewAPIRoutes(t *testing.T) {
 		"rule":                      5,
 		"run":                       8,
 		"domain":                    9,
-		"rack":                      13,
-		"tray":                      9,
+		"rack":                      16,
+		"tray":                      12,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -118,6 +119,36 @@ func TestNewAPIRoutes(t *testing.T) {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
 			}
 
+			expectedInventoryBulkPaths := []string{
+				"/expected-machine",
+				"/expected-power-shelf",
+				"/expected-switch",
+			}
+			for _, path := range expectedInventoryBulkPaths {
+				allPath := "/org/:orgName/" + cfg.GetAPIName() + path + "/all"
+				itemPath := "/org/:orgName/" + cfg.GetAPIName() + path + "/:id"
+				assertRouteExists(t, got, http.MethodPut, allPath)
+				assertRouteExists(t, got, http.MethodDelete, allPath)
+				assertRouteBefore(t, got, http.MethodDelete, allPath, http.MethodDelete, itemPath)
+			}
+
+			rackPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-rack"
+			assertRouteExists(t, got, http.MethodPut, rackPath)
+			assertRouteExists(t, got, http.MethodPut, rackPath+"/all")
+			assertRouteExists(t, got, http.MethodDelete, rackPath+"/all")
+			assertRouteBefore(t, got, http.MethodDelete, rackPath+"/all", http.MethodDelete, rackPath+"/:id")
+
+			rackGroupPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-rack-group"
+			for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodPut} {
+				assertRouteExists(t, got, method, rackGroupPath)
+			}
+			for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+				assertRouteExists(t, got, method, rackGroupPath+"/:id")
+			}
+			assertRouteExists(t, got, http.MethodPut, rackGroupPath+"/all")
+			assertRouteExists(t, got, http.MethodDelete, rackGroupPath+"/all")
+			assertRouteBefore(t, got, http.MethodDelete, rackGroupPath+"/all", http.MethodDelete, rackGroupPath+"/:id")
+
 			bmcCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/bmc"
 			assertRouteExists(t, got, http.MethodPut, bmcCredentialPath)
 			reencryptPath := "/org/:orgName/" + cfg.GetAPIName() + "/site/:siteID/tenant-identity/re-encrypt"
@@ -126,6 +157,14 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, siteExplorerEndpointPath)
 			siteExplorerActionPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint/action"
 			assertRouteExists(t, got, http.MethodPost, siteExplorerActionPath)
+			rackHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			trayHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, trayHealthReportPath+"/:source")
 			uefiCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/uefi"
 			assertRouteExists(t, got, http.MethodPost, uefiCredentialPath)
 			measuredBootPath := "/org/:orgName/" + cfg.GetAPIName() + "/measured-boot"
@@ -198,6 +237,10 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, ipxeTemplatePath+"/:id")
 
 			domainPath := "/org/:orgName/" + cfg.GetAPIName() + "/domain/nvlink"
+			assertRouteExists(t, got, http.MethodGet, domainPath)
+			assertRouteExists(t, got, http.MethodGet, domainPath+"/:id")
+			assertRouteBefore(t, got, http.MethodPatch, domainPath+"/power", http.MethodGet, domainPath+"/:id")
+			assertRouteBefore(t, got, http.MethodPatch, domainPath+"/firmware", http.MethodGet, domainPath+"/:id")
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/power")
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/firmware")
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/:id/power")

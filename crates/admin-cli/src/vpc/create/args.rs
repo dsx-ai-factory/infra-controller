@@ -65,7 +65,7 @@ pub(crate) struct Args {
         long,
         action = clap::ArgAction::Set,
         value_name = "SLAAC_ENABLED",
-        help = "Whether Core should allocate an IPv6 /64 for each IPv6-enabled instance interface. Supported only for FNN VPCs; NICo does not configure router advertisements. Enabling requires the connected Core to advertise VPC SLAAC support and fails otherwise. Omit or set false to disable. This setting cannot be changed after creation"
+        help = "Use SLAAC for IPv6 interfaces in this VPC. Requires --virtualization-type fnn and a supporting Core. Tenant RA and default-route discovery require a routed /64 and upgraded DPU agents on every possible host. Omit or set false to disable; this setting cannot be changed after creation"
     )]
     slaac_enabled: Option<bool>,
 }

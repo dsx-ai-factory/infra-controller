@@ -37,7 +37,7 @@
         ip:
           address:
             192.168.0.0/16: {} 
-          vrf: vpc_10101 
+          vrf: vpc_10101
     nve:
       vxlan:
         arp-nd-suppress: on

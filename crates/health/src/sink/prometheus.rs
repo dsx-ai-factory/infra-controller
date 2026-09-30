@@ -73,17 +73,22 @@ impl PrometheusSink {
     }
 
     fn metric_reading_key(sample: &MetricSample) -> String {
+        Self::metric_reading_key_parts(&sample.key, &sample.metric_type, &sample.unit)
+    }
+
+    fn metric_reading_key_parts(key: &str, metric_type: &str, unit: &str) -> String {
         const KEY_SEPARATOR: &str = "::";
         let separators_len = KEY_SEPARATOR.len() * 2;
-        let mut key = String::with_capacity(
-            sample.key.len() + sample.metric_type.len() + sample.unit.len() + separators_len,
-        );
-        key.push_str(&sample.key);
-        key.push_str(KEY_SEPARATOR);
-        key.push_str(&sample.metric_type);
-        key.push_str(KEY_SEPARATOR);
-        key.push_str(&sample.unit);
-        key
+
+        let mut reading_key =
+            String::with_capacity(key.len() + metric_type.len() + unit.len() + separators_len);
+
+        reading_key.push_str(key);
+        reading_key.push_str(KEY_SEPARATOR);
+        reading_key.push_str(metric_type);
+        reading_key.push_str(KEY_SEPARATOR);
+        reading_key.push_str(unit);
+        reading_key
     }
 
     fn is_valid_label_name(name: &str) -> bool {
@@ -274,6 +279,47 @@ impl DataSink for PrometheusSink {
         "prometheus_sink"
     }
 
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        if let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key())
+            && let Some(entry) = endpoint_metrics.get(context.collector_type)
+        {
+            let labels = labels
+                .iter()
+                .map(|(name, value)| (Self::normalize_label_name(name.clone()), value.clone()))
+                .collect::<Vec<_>>();
+
+            let label_names = label_names.map(|names| {
+                names
+                    .iter()
+                    .copied()
+                    .chain(context.labels().keys().map(String::as_str))
+                    .map(|name| Self::normalize_label_name(Cow::Owned(name.to_string())))
+                    .collect::<Vec<_>>()
+            });
+
+            entry
+                .value()
+                .prune(metric_type, &labels, unit, label_names.as_deref());
+        }
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        if let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key())
+            && let Some(entry) = endpoint_metrics.get(context.collector_type)
+        {
+            let reading_key = Self::metric_reading_key_parts(key, metric_type, unit);
+
+            entry.value().prune_key(&reading_key);
+        }
+    }
+
     fn try_handle_event(
         &self,
         context: &EventContext,
@@ -367,6 +413,7 @@ mod tests {
     use crate::endpoint::{
         BmcAddr, EndpointMetadata, MachineData, PowerShelfData, SwitchData, SwitchEndpointRole,
     };
+    use crate::sink::CompositeDataSink;
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
@@ -685,5 +732,75 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(PrometheusSink::normalize_label_name(input.into()), expected);
         }
+    }
+
+    #[test]
+    fn prometheus_prune_matches_labels_through_composite_sink() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+        let prometheus =
+            PrometheusSink::new(manager.clone(), "test_sink").expect("Prometheus sink");
+
+        let sink = CompositeDataSink::new(vec![Arc::new(prometheus)], manager.clone());
+
+        let context = EventContext {
+            endpoint_key: "switch-1".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().expect("test IP"),
+                port: None,
+                mac: None,
+            },
+            collector_type: "nvue_gnmi_extended",
+            labels: Default::default(),
+            metadata: None,
+            rack_id: None,
+        };
+
+        for (key, subscription, iface) in [
+            ("a:old", "a", "old"),
+            ("a:live", "a", "live"),
+            ("a:live-shadow", "a", "live"),
+            ("b:other", "b", "other"),
+        ] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::Metric(Box::new(MetricSample {
+                    key: key.to_string(),
+                    name: "nvue_gnmi_extended".to_string(),
+                    metric_type: "reading".to_string(),
+                    unit: "count".to_string(),
+                    value: 1.0,
+                    labels: vec![
+                        (Cow::Borrowed("subscription"), subscription.to_string()),
+                        (Cow::Borrowed("interface_name"), iface.to_string()),
+                    ],
+                    context: None,
+                })),
+            );
+        }
+
+        sink.prune_metrics(
+            &context,
+            Some("reading"),
+            &[
+                (Cow::Borrowed("subscription"), "a".to_string()),
+                (Cow::Borrowed("interface_name"), "old".to_string()),
+            ],
+            None,
+            None,
+        );
+
+        let exposition = manager.export_telemetry().expect("telemetry");
+
+        assert!(!exposition.contains("interface_name=\"old\""));
+        assert!(exposition.contains("interface_name=\"live\""));
+        assert!(exposition.contains("interface_name=\"other\""));
+
+        sink.prune_metric_key(&context, "a:live", "reading", "count");
+
+        let exposition = manager.export_telemetry().expect("telemetry");
+
+        assert_eq!(exposition.matches("interface_name=\"live\"").count(), 1);
+        assert!(exposition.contains("interface_name=\"other\""));
     }
 }

@@ -943,7 +943,7 @@ async fn test_preallocate_machine_interface_recreates_after_deletion(
     preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let interfaces_before = find_by_mac_address(&mut txn, mac).await?;
     let interface_id = interfaces_before[0].id;
-    delete(&interface_id, txn.as_pgconn()).await?;
+    delete(&interface_id, txn.as_pgconn(), false).await?;
     txn.commit().await?;
 
     let mut txn = db::Transaction::begin(&pool).await?;

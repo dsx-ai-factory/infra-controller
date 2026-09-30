@@ -38,7 +38,6 @@ ssh-console/legacy/ssh-console
 
 dev/mac-local-dev/carbide-api-config-*.toml
 crates/dpf/doca-platform
-helm-prereqs/.dpf-src/
 helm-prereqs/values/nico-core.yaml.dpf.bak
 
 /helm/Chart.lock

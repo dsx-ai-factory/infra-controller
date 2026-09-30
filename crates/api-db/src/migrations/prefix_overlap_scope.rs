@@ -10,6 +10,9 @@ use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator};
 const VERSION: i64 = 20260922070926;
 const MIGRATION: &str =
     include_str!("../../migrations/20260922070926_add_prefix_overlap_scope.sql");
+const CUTOVER_VERSION: i64 = 20260922073124;
+const CUTOVER_MIGRATION: &str =
+    include_str!("../../migrations/20260922073124_drop_global_prefix_exclusions.sql");
 const VPC: &str = "00000000-0000-0000-0000-000000003891";
 const OTHER_VPC: &str = "00000000-0000-0000-0000-000000003892";
 const ROOT: &str = "00000000-0000-0000-0000-000000003893";
@@ -82,28 +85,33 @@ async fn stored_prefixes(pool: &PgPool) -> (serde_json::Value, serde_json::Value
     .unwrap()
 }
 
-#[crate::sqlx_test]
-async fn scope_migration_preserves_rows_and_old_writers(pool: PgPool) {
-    // Rebuild this private test database at the actual predecessor and use
-    // SQLx to apply the same migration file shipped to operators.
+async fn migrate_before(pool: &PgPool, version: i64) {
     sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
     let epoch = MIGRATION_LAYOUT.epochs.last().unwrap();
-    epoch.squash.run(&pool).await.unwrap();
+    epoch.squash.run(pool).await.unwrap();
     Migrator::with_migrations(
         epoch
             .post_squash
             .iter()
-            .filter(|migration| migration.version < VERSION)
+            .filter(|migration| migration.version < version)
             .cloned()
             .collect(),
     )
     .ignoring_missing()
-    .run(&pool)
+    .run(pool)
     .await
     .unwrap();
+}
+
+#[crate::sqlx_test]
+async fn scope_migration_preserves_rows_and_old_writers(pool: PgPool) {
+    // Keep this expand-phase proof on its actual predecessor, even after
+    // subsequent migrations remove the original exclusions.
+    migrate_before(&pool, VERSION).await;
+    let epoch = MIGRATION_LAYOUT.epochs.last().unwrap();
     seed_prefix_rows(&pool).await;
     let before = stored_prefixes(&pool).await;
     let migration = epoch
@@ -189,6 +197,7 @@ async fn scope_migration_preserves_rows_and_old_writers(pool: PgPool) {
 
 #[crate::sqlx_test]
 async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPool) {
+    migrate_before(&pool, CUTOVER_VERSION).await;
     seed_prefix_rows(&pool).await;
     let mut txn = pool.begin().await.unwrap();
     sqlx::query("UPDATE network_vpc_prefixes SET overlap_vpc_id = vpc_id WHERE id = $1::uuid")
@@ -417,4 +426,130 @@ async fn scoped_prefix_constraints_reject_invalid_keys_and_conflicts(pool: PgPoo
         attempt.rollback().await.unwrap();
     }
     txn.rollback().await.unwrap();
+}
+
+#[crate::sqlx_test]
+async fn overlap_cutover_preserves_rows_and_global_predecessor_writes(pool: PgPool) {
+    migrate_before(&pool, CUTOVER_VERSION).await;
+    seed_prefix_rows(&pool).await;
+    let before = stored_prefixes(&pool).await;
+    let migration = MIGRATION_LAYOUT
+        .epochs
+        .last()
+        .unwrap()
+        .post_squash
+        .iter()
+        .find(|migration| migration.version == CUTOVER_VERSION)
+        .unwrap();
+    assert_eq!(migration.sql.as_ref(), CUTOVER_MIGRATION);
+    Migrator::with_migrations(vec![migration.clone()])
+        .ignoring_missing()
+        .run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_prefixes(&pool).await, before);
+    // Broad overlap probes cannot use either scope-specific partial index.
+    for (table, index) in [
+        ("network_prefixes", "network_prefixes_prefix_idx"),
+        ("network_vpc_prefixes", "network_vpc_prefixes_prefix_idx"),
+    ] {
+        let full_overlap_index: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                JOIN pg_am am ON am.oid = c.relam
+                JOIN pg_opclass op ON op.oid = i.indclass[0]
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+                WHERE i.indrelid = $1::regclass AND i.indexrelid = $2::regclass
+                  AND i.indisvalid AND NOT i.indisexclusion
+                  AND i.indpred IS NULL AND i.indexprs IS NULL
+                  AND i.indnatts = 1 AND i.indnkeyatts = 1
+                  AND a.attname = 'prefix'
+                  AND am.amname = 'gist' AND op.opcname = 'inet_ops'
+            )",
+        )
+        .bind(table)
+        .bind(index)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(full_overlap_index, "missing full overlap index for {table}");
+    }
+    let scoped_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM network_vpc_prefixes WHERE overlap_vpc_id IS NOT NULL)
+              + (SELECT count(*) FROM network_prefixes WHERE overlap_vpc_id IS NOT NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scoped_rows, 0);
+
+    // These are the predecessor's SQL statements, not an old-binary test.
+    // Omitting scope must still create globally exclusive rows after cutover.
+    let old_parent: (VpcPrefixId, Option<VpcId>) = sqlx::query_as(
+        "INSERT INTO network_vpc_prefixes (prefix, name, vpc_id)
+         VALUES ('10.123.2.0/24', 'old writer', $1::uuid) RETURNING id, overlap_vpc_id",
+    )
+    .bind(VPC)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_parent.1, None);
+    let old_segment = NetworkSegmentId::new();
+    let conflicting_segment = NetworkSegmentId::new();
+    for (segment_id, name) in [
+        (old_segment, "old writer"),
+        (conflicting_segment, "overlapping old writer"),
+    ] {
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, version, vpc_id, network_segment_type, can_stretch)
+             VALUES ($1, $2, 'V1-T0', $3::uuid, 'tenant', false)",
+        )
+        .bind(segment_id)
+        .bind(name)
+        .bind(VPC)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let old_child_scope: Option<VpcId> = sqlx::query_scalar(
+        "INSERT INTO network_prefixes (segment_id, prefix, vpc_prefix_id, vpc_prefix)
+         VALUES ($1::uuid, '10.123.2.0/31', $2, '10.123.2.0/24') RETURNING overlap_vpc_id",
+    )
+    .bind(old_segment)
+    .bind(old_parent.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_child_scope, None);
+
+    for (scenario, query, expected) in [
+        (
+            "deleting global parent remains reserved",
+            sqlx::query(
+                "INSERT INTO network_vpc_prefixes (prefix, name, vpc_id)
+                         VALUES ('fd00:3891::/64', 'overlapping old writer', $1::uuid)",
+            )
+            .bind(OTHER_VPC),
+            "network_vpc_prefixes_global_prefix_excl",
+        ),
+        (
+            "global child remains reserved",
+            sqlx::query(
+                "INSERT INTO network_prefixes (segment_id, prefix)
+                         VALUES ($1::uuid, '10.123.2.0/31')",
+            )
+            .bind(conflicting_segment),
+            "network_prefixes_global_prefix_excl",
+        ),
+    ] {
+        let error = query.execute(&pool).await.expect_err(scenario);
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some(expected),
+            "{scenario}"
+        );
+    }
 }

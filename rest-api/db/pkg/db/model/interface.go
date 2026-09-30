@@ -127,6 +127,7 @@ type Interface struct {
 	RequestedIpAddress   *string                        `bun:"requested_ip_address"`
 	MacAddress           *string                        `bun:"mac_address"`
 	IPAddresses          []string                       `bun:"ip_addresses,type:text[]"`
+	IPPrefixes           []string                       `bun:"ip_prefixes,type:text[]"`
 	InlineRoutingProfile *InterfaceInlineRoutingProfile `bun:"inline_routing_profile,type:jsonb"`
 	Status               string                         `bun:"status,notnull"`
 	Created              time.Time                      `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -136,7 +137,7 @@ type Interface struct {
 }
 
 // EthernetInterfaceKey returns a stable string key for the Interface fields controlled by an update request.
-// Equivalent requested IP addresses must reuse the interface instead of replacing it.
+// Equivalent requested IP addresses and anycast prefixes must reuse the interface instead of replacing it.
 func (ifc Interface) EthernetInterfaceKey() string {
 	values := url.Values{}
 	if ifc.SubnetID != nil {
@@ -174,7 +175,14 @@ func (ifc Interface) EthernetInterfaceKey() string {
 	}
 	if ifc.InlineRoutingProfile != nil {
 		values.Set("has_inline_routing_profile", "true")
-		values["inline_routing_prefix"] = append([]string(nil), ifc.InlineRoutingProfile.AllowedAnycastPrefixes...)
+		// Only normalize address text; preserve host bits, prefix order, and duplicates.
+		for _, prefix := range ifc.InlineRoutingProfile.AllowedAnycastPrefixes {
+			parsedPrefix, err := netip.ParsePrefix(prefix)
+			if err == nil {
+				prefix = parsedPrefix.String()
+			}
+			values.Add("inline_routing_prefix", prefix)
+		}
 	}
 
 	return values.Encode()
@@ -213,6 +221,7 @@ type InterfaceUpdateInput struct {
 	InlineRoutingProfile *InterfaceInlineRoutingProfile
 	MacAddress           *string
 	IpAddresses          []string
+	IPPrefixes           []string // Nil preserves stored prefixes; an empty slice clears them.
 	Status               *string
 }
 
@@ -579,6 +588,17 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 		if interfaceDAOSpan != nil {
 			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "ip_addresses", input.IpAddresses)
 		}
+	}
+	if input.IPPrefixes != nil {
+		for _, prefix := range input.IPPrefixes {
+			_, parseErr := netip.ParsePrefix(prefix)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid Interface IP prefix %q: %w", prefix, parseErr)
+			}
+		}
+
+		is.IPPrefixes = input.IPPrefixes
+		updatedFields = append(updatedFields, "ip_prefixes")
 	}
 	if input.Status != nil {
 		is.Status = *input.Status

@@ -220,6 +220,12 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub dhcp_servers: Vec<Ipv4Addr>,
 
+    /// DHCPv6 Preference option sent in ADVERTISE messages. Omission leaves the
+    /// option absent and uses the protocol preference of zero; `Some(0)` emits
+    /// an explicit zero.
+    #[serde(default)]
+    pub dhcpv6_server_preference: Option<u8>,
+
     /// NTP server IP addresses for the site.
     #[serde(default)]
     pub ntp_servers: Vec<Ipv4Addr>,
@@ -309,7 +315,8 @@ pub struct CarbideConfig {
     pub common_tenant_host_asn: Option<u32>,
 
     /// VPC isolation policy enforced on tenant traffic.
-    /// Controls whether VPCs are mutually isolated or open.
+    /// Select `mutual_isolation` (the default) or `open` at site installation.
+    /// Changing this policy on an existing site is not supported.
     #[serde(default)]
     pub vpc_isolation_behavior: VpcIsolationBehaviorType,
 
@@ -330,6 +337,11 @@ pub struct CarbideConfig {
     /// TLS certificate and key paths for securing gRPC and
     /// HTTP connections.
     pub tls: Option<TlsConfig>,
+
+    /// Private carbide-ssh-console gRPC endpoint. When omitted, console-log
+    /// streaming is unavailable.
+    #[serde(default)]
+    pub ssh_console_url: Option<url::Url>,
 
     /// Transport mode for the gRPC API server.
     /// Default is `Tls`.
@@ -2421,6 +2433,10 @@ pub struct DpfDeploymentConfig {
     /// DPUs.
     #[serde(default)]
     pub extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    /// Defaults to `false` when omitted; setting it to `true` enables the delay.
+    #[serde(default)]
+    pub enable_delay_host_init: bool,
 }
 
 impl Default for DpfDeploymentConfig {
@@ -2434,6 +2450,7 @@ impl Default for DpfDeploymentConfig {
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
         }
     }
 }
@@ -3644,24 +3661,12 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Deprecated. Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed
-    /// `nvue_api` binding before RMS V2 selects and configures the primary switch.
-    /// Per-switch certificate configuration uses
-    /// `[switch_state_controller].switch_mtls_services`.
+    /// Deprecated and ignored. Rack `ConfigureNmxCluster` binds `nvue_api`
+    /// before RMS V2; RMS V2 binds NMX-C on the selected primary. gNMI requires
+    /// an explicit `[switch_state_controller].switch_mtls_services` entry, while
+    /// primary nmx-telemetry uses the effective service list.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
-}
-
-impl RackStateControllerConfig {
-    /// Returns configured NMX cluster switch mTLS services, or the ScaleUpFabric
-    /// defaults when the field was omitted or left empty in config.
-    pub fn effective_nmx_cluster_switch_mtls_services_as_i32(&self) -> Vec<i32> {
-        component_manager::config::switch_mtls_services_as_i32(
-            &component_manager::config::effective_nmx_cluster_switch_mtls_services(
-                &self.nmx_cluster_switch_mtls_services,
-            ),
-        )
-    }
 }
 
 /// SwitchStateController related config
@@ -3675,6 +3680,10 @@ pub struct SwitchStateControllerConfig {
     /// Switch services that receive installed mTLS certificates during RMS
     /// `configure_switch_certificate` calls initiated by the switch state
     /// machine or the direct `ComponentConfigureSwitchCertificate` RPC path.
+    /// The switch state machine omits primary-only cluster applications on
+    /// non-primary switches; the direct RPC is unchanged. Rack
+    /// `ConfigureNmxCluster` uses the effective list for the primary NMX-T
+    /// binding, but applies gNMI only when explicitly listed.
     ///
     /// When this field is omitted or empty, all supported services are used.
     ///
@@ -4780,7 +4789,16 @@ pub struct VmaasConfig {
     #[serde(default = "default_to_true")]
     pub allow_instance_vf: bool,
 
-    /// Select which representors from the configured VF population HBN is expected to use.
+    /// Comma-separated representors HBN is expected to use during DPU provisioning.
+    /// When `allow_instance_vf` is true, non-DPF instance admission recognizes individual
+    /// `pf0vfN` entries and inclusive `pf0vfN-pf0vfM` ranges; other representors do not select
+    /// tenant VFs. Requested VF IDs are limited to VF0 through VF15 and must also be lower than
+    /// `dpu_config.num_of_vfs`. An explicit value replaces the fallback; when omitted or empty,
+    /// VF0 through VF13 are selected and still capped by `num_of_vfs`. Malformed PF0 VF selectors,
+    /// whitespace, and empty list entries cause non-DPF instance creation and network updates to
+    /// fail. DPF-managed hosts ignore this field for instance admission: BF4 Astra hosts use the
+    /// static VF0 through VF13 inventory provisioned for Astra, while other DPF hosts use the
+    /// configured intercept topology or retain topology-free compatibility behavior.
     pub hbn_reps: Option<String>,
 
     /// Provisioning-time topology for bridges inserted between host representors and HBN.
@@ -6132,6 +6150,7 @@ path = "credentials.yaml"
             }
         );
         assert!(config.dhcp_servers.is_empty());
+        assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
         assert!(config.route_servers.is_empty());
@@ -6233,6 +6252,47 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies omission, explicit zero, and the one-octet protocol bounds.
+    #[test]
+    fn dhcpv6_server_preference_enforces_config_contract() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: "",
+                    expect: None,
+                },
+                // Explicit zero must not be mistaken for an omitted setting.
+                Check {
+                    scenario: "explicit protocol minimum",
+                    input: "dhcpv6_server_preference = 0",
+                    expect: Some(0),
+                },
+                // The protocol maximum is a valid explicit setting.
+                Check {
+                    scenario: "explicit protocol maximum",
+                    input: "dhcpv6_server_preference = 255",
+                    expect: Some(255),
+                },
+            ],
+            |patch| {
+                let config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(patch))
+                    .extract()
+                    .unwrap();
+                config.dhcpv6_server_preference
+            },
+        );
+
+        // Serde must reject a value that the DHCPv6 packet cannot encode.
+        let result = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(Toml::string("dhcpv6_server_preference = 256"))
+            .extract::<CarbideConfig>();
+        assert!(result.is_err());
+    }
+
     // The address contract: host-only gets the BMC proxy's default port, a
     // host-less address is rejected at parse time rather than producing a client
     // that silently dials the BMC itself.
@@ -6324,6 +6384,10 @@ path = "credentials.yaml"
             ),
             ("{{ .Values.service.perObjectStateMetrics.port }}", "9091"),
             (
+                "{{ .Values.machineStateController.maxConcurrency | int }}",
+                "10",
+            ),
+            (
                 "{{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}",
                 "[]",
             ),
@@ -6359,6 +6423,10 @@ path = "credentials.yaml"
             (
                 r#"{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"#,
                 "nico-bmc-proxy.nico-system.svc.cluster.local:1079",
+            ),
+            (
+                r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
+                "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
@@ -8175,7 +8243,23 @@ helm_repo_url = "oci://registry.example.test/doca"
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_deployment_delay_host_init_defaults_to_false_and_accepts_true() {
+        let base = r#"
+            flavor_name = "flavor"
+            deployment_name = "deployment"
+            node_label_key = "example.com/dpu"
+        "#;
+        let defaulted: DpfDeploymentConfig = toml::from_str(base).unwrap();
+        let enabled: DpfDeploymentConfig =
+            toml::from_str(&format!("{base}\nenable_delay_host_init = true")).unwrap();
+
+        assert!(!defaulted.enable_delay_host_init);
+        assert!(enabled.enable_delay_host_init);
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.

@@ -18,6 +18,7 @@ This section provides example REST API workflows for common NICo tasks. All exam
   </Accordion>
   <Accordion title="View Existing IP Blocks">
     Use the value of `id` from the output of the preceding example as the value for the `infrastructureProviderId` and `siteId` URL parameters.
+    The response includes the IP Block NICo creates for each fabric prefix the Site reports, such as `site-fabric-ipv4-192-168-20-0-24` in the example response.
     <Code src="snippets/input/view_ip_blocks.sh" title="Example Call" />
     <Code src="snippets/output/view_ip_blocks.json" title="Example Response" />
   </Accordion>
@@ -132,9 +133,11 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
     <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a VPC Prefix">
-    Add a VPC Prefix to the Ready `FNN` VPC created above. The source IP Block determines the VPC Prefix's address family. REST support for creating IPv6 FNN VPC Prefixes is tracked by [#5407](https://github.com/NVIDIA/infra-controller/issues/5407).
-    <Code src="snippets/input/create_vpc_prefix.sh" title="Example Call" />
-    <Code src="snippets/output/create_vpc_prefix.json" title="Example Response" />
+    Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready tenant IP Block at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
+    <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
+    <Code src="snippets/output/create_vpc_prefix.json" title="Automatic Allocation Response" />
+    <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
+    <Code src="snippets/output/create_vpc_prefix_explicit.json" title="Explicit CIDR Allocation Response" />
   </Accordion>
 </AccordionGroup>
 
@@ -142,6 +145,7 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
 
 <AccordionGroup>
   <Accordion title="Add an IP Block">
+    NICo already creates an IP Block for each fabric prefix the Site reports, so add one only for another range. A range that overlaps an existing Site IP Block returns 409.
     <Code src="snippets/input/add_ip_block.sh" title="Example Call" />
     <Code src="snippets/output/add_ip_block.json" title="Example Response" />
   </Accordion>

@@ -415,8 +415,7 @@ pub struct DpfHelmChartServiceData {
     pub chart_name: String,
     #[serde(rename = "chartVersion")]
     pub chart_version: String,
-    #[serde(rename = "security.privileged")]
-    pub security_privileged: bool,
+    pub security: DpfHelmChartServiceSecurity,
     /// Optional chart-specific values. When absent, no `helmChart.values`
     /// field is sent to DPF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +427,23 @@ pub struct DpfHelmChartServiceData {
     )]
     pub service_daemon_set: Option<DpfHelmChartServiceDaemonSet>,
 }
+
+/// Security settings projected onto the DPF DPUService.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartServiceSecurity {
+    pub privileged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spiffe: Option<DpfHelmChartServiceSpiffe>,
+}
+
+/// Enables SPIFFE workload identity when present in extension-service data.
+///
+/// DPF currently has no SPIFFE configs, so the empty object is used as a
+/// presence-gated opt-in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartServiceSpiffe {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -606,7 +622,7 @@ mod tests {
     fn dpf_helm_chart_data_accepts_omitted_values() {
         let input = r#"{
                 "chartVersion":"1.2.3",
-                "security.privileged":false,
+                "security":{"privileged":false},
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service"
             }"#;
@@ -615,7 +631,7 @@ mod tests {
         assert_eq!(data.values, None);
         assert_eq!(
             data.normalized_json().unwrap(),
-            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","security.privileged":false}"#
+            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","security":{"privileged":false}}"#
         );
         assert_eq!(
             DpfHelmChartServiceData::parse_normalized(input).unwrap(),
@@ -629,7 +645,7 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
-            "security.privileged":true,
+            "security":{"privileged":true},
             "values": %VALUES%
         }"#;
 
@@ -651,7 +667,7 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
-            "security.privileged":true,
+            "security":{"privileged":true,"spiffe":{}},
             "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
             "serviceDaemonSet":{
                 "labels":{"app.kubernetes.io/name":"storage-client","svc.dpu.nvidia.com/custom-flows":"enabled"},
@@ -662,6 +678,7 @@ mod tests {
         }"#;
 
         let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+        assert_eq!(parsed.security.spiffe, Some(DpfHelmChartServiceSpiffe {}));
         let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
         assert_eq!(
             daemon_set.resources.as_ref().unwrap()["nvidia.com/bf_sf"],

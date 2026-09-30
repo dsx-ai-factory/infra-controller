@@ -22,6 +22,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 async-trait = { workspace = true }
 bmc-vendor = { path = "../bmc-vendor" }

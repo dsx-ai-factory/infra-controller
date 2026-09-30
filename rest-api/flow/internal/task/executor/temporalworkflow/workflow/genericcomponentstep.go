@@ -48,13 +48,16 @@ func genericComponentStepWorkflow(
 	// Build activity options from step configuration
 	activityOpts := buildActivityOptions(step)
 	ctx = workflow.WithActivityOptions(ctx, activityOpts)
+	maxParallel := versionedMaxParallel(ctx, step.MaxParallel)
 
 	// 1. Execute pre-operation actions
 	if shouldDo, actions := step.DoPreOperations(); shouldDo {
 		log.Debug().
 			Int("action_count", len(actions)).
 			Msg("Executing pre-operation actions")
-		if err := executeActionList(ctx, actions, target, allTargets, activityInfo); err != nil {
+		if err := executeActionList(
+			ctx, actions, target, allTargets, activityInfo, maxParallel,
+		); err != nil {
 			return fmt.Errorf("pre-operation failed: %w", err)
 		}
 	}
@@ -64,7 +67,9 @@ func genericComponentStepWorkflow(
 		log.Debug().
 			Str("action", action.Name).
 			Msg("Executing main operation action")
-		if err := executeAction(ctx, action, target, allTargets, activityInfo); err != nil {
+		if err := executeActionBatches(
+			ctx, action, target, allTargets, activityInfo, maxParallel,
+		); err != nil {
 			return fmt.Errorf("main operation failed: %w", err)
 		}
 	} else {
@@ -76,7 +81,9 @@ func genericComponentStepWorkflow(
 		log.Debug().
 			Int("action_count", len(actions)).
 			Msg("Executing post-operation actions")
-		if err := executeActionList(ctx, actions, target, allTargets, activityInfo); err != nil {
+		if err := executeActionList(
+			ctx, actions, target, allTargets, activityInfo, maxParallel,
+		); err != nil {
 			return fmt.Errorf("post-operation failed: %w", err)
 		}
 	}

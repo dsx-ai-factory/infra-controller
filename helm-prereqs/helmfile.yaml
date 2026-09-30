@@ -149,7 +149,7 @@ releases:
   # Installed by setup.sh phase 5b unless --skip-dpf (per-release
   # sync; nothing here installs on a normal run). Versions and values are
   # pinned from NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml at the tag
-  # matching NICO_DPF_VERSION (v26.4.0) — bump together.
+  # the helm-prereqs/doca-platform submodule is pinned to (v26.4.0) - bump together.
   # All four install into dpf-operator-system, same as upstream.
   # NOTE: upstream pins cert-manager v1.19.3; we reuse our v1.17.1 release
   # above (compatible with DPF's Issuer/Certificate v1 usage — known skew).

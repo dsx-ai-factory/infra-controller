@@ -602,6 +602,12 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		apim.InstanceType = NewAPIInstanceTypeSummary(dbm.InstanceType)
 	}
 
+	// Machine and Instance reads may straddle a committed allocation. Never
+	// expose Ready alongside an assignment, including rows awaiting inventory.
+	if dbm.IsAssigned || dbins != nil {
+		apim.Status = dbm.StatusForAssignment(true)
+	}
+
 	if dbins != nil {
 		apim.InstanceID = cutil.GetPtr(dbins.ID.String())
 		apim.Instance = NewAPIInstanceSummary(dbins)

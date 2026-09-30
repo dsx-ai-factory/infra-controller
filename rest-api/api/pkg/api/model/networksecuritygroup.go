@@ -350,7 +350,8 @@ func validateRuleProtocolPortCompat(rule *APINetworkSecurityGroupRule) error {
 // Per the proto-conversion convention this is the pre-`ToProto`
 // validation step: it covers priority bounds, recognised enum values,
 // protocol/port compatibility, port-range parseability, prefix CIDR
-// shape, and the presence of source / destination network options.
+// validity, required source and destination prefixes, and matching
+// prefix/protocol IP versions.
 // Once Validate has succeeded `ToProto` can act as a focused mapper.
 func (rule *APINetworkSecurityGroupRule) Validate() error {
 	if rule.Priority < NetworkSecurityGroupRulePriorityMin || rule.Priority > NetworkSecurityGroupRulePriorityMax {
@@ -380,14 +381,30 @@ func (rule *APINetworkSecurityGroupRule) Validate() error {
 	if err := validateRulePrefix(rule.DestinationPrefix, "destination"); err != nil {
 		return err
 	}
+	return rule.validateIPVersion()
+}
+
+// validateIPVersion requires both prefixes to have passed `validateRulePrefix`.
+func (rule *APINetworkSecurityGroupRule) validateIPVersion() error {
+	_, source, _ := net.ParseCIDR(*rule.SourcePrefix)
+	_, destination, _ := net.ParseCIDR(*rule.DestinationPrefix)
+	if len(source.Mask) != len(destination.Mask) {
+		return ruleErr("source and destination prefixes must use the same IP version")
+	}
+	if len(source.Mask) == net.IPv6len && rule.Protocol == APINetworkSecurityGroupRuleProtocolIcmp {
+		return ruleErr("protocol `ICMP` cannot be used with IPv6 prefixes")
+	}
+	if len(source.Mask) == net.IPv4len && rule.Protocol == APINetworkSecurityGroupRuleProtocolIcmp6 {
+		return ruleErr("protocol `ICMP6` cannot be used with IPv4 prefixes")
+	}
 	return nil
 }
 
 // ToProto converts an API rule into the workflow proto attributes that
-// the DB record wraps and that get sent to NICo. It trusts that
-// `Validate` has run first — enum lookups, port ranges, and prefixes
-// are assumed safe — so this method is a focused mapper and does not
-// return errors.
+// the DB record wraps and that get sent to NICo. `Validate` must run
+// first: enum lookups and port ranges are valid, and both prefixes are
+// present, parseable, and use the same IP version. This method only maps
+// the validated rule and does not return errors.
 func (rule *APINetworkSecurityGroupRule) ToProto() *corev1.NetworkSecurityGroupRuleAttributes {
 	// Validate has normalized casing and proven these lookups succeed,
 	// so we don't re-check the `found` results here.
@@ -407,7 +424,6 @@ func (rule *APINetworkSecurityGroupRule) ToProto() *corev1.NetworkSecurityGroupR
 		Protocol:  protocol,
 		Action:    action,
 		Priority:  uint32(rule.Priority),
-		Ipv6:      false, // We have support for it in ACLs but pretty much nowhere else, so hide this for now.
 
 		SrcPortStart: srcPortStart,
 		SrcPortEnd:   srcPortEnd,
@@ -416,6 +432,11 @@ func (rule *APINetworkSecurityGroupRule) ToProto() *corev1.NetworkSecurityGroupR
 	}
 
 	if rule.SourcePrefix != nil {
+		// `Validate` guarantees matching IP versions, so use the source prefix.
+		// The mask keeps IPv4-mapped IPv6 prefixes classified as IPv6, matching
+		// Core's `IpNetwork` parser. `IP.To4` would lose that distinction.
+		_, source, _ := net.ParseCIDR(*rule.SourcePrefix)
+		attrs.Ipv6 = len(source.Mask) == net.IPv6len
 		attrs.SourceNet = &corev1.NetworkSecurityGroupRuleAttributes_SrcPrefix{SrcPrefix: *rule.SourcePrefix}
 	}
 	if rule.DestinationPrefix != nil {

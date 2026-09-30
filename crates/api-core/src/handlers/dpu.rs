@@ -755,6 +755,7 @@ async fn get_managed_host_network_config_inner(
             .iter()
             .map(|addr| addr.to_string())
             .collect(),
+        dhcpv6_server_preference: api.runtime_config.dhcpv6_server_preference.map(u32::from),
         // TODO: Automatically add the prefix(es?) from the IPv4 loopback
         // pool to deny_prefixes. The database stores the pool in an
         // exploded representation, so we either need to reconstruct the

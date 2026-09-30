@@ -282,7 +282,7 @@ func (o *InstanceCreateRequest) GetMachineLabelSelector() map[string]string {
 	return o.MachineLabelSelector
 }
 
-// GetMachineLabelSelectorOk returns a tuple with the MachineLabelSelector field value if set, nil otherwise
+// GetMachineLabelSelectorOk returns a tuple with the MachineLabelSelector field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *InstanceCreateRequest) GetMachineLabelSelectorOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.MachineLabelSelector) {
@@ -649,7 +649,7 @@ func (o *InstanceCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *InstanceCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

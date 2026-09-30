@@ -59,6 +59,13 @@ func TestFlowServerImplRejectsMalformedUUIDs(t *testing.T) {
 			})
 			return err
 		},
+		"AC power cycle rule ID": func(ctx context.Context, server *FlowServerImpl) error {
+			_, err := server.ACPowerCycleRack(ctx, &pb.ACPowerCycleRackRequest{
+				TargetSpec: targetSpec,
+				RuleId:     invalid,
+			})
+			return err
+		},
 		"bring-up rule ID": func(ctx context.Context, server *FlowServerImpl) error {
 			_, err := server.BringUpRack(ctx, &pb.BringUpRackRequest{
 				TargetSpec: targetSpec,

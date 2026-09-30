@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: workflow config Site Manager endpoint
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-rest
+tests:
+  - it: defaults the Site Manager endpoint to the in-namespace Site Manager service
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^siteManager:\n  svcEndpoint: https://nico-rest-site-manager:8100/v1/site$'
+
+  - it: keeps the Site Manager endpoint when the DB password comes from a Secret
+    set:
+      secrets:
+        dbCreds: db-creds
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^siteManager:\n  svcEndpoint: https://nico-rest-site-manager:8100/v1/site$'

@@ -151,7 +151,7 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
 
     let mut txn = pool.begin().await?;
     let found = find_by_rack_id(&mut txn, &ids[0]).await?.unwrap();
-    assert_eq!(found.rack_profile_id.as_str(), "NVL36");
+    assert_eq!(found.rack_profile_id.as_str(), "NVL72");
     assert_eq!(found.metadata.name, "updated-rack");
 
     Ok(())

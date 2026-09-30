@@ -636,6 +636,7 @@ impl CurrentNetworkVersion {
 
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
+        config.dhcpv6_server_preference = None;
 
         // `host_interface_id` helps resolve the host machine ID when the agent
         // starts, but a later change does not affect HBN rendering.
@@ -648,14 +649,36 @@ impl CurrentNetworkVersion {
         // rendering.
         config.enable_dhcp = false;
 
-        // HBN rendering does not consume the family-neutral address list. Exclude
-        // it from the fingerprint so changes to that staged field do not trigger
-        // an apply that cannot render them.
+        // Tenant IPv6 addresses can feed routed RA or an L2 SVI's VRR address,
+        // while admin family-neutral fields remain non-rendering inputs.
         if let Some(admin_interface) = &mut config.admin_interface {
             admin_interface.addresses.clear();
         }
+
+        let renders_tenant_ipv6 = !config.use_admin_network
+            && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
         for interface in &mut config.tenant_interfaces {
-            interface.addresses.clear();
+            if !renders_tenant_ipv6 {
+                interface.addresses.clear();
+                continue;
+            }
+
+            // Routed tenant RA consumes the V6 mode, linknet, and allocated
+            // prefix. L2 rendering consumes only the prefix when deriving the
+            // SVI's VRR address. Remove all other family-neutral fields so
+            // DHCP-only or future staged values do not cause an HBN apply.
+            interface.addresses.retain(|address| {
+                address.address_family == i32::from(::rpc::forge::AddressFamily::V6)
+            });
+            for address in &mut interface.addresses {
+                if interface.is_l2_segment {
+                    address.ip.clear();
+                    address.interface_prefix.clear();
+                }
+                address.gateway = None;
+                address.svi_ip = None;
+                address.tenant_vrf_loopback_ip = None;
+            }
         }
     }
 
@@ -1117,6 +1140,7 @@ impl MainLoop {
                             virtualization_type,
                             update_flavor,
                             &conf,
+                            &self.service_addrs,
                             self.hbn_device_names.clone(),
                             supplemental_config.as_deref(),
                         )

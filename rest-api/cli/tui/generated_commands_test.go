@@ -109,9 +109,29 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "machine health-report delete", want: true},
 		{name: "machine health-report list", want: true},
 		{name: "machine health-report update", want: true},
+		{name: "machine bmc reset", want: true},
+		{name: "machine dpu reprovision", want: true},
+		{name: "machine validation results list", want: true},
+		{name: "machine validation runs list", want: true},
+		{name: "machine validation start", want: true},
+		{name: "rack health-report delete", want: true},
+		{name: "rack health-report list", want: true},
+		{name: "rack health-report update", want: true},
+		{name: "tray health-report delete", want: true},
+		{name: "tray health-report list", want: true},
+		{name: "tray health-report update", want: true},
 		{name: "health-report delete", want: false},
 		{name: "health-report list", want: false},
 		{name: "health-report update", want: false},
+		{name: "bmc-reset reset", want: false},
+		{name: "dpu-reprovision reprovision", want: false},
+		{name: "machine-validation results list", want: false},
+		{name: "machine-validation runs list", want: false},
+		{name: "machine-validation start", want: false},
+		{name: "machine reprovision-machine-dpu reprovision-machine-dpu", want: false},
+		{name: "machine reset-machine-bmc reset-machine-bmc", want: false},
+		{name: "machine validation-results list", want: false},
+		{name: "machine validation-runs list", want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.want {
@@ -658,8 +678,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
-		"nvlink-domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
-		"nvlink-domain power-control-nvlink-domain|id",
+		"domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
+		"domain power-control-nvlink-domain|id",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -940,6 +960,11 @@ func TestResolveGeneratedResource_NilResolverReturnsErrorForInteractiveDependent
 	assert.True(t, supported)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "interactive resolver is required")
+
+	for _, command := range []string{"rack health-report delete", "tray health-report delete"} {
+		descriptor := GeneratedPathResourceDescriptor(command, "source")
+		assert.NotEmpty(t, descriptor.FreeFormReason, "%s must explain why source is entered directly", command)
+	}
 }
 
 func TestResolveGeneratedPathParameters_PreservesExplicitUnsupportedID(t *testing.T) {

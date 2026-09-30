@@ -26,7 +26,8 @@ use db::{self, explored_endpoints as db_explored_endpoints};
 use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::site_explorer::{
-    Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, ExploredManagedSwitch,
+    Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
+    ExploredManagedSwitch,
 };
 use model::switch::SwitchSearchFilter;
 use rpc::forge::DhcpDiscovery;
@@ -151,6 +152,9 @@ async fn test_site_explorer_switch_discovery(
     explorer.insert_endpoint_result(
         switch_ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -224,6 +228,54 @@ async fn test_site_explorer_switch_discovery(
     println!("switches: {:?}", switches);
     txn.commit().await?;
     assert_eq!(switches.len(), 1, "Expected one switch to be created");
+
+    // Steady state: skipping the existing switch must still replace the
+    // expected record's NVOS MAC addresses with the ones re-read from the switch.
+    let nvos_mac: MacAddress = "B8:3F:D2:90:97:C1".parse().unwrap();
+    explorer.insert_endpoint_result(
+        switch_ip.parse().unwrap(),
+        Ok(EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            systems: vec![ComputerSystem {
+                serial_number: Some(serial_number.clone()),
+                ethernet_interfaces: vec![EthernetInterface {
+                    id: Some("eth0".to_string()),
+                    mac_address: Some(nvos_mac),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            chassis: vec![Chassis {
+                id: "mgx_nvswitch_0".to_string(),
+                model: Some("Switch".to_string()),
+                manufacturer: Some("NVIDIA".to_string()),
+                serial_number: Some(serial_number.clone()),
+                part_number: Some(serial_number.clone()),
+                ..Default::default()
+            }],
+            model: Some("Switch".to_string()),
+            ..Default::default()
+        }),
+    );
+
+    explorer.run_single_iteration().await.unwrap();
+
+    let mut txn = env.pool.begin().await?;
+    let switches = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
+    let expected_switches = db::expected_switch::find_all(&mut txn).await?;
+    txn.commit().await?;
+    assert_eq!(
+        switches.len(),
+        1,
+        "an existing switch must not be created again"
+    );
+    assert_eq!(expected_switches.len(), 1);
+    assert_eq!(
+        expected_switches[0].nvos_mac_addresses,
+        vec![nvos_mac],
+        "explored NVOS MAC addresses must replace the expected record"
+    );
 
     Ok(())
 }

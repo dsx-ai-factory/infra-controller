@@ -835,6 +835,47 @@ mod tests {
         );
     }
 
+    /// `task_completion_delay` is the whole time the task reports `Running`:
+    /// still Running just before it, Completed right after, with no jitter
+    /// when jitter is zero (the router caps jitter at the delay, so a zero
+    /// delay from `firmware_upgrade = "0s"` completes immediately).
+    #[tokio::test(start_paused = true)]
+    async fn task_completes_after_the_configured_delay() {
+        let state = Arc::new(UpdateServiceState::from_config(UpdateServiceConfig {
+            firmware_inventory: vec![
+                software_inventory::builder(&software_inventory::firmware_inventory_resource(
+                    "HostBMC_0",
+                ))
+                .version("24.09.17")
+                .build(),
+            ],
+            pending_upgrades: [("HostBMC_0".to_string(), "24.10.00".to_string())]
+                .into_iter()
+                .collect(),
+            task_completion_delay: Duration::from_secs(600),
+            task_completion_jitter: Duration::ZERO,
+            ..Default::default()
+        }));
+        // record_upload returns the task's @odata.id and its JSON; the task is
+        // looked up by the "Id" field.
+        let (_, running) = state.record_upload("HostBMC_0", "24.10.00".into());
+        let task_id = running["Id"].as_str().unwrap().to_string();
+        let task_state =
+            |s: &Arc<UpdateServiceState>| s.find_task(&task_id).unwrap()["TaskState"].clone();
+        // Let the spawned completion task run up to its sleep, so the sleep is
+        // registered at t=0 before the clock is advanced.
+        tokio::task::yield_now().await;
+        assert_eq!(task_state(&state), "Running", "right after the upload");
+
+        tokio::time::advance(Duration::from_secs(599)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(task_state(&state), "Running", "one second before the delay");
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(task_state(&state), "Completed", "once the delay has passed");
+    }
+
     #[tokio::test]
     async fn apply_staged_noop_without_completed_tasks() {
         let state = make_state(&[("HostBMC_0", "24.09.17")], &[("HostBMC_0", "24.10.00")]);

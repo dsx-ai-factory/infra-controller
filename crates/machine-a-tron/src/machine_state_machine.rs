@@ -367,6 +367,7 @@ impl MachineStateMachine {
             power_off_graceful = ?resolved.power_off_graceful,
             power_off_force = ?resolved.power_off_force,
             bmc_reset = ?resolved.bmc_reset,
+            firmware_upgrade = ?resolved.firmware_upgrade,
             "Resolved lifecycle timings"
         );
         resolved
@@ -1418,8 +1419,8 @@ impl MachineStateMachine {
             Arc::new(LiveStateHostnameQuery(self.live_state.clone())),
             self.mat_host_id,
             self.bmc_injection.clone(),
-            // wires LifecycleTimings::bmc_reset (epic #3796 issue 4)
-            Some(self.resolved_timings.bmc_reset),
+            // wires LifecycleTimings::bmc_reset (epic #3796 issue 4) and firmware_upgrade (#4494)
+            Some(&self.resolved_timings),
         );
 
         let pw_override = match &self.machine_info {
