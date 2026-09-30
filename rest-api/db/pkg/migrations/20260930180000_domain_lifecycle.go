@@ -67,6 +67,33 @@ func domainLifecycleUpMigration(ctx context.Context, db *bun.DB) error {
 	if err != nil {
 		return err
 	}
+	// The Subnet row is the serialization point for attach, inventory and
+	// recovery. An intent retains both REST and Core VPC IDs plus the Core
+	// segment version needed to fence a delayed RPC. A pending row must remain
+	// retryable after a worker restart, never inferred from inventory alone.
+	_, err = db.ExecContext(ctx, `
+		ALTER TABLE subnet
+		ADD COLUMN attach_intent_id uuid,
+		ADD COLUMN attach_source_vpc_id uuid,
+		ADD COLUMN attach_target_vpc_id uuid,
+		ADD COLUMN attach_source_controller_vpc_id uuid,
+		ADD COLUMN attach_target_controller_vpc_id uuid,
+		ADD COLUMN attach_segment_version text,
+		ADD COLUMN attach_recovery_token uuid,
+		ADD COLUMN attach_lease_until timestamptz,
+		ADD COLUMN attach_next_at timestamptz,
+		ADD COLUMN attach_attempts integer NOT NULL DEFAULT 0
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+		CREATE INDEX subnet_attach_recovery_due_idx ON subnet (attach_next_at, updated, id)
+		WHERE deleted IS NULL AND attach_intent_id IS NOT NULL
+	`)
+	if err != nil {
+		return err
+	}
 	fmt.Print(" [up migration] Added owned Domain reservation uniqueness. ")
 	return nil
 }

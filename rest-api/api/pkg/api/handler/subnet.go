@@ -1096,43 +1096,97 @@ func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet is being used by one or more Instances and cannot be attached to another VPC", nil)
 	}
 
+	if subnet.AttachIntentID != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+	}
+	// The stored owner and Site, never caller input, select the Site RPC queue.
+	_, siteErr := getDomainSiteForTenant(ctx, logger, asvh.dbSession, tenant, subnet.SiteID.String(), true)
+	if siteErr != nil {
+		return cutil.NewAPIErrorResponse(c, siteErr.Code, siteErr.Message, nil)
+	}
 	stc, err := asvh.scp.GetClientByID(subnet.SiteID)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
-	apiRequest.ControllerNetworkSegmentID = *subnet.ControllerNetworkSegmentID
-	apiRequest.ControllerVpcID = *targetVpc.ControllerVpcID
-	coreResponse := &corev1.NetworkSegment{}
-	apiErr := common.ExecuteCoreGRPC(
-		ctx,
-		stc,
-		corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName,
-		apiRequest.ToProto(),
-		coreResponse,
-		subnet.SiteID.String(),
-	)
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to attach Subnet to VPC")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-	if coreResponse.GetId().GetValue() != subnet.ControllerNetworkSegmentID.String() ||
-		coreResponse.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT ||
-		coreResponse.GetConfig().GetVpcId().GetValue() != targetVpc.ControllerVpcID.String() {
-		logger.Error().Msg("Core returned an unexpected Network Segment after attaching Subnet to VPC")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Core returned an unexpected Subnet attachment response", nil)
-	}
 
-	updatedSubnet, err := cdb.WithTxResult(ctx, asvh.dbSession, func(tx *cdb.Tx) (*cdbm.Subnet, error) {
-		result, derr := subnetDAO.Update(ctx, tx, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, VpcID: &targetVpc.ID})
-		if derr != nil {
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Subnet VPC", nil)
+	// Core's monotonically changing segment version fences a late RPC, even
+	// if an unrelated writer moved the VPC back to this source (ABA).
+	segments := &corev1.NetworkSegmentList{}
+	readErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName,
+		&corev1.NetworkSegmentsByIdsRequest{NetworkSegmentsIds: []*corev1.NetworkSegmentId{
+			{Value: subnet.ControllerNetworkSegmentID.String()},
+		}}, segments, subnet.SiteID.String())
+	if readErr != nil {
+		return cutil.NewAPIErrorResponse(c, readErr.Code, readErr.Message, nil)
+	}
+	if len(segments.GetNetworkSegments()) != 1 ||
+		segments.GetNetworkSegments()[0].GetId().GetValue() != subnet.ControllerNetworkSegmentID.String() ||
+		segments.GetNetworkSegments()[0].GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT ||
+		segments.GetNetworkSegments()[0].GetStatus().GetLifecycle().GetVersion() == "" {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Could not establish a versioned tenant Subnet at its Site", nil)
+	}
+	segment := segments.GetNetworkSegments()[0]
+	if segment.GetConfig().GetVpcId().GetValue() != subnet.Vpc.ControllerVpcID.String() {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC projection differs from its Site; reconciliation required", nil)
+	}
+	if subnet.VpcID == targetVpc.ID {
+		return c.JSON(http.StatusOK, model.NewAPISubnet(subnet, nil, nil))
+	}
+	if !apiRequest.AllowReplace {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Replacing the current Subnet VPC requires allowReplace", nil)
+	}
+	intent := cdbm.SubnetAttachIntent{
+		ID: uuid.New(), SubnetID: subnet.ID, TenantID: tenant.ID, SiteID: subnet.SiteID,
+		ControllerSegmentID: *subnet.ControllerNetworkSegmentID,
+		SourceVpcID:         subnet.VpcID, TargetVpcID: targetVpc.ID,
+		SourceControllerVpcID: *subnet.Vpc.ControllerVpcID,
+		TargetControllerVpcID: *targetVpc.ControllerVpcID,
+		SegmentVersion:        segment.GetStatus().GetLifecycle().GetVersion(),
+	}
+	reserved, err := cdb.WithTxResult(ctx, asvh.dbSession, func(tx *cdb.Tx) (bool, error) {
+		_, assocErr := cdbm.NewTenantSiteDAO(asvh.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, subnet.SiteID, nil)
+		if assocErr != nil {
+			return false, assocErr
 		}
-		return result, nil
+		return subnetDAO.ReserveAttachment(ctx, tx, intent)
 	})
 	if err != nil {
-		return common.HandleTxError(c, logger, err, "Failed to update Subnet VPC, DB transaction error")
+		logger.Error().Err(err).Msg("could not reserve Subnet attachment")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Could not reserve Subnet attachment for an authorized Site", nil)
 	}
+	if !reserved {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet changed or has a pending VPC reassignment", nil)
+	}
+
+	apiRequest.ControllerNetworkSegmentID = *subnet.ControllerNetworkSegmentID
+	apiRequest.ControllerVpcID = *targetVpc.ControllerVpcID
+	coreRequest := apiRequest.ToProto()
+	coreRequest.ExpectedSourceVpcId = &corev1.VpcId{Value: intent.SourceControllerVpcID.String()}
+	coreRequest.ExpectedSegmentVersion = &intent.SegmentVersion
+	coreResponse := &corev1.NetworkSegment{}
+	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName,
+		coreRequest, coreResponse, subnet.SiteID.String())
+	if apiErr != nil {
+		// A 504 does not cancel the Site RPC. Keep the due intent for the
+		// recovery worker to query Core and resolve under its version fence.
+		logAPIError(logger, apiErr, "Subnet attachment is unconfirmed; durable intent retained")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+	}
+	if coreResponse.GetId().GetValue() != intent.ControllerSegmentID.String() ||
+		coreResponse.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT ||
+		coreResponse.GetConfig().GetVpcId().GetValue() != intent.TargetControllerVpcID.String() {
+		logger.Error().Msg("Core returned a different segment for reserved attachment")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+	}
+	completed, err := cdb.WithTxResult(ctx, asvh.dbSession, func(tx *cdb.Tx) (bool, error) {
+		return subnetDAO.CompleteAttachment(ctx, tx, intent)
+	})
+	if err != nil || !completed {
+		logger.Error().Err(err).Msg("Core attachment confirmed but REST projection still pending")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+	}
+	updatedSubnet := subnet
+	updatedSubnet.VpcID = targetVpc.ID
 	updatedSubnet.Vpc = targetVpc
 
 	statusDetailDAO := cdbm.NewStatusDetailDAO(asvh.dbSession)
@@ -1227,6 +1281,9 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed not retrieve Subnet for deletion, DB error", nil)
 	}
 
+	if subnet.AttachIntentID != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+	}
 	if subnet.Tenant == nil {
 		logger.Warn().Err(err).Msg("failed to retrieve Tenant details")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant details", nil)

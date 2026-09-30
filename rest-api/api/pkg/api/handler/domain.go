@@ -376,7 +376,7 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 	// times out, the API process exits, or the final REST write fails.
 	domainDAO := cdbm.NewDomainDAO(ddh.dbSession)
 	if domain.Status != cdbm.DomainStatusDeleting {
-		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending {
+		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusError {
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
 		}
 		changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {

@@ -223,10 +223,24 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 			mtu = &mtuVal
 		}
 
-		if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil || vpcID != nil {
-			_, serr := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, VpcID: vpcID, ControllerNetworkSegmentID: controllerSegmentID, Mtu: mtu, IsMissingOnSite: cwutil.GetPtr(false)})
+		if vpcID != nil {
+			// A Site inventory page is an observation and can be older than a
+			// tenant attachment or a late Site RPC. The conditional UPDATE takes
+			// the same Subnet row lock used by an attach reservation and refuses
+			// to overwrite an unresolved durable intent or a newer REST VPC.
+			// Recovery remains due and re-reads Core even when inventory skips.
+			updated, serr := subnetDAO.UpdateVpcFromInventory(ctx, subnet.ID, site.ID, subnet.VpcID, *vpcID, controllerSegmentID, mtu, true)
 			if serr != nil {
-				slogger.Error().Err(serr).Msg("failed to update VPC/MTU/missing on Site flag/controller Segment ID in DB")
+				slogger.Error().Err(serr).Msg("failed to reconcile Site VPC observation in REST DB")
+				continue
+			}
+			if !updated {
+				slogger.Info().Msg("skipping stale Site VPC observation or pending tenant attachment")
+			}
+		} else if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil {
+			_, serr := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, ControllerNetworkSegmentID: controllerSegmentID, Mtu: mtu, IsMissingOnSite: cwutil.GetPtr(false)})
+			if serr != nil {
+				slogger.Error().Err(serr).Msg("failed to update MTU/missing on Site flag/controller Segment ID in DB")
 				continue
 			}
 		}
@@ -294,6 +308,12 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 	// Loop through and remove controller Network Segment ID from Subnets that were not found
 	for _, subnet := range subnetsToDelete {
 		slogger := logger.With().Str("Subnet ID", subnet.ID.String()).Logger()
+		// Missing inventory is not authority to discard a pending Site write.
+		// The bounded recovery worker re-reads the exact Core segment.
+		if subnet.AttachIntentID != nil {
+			slogger.Info().Msg("skipping missing-inventory cleanup during pending VPC attachment")
+			continue
+		}
 
 		// If the Subnet was already being deleted, we can proceed with removing it from the DB
 		if subnet.Status == cdbm.SubnetStatusDeleting {

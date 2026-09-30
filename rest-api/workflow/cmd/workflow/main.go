@@ -44,7 +44,9 @@ import (
 	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpc"
 	vpcWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/vpc"
 
+	domainActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/domain"
 	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/subnet"
+	domainWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/domain"
 	subnetWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/subnet"
 
 	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/instance"
@@ -251,6 +253,8 @@ func main() {
 
 		// Subnet workflows
 		w.RegisterWorkflow(subnetWorkflow.DeleteSubnetByID)
+		w.RegisterWorkflow(subnetWorkflow.ReconcileSubnetAttachmentIntents)
+		w.RegisterWorkflow(domainWorkflow.ReconcileReservedDomains)
 
 		// Instance workflows
 		w.RegisterWorkflow(instanceWorkflow.DeleteInstanceByID)
@@ -397,6 +401,9 @@ func main() {
 
 	subnetManager := subnetActivity.NewManageSubnet(dbSession, siteClientPool, tc)
 	w.RegisterActivity(&subnetManager)
+	if tcfg.Namespace == cwfn.CloudNamespace {
+		w.RegisterActivity(&domainActivity.ManageDomain{DB: dbSession, Sites: siteClientPool})
+	}
 
 	instanceManager := instanceActivity.NewManageInstance(dbSession, siteClientPool, tc, cfg)
 	w.RegisterActivity(&instanceManager)
@@ -498,6 +505,17 @@ func main() {
 				log.Panic().Err(serr).Msg("failed to start Prometheus metrics server")
 			}
 		}()
+	}
+
+	// The existing monitor starts below w.Run cannot execute until shutdown;
+	// schedule this new durable recovery cron *before* the blocking worker run.
+	if tcfg.Namespace == cwfn.CloudNamespace {
+		if err := subnetWorkflow.ExecuteReconcileSubnetAttachmentIntents(ctx, tc); err != nil {
+			log.Error().Err(err).Msg("failed to schedule Subnet attachment recovery; outstanding intents will remain pending")
+		}
+		if err := domainWorkflow.ExecuteReconcileReservedDomains(ctx, tc); err != nil {
+			log.Error().Err(err).Msg("failed to schedule reserved Domain recovery; outstanding intents will remain pending")
+		}
 	}
 
 	// Start listening to the Task Queue

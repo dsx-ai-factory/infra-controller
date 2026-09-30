@@ -102,6 +102,10 @@ type Domain struct {
 	Updated            time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted            *time.Time `bun:"deleted,soft_delete"`
 	CreatedBy          uuid.UUID  `bun:"type:uuid,notnull"`
+	RecoveryToken      *uuid.UUID `bun:"recovery_token,type:uuid"`
+	RecoveryLeaseUntil *time.Time `bun:"recovery_lease_until"`
+	RecoveryNextAt     *time.Time `bun:"recovery_next_at"`
+	RecoveryAttempts   int        `bun:"recovery_attempts,notnull"`
 }
 
 var _ bun.BeforeAppendModelHook = (*Domain)(nil)
@@ -205,8 +209,12 @@ func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input Domai
 		input.Status != DomainStatusPending {
 		return nil, false, db.ErrDoesNotExist
 	}
+	// Give the request's first Site RPC time to finish before a worker
+	// replays this immutable reserved ID. A crash still leaves a due intent.
+	firstRetry := time.Now().UTC().Add(70 * time.Second)
 	reservation := &Domain{
-		ID: uuid.New(), Hostname: NormalizeForwardDomainName(input.Hostname), Org: input.Org,
+		RecoveryNextAt: &firstRetry,
+		ID:             uuid.New(), Hostname: NormalizeForwardDomainName(input.Hostname), Org: input.Org,
 		TenantID: input.TenantID, SiteID: input.SiteID,
 		ControllerDomainID: input.ControllerDomainID, Status: DomainStatusPending,
 		CreatedBy: input.CreatedBy,
