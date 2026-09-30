@@ -6344,7 +6344,23 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
             tracing_subscriber::registry().with(WarnCapture(captured_clone)),
             f,
         );
-        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+
+        // Callsite registration can retain the subscriber after with_default returns.
+        std::mem::take(&mut *captured.lock().unwrap())
+    }
+
+    #[test]
+    fn warning_capture_allows_a_retained_dispatcher() {
+        let mut retained_dispatcher = None;
+
+        let warnings = capture_warnings(|| {
+            retained_dispatcher = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::warn!("captured warning");
+        });
+
+        assert_eq!(warnings, vec!["captured warning"]);
+
+        drop(retained_dispatcher);
     }
 
     #[test]
