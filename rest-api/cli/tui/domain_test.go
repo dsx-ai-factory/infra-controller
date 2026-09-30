@@ -39,11 +39,11 @@ func TestSessionFetchDomainsUsesSiteScopeAndCache(t *testing.T) {
 				domains := make([]map[string]string, 100)
 				for i := range domains {
 					id := "domain-" + strconv.Itoa(i+1)
-					domains[i] = map[string]string{"id": id, "name": id + ".example.com", "siteId": "site-1", "tenantId": "tenant-1"}
+					domains[i] = map[string]string{"id": id, "name": id + ".example.com", "siteId": "site-1", "tenantId": "tenant-1", "status": "Ready"}
 				}
 				require.NoError(t, json.NewEncoder(w).Encode(domains))
 			case "2":
-				_, err := io.WriteString(w, `[{"id":"domain-101","name":"domain-101.example.com","siteId":"site-1","tenantId":"tenant-1"}]`)
+				_, err := io.WriteString(w, `[{"id":"domain-101","name":"domain-101.example.com","siteId":"site-1","tenantId":"tenant-1","status":"Ready"}]`)
 				require.NoError(t, err)
 			default:
 				t.Errorf("unexpected Domain page %q", page)
