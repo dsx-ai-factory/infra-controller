@@ -30,10 +30,12 @@ prost = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # [local-dependencies]
 carbide-dhcp-common = { path = "../dhcp-common" }
-carbide-instrument = { path = "../instrument" }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
 carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }
 carbide-dhcpv6 = { path = "../dhcpv6" }

@@ -74,6 +74,9 @@ certificate:
   extraDnsNames: []
   extraUris: []
 
+## OTLP/gRPC collector endpoint. Empty leaves tracing off unless set through env.
+otlpEndpoint: ""
+
 env:
   FORGE_ROOT_CAFILE_PATH: /var/run/secrets/spiffe.io/ca.crt
   NICO_ROOT_CAFILE_PATH: /var/run/secrets/spiffe.io/ca.crt

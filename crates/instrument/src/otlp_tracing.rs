@@ -157,7 +157,37 @@ enum State {
     },
 }
 
+/// What [`setup`] configured, for callers whose logs do not go through
+/// `tracing`, so [`Tracing::report`] would not reach them.
+#[derive(Debug)]
+pub enum Status<'a> {
+    /// No endpoint is configured and no spans export.
+    Off,
+    /// Spans export to this endpoint.
+    On {
+        /// The endpoint spans export to.
+        endpoint: &'a str,
+    },
+    /// The endpoint was rejected and no spans export.
+    Failed {
+        /// The endpoint that was rejected.
+        endpoint: &'a str,
+        /// Why the exporter could not be built.
+        error: &'a opentelemetry_otlp::ExporterBuildError,
+    },
+}
+
 impl Tracing {
+    /// Reports what [`setup`] configured. Prefer [`Tracing::report`] unless the
+    /// caller logs somewhere other than `tracing`.
+    pub fn status(&self) -> Status<'_> {
+        match &self.state {
+            State::Off => Status::Off,
+            State::On { endpoint } => Status::On { endpoint },
+            State::Failed { endpoint, error } => Status::Failed { endpoint, error },
+        }
+    }
+
     /// Logs export settings and errors. Call after initializing the subscriber.
     pub fn report(&self) {
         match &self.state {

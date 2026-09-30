@@ -171,6 +171,10 @@ pub unsafe extern "C" fn carbide_pkt6_receive(
     client_link_layer_len: usize,
     machine_ptr_out: *mut *mut Machine,
 ) -> V6HookResult {
+    // Roots a trace per packet, as the v4 discovery path does.
+    let span = tracing::info_span!("dhcpv6_discovery");
+    let _guard = span.enter();
+
     // SAFETY: The C ABI contract keeps every non-null input buffer readable for
     // its paired length and the non-null output slot writable for this call.
     // Relay bytes are copied before return, and successful Box ownership moves

@@ -70,6 +70,11 @@ pub unsafe extern "C" fn carbide_expire_lease(
 
     let url = &CONFIG.read().unwrap().api_endpoint;
     let forge_client_config = tls::build_forge_client_config();
+
+    // Roots a trace for the nico-api call the expiration makes.
+    let span = tracing::info_span!("dhcp_lease_expiration");
+    let _guard = span.enter();
+
     expire_lease_at(ip_str, mac_str, url, &forge_client_config)
 }
 

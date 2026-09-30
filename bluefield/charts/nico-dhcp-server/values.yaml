@@ -10,6 +10,9 @@ exposedPorts:
   ports: {}
 
 ### Service specific values ###
+## OTLP/gRPC collector endpoint. Empty leaves span export off.
+otlpEndpoint: ""
+
 image:
   repository: ""
   pullPolicy: IfNotPresent
