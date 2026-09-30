@@ -158,9 +158,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         header_read_timeout_seconds = server::HEADER_READ_TIMEOUT.as_secs(),
         "serving http"
     );
-    server::serve(listener, final_app, server::HEADER_READ_TIMEOUT).await?;
+    server::serve(
+        listener,
+        final_app,
+        server::HEADER_READ_TIMEOUT,
+        shutdown_signal(),
+    )
+    .await?;
 
     Ok(())
+}
+
+/// Waits for SIGTERM signal
+async fn shutdown_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                // SIGTERM ends the process without connections draining
+                tracing::warn!(%error, "failed to register SIGTERM handler");
+                return std::future::pending().await;
+            }
+        };
+
+    terminate.recv().await;
+    tracing::info!("shutdown signal received, draining in-flight requests");
 }
 
 /// Installs the tracing subscriber that emits logs in the fleet's logfmt
