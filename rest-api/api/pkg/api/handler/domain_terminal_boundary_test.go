@@ -37,7 +37,7 @@ func TestDomainCreateTerminalCoreReply_RetainsOneReservedIdentity(t *testing.T) 
 			// ResetModel drops migration indexes; restore the actual production
 			// reservation uniqueness invariant before testing HTTP retries.
 			_, err := f.dbSession.DB.ExecContext(t.Context(), `CREATE UNIQUE INDEX domain_owned_name_idx
-                ON domain (tenant_id, site_id, lower(rtrim(hostname, '.')))
+                ON domain (tenant_id, site_id, translate(rtrim(hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))
                 WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
                 AND controller_domain_id IS NOT NULL`)
 			require.NoError(t, err)

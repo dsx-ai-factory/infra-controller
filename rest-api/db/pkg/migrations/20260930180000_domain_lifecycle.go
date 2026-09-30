@@ -17,16 +17,17 @@ func init() {
 
 func domainLifecycleUpMigration(ctx context.Context, db *bun.DB) error {
 	// Detect duplicates before installing the index. Historical REST rows may
-	// contain equivalent dotted/case variants; never choose a winner or infer
-	// Core ownership from a name. Fail with the exact rows to reconcile.
+	// contain equivalent dotted/ASCII-case variants; never choose a winner or infer
+	// Core ownership from a name. Match Core ASCII folding exactly (SQL lower
+	// would additionally fold Unicode). Fail with the exact rows to reconcile.
 	var tenantID, siteID, name, conflictingIDs string
 	err := db.QueryRowContext(ctx, `
-		SELECT tenant_id::text, site_id::text, lower(rtrim(hostname, '.')),
+		SELECT tenant_id::text, site_id::text, translate(rtrim(hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),
 			string_agg(id::text, ', ' ORDER BY id::text)
 		FROM domain
 		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
 		AND controller_domain_id IS NOT NULL
-		GROUP BY tenant_id, site_id, lower(rtrim(hostname, '.'))
+		GROUP BY tenant_id, site_id, translate(rtrim(hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 		HAVING count(*) > 1 LIMIT 1
 	`).Scan(&tenantID, &siteID, &name, &conflictingIDs)
 	if err != nil && err != sql.ErrNoRows {
@@ -39,7 +40,7 @@ func domainLifecycleUpMigration(ctx context.Context, db *bun.DB) error {
 	// remain untouched; a name never establishes Core ownership.
 	_, err = db.ExecContext(ctx, `
 		CREATE UNIQUE INDEX domain_owned_name_idx
-		ON domain (tenant_id, site_id, lower(rtrim(hostname, '.')))
+		ON domain (tenant_id, site_id, translate(rtrim(hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))
 		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
 		AND controller_domain_id IS NOT NULL
 	`)

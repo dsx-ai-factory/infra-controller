@@ -235,7 +235,7 @@ func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input Domai
 	// shared DNS namespace. Never accept a Core resource by a name lookup.
 	var existing Domain
 	err = db.GetIDB(tx, dsd.dbSession).NewSelect().Model(&existing).
-		Where("d.tenant_id = ? AND d.site_id = ? AND lower(rtrim(d.hostname, '.')) = lower(rtrim(?, '.'))", input.TenantID, input.SiteID, input.Hostname).
+		Where("d.tenant_id = ? AND d.site_id = ? AND translate(rtrim(d.hostname, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate(rtrim(?, '.'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')", input.TenantID, input.SiteID, input.Hostname).
 		Scan(ctx)
 	if err != nil {
 		return nil, false, err
