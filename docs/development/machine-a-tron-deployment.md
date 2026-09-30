@@ -129,8 +129,8 @@ cycle). Repeating `helm upgrade --install` with the same values is always safe.
   relies on
 - A cluster where machine-a-tron can reach `nico-api.nico-system.svc.cluster.local:1079`
 - The `nico-machine-a-tron` Helm chart (`helm/charts/nico-machine-a-tron`)
-- `kubectl`, `helm`, and `python3` with PyYAML for the ServiceCIDR check in
-  Controller Mode
+- `kubectl`, `helm`, and `python3` 3.11 or later with PyYAML for the
+  ServiceCIDR check in Controller Mode
 
 ## Building the Container Image
 
@@ -514,7 +514,7 @@ SPIFFE URI). Controller Mode adds the following requirements:
 
 ```bash
 python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-multipod.yaml \
-  --site-config helm-prereqs/values/nico-core-simulation.yaml
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
   --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
@@ -541,7 +541,7 @@ keep the chart from rendering a Namespace that collides with the pre-created
 
 ```bash
 python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-10racks.yaml \
-  --site-config helm-prereqs/values/nico-core-simulation.yaml
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
   --set createNamespace=false \
@@ -810,8 +810,9 @@ For a from-scratch reset on a simulation-only site, truncate the machine graph
 directly on the Patroni primary (`psql -d nico_system_nico -v ON_ERROR_STOP=1`).
 Every machine on the cluster is assumed to be simulated. Never run this
 against a site with real inventory. CASCADE does not reach the rack, switch,
-and power-shelf tables, so the list names them. The
-`machine_interfaces_deletion` singleton must survive:
+and power-shelf tables, so the list names them. `resource_pool` holds the
+`[pools.*]` allocations without a foreign key to the machine graph, so the
+UPDATE frees them. The `machine_interfaces_deletion` singleton must survive:
 
 ```sql
 BEGIN;
@@ -820,6 +821,7 @@ TRUNCATE machines, machine_interfaces, explored_endpoints, explored_managed_host
   expected_rack_groups, expected_switches, expected_power_shelves,
   rack_health_history, switch_health_history, power_shelf_health_history
   RESTART IDENTITY CASCADE;
+UPDATE resource_pool SET allocated = NULL, state = '{"state": "free"}' WHERE allocated IS NOT NULL;
 UPDATE machine_interfaces_deletion SET last_deletion = now() WHERE id = 1;
 INSERT INTO machine_interfaces_deletion (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 COMMIT;

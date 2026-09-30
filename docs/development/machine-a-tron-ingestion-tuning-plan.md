@@ -41,9 +41,9 @@ blocks of `helm-prereqs/values/nico-core-simulation.yaml`.
   an identical state: `helm uninstall`, then the inventory reset in
   [Teardown and Reset](machine-a-tron-deployment.md#teardown-and-reset) of the
   deployment guide, or a site reprovision.
-- **Instrumentation first (run 0)**: `helm-prereqs/ingestion-rate-report.sh`
+- **Instrumentation first (run 0)**: `helm-prereqs/ingestion-rate-report.sh --csv`
   derives the per-minute machine and interface creation curves from the
-  database's own timestamps, so each run yields per-phase rate curves, not
+  database's own timestamps, so each run yields creation rate curves, not
   just total wall clock.
 - **Record per run**: knob values, end-to-end wall clock, per-phase windows
   (DHCP / exploration / preingestion / creation / init), postgres CPU, any

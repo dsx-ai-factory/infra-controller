@@ -298,10 +298,12 @@ files, so the chart's example group survives unless the values file nulls it
 `helm template` has no cluster access, so its render omits the
 `host_bmc_password` and `dpu_bmc_password` lines that the site credentials
 lookup adds on install. Install with a low API request rate when the release
-creates hundreds of Services or the cluster is reached through a tunnel. The
-command expects the labeled `nico-mat` namespace and the `machine-a-tron-pull`
-Secret to exist, or the flags from [Helm-Only Deployment](#helm-only-deployment)
-that make the chart create them:
+creates hundreds of Services or the cluster is reached through a tunnel. With
+the values above, chart resources land in `nico-system`, and `-n nico-mat` sets
+only the Helm release namespace. The labeled `nico-system` namespace and its
+`machine-a-tron-pull` Secret must exist, or pass the flags from
+[Helm-Only Deployment](#helm-only-deployment) that make the chart create them
+in the effective resource namespace:
 
 ```bash
 helm template nico-machine-a-tron ./helm/charts/nico-machine-a-tron -f my-values.yaml \
@@ -380,9 +382,10 @@ adds a dynamic target UDP port for IPMI access.
   every `helm upgrade --install`. It resolves each `bmcDhcpRelayAddress` to
   its `[networks.*]` prefix in the Core values file or a rendered site config,
   reads the ServiceCIDR from the cluster (`SCALE_SERVICE_CIDRS` overrides it),
-  and exits nonzero on an overlap, an unresolved relay, or an unknown
-  ServiceCIDR. `SCALE_BMC_PREFIXES` names the network of a relay the site
-  config does not declare yet.
+  and exits nonzero on an overlap, an unresolved relay, an unknown
+  ServiceCIDR, or a Controller Mode values file without `pods`, which would
+  inherit the chart's default group. `SCALE_BMC_PREFIXES` names the network of
+  a relay the site config does not declare yet.
 
   ```bash
   python3 helm-prereqs/check-mat-service-cidr.py my-values.yaml \

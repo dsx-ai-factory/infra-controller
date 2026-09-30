@@ -97,6 +97,8 @@ pods:
             # Null pods and null groups disable chart defaults and carry no relay.
             ("null pods and groups", "pods:\n  default: null\n  mat-0:\n    machines:\n      rack-machines: null\n",
              ["10.96.0.0/12"], [], [], []),
+            # Without the controller no Service publishes the inherited default group.
+            ("Override Mode without pods", "image:\n  tag: dev\n", ["10.96.0.0/12"], [], [], []),
             # Tokens that are not CIDRs are reported, never silently dropped.
             ("invalid CIDR tokens", machines_values(), ["10.96.0.0/12", "nope"], ["10.200.0.0/33"], ["10.200.0.0/18"],
              ["SCALE_SERVICE_CIDRS entry 'nope' is not a CIDR", "SCALE_BMC_PREFIXES entry '10.200.0.0/33' is not a CIDR"]),
@@ -124,12 +126,34 @@ pods:
              "which this check cannot vouch for"),
             ("DHCP relay mode", "dhcpRelay:\n  baseIP: 10.96.127.10\n" + machines_values(),
              "dhcpRelay.baseIP is set: DHCP relay mode is not covered by this check"),
+            # Controller Mode publishes the inherited default group, so a partial values file cannot be vouched for.
+            ("Controller Mode without pods", "image:\n  tag: dev\nmat-k8s-controller:\n  enabled: true\n",
+             "mat-k8s-controller.enabled is true but pods is not set, so the chart's default machine group would "
+             "deploy unchecked; pass the complete values file of the install"),
         ]
         for name, values, message in cases:
             with self.subTest(name=name):
                 with self.assertRaises(ValueError) as raised:
                     check_service_cidr(io.StringIO(values), ["10.96.0.0/12"], [], SITE_CONFIG)
                 self.assertEqual(str(raised.exception), message)
+
+    def test_site_config_representations(self):
+        """Read the prefixes from TOML and from Core values whatever quoting their author chose."""
+        cases = [
+            # A rendered site config is TOML, where single quotes also delimit strings.
+            ("single-quoted TOML", "[networks.simulated-oob]\ntype = 'underlay'\nprefix = '10.200.0.0/18'\n"),
+            # A double-quoted YAML scalar escapes the TOML quotes and line breaks.
+            ("escaped YAML scalar",
+             'nico-api:\n  siteConfig:\n    nicoApiSiteConfig: "[networks.simulated-oob]\\nprefix = \\"10.200.0.0/18\\"\\n"\n'),
+        ]
+        for name, site_config in cases:
+            with self.subTest(name=name):
+                prefixes, errors = check_service_cidr(io.StringIO(machines_values()), ["10.96.0.0/12"], [], site_config)
+                self.assertEqual(([str(prefix) for prefix in prefixes], errors), (["10.200.0.0/18"], []))
+        # Core values without the embedded site config are reported, not treated as an empty declaration.
+        with self.assertRaises(ValueError) as raised:
+            check_service_cidr(io.StringIO(machines_values()), ["10.96.0.0/12"], [], "global: {}\n")
+        self.assertIn("neither TOML nor Core values", str(raised.exception))
 
     def test_cli_service_cidr_sources_and_exit_status(self):
         """Resolve the ServiceCIDR from the environment or kubectl and exit nonzero on any finding."""

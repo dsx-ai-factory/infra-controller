@@ -10,6 +10,10 @@ import subprocess
 import sys
 
 try:
+    import tomllib
+except ImportError:
+    raise SystemExit("machine-a-tron ServiceCIDR preflight requires python3 3.11 or later")
+try:
     import yaml
 except ImportError:
     raise SystemExit("machine-a-tron ServiceCIDR preflight requires PyYAML in the python3 environment")
@@ -19,8 +23,6 @@ RELAY_KEYS = {
     "machines": ("bmcDhcpRelayAddress", "oobDhcpRelayAddress"),
     "racks": ("bmc_dhcp_relay_address", "oob_dhcp_relay_address"),
 }
-# `prefix = "..."` lines of the [networks.*] stanzas, in a Core values file or a rendered site config.
-SITE_PREFIX = re.compile(r'^\s*prefix\s*=\s*"([^"]+)"', re.MULTILINE)
 
 
 def parse_networks(tokens, source):
@@ -35,6 +37,32 @@ def parse_networks(tokens, source):
     return networks, errors
 
 
+def site_prefixes(site_config):
+    """Read the [networks.*] prefixes of a site config, given as TOML or as the Core values YAML that embeds it."""
+    if not site_config.strip():
+        return []
+    try:
+        config = tomllib.loads(site_config)
+    except tomllib.TOMLDecodeError as toml_error:
+        values = yaml.safe_load(site_config)
+        try:
+            embedded = values["nico-api"]["siteConfig"]["nicoApiSiteConfig"]
+        except (KeyError, TypeError):
+            embedded = None
+        if not isinstance(embedded, str):
+            raise ValueError("site config is neither TOML nor Core values with "
+                             f"nico-api.siteConfig.nicoApiSiteConfig: {toml_error}") from None
+        try:
+            config = tomllib.loads(embedded)
+        except tomllib.TOMLDecodeError as error:
+            raise ValueError(f"nico-api.siteConfig.nicoApiSiteConfig is not TOML: {error}") from None
+    networks = config.get("networks", {})
+    if not isinstance(networks, dict):
+        raise ValueError("site config networks must be a table")
+    return [str(network["prefix"]) for network in networks.values()
+            if isinstance(network, dict) and network.get("prefix") is not None]
+
+
 def relay_addresses(values):
     """Collect the BMC DHCP relay address of every configured machine and rack group."""
     if values is None:
@@ -47,7 +75,16 @@ def relay_addresses(values):
     # DHCP relay mode places the BMC network inside a dedicated ServiceCIDR by design.
     if dhcp_relay and dhcp_relay.get("baseIP"):
         raise ValueError("dhcpRelay.baseIP is set: DHCP relay mode is not covered by this check")
-    pods = values.get("pods")
+    controller = values.get("mat-k8s-controller")
+    if controller is not None and not isinstance(controller, dict):
+        raise ValueError("mat-k8s-controller must be a mapping")
+    if "pods" not in values:
+        # Helm keeps the chart's default group when the values define no pods.
+        if controller and controller.get("enabled"):
+            raise ValueError("mat-k8s-controller.enabled is true but pods is not set, so the chart's default "
+                             "machine group would deploy unchecked; pass the complete values file of the install")
+        return []
+    pods = values["pods"]
     if pods is None:
         return []
     if not isinstance(pods, dict):
@@ -90,7 +127,7 @@ def check_service_cidr(stream, service_cidrs, bmc_prefixes=(), site_config=""):
     relays = relay_addresses(yaml.safe_load(stream))
     service_networks, errors = parse_networks(service_cidrs, "SCALE_SERVICE_CIDRS")
     extra_networks, extra_errors = parse_networks(bmc_prefixes, "SCALE_BMC_PREFIXES")
-    site_networks, site_errors = parse_networks(SITE_PREFIX.findall(site_config), "site config")
+    site_networks, site_errors = parse_networks(site_prefixes(site_config), "site config")
     errors += extra_errors + site_errors
     if not service_networks and not errors:
         errors.append("cannot determine the cluster ServiceCIDR: set SCALE_SERVICE_CIDRS=\"<cidr> ...\"")

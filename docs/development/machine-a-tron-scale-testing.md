@@ -16,7 +16,7 @@ values a simulation site needs.
 export KUBECONFIG=/path/to/site/kubeconfig
 helm uninstall nico-machine-a-tron -n nico-mat
 python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-scale.yaml \
-  --site-config helm-prereqs/values/nico-core-simulation.yaml
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
   --set image.repository=<registry>/machine-a-tron --set image.tag=<tag> \
