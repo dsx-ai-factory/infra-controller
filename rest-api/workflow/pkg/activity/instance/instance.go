@@ -827,20 +827,25 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				// nil otherwise), matching how the MAC, IP and VF fields are reconciled above.
 				var bridgeName *string
 				var ovnNetworkName *string
+				clearOvnNetworkName := false
 				if ovs := attachmentConfig.GetAttachmentOvs(); ovs != nil {
 					reportedBridgeName := ovs.GetBridgeName()
 					if sxa.BridgeName == nil || *sxa.BridgeName != reportedBridgeName {
 						bridgeName = &reportedBridgeName
 					}
 
-					// ovn_network_name is optional on the wire, so only a value the Site
-					// actually reported is taken; an absent one leaves the persisted value
-					// untouched rather than clearing it.
+					// attachment_ovs is the client-owned config echoed back whole, so it is
+					// authoritative for ovn_network_name: a reported value is taken, and an
+					// omitted one means the mapping was removed and the persisted value must
+					// be cleared. Leaving it would report stale metadata and re-send the old
+					// mapping to Core on a later unrelated PATCH.
 					if ovs.OvnNetworkName != nil {
 						reportedOvnNetworkName := ovs.GetOvnNetworkName()
 						if sxa.OvnNetworkName == nil || *sxa.OvnNetworkName != reportedOvnNetworkName {
 							ovnNetworkName = &reportedOvnNetworkName
 						}
+					} else if sxa.OvnNetworkName != nil {
+						clearOvnNetworkName = true
 					}
 				}
 
@@ -852,25 +857,43 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
-				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && bridgeName == nil && ovnNetworkName == nil && status == nil {
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && bridgeName == nil && ovnNetworkName == nil && status == nil && !clearOvnNetworkName {
 					continue
 				}
 
-				_, serr := sxaDAO.Update(
-					ctx,
-					nil,
-					cdbm.SpectrumXAttachmentUpdateInput{
-						SpectrumXAttachmentID: sxa.ID,
-						MacAddress:            macAddress,
-						IPAddress:             ipAddress,
-						VirtualFunctionID:     virtualFunctionID,
-						BridgeName:            bridgeName,
-						OvnNetworkName:        ovnNetworkName,
-						Status:                status,
-					},
-				)
-				if serr != nil {
-					slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+				if macAddress != nil || ipAddress != nil || virtualFunctionID != nil || bridgeName != nil || ovnNetworkName != nil || status != nil {
+					_, serr := sxaDAO.Update(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentUpdateInput{
+							SpectrumXAttachmentID: sxa.ID,
+							MacAddress:            macAddress,
+							IPAddress:             ipAddress,
+							VirtualFunctionID:     virtualFunctionID,
+							BridgeName:            bridgeName,
+							OvnNetworkName:        ovnNetworkName,
+							Status:                status,
+						},
+					)
+					if serr != nil {
+						slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+					}
+				}
+
+				// Update only writes provided values, so a removed ovn_network_name is
+				// cleared explicitly to drop the stale mapping.
+				if clearOvnNetworkName {
+					_, cerr := sxaDAO.Clear(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentClearInput{
+							SpectrumXAttachmentID: sxa.ID,
+							OvnNetworkName:        true,
+						},
+					)
+					if cerr != nil {
+						slogger.Error().Err(cerr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+					}
 				}
 			}
 		}
