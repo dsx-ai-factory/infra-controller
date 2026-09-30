@@ -272,7 +272,7 @@ func TestHTTPServiceDoneWaitsForActiveRequest(t *testing.T) {
 
 	s := NewHTTPService("127.0.0.1:0")
 	s.ShutDownGracePeriod = 300 * time.Millisecond
-	s.Router.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
+	s.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
 		close(entered)
 		<-release
 		w.WriteHeader(http.StatusOK)
