@@ -28,9 +28,9 @@ type SequenceStep struct {
 	ComponentType string `json:"componentType"`
 	// Stage number; steps with the same stage run in parallel, lower stages run first. Component types must be unique within a stage.
 	Stage int32 `json:"stage"`
-	// Maximum number of components of this type processed concurrently. `0` means unlimited, `1` means strictly sequential.
+	// Maximum targets per component-scoped activity dispatch in the step's pre-, main-, and post-operations. Batches run sequentially. `0` sends the complete target once; `1` sends one target per dispatch.  Step-wide coordination and group-wide validation actions execute once with their complete context. `VerifyReachability` executes once, but applies this limit to its nested component activity dispatches.
 	MaxParallel *int32 `json:"maxParallel,omitempty"`
-	// Optional child-workflow timeout for this step, as a Go duration string (e.g. `30s`, `2m`). Applies to pre + main + post combined.
+	// Optional default activity start-to-close timeout for this step, as a Go duration string (e.g. `30s`, `2m`). Flow separately derives the child workflow execution timeout to cover sequential batches, configured retries, declared pre/post action timeouts, and scheduling overhead.
 	Timeout *string      `json:"timeout,omitempty"`
 	Retry   *RetryPolicy `json:"retry,omitempty"`
 	// Actions to run before the main operation.

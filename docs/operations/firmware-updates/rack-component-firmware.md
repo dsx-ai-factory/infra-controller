@@ -66,12 +66,13 @@ bundle. An unfiltered batch request can affect the entire site.
 
 ## Describe the update
 
-The request has four controls in addition to `siteId`:
+The request has five controls in addition to `siteId`:
 
 | Field | Purpose |
 |---|---|
 | `version` | Target passed to the component backend. For current rack-scale RMS paths, this is a complete SOT firmware-object JSON document serialized as a string. Legacy backends can accept a plain version string. |
 | `targets` | Optional component subset for tray requests. When present, `version` must also be present. Rack handlers do not forward this field, so do not send it with a rack request. |
+| `authenticationData` | Optional, write-only authentication data for firmware downloads. Use either one shared value or values scoped by component type. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 
@@ -121,9 +122,31 @@ If a layered document omits a component-type key, Flow passes an empty target
 to that component manager. Use an operation rule that excludes the component
 instead of relying on an empty value to skip it.
 
-The REST surface does not accept an RMS artifact access token. Core sends
-`NOAUTH` when no token is available, so artifacts referenced by these requests
-must be reachable without a separate token.
+### Firmware download authentication
+
+`authenticationData` must contain exactly one of these representations:
+
+```json
+{"authenticationData":{"shared":"<authentication-data>"}}
+```
+
+```json
+{
+  "authenticationData": {
+    "perComponent": {
+      "compute": "<compute-authentication-data>",
+      "nvswitch": "<nvswitch-authentication-data>",
+      "powershelf": "<powershelf-authentication-data>"
+    }
+  }
+}
+```
+
+Fields under `perComponent` are optional; an omitted field or empty string
+means no authentication data for that component type. Unknown fields in
+`authenticationData` or `perComponent` return HTTP `400` before Flow work is
+dispatched. Authentication data is not supported for DPU-only updates or by
+the legacy NICo compute firmware controller.
 
 ## Submit an update
 
@@ -250,7 +273,8 @@ GET /v2/org/{org}/nico/tray/{tray-id}/task?siteId={site-id}&activeOnly=true&incl
 [Cancel a Task](api:POST/v2/org/{org}/nico/task/{id}/cancel)
 is best effort. It terminates a pending, running, or waiting task, but it cannot
 undo firmware work already accepted by a hardware backend. Completed and
-failed tasks cannot be cancelled.
+failed tasks cannot be cancelled; those requests return HTTP `412 Precondition
+Failed` instead of `202 Accepted`.
 
 ```text
 POST /v2/org/{org}/nico/task/{task-id}/cancel
