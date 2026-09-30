@@ -5,9 +5,10 @@
 
 FROM nico-devspace-core-artifacts AS artifacts
 
-FROM ubuntu:24.04
+# Pin the multi-architecture Ubuntu index used by the verified PXE runtime build.
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates=20260601~24.04.1 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 nico \
