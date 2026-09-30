@@ -49,6 +49,8 @@ const (
 
 	// ConfigAPIName specifies the name of the API
 	ConfigAPIName = "api.name"
+	// ConfigAPIPort specifies the port the API server listens on
+	ConfigAPIPort = "api.port"
 	// ConfigAPIRouteVersion specifies the version of the API
 	ConfigAPIRouteVersion = "api.route.version"
 
@@ -242,6 +244,7 @@ func NewConfig() *Config {
 
 	// Set API name
 	c.v.SetDefault(ConfigAPIName, "nico")
+	c.v.SetDefault(ConfigAPIPort, 8388)
 	c.v.SetDefault(ConfigAPIRouteVersion, "v1")
 
 	// Set config file
@@ -851,6 +854,11 @@ func (c *Config) GetEnvDisconnected() bool {
 // GetAPIName returns the name of the API
 func (c *Config) GetAPIName() string {
 	return c.v.GetString(ConfigAPIName)
+}
+
+// GetAPIPort returns the port the API server listens on
+func (c *Config) GetAPIPort() int {
+	return c.v.GetInt(ConfigAPIPort)
 }
 
 // GetAPIRouteVersion returns the version of the API

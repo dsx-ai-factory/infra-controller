@@ -39,7 +39,6 @@ const (
 	// ZerologLevelFieldName specifies the field name for log level
 	ZerologLevelFieldName = "type"
 
-	apiListenAddress = ":8388"
 	// The deployments do not set terminationGracePeriodSeconds, so the kubelet
 	// sends SIGKILL 30 seconds after SIGTERM. The two sequential shutdown
 	// budgets below must fit inside that with room for dependency cleanup.
@@ -146,7 +145,7 @@ func run(ctx context.Context) (retErr error) {
 
 	// Initialize API Echo instance
 	e := capis.InitAPIServer(cfg, dbSession, tc, tnc, scp, powerProvisioner)
-	e.Server.Addr = apiListenAddress
+	e.Server.Addr = fmt.Sprintf(":%d", cfg.GetAPIPort())
 	servers := []*echo.Echo{e}
 
 	mconfig := cfg.GetMetricsConfig()

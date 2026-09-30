@@ -64,6 +64,34 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
+func TestConfig_GetAPIPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(c *Config)
+		want      int
+	}{
+		{
+			name:      "unset falls back to the default",
+			configure: func(c *Config) {},
+			want:      8388,
+		},
+		{
+			name:      "override is honored",
+			configure: func(c *Config) { c.v.Set(ConfigAPIPort, 18388) },
+			want:      18388,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			tt.configure(c)
+			defer c.v.Set(ConfigAPIPort, 8388)
+
+			assert.Equal(t, tt.want, c.GetAPIPort())
+		})
+	}
+}
+
 func TestConfig_GetIssuersConfig(t *testing.T) {
 	tests := []struct {
 		name       string
