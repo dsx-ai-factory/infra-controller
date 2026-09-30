@@ -17,7 +17,7 @@ import (
 )
 
 func TestDomainManagerCRUD(t *testing.T) {
-	const domainJSON = `{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1","created":"2026-09-02T12:00:00Z","updated":"2026-09-02T12:00:00Z"}`
+	const domainJSON = `{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1","status":"Ready","created":"2026-09-02T12:00:00Z","updated":"2026-09-02T12:00:00Z"}`
 	requests := make([]string, 0, 5)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -35,11 +35,6 @@ func TestDomainManagerCRUD(t *testing.T) {
 			assert.Equal(t, "tenant-1", r.URL.Query().Get("tenantId"))
 			_, _ = io.WriteString(w, "["+domainJSON+"]")
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/test-org/nico/domain/domain-1":
-			_, _ = io.WriteString(w, domainJSON)
-		case r.Method == http.MethodPatch && r.URL.Path == "/v2/org/test-org/nico/domain/domain-1":
-			var body map[string]any
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			assert.Equal(t, "renamed.example.com", body["name"])
 			_, _ = io.WriteString(w, domainJSON)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/org/test-org/nico/domain/domain-1":
 			w.WriteHeader(http.StatusNoContent)
@@ -74,17 +69,45 @@ func TestDomainManagerCRUD(t *testing.T) {
 	require.NotNil(t, domain)
 	assert.Equal(t, "domain-1", domain.ID)
 
-	updated, apiErr := manager.Update(ctx, "domain-1", DomainUpdateRequest{Name: "renamed.example.com"})
-	require.Nil(t, apiErr)
-	require.NotNil(t, updated)
-	assert.Equal(t, "domain-1", updated.ID)
-
 	require.Nil(t, manager.Delete(ctx, "domain-1"))
 	assert.Equal(t, []string{
 		"POST /v2/org/test-org/nico/domain",
 		"GET /v2/org/test-org/nico/domain?pageNumber=1&siteId=site-1&tenantId=tenant-1",
 		"GET /v2/org/test-org/nico/domain/domain-1",
-		"PATCH /v2/org/test-org/nico/domain/domain-1",
 		"DELETE /v2/org/test-org/nico/domain/domain-1",
 	}, requests)
+}
+
+func TestDomainManager_CreateResponseValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus string
+		wantError  int
+	}{
+		{name: "pending reservation", status: http.StatusAccepted, body: `{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1","status":"Pending","created":"2026-09-02T12:00:00Z","updated":"2026-09-02T12:00:00Z"}`, wantStatus: "Pending"},
+		{name: "missing required status", status: http.StatusCreated, body: `{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1","created":"2026-09-02T12:00:00Z","updated":"2026-09-02T12:00:00Z"}`, wantError: http.StatusBadGateway},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v2/org/test-org/nico/domain", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			domain, apiErr := NewDomainManager(newSimpleTestClient(server.URL)).Create(context.Background(), DomainCreateRequest{Name: "tenant.example.com"})
+			if tt.wantError != 0 {
+				require.Nil(t, domain, "invalid 2xx model must not look like successful create")
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.wantError, apiErr.Code)
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, domain)
+			assert.Equal(t, "domain-1", domain.ID)
+			assert.Equal(t, tt.wantStatus, domain.Status)
+		})
+	}
 }

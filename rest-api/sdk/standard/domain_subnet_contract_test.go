@@ -20,6 +20,7 @@ const domainResponse = `{
 	"name":"tenant.example.com",
 	"siteId":"site-id",
 	"tenantId":"tenant-id",
+	"status":"Ready",
 	"created":"2026-09-02T12:00:00Z",
 	"updated":"2026-09-02T12:00:00Z"
 }`
@@ -66,7 +67,7 @@ func TestDomainAPIService_WireContract(t *testing.T) {
 			status:       http.StatusCreated,
 			responseBody: domainResponse,
 			execute: func(client *APIClient) error {
-				_, _, err := client.DomainAPI.CreateDomain(context.Background(), "tenant-org").
+				_, _, err := client.DNSDomainAPI.CreateDomain(context.Background(), "tenant-org").
 					DomainCreateRequest(*NewDomainCreateRequest("tenant.example.com", "site-id")).
 					Execute()
 				return err
@@ -86,7 +87,7 @@ func TestDomainAPIService_WireContract(t *testing.T) {
 			status:       http.StatusOK,
 			responseBody: "[" + domainResponse + "]",
 			execute: func(client *APIClient) error {
-				_, _, err := client.DomainAPI.GetAllDomain(context.Background(), "tenant-org").
+				_, _, err := client.DNSDomainAPI.GetAllDomain(context.Background(), "tenant-org").
 					SiteId("site-id").
 					TenantId("tenant-id").
 					PageNumber(3).
@@ -104,22 +105,7 @@ func TestDomainAPIService_WireContract(t *testing.T) {
 			status:       http.StatusOK,
 			responseBody: domainResponse,
 			execute: func(client *APIClient) error {
-				_, _, err := client.DomainAPI.GetDomain(context.Background(), "tenant-org", "domain-id").Execute()
-				return err
-			},
-		},
-		{
-			name:         "update",
-			method:       http.MethodPatch,
-			path:         "/v2/org/tenant-org/nico/domain/domain-id",
-			query:        url.Values{},
-			body:         map[string]any{"name": "renamed.example.com"},
-			status:       http.StatusOK,
-			responseBody: domainResponse,
-			execute: func(client *APIClient) error {
-				_, _, err := client.DomainAPI.UpdateDomain(context.Background(), "tenant-org", "domain-id").
-					DomainUpdateRequest(*NewDomainUpdateRequest("renamed.example.com")).
-					Execute()
+				_, _, err := client.DNSDomainAPI.GetDomain(context.Background(), "tenant-org", "domain-id").Execute()
 				return err
 			},
 		},
@@ -131,7 +117,7 @@ func TestDomainAPIService_WireContract(t *testing.T) {
 			status:       http.StatusNoContent,
 			responseBody: "",
 			execute: func(client *APIClient) error {
-				_, err := client.DomainAPI.DeleteDomain(context.Background(), "tenant-org", "domain-id").Execute()
+				_, err := client.DNSDomainAPI.DeleteDomain(context.Background(), "tenant-org", "domain-id").Execute()
 				return err
 			},
 		},

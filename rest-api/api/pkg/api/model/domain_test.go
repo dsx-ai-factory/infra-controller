@@ -76,34 +76,6 @@ func TestAPIDomainGetAllRequest_Validate(t *testing.T) {
 	}
 }
 
-func TestAPIDomainUpdateRequest_Validate(t *testing.T) {
-	tests := []struct {
-		name    string
-		request APIDomainUpdateRequest
-		wantErr bool
-	}{
-		{name: "valid", request: APIDomainUpdateRequest{Name: "renamed.example.com"}},
-		{name: "missing name", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.request.Validate()
-			assert.Equal(t, tt.wantErr, err != nil)
-		})
-	}
-}
-
-func TestAPIDomainUpdateRequest_ToProto(t *testing.T) {
-	controllerDomainID := uuid.New()
-	request := APIDomainUpdateRequest{Name: "renamed.example.com", ControllerDomainID: controllerDomainID}
-
-	got := request.ToProto().GetDomain()
-	require.NotNil(t, got)
-	assert.Equal(t, controllerDomainID.String(), got.GetId().GetValue())
-	assert.Equal(t, request.Name, got.GetName())
-}
-
 func TestNewAPIDomain(t *testing.T) {
 	localID := uuid.New()
 	controllerID := uuid.New()
@@ -167,8 +139,8 @@ func TestAPIDomain_MarshalJSON(t *testing.T) {
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &got))
-	assert.Len(t, got, 6)
-	for _, key := range []string{"id", "name", "tenantId", "siteId", "created", "updated"} {
+	assert.Len(t, got, 7)
+	for _, key := range []string{"id", "name", "tenantId", "siteId", "status", "created", "updated"} {
 		assert.Contains(t, got, key)
 	}
 }

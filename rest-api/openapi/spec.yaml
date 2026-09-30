@@ -154,9 +154,9 @@ tags:
       Deprecation history:
 
       - `ResourceTypeID` attribute on Allocation Constraint was deprecated in favor of `resourceTypeId` and will be removed on July 9th, 2026 0:00 UTC. Please use `resourceTypeId` instead.
-  - name: Domain
+  - name: DNS Domain
     description: |-
-      Domain is a tenant-owned DNS zone at a Site. Domains can be assigned to Subnets when the Subnet is created.
+      DNS Domain is a tenant-owned DNS zone at a Site. Domains can be assigned to Subnets when the Subnet is created.
   - name: VPC
     x-displayName: VPC
     description: |-
@@ -2928,6 +2928,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Domain'
+        '200':
+          description: Existing Ready Domain for an identical authenticated tenant/Site/name create request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '202':
+          description: Pending, reserved Domain identity; not yet usable as subdomainId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '409':
+          $ref: '#/components/responses/GenericHttpError'
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -2939,7 +2953,7 @@ paths:
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - Domain
+        - DNS Domain
     get:
       summary: Retrieve all Domains
       operationId: get-all-domain
@@ -3007,7 +3021,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
-        - Domain
+        - DNS Domain
   '/v2/org/{org}/nico/domain/{domainId}':
     parameters:
       - schema:
@@ -3042,43 +3056,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
       tags:
-        - Domain
-    patch:
-      summary: Update Domain
-      operationId: update-domain
-      description: |-
-        Update the name of a tenant-owned DNS Domain. Ownership, Site, and the internal Core mapping are immutable.
-
-        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/DomainUpdateRequest'
-            examples:
-              example-1:
-                value:
-                  name: renamed.example.com
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '412':
-          $ref: '#/components/responses/GenericHttpError'
-        '504':
-          $ref: '#/components/responses/GatewayTimeoutError'
-      tags:
-        - Domain
+        - DNS Domain
     delete:
       summary: Delete Domain
       operationId: delete-domain
@@ -3098,7 +3076,7 @@ paths:
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - Domain
+        - DNS Domain
   '/v2/org/{org}/nico/vpc':
     parameters:
       - schema:
@@ -22455,6 +22433,11 @@ components:
           type: string
           format: uuid
           description: ID of the Tenant that owns the Domain
+        status:
+          type: string
+          enum: [Pending, Ready, Deleting, Error]
+          description: Only Ready Domains can be used as a Subnet subdomainId. Pending and Deleting are durable retry states.
+          readOnly: true
         created:
           type: string
           format: date-time
@@ -22470,6 +22453,7 @@ components:
         - name
         - siteId
         - tenantId
+        - status
         - created
         - updated
     DomainCreateRequest:
@@ -22487,16 +22471,6 @@ components:
       required:
         - name
         - siteId
-    DomainUpdateRequest:
-      title: DomainUpdateRequest
-      type: object
-      description: Request data for renaming a tenant-owned DNS Domain.
-      properties:
-        name:
-          type: string
-          description: New DNS name of the Domain
-      required:
-        - name
     Subnet:
       title: Subnet
       type: object

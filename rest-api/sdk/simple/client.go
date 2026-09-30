@@ -77,7 +77,6 @@ type ClientInterface interface {
 	CreateDomain(ctx context.Context, request DomainCreateRequest) (*Domain, *ApiError)
 	GetDomains(ctx context.Context, domainFilter *DomainFilter) ([]Domain, *ApiError)
 	GetDomain(ctx context.Context, id string) (*Domain, *ApiError)
-	UpdateDomain(ctx context.Context, id string, request DomainUpdateRequest) (*Domain, *ApiError)
 	DeleteDomain(ctx context.Context, id string) *ApiError
 
 	// Subnet management interfaces
@@ -639,15 +638,6 @@ func (c *Client) GetDomain(ctx context.Context, id string) (*Domain, *ApiError) 
 	logger.Info().Msgf("Getting Domain for org: %s", c.Config.Org)
 
 	return NewDomainManager(c).Get(ctx, id)
-}
-func (c *Client) UpdateDomain(ctx context.Context, id string, request DomainUpdateRequest) (*Domain, *ApiError) {
-	ctx = WithLogger(ctx, c.Logger)
-	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
-
-	logger := LoggerFromContext(ctx)
-	logger.Info().Msgf("Updating Domain for org: %s", c.Config.Org)
-
-	return NewDomainManager(c).Update(ctx, id, request)
 }
 func (c *Client) DeleteDomain(ctx context.Context, id string) *ApiError {
 	ctx = WithLogger(ctx, c.Logger)

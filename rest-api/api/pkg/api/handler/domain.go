@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,44 +75,71 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	coreDomain := &corev1.Domain{}
-	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, apiRequest.ToProto(), coreDomain, site.ID.String())
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to create Domain via Core proxy")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-
-	controllerDomainID, err := uuid.Parse(coreDomain.GetId().GetValue())
-	if err != nil || controllerDomainID == uuid.Nil {
-		logger.Error().Err(err).Str("controllerDomainID", coreDomain.GetId().GetValue()).Msg("Core returned an invalid Domain ID")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Core returned an unexpected Domain create response", nil)
-	}
-
+	// Commit the owner-to-reserved-ID mapping before ANY Core operation. Even a
+	// proxy timeout can conceal a successfully executed Core write.
 	domainDAO := cdbm.NewDomainDAO(cdh.dbSession)
-	domain, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (*cdbm.Domain, error) {
-		return domainDAO.Create(ctx, tx, cdbm.DomainCreateInput{
-			Hostname:           apiRequest.Name,
-			Org:                org,
-			TenantID:           &tenant.ID,
-			SiteID:             &site.ID,
-			ControllerDomainID: &controllerDomainID,
-			Status:             cdbm.DomainStatusReady,
-			CreatedBy:          dbUser.ID,
+	coreID := uuid.New()
+	domain, inserted, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (*cdbm.Domain, error) {
+		row, fresh, reserveErr := domainDAO.ReserveOwned(ctx, tx, cdbm.DomainCreateInput{
+			Hostname: apiRequest.Name, Org: org, TenantID: &tenant.ID, SiteID: &site.ID,
+			ControllerDomainID: &coreID, Status: cdbm.DomainStatusPending, CreatedBy: dbUser.ID,
 		})
+		inserted = fresh
+		return row, reserveErr
 	})
 	if err != nil {
-		logger.Error().Err(err).Str("controllerDomainID", controllerDomainID.String()).Msg("Domain created in Core but failed to update REST DB")
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cutil.WorkflowContextTimeout)
-		cleanupErr := common.ExecuteCoreGRPC(cleanupCtx, stc, corev1.Forge_DeleteDomain_FullMethodName, &corev1.DomainDeletionRequest{
-			Id: &corev1.DomainId{Value: controllerDomainID.String()},
-		}, nil, site.ID.String())
-		cancel()
-		if cleanupErr != nil {
-			logAPIError(logger, cleanupErr, "failed to compensate Core Domain after REST DB failure")
-		}
-		return common.HandleTxError(c, logger, err, "Failed to create Domain, DB transaction error")
+		logger.Error().Err(err).Msg("failed to reserve owned Domain in REST DB")
+		return common.HandleTxError(c, logger, err, "Failed to reserve Domain, DB transaction error")
 	}
-
+	if domain.ControllerDomainID == nil || domain.SiteID == nil || domain.TenantID == nil ||
+		*domain.SiteID != site.ID || *domain.TenantID != tenant.ID ||
+		domain.Hostname != cdbm.NormalizeForwardDomainName(apiRequest.Name) || domain.Org != org {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain reservation does not match the requested owner and name", nil)
+	}
+	if !inserted {
+		switch domain.Status {
+		case cdbm.DomainStatusReady:
+			return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
+		case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering:
+			return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
+		default:
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain reservation is not available for creation", nil)
+		}
+	}
+	coreRequest := apiRequest.ToProto()
+	coreRequest.Name = domain.Hostname
+	coreRequest.ReservedId = &corev1.DomainId{Value: domain.ControllerDomainID.String()}
+	coreDomain := &corev1.Domain{}
+	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, coreRequest, coreDomain, site.ID.String())
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "Domain create did not return a confirmed resource; reservation retained")
+		if apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusBadRequest {
+			// These definitive Core validation/conflict responses may be surfaced;
+			// retain a durable Error row so a retry cannot adopt by DNS name.
+			changed, transitionErr := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {
+				return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, cdbm.DomainStatusPending, cdbm.DomainStatusError)
+			})
+			if transitionErr == nil && changed {
+				return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+			}
+			logger.Error().Err(transitionErr).Str("domainID", domain.ID.String()).Msg("could not persist rejected Domain intent")
+		}
+		// A 504 does not cancel an in-flight Site workflow. Keep the durable
+		// reservation rather than reporting a false rollback or issuing a new ID.
+		return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
+	}
+	if coreDomain.GetId().GetValue() != domain.ControllerDomainID.String() || coreDomain.GetName() != domain.Hostname {
+		logger.Error().Str("domainID", domain.ID.String()).Msg("Core returned a different identity for reserved Domain")
+		return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
+	}
+	changed, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (bool, error) {
+		return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, cdbm.DomainStatusPending, cdbm.DomainStatusReady)
+	})
+	if err != nil || !changed {
+		logger.Error().Err(err).Str("domainID", domain.ID.String()).Msg("Domain ready transition did not commit")
+		return c.JSON(http.StatusAccepted, model.NewAPIDomain(domain))
+	}
+	domain.Status = cdbm.DomainStatusReady
 	return c.JSON(http.StatusCreated, model.NewAPIDomain(domain))
 }
 
@@ -271,105 +297,6 @@ func (gdh GetDomainHandler) Handle(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
-}
-
-// UpdateDomainHandler renames a tenant-owned DNS Domain in Core and its REST projection.
-type UpdateDomainHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
-}
-
-// NewUpdateDomainHandler returns a Domain update handler.
-func NewUpdateDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) UpdateDomainHandler {
-	return UpdateDomainHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
-	}
-}
-
-// Handle renames a tenant-owned DNS Domain.
-func (udh UpdateDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Update", c, udh.tracerSpan)
-	if handlerSpan != nil {
-		defer handlerSpan.End()
-	}
-	if dbUser == nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
-	}
-
-	domainID, err := uuid.Parse(c.Param("domainId"))
-	if err != nil || domainID == uuid.Nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Domain ID in URL", nil)
-	}
-
-	apiRequest := model.APIDomainUpdateRequest{}
-	err = c.Bind(&apiRequest)
-	if err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
-	}
-	err = apiRequest.Validate()
-	if err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Domain update request data", err)
-	}
-
-	tenant, apiErr := common.IsTenant(ctx, logger, udh.dbSession, org, dbUser, nil)
-	if apiErr != nil {
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-	}
-	domain, err := getOwnedDomain(ctx, udh.dbSession, domainID, tenant.ID)
-	if errors.Is(err, cdb.ErrDoesNotExist) {
-		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Domain with the specified ID", nil)
-	}
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve Domain from REST DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Domain, DB error", nil)
-	}
-	if domain.SiteID == nil || domain.ControllerDomainID == nil || *domain.SiteID == uuid.Nil || *domain.ControllerDomainID == uuid.Nil {
-		logger.Error().Str("domainID", domain.ID.String()).Msg("owned Domain projection is missing Site or Core identity")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Domain projection is missing required Site or Core identity", nil)
-	}
-
-	site, apiErr := getDomainSiteForTenant(ctx, logger, udh.dbSession, tenant, domain.SiteID.String(), true)
-	if apiErr != nil {
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-	}
-	stc, err := udh.scp.GetClientByID(site.ID)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
-	}
-
-	apiRequest.ControllerDomainID = *domain.ControllerDomainID
-	coreDomain := &corev1.Domain{}
-	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_UpdateDomain_FullMethodName, apiRequest.ToProto(), coreDomain, site.ID.String())
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to update Domain via Core proxy")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-	if coreDomain.GetId().GetValue() != domain.ControllerDomainID.String() || coreDomain.GetName() != apiRequest.Name {
-		logger.Error().
-			Str("domainID", domain.ID.String()).
-			Str("controllerDomainID", domain.ControllerDomainID.String()).
-			Str("returnedControllerDomainID", coreDomain.GetId().GetValue()).
-			Msg("Core returned an unexpected Domain update response")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Core returned an unexpected Domain update response", nil)
-	}
-
-	domainDAO := cdbm.NewDomainDAO(udh.dbSession)
-	updatedDomain, err := cdb.WithTxResult(ctx, udh.dbSession, func(tx *cdb.Tx) (*cdbm.Domain, error) {
-		return domainDAO.Update(ctx, tx, cdbm.DomainUpdateInput{
-			DomainID: domain.ID,
-			Hostname: &apiRequest.Name,
-		})
-	})
-	if err != nil {
-		logger.Error().Err(err).Msg("Domain updated in Core but failed to update REST DB")
-		return common.HandleTxError(c, logger, err, "Failed to update Domain, DB transaction error")
-	}
-
-	return c.JSON(http.StatusOK, model.NewAPIDomain(updatedDomain))
 }
 
 // DeleteDomainHandler deletes a tenant-owned DNS Domain from Core and its REST projection.

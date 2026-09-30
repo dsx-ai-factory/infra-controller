@@ -51,31 +51,9 @@ func (dgar APIDomainGetAllRequest) Validate() error {
 	)
 }
 
-// APIDomainUpdateRequest is the request body for renaming a tenant-owned DNS Domain.
-type APIDomainUpdateRequest struct {
-	Name               string    `json:"name"`
-	ControllerDomainID uuid.UUID `json:"-"`
-}
-
-// Validate checks the Domain update request before it is sent to Core.
-func (dur APIDomainUpdateRequest) Validate() error {
-	return validation.ValidateStruct(&dur,
-		validation.Field(&dur.Name, validation.Required.Error(validationErrorValueRequired)),
-	)
-}
-
-// ToProto converts a validated REST request into Core's Domain update request.
-func (dur APIDomainUpdateRequest) ToProto() *corev1.UpdateDomainRequest {
-	return &corev1.UpdateDomainRequest{
-		Domain: &corev1.Domain{
-			Id:   &corev1.DomainId{Value: dur.ControllerDomainID.String()},
-			Name: dur.Name,
-		},
-	}
-}
-
 // APIDomain is the tenant-facing representation of a DNS Domain.
 type APIDomain struct {
+	Status   string    `json:"status"`
 	ID       string    `json:"id"`
 	Name     string    `json:"name"`
 	TenantID string    `json:"tenantId"`
@@ -100,11 +78,27 @@ func NewAPIDomain(domain *cdbm.Domain) *APIDomain {
 	}
 
 	return &APIDomain{
+		Status:   mapDomainStatus(domain.Status),
 		ID:       domain.ID.String(),
 		Name:     domain.Hostname,
 		TenantID: tenantID,
 		SiteID:   siteID,
 		Created:  domain.Created,
 		Updated:  domain.Updated,
+	}
+}
+
+// mapDomainStatus exposes only the public readiness contract, not DB-internal
+// controller/projection status names. Unknown legacy values fail closed.
+func mapDomainStatus(status string) string {
+	switch status {
+	case cdbm.DomainStatusReady:
+		return "Ready"
+	case cdbm.DomainStatusPending, cdbm.DomainStatusRegistering:
+		return "Pending"
+	case cdbm.DomainStatusDeleting:
+		return "Deleting"
+	default:
+		return "Error"
 	}
 }

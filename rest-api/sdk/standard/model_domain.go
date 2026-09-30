@@ -33,6 +33,8 @@ type Domain struct {
 	SiteId string `json:"siteId"`
 	// ID of the Tenant that owns the Domain
 	TenantId string `json:"tenantId"`
+	// Only Ready Domains can be used as a Subnet subdomainId. Pending and Deleting are durable retry states.
+	Status string `json:"status"`
 	// Date/time when the Domain was created
 	Created time.Time `json:"created"`
 	// Date/time when the Domain was last updated
@@ -45,12 +47,13 @@ type _Domain Domain
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDomain(id string, name string, siteId string, tenantId string, created time.Time, updated time.Time) *Domain {
+func NewDomain(id string, name string, siteId string, tenantId string, status string, created time.Time, updated time.Time) *Domain {
 	this := Domain{}
 	this.Id = id
 	this.Name = name
 	this.SiteId = siteId
 	this.TenantId = tenantId
+	this.Status = status
 	this.Created = created
 	this.Updated = updated
 	return &this
@@ -160,6 +163,30 @@ func (o *Domain) SetTenantId(v string) {
 	o.TenantId = v
 }
 
+// GetStatus returns the Status field value
+func (o *Domain) GetStatus() string {
+	if o == nil {
+		var ret string
+		return ret
+	}
+
+	return o.Status
+}
+
+// GetStatusOk returns a tuple with the Status field value
+// and a boolean to check if the value has been set.
+func (o *Domain) GetStatusOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.Status, true
+}
+
+// SetStatus sets field value
+func (o *Domain) SetStatus(v string) {
+	o.Status = v
+}
+
 // GetCreated returns the Created field value
 func (o *Domain) GetCreated() time.Time {
 	if o == nil {
@@ -222,6 +249,7 @@ func (o Domain) ToMap() (map[string]interface{}, error) {
 	toSerialize["name"] = o.Name
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["tenantId"] = o.TenantId
+	toSerialize["status"] = o.Status
 	toSerialize["created"] = o.Created
 	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
@@ -236,6 +264,7 @@ func (o *Domain) UnmarshalJSON(data []byte) (err error) {
 		"name",
 		"siteId",
 		"tenantId",
+		"status",
 		"created",
 		"updated",
 	}

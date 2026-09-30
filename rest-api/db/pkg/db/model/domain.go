@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -23,6 +24,8 @@ const (
 	DomainStatusRegistering = "DomainStatusRegistering"
 	// DomainStatusReady status is ready
 	DomainStatusReady = "DomainStatusReady"
+	// DomainStatusDeleting status is retrying a Core deletion
+	DomainStatusDeleting = "DomainStatusDeleting"
 	// DomainStatusError status is error
 	DomainStatusError = "DomainStatusError"
 	// DomainRelationName is the relation name for the Domain model
@@ -39,6 +42,7 @@ var (
 	DomainStatusMap = map[string]bool{
 		DomainStatusPending:     true,
 		DomainStatusReady:       true,
+		DomainStatusDeleting:    true,
 		DomainStatusError:       true,
 		DomainStatusRegistering: true,
 	}
@@ -115,6 +119,8 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 
 // DomainDAO is an interface for interacting with the Domain model
 type DomainDAO interface {
+	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
+	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, error)
 	//
@@ -167,6 +173,76 @@ func (dsd DomainSQLDAO) Create(ctx context.Context, tx *db.Tx, input DomainCreat
 	}
 
 	return nv, nil
+}
+
+// NormalizeForwardDomainName matches Core DNS identity: ASCII lower-case and
+// trailing DNS presentation dots removed. It deliberately does not trim spaces.
+func NormalizeForwardDomainName(name string) string {
+	name = strings.TrimRight(name, ".")
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// ReserveOwned inserts an immutable tenant/Site/name reservation before contacting
+// Core. The partial unique index serializes concurrent requests and protects the
+// stable reserved Core ID; a retry never generates another Core identity.
+// Callers must pass an authenticated tenant and a generated Core ID.
+func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error) {
+	if input.TenantID == nil || input.SiteID == nil || input.ControllerDomainID == nil ||
+		*input.TenantID == uuid.Nil || *input.SiteID == uuid.Nil || *input.ControllerDomainID == uuid.Nil ||
+		input.Status != DomainStatusPending {
+		return nil, false, db.ErrDoesNotExist
+	}
+	reservation := &Domain{
+		ID: uuid.New(), Hostname: NormalizeForwardDomainName(input.Hostname), Org: input.Org,
+		TenantID: input.TenantID, SiteID: input.SiteID,
+		ControllerDomainID: input.ControllerDomainID, Status: DomainStatusPending,
+		CreatedBy: input.CreatedBy,
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewInsert().Model(reservation).
+		On("CONFLICT DO NOTHING").Exec(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+	if count == 1 {
+		return reservation, true, nil
+	}
+	// The index is scoped to this exact authenticated owner, not Core's
+	// shared DNS namespace. Never accept a Core resource by a name lookup.
+	var existing Domain
+	err = db.GetIDB(tx, dsd.dbSession).NewSelect().Model(&existing).
+		Where("d.tenant_id = ? AND d.site_id = ? AND lower(rtrim(d.hostname, '.')) = lower(rtrim(?, '.'))", input.TenantID, input.SiteID, input.Hostname).
+		Scan(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return &existing, false, nil
+}
+
+// TransitionOwned performs a compare-and-swap on a previously committed
+// immutable reservation. A stale worker cannot mark an unrelated state Ready.
+func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error) {
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", to).Set("updated = current_timestamp").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND deleted IS NULL", id, coreID, from).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
 }
 
 // GetByID returns a Domain by ID
