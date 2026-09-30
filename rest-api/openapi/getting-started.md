@@ -21,9 +21,11 @@ In both cases, these calls initialize Provider and Tenant entities for the organ
 Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
 ### Creating Site Level IP Blocks
-To utilize a NICo Site, the Provider or Service Account holder must create IP Blocks for each network overlay defined in NICo Site configuration toml file.
+NICo creates a Site IP Block for each `site_fabric_prefixes` entry in the NICo Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
 
-To create an IP Block, the user must make a call to the [Create IP Block endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/create-ipblock).
+When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. While a new prefix overlaps a remaining Site IP Block, NICo makes no IP Block changes for the Site. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+
+To create any other IP Block, the user must make a call to the [Create IP Block endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
 > **Note:** From this point onwards, a brief outline is provided for the typical API call flows for various use cases.
 
@@ -31,6 +33,7 @@ To create an IP Block, the user must make a call to the [Create IP Block endpoin
 
 - Retrieve available Sites using the [Retrieve All Sites endpoint](/infra-controller/rest-api-reference/api-reference/site/get-all-site) and choose a Site to create resources in. For _Disconnected_ NICo installations where NICo
 REST is deployed alongside NICo Core, typically there will be a single Site available.
+- Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/get-all-ipblock).
 - For each Site IP Block, create a Network Allocation for the Tenant entity using the [Create Allocation endpoint](/infra-controller/rest-api-reference/api-reference/allocation/create-allocation) using the full prefix length.
 This will create a Tenant IP Block for each Site IP Block.
 - Creating an Allocation will create the Tenant in NICo Core.
@@ -53,6 +56,7 @@ using the [Create Subnet endpoint](/infra-controller/rest-api-reference/api-refe
 [Create Instance Type/Machine Association endpoint](/infra-controller/rest-api-reference/api-reference/instance-type/create-instance-type-machine-association)
 - Create a Compute Allocation for Tenant using the [Create Compute Allocation endpoint](/infra-controller/rest-api-reference/api-reference/allocation/create-allocation) referencing the Instance Type
 - Creating any type of Allocation for a Tenant will create the Tenant in NICo Core.
+- Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](/infra-controller/rest-api-reference/api-reference/ip-block/get-all-ipblock).
 - Create a Network Allocation for Tenant using the [Create Allocation endpoint](/infra-controller/rest-api-reference/api-reference/allocation/create-allocation) referencing a Site IP Block
 - Creating a Network Allocation will create a Tenant IP Block
 

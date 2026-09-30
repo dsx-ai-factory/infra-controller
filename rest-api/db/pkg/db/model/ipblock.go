@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -69,6 +70,19 @@ var (
 		IPBlockStatusDeleting:     true,
 	}
 )
+
+// SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
+// prefix import and root IP Block creation for one Site. The key keeps its
+// DatacenterOnly suffix, so an upgrade doesn't change the ID that processes
+// from the previous release still take.
+func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString(fmt.Sprintf(
+		"site-fabric-ip-blocks:%s:%s:%s",
+		infrastructureProviderID.String(),
+		siteID.String(),
+		IPBlockRoutingTypeDatacenterOnly,
+	))
+}
 
 // IPBlock contains information about an IPv4/v6 address pool owned
 // by the InfrastructureProvider and assigned as an overlay network
@@ -223,6 +237,8 @@ type IPBlockDAO interface {
 	Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IPBlock, error)
+	// GetByIDForUpdate returns and locks one active IP Block for the transaction.
+	GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IPBlock, error)
 	//
 	GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (*IPBlock, error)
 	//
@@ -322,6 +338,35 @@ func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
 	}
 
 	return ipb, nil
+}
+
+// GetByIDForUpdate returns an active IP Block and keeps its row locked until
+// the required transaction commits or rolls back.
+func (ipbsd IPBlockSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IPBlock, error) {
+	if tx == nil {
+		return nil, db.ErrInvalidParams
+	}
+
+	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetByIDForUpdate")
+	if ipblockDAOSpan != nil {
+		defer ipblockDAOSpan.End()
+		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", id.String())
+	}
+
+	ipBlock := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).
+		NewSelect().
+		Model(ipBlock).
+		Where("ipb.id = ?", id).
+		For("UPDATE").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrDoesNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ipBlock, nil
 }
 
 // GetOne returns the IPBlock with the given ID when it also matches the filter.

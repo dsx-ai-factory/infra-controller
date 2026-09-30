@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -53,16 +54,37 @@ const (
 	siteFabricIPBlockReadyMsg = "IP Block is ready for use"
 )
 
-// siteFabricIPBlocksLockID derives the advisory lock that serializes Site
-// fabric IP Block creation for a Site. It is shared with the activity's tests,
-// which acquire the same lock to exercise contention handling.
-func getSiteFabricIPBlockLockID(dbSite *cdbm.Site) uint64 {
-	return cdb.GetAdvisoryLockIDFromString(fmt.Sprintf(
-		"site-fabric-ip-blocks:%s:%s:%s",
-		dbSite.InfrastructureProviderID.String(),
-		dbSite.ID.String(),
-		cdbm.IPBlockRoutingTypeDatacenterOnly,
-	))
+// privateIPPrefixes are the RFC 1918 and RFC 4193 ranges, which are not routed
+// on the public Internet.
+var privateIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("fc00::/7"),
+}
+
+// getSiteFabricIPBlockRoutingType returns DatacenterOnly for a prefix that lies
+// entirely inside a private range, and Public for any other prefix. Checking the
+// address alone with netip.Addr.IsPrivate is not enough, since a prefix such as
+// 192.168.0.0/15 starts inside a private range but extends past it.
+func getSiteFabricIPBlockRoutingType(prefix netip.Prefix) string {
+	for _, privatePrefix := range privateIPPrefixes {
+		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
+			return cdbm.IPBlockRoutingTypeDatacenterOnly
+		}
+	}
+	return cdbm.IPBlockRoutingTypePublic
+}
+
+// getSiteFabricIPBlockName returns the name UpdateIPBlocksInDBFromFabricPrefixes
+// gives the IP Block it creates for prefix.
+func getSiteFabricIPBlockName(prefix netip.Prefix) string {
+	address := prefix.Addr()
+	if address.Is4() {
+		return fmt.Sprintf("%s-ipv4-%s-%d", siteFabricIPBlockNamePrefix, strings.ReplaceAll(address.String(), ".", "-"), prefix.Bits())
+	}
+	octets := address.As16()
+	return fmt.Sprintf("%s-ipv6-%s-%d", siteFabricIPBlockNamePrefix, hex.EncodeToString(octets[:]), prefix.Bits())
 }
 
 // ManageSite is an activity wrapper for managing Site lifecycle that allows
@@ -932,10 +954,17 @@ func (mst ManageSite) DeleteOrphanedSiteTemporalNamespaces(ctx context.Context) 
 	return nil
 }
 
-// UpdateIPBlocksInDBFromFabricPrefixes creates Site-level DatacenterOnly IP
-// Blocks for the fabric prefixes reported by the Site as part of its Site
-// Config inventory. Existing root IP Blocks for the same provider, Site,
-// prefix, and prefix length are left untouched, so the activity is idempotent.
+// UpdateIPBlocksInDBFromFabricPrefixes creates Site-level IP Blocks for the
+// fabric prefixes reported by the Site as part of its Site Config inventory. A
+// prefix inside a private range gets a DatacenterOnly IP Block, any other
+// prefix gets a Public one. An IP Block's routing type is part of its IPAM
+// namespace and can't be corrected in place. So a prefix that already has a
+// root IP Block is skipped, even when that block's routing type differs.
+//
+// Once the Site stops reporting a prefix, the IP Block created for it is
+// removed unless Allocations still use it. This also lets a resized prefix
+// replace its old IP Block. A prefix that overlaps a remaining root IP Block
+// fails the activity, and no IP Block changes.
 func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, siteID uuid.UUID, siteFabricPrefixes []string) error {
 	logger := log.With().
 		Str("Activity", "UpdateIPBlocksInDBFromFabricPrefixes").
@@ -952,9 +981,9 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	}
 
 	// Parse and de-duplicate the reported prefixes before opening the write
-	// transaction so an invalid prefix fails the activity without creating any
+	// transaction so an invalid prefix fails the activity without changing any
 	// IP Blocks.
-	seen := map[string]bool{}
+	reported := map[netip.Prefix]bool{}
 	prefixes := make([]netip.Prefix, 0, len(siteFabricPrefixes))
 	for _, cidr := range siteFabricPrefixes {
 		prefix, perr := netip.ParsePrefix(cidr)
@@ -963,22 +992,29 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			return fmt.Errorf("parse Site fabric prefix %q: %w", cidr, perr)
 		}
 		prefix = prefix.Masked()
-		if seen[prefix.String()] {
+		if reported[prefix] {
 			continue
 		}
-		seen[prefix.String()] = true
+		reported[prefix] = true
 		prefixes = append(prefixes, prefix)
 	}
+	// A Site whose Core doesn't return its runtime config reports no prefixes,
+	// so an empty report doesn't remove any IP Blocks.
 	if len(prefixes) == 0 {
 		logger.Info().Msg("no Site fabric prefixes reported")
 		return nil
 	}
 
 	ipBlockDAO := cdbm.NewIPBlockDAO(mst.dbSession)
+	allocationConstraintDAO := cdbm.NewAllocationConstraintDAO(mst.dbSession)
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mst.dbSession)
 
 	err = cdb.WithTx(ctx, mst.dbSession, func(tx *cdb.Tx) error {
-		derr := tx.AcquireAdvisoryLock(ctx, getSiteFabricIPBlockLockID(dbSite), false)
+		derr := tx.AcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(dbSite.InfrastructureProviderID, dbSite.ID),
+			false,
+		)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to acquire advisory lock for Site fabric IP Blocks")
 			return derr
@@ -986,37 +1022,135 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 
 		ipamStorage := ipam.NewIpamStorage(mst.dbSession.DB, tx.GetBunTx())
 
-		for _, prefix := range prefixes {
-			address := prefix.Addr()
-			prefixAddr := address.String()
-			prefixLength := prefix.Bits()
+		existingIPBlocks, _, derr := ipBlockDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.IPBlockFilterInput{
+				SiteIDs:        []uuid.UUID{dbSite.ID},
+				ExcludeDerived: true,
+			},
+			cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to retrieve root IP Blocks for Site from DB")
+			return derr
+		}
 
-			_, existing, derr := ipBlockDAO.GetAll(
-				ctx,
-				tx,
-				cdbm.IPBlockFilterInput{
-					SiteIDs:        []uuid.UUID{dbSite.ID},
-					Prefixes:       []string{prefixAddr},
-					PrefixLengths:  []int{prefixLength},
-					RoutingTypes:   []string{cdbm.IPBlockRoutingTypeDatacenterOnly},
-					ExcludeDerived: true,
-				},
-				cdbp.PageInput{Limit: ccu.GetPtr(1)},
-				nil,
-			)
-			if derr != nil {
-				return derr
+		type rootPrefix struct {
+			prefix    netip.Prefix
+			ipBlockID uuid.UUID
+		}
+		rootPrefixes := make([]rootPrefix, 0, len(existingIPBlocks)+len(prefixes))
+
+		for _, ipBlock := range existingIPBlocks {
+			prefix, perr := netip.ParsePrefix(fmt.Sprintf("%s/%d", ipBlock.Prefix, ipBlock.PrefixLength))
+			if perr != nil {
+				logger.Warn().Err(perr).Str("IPBlockID", ipBlock.ID.String()).Msg("skipping root IP Block with an invalid prefix")
+				continue
 			}
-			if existing > 0 {
+			prefix = prefix.Masked()
+
+			// An IP Block this activity created is recognized by the name it gave
+			// it, so a Provider can keep one by renaming it. Core manages an IP
+			// Block linked to a SitePrefix.
+			if reported[prefix] || ipBlock.Name != getSiteFabricIPBlockName(prefix) || ipBlock.SitePrefixID != nil {
+				rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: ipBlock.ID})
 				continue
 			}
 
+			// Lock the IP Block before counting Allocations, as the delete API
+			// does. An Allocation locks its root too, so it is either counted
+			// here or finds the IP Block removed. A rename can commit before the
+			// lock, so the locked IP Block is checked again.
+			lockedIPBlock, derr := ipBlockDAO.GetByIDForUpdate(ctx, tx, ipBlock.ID)
+			if errors.Is(derr, cdb.ErrDoesNotExist) {
+				continue
+			}
+			if derr != nil {
+				logger.Error().Err(derr).Str("IPBlockID", ipBlock.ID.String()).Msg("failed to lock Site fabric IP Block")
+				return derr
+			}
+			if lockedIPBlock.Name != getSiteFabricIPBlockName(prefix) || lockedIPBlock.SitePrefixID != nil {
+				rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: lockedIPBlock.ID})
+				continue
+			}
+
+			_, allocationCount, derr := allocationConstraintDAO.GetAll(
+				ctx,
+				tx,
+				cdbm.AllocationConstraintFilterInput{
+					ResourceType:    ccu.GetPtr(cdbm.AllocationResourceTypeIPBlock),
+					ResourceTypeIDs: []uuid.UUID{lockedIPBlock.ID},
+				},
+				cdbp.PageInput{},
+				nil,
+			)
+			if derr != nil {
+				logger.Error().Err(derr).Str("IPBlockID", lockedIPBlock.ID.String()).Msg("failed to retrieve Allocations for Site fabric IP Block")
+				return derr
+			}
+			if allocationCount > 0 {
+				logger.Info().
+					Str("IPBlockID", lockedIPBlock.ID.String()).
+					Str("Prefix", prefix.String()).
+					Int("AllocationCount", allocationCount).
+					Msg("keeping Site fabric IP Block for an unreported prefix, Allocations still use it")
+				rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: lockedIPBlock.ID})
+				continue
+			}
+
+			derr = ipBlockDAO.Delete(ctx, tx, lockedIPBlock.ID)
+			if derr != nil {
+				logger.Error().Err(derr).Str("IPBlockID", lockedIPBlock.ID.String()).Msg("failed to delete Site fabric IP Block from DB")
+				return derr
+			}
+			derr = ipam.DeleteIpamEntryForIPBlock(
+				ctx,
+				ipamStorage,
+				lockedIPBlock.Prefix,
+				lockedIPBlock.PrefixLength,
+				lockedIPBlock.RoutingType,
+				lockedIPBlock.InfrastructureProviderID.String(),
+				lockedIPBlock.SiteID.String(),
+			)
+			if derr != nil {
+				logger.Error().Err(derr).Str("IPBlockID", lockedIPBlock.ID.String()).Msg("failed to delete IPAM entry for Site fabric IP Block")
+				return derr
+			}
+
+			logger.Info().
+				Str("IPBlockID", lockedIPBlock.ID.String()).
+				Str("Prefix", prefix.String()).
+				Str("RoutingType", lockedIPBlock.RoutingType).
+				Msg("removed Site fabric IP Block for an unreported prefix")
+		}
+
+		for _, prefix := range prefixes {
+			if slices.ContainsFunc(rootPrefixes, func(root rootPrefix) bool { return root.prefix == prefix }) {
+				continue
+			}
+
+			// IPAM keeps each routing type in its own namespace, so it can't
+			// detect an overlap with a root IP Block of the other routing type.
+			overlap := slices.IndexFunc(rootPrefixes, func(root rootPrefix) bool { return root.prefix.Overlaps(prefix) })
+			if overlap >= 0 {
+				logger.Error().
+					Str("Prefix", prefix.String()).
+					Str("IPBlockID", rootPrefixes[overlap].ipBlockID.String()).
+					Str("IPBlockPrefix", rootPrefixes[overlap].prefix.String()).
+					Msg("Site fabric prefix overlaps a root IP Block")
+				return fmt.Errorf("create IP Block for Site fabric prefix %s: overlaps IP Block %s with prefix %s",
+					prefix, rootPrefixes[overlap].ipBlockID, rootPrefixes[overlap].prefix)
+			}
+
+			address := prefix.Addr()
+			prefixAddr := address.String()
+			prefixLength := prefix.Bits()
+			routingType := getSiteFabricIPBlockRoutingType(prefix)
 			protocolVersion := cdbm.IPBlockProtocolVersionV4
-			name := fmt.Sprintf("%s-ipv4-%s-%d", siteFabricIPBlockNamePrefix, strings.ReplaceAll(prefixAddr, ".", "-"), prefixLength)
 			if !address.Is4() {
 				protocolVersion = cdbm.IPBlockProtocolVersionV6
-				octets := address.As16()
-				name = fmt.Sprintf("%s-ipv6-%s-%d", siteFabricIPBlockNamePrefix, hex.EncodeToString(octets[:]), prefixLength)
 			}
 
 			if _, derr = ipam.CreateIpamEntryForIPBlock(
@@ -1024,7 +1158,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				ipamStorage,
 				prefixAddr,
 				prefixLength,
-				cdbm.IPBlockRoutingTypeDatacenterOnly,
+				routingType,
 				dbSite.InfrastructureProviderID.String(),
 				dbSite.ID.String(),
 			); derr != nil {
@@ -1037,11 +1171,11 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			}
 
 			createdIPBlock, derr := ipBlockDAO.Create(ctx, tx, cdbm.IPBlockCreateInput{
-				Name:                     name,
+				Name:                     getSiteFabricIPBlockName(prefix),
 				Description:              ccu.GetPtr(siteFabricIPBlockDescription),
 				SiteID:                   dbSite.ID,
 				InfrastructureProviderID: dbSite.InfrastructureProviderID,
-				RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+				RoutingType:              routingType,
 				Prefix:                   prefixAddr,
 				PrefixLength:             prefixLength,
 				ProtocolVersion:          protocolVersion,
@@ -1070,7 +1204,10 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				Str("IPBlockID", createdIPBlock.ID.String()).
 				Str("Prefix", prefixAddr).
 				Int("PrefixLength", prefixLength).
+				Str("RoutingType", routingType).
 				Msg("created Site fabric IP Block")
+
+			rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: createdIPBlock.ID})
 		}
 
 		return nil

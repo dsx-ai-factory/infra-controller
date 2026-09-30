@@ -383,6 +383,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: ipID,
 		SiteID:                   siteID,
+		TenantID:                 &tenantID,
 		Prefix:                   "192.168.0.0",
 		PrefixLength:             16,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
@@ -392,6 +393,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: ipID,
 		SiteID:                   siteID,
+		TenantID:                 &tenantID,
 		Prefix:                   "192.169.1.0",
 		PrefixLength:             28,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
@@ -401,6 +403,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: uuid.New(),
 		SiteID:                   uuid.New(),
+		TenantID:                 &tenantID,
 		Prefix:                   "192.169.0.0",
 		PrefixLength:             16,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
@@ -410,6 +413,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: uuid.New(),
 		SiteID:                   uuid.New(),
+		TenantID:                 &tenantID,
 		Prefix:                   "192.169.0.0",
 		PrefixLength:             16,
 		FullGrant:                true,
@@ -437,6 +441,8 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		FullGrant:                false,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
 	}
+	siteFabricIPBlock := *ipBlock1
+	siteFabricIPBlock.TenantID = nil
 
 	ipamer := cipam.NewWithStorage(ipamDB)
 	ipamer.SetNamespace(GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, ipID.String(), siteID.String()))
@@ -467,6 +473,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		childCount        int
 		childPrefixLength int
 		expectedErr       bool
+		expectedError     string
 		checkFullGrant    bool
 	}{
 
@@ -532,12 +539,23 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 			childCount:        1,
 			checkFullGrant:    true,
 		},
+		{
+			name:              "failure when a Site fabric parent has no transaction",
+			parentIPBlock:     &siteFabricIPBlock,
+			expectedErr:       true,
+			expectedError:     fmt.Sprintf("parent IP Block %s requires a transaction for allocation", siteFabricIPBlock.ID),
+			childPrefixLength: 24,
+			childCount:        1,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			for i := 0; i < tc.childCount; i++ {
 				pref, err := CreateChildIpamEntryForIPBlock(ctx, nil, dbSession, ipamDB, tc.parentIPBlock, tc.childPrefixLength)
 				assert.Equal(t, tc.expectedErr, err != nil)
+				if tc.expectedError != "" {
+					assert.EqualError(t, err, tc.expectedError)
+				}
 				if !tc.expectedErr {
 					assert.NotNil(t, pref)
 					fmt.Println(pref.Cidr)
@@ -552,6 +570,85 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 					assert.Equal(t, pref.Cidr, GetCidrForIPBlock(ctx, tc.parentIPBlock.Prefix, tc.parentIPBlock.PrefixLength))
 				}
 			}
+		})
+	}
+
+	t.Run("database reload error has a stable classification", func(t *testing.T) {
+		tx, err := db.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() {
+			assert.NoError(t, tx.Rollback())
+		}()
+
+		missing := siteFabricIPBlock
+		missing.ID = uuid.New()
+		_, err = CreateChildIpamEntryForIPBlock(ctx, tx, dbSession, ipamDB, &missing, 24)
+		require.ErrorIs(t, err, ErrParentIPBlockReload)
+		require.ErrorIs(t, err, db.ErrDoesNotExist)
+	})
+}
+
+func TestLockAndValidateParentIPBlockForAllocation(t *testing.T) {
+	dbSession := cdbutil.GetTestDBSession(t, false)
+	defer dbSession.Close()
+	dbSession.DB.AddQueryHook(bundebug.NewQueryHook(
+		bundebug.WithEnabled(false),
+		bundebug.FromEnv("BUNDEBUG"),
+	))
+	ctx := context.Background()
+	testIpamSetupSchema(t, dbSession)
+
+	ip := testIpamBuildInfrastructureProvider(t, dbSession, "lock-parent-ip-block")
+	site := testIpamBuildSite(t, dbSession, ip, "lock-parent-ip-block")
+	tests := []struct {
+		name          string
+		storedStatus  string
+		callerStatus  string
+		expectedError bool
+	}{
+		{
+			name:         "refreshes a stale caller from the locked Ready row",
+			storedStatus: cdbm.IPBlockStatusReady,
+			callerStatus: cdbm.IPBlockStatusDeleting,
+		},
+		{
+			name:          "rejects the current locked Deleting row",
+			storedStatus:  cdbm.IPBlockStatusDeleting,
+			callerStatus:  cdbm.IPBlockStatusReady,
+			expectedError: true,
+		},
+	}
+
+	for index, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedID := uuid.New()
+			linked := testIpamBuildIPBlock(t, dbSession, &cdbm.IPBlock{
+				ID:                       uuid.New(),
+				Name:                     fmt.Sprintf("linked-site-fabric-parent-%d", index),
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				SitePrefixID:             &linkedID,
+				RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+				Prefix:                   fmt.Sprintf("192.172.%d.0", index),
+				PrefixLength:             24,
+				ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+				Status:                   tc.storedStatus,
+			})
+			stale := *linked
+			stale.Status = tc.callerStatus
+
+			tx, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() {
+				assert.NoError(t, tx.Rollback())
+			}()
+			err = LockAndValidateParentIPBlockForAllocation(ctx, tx, dbSession, &stale)
+			if tc.expectedError {
+				assert.EqualError(t, err, fmt.Sprintf("parent IP Block %s linked to an OperatorManaged SitePrefix is not Ready", linked.ID))
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.storedStatus, stale.Status)
 		})
 	}
 }
@@ -619,6 +716,7 @@ func TestDeleteChildIpamEntryFromCidr(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: ipID,
 		SiteID:                   siteID,
+		TenantID:                 &tenantID,
 		Prefix:                   "192.168.0.0",
 		PrefixLength:             16,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
@@ -726,6 +824,7 @@ func TestAcquireSpecificChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: ip.ID,
 		SiteID:                   site.ID,
+		TenantID:                 cutil.GetPtr(uuid.New()),
 		Prefix:                   "10.20.0.0",
 		PrefixLength:             16,
 		FullGrant:                false,
@@ -742,11 +841,15 @@ func TestAcquireSpecificChildIpamEntryForIPBlock(t *testing.T) {
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		InfrastructureProviderID: ip.ID,
 		SiteID:                   site.ID,
+		TenantID:                 cutil.GetPtr(uuid.New()),
 		Prefix:                   "10.21.0.0",
 		PrefixLength:             16,
 		FullGrant:                true,
 		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
 	}
+	siteFabricParent := *parent
+	siteFabricParent.ID = uuid.New()
+	siteFabricParent.TenantID = nil
 
 	tests := []struct {
 		name          string
@@ -783,6 +886,13 @@ func TestAcquireSpecificChildIpamEntryForIPBlock(t *testing.T) {
 			parentIPBlock: nil,
 			childCidr:     "10.20.2.0/24",
 			expectedErr:   true,
+		},
+		{
+			name:          "failure when a Site fabric parent has no transaction",
+			parentIPBlock: &siteFabricParent,
+			childCidr:     "10.20.2.0/24",
+			expectedErr:   true,
+			expectedError: fmt.Sprintf("parent IP Block %s requires a transaction for allocation", siteFabricParent.ID),
 		},
 	}
 	for _, tc := range tests {
