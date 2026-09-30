@@ -6444,6 +6444,140 @@ path = "credentials.yaml"
         config
     }
 
+    #[test]
+    fn shipped_rack_profiles_and_site_overrides() {
+        let source = rendered_helm_api_config();
+        let config: CarbideConfig = Figment::new()
+            .merge(Toml::string(&source))
+            .extract()
+            .unwrap();
+        component_manager::rms::validate_rms_backend_rack_profiles(
+            config.component_manager.as_ref().unwrap(),
+            &config.rack_profiles,
+        )
+        .unwrap();
+        let profiles = &config.rack_profiles.rack_profiles;
+        assert_eq!(profiles.len(), 14);
+        for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
+            (
+                "VR_NVL72R1_C2G4_NVIDIA",
+                "vrnvl72",
+                "vr_nvl72r1_c2g4_topology",
+                None,
+                "NVIDIA",
+                "LiteOn",
+                4,
+            ),
+            (
+                "GB300_NVL72R1_C2G4_NVIDIA",
+                "gb300",
+                "gb300_nvl72r1_c2g4_topology",
+                Some("GB300"),
+                "NVIDIA",
+                "LiteOn",
+                6,
+            ),
+            (
+                "GB300_NVL72R1_C2G4_LENOVO",
+                "gb300",
+                "gb300_nvl72r1_c2g4_topology",
+                Some("GB300"),
+                "Lenovo",
+                "LiteOn",
+                6,
+            ),
+            (
+                "GB300_NVL72R1_C2G4_SMC",
+                "gb300",
+                "gb300_nvl72r1_c2g4_topology",
+                Some("GB300"),
+                "Supermicro",
+                "Delta",
+                6,
+            ),
+            (
+                "GB200_NVL72R1_C2G4_NVIDIA",
+                "gb200",
+                "gb200_nvl72r1_c2g4_topology",
+                Some("GB200"),
+                "NVIDIA",
+                "LiteOn",
+                8,
+            ),
+            (
+                "GB200_NVL72R1_C2G4_WIWYNN",
+                "gb200",
+                "gb200_nvl72r1_c2g4_topology",
+                Some("GB200"),
+                "WIWYNN",
+                "LiteOn",
+                8,
+            ),
+        ] {
+            for (suffix, count) in [("", power_count), ("_NO_POWERSHELF", 0)] {
+                let key = format!("{id}{suffix}");
+                let profile = profiles
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("missing {key}"));
+                assert_eq!(
+                    profile.product_family.as_ref().unwrap().as_str(),
+                    family,
+                    "{key}"
+                );
+                assert_eq!(
+                    profile.rack_hardware_topology.as_ref().unwrap().to_string(),
+                    topology,
+                    "{key}"
+                );
+                let caps = &profile.rack_capabilities;
+                assert_eq!(caps.compute.name.as_deref(), name, "{key}");
+                assert_eq!(
+                    caps.compute.vendor.as_deref(),
+                    Some(compute_vendor),
+                    "{key}"
+                );
+                assert_eq!(caps.compute.count, 18, "{key}");
+                assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
+                assert_eq!(caps.switch.count, 9, "{key}");
+                assert_eq!(
+                    caps.power_shelf.vendor.as_deref(),
+                    Some(power_vendor),
+                    "{key}"
+                );
+                assert_eq!(caps.power_shelf.count, count, "{key}");
+            }
+        }
+        for (id, family, vendor, power_count) in [
+            ("NVL72", "gb200", "NVIDIA", 8),
+            ("NVL72_GB300", "gb300", "Lenovo", 6),
+        ] {
+            let profile = &profiles[id];
+            assert_eq!(profile.product_family.as_ref().unwrap().as_str(), family);
+            assert_eq!(
+                profile.rack_capabilities.compute.vendor.as_deref(),
+                Some(vendor)
+            );
+            assert_eq!(profile.rack_capabilities.compute.count, 18);
+            assert_eq!(profile.rack_capabilities.switch.count, 9);
+            assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
+        }
+        let overridden: CarbideConfig = Figment::new()
+            .merge(Toml::string(&source))
+            .merge(Toml::string(
+                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"",
+            ))
+            .extract()
+            .unwrap();
+        let profile = &overridden.rack_profiles.rack_profiles["GB200_NVL72R1_C2G4_WIWYNN"];
+        assert_eq!(
+            profile.rack_capabilities.compute.vendor.as_deref(),
+            Some("WiWynn")
+        );
+        assert_eq!(profile.rack_capabilities.compute.count, 18);
+        assert_eq!(profile.rack_capabilities.power_shelf.count, 8);
+        assert_eq!(overridden.rack_profiles.rack_profiles.len(), profiles.len());
+    }
+
     fn rendered_deployment_site_config() -> String {
         let mut config =
             include_str!("../../../../deploy/files/nico-api/nico-api-site-config.toml").to_string();
