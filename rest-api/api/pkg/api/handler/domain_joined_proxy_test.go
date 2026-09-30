@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -66,12 +67,14 @@ func (joinedCodec) Unmarshal(b []byte, v any) error {
 }
 
 type joinedGate struct {
-	entered    chan uuid.UUID
-	release    chan struct{}
-	canceled   chan uuid.UUID
-	dropCancel bool
-	mu         sync.Mutex
-	methods    []string
+	entered        chan uuid.UUID
+	release        chan struct{}
+	created        chan uuid.UUID
+	releaseCreated chan struct{}
+	canceled       chan uuid.UUID
+	dropCancel     bool
+	mu             sync.Mutex
+	methods        []string
 }
 
 func (g *joinedGate) serve(server grpc.ServerStream, core *grpc.ClientConn) error {
@@ -128,6 +131,33 @@ func (g *joinedGate) serve(server grpc.ServerStream, core *grpc.ClientConn) erro
 	if err := core.Invoke(server.Context(), method, &in, &out, grpc.ForceCodec(joinedCodec{})); err != nil {
 		return err
 	}
+	if method == corev1.Forge_CreateDomain_FullMethodName {
+		var req corev1.CreateDomainRequest
+		if err := proto.Unmarshal(in, &req); err != nil {
+			return err
+		}
+		if req.Name == "joined-late-success.example.com" {
+			var created corev1.Domain
+			if err := proto.Unmarshal(out, &created); err != nil {
+				return fmt.Errorf("real Core Create success decode: %w", err)
+			}
+			if created.GetId().GetValue() != id.String() || created.GetName() != req.Name {
+				return fmt.Errorf("real Core Create returned wrong identity %s/%s", created.GetId().GetValue(), created.GetName())
+			}
+			// Core has committed and returned a real success. Keep the reply in
+			// flight while REST deletes its still-Pending owner projection.
+			select {
+			case g.created <- id:
+			case <-server.Context().Done():
+				return server.Context().Err()
+			}
+			select {
+			case <-g.releaseCreated:
+			case <-server.Context().Done():
+				return server.Context().Err()
+			}
+		}
+	}
 	if method == corev1.Forge_DeleteDomain_FullMethodName {
 		select {
 		case g.canceled <- id:
@@ -151,7 +181,8 @@ type joinedWorkflowResult struct {
 }
 type joinedRun struct {
 	tmocks.WorkflowRun
-	done chan joinedWorkflowResult
+	done    chan joinedWorkflowResult
+	success chan grpcproxy.Response
 }
 
 func (r *joinedRun) Get(ctx context.Context, result any) error {
@@ -159,6 +190,9 @@ func (r *joinedRun) Get(ctx context.Context, result any) error {
 	case v := <-r.done:
 		if v.err == nil {
 			*(result.(*grpcproxy.Response)) = v.response
+			if r.success != nil {
+				r.success <- v.response
+			}
 		}
 		return v.err
 	case <-ctx.Done():
@@ -168,7 +202,8 @@ func (r *joinedRun) Get(ctx context.Context, result any) error {
 
 type joinedTemporalClient struct {
 	tmocks.Client
-	activity siteactivity.ManageCoreProxy
+	activity       siteactivity.ManageCoreProxy
+	successCreates chan grpcproxy.Response
 }
 
 func (c *joinedTemporalClient) ExecuteWorkflow(_ context.Context, _ tclient.StartWorkflowOptions, name any, args ...any) (tclient.WorkflowRun, error) {
@@ -180,6 +215,9 @@ func (c *joinedTemporalClient) ExecuteWorkflow(_ context.Context, _ tclient.Star
 		return nil, errors.New("missing typed Core proxy request")
 	}
 	run := &joinedRun{done: make(chan joinedWorkflowResult, 1)}
+	if req.FullMethod == corev1.Forge_CreateDomain_FullMethodName {
+		run.success = c.successCreates
+	}
 	go func() {
 		var suite testsuite.WorkflowTestSuite
 		env := suite.NewTestWorkflowEnvironment()
@@ -206,7 +244,7 @@ func TestDomainJoinedRealSiteCore(t *testing.T) {
 	core, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, core.Close()) })
-	gate := &joinedGate{entered: make(chan uuid.UUID, 1), release: make(chan struct{}), canceled: make(chan uuid.UUID, 2)}
+	gate := &joinedGate{entered: make(chan uuid.UUID, 1), release: make(chan struct{}), created: make(chan uuid.UUID, 1), releaseCreated: make(chan struct{}), canceled: make(chan uuid.UUID, 1)}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	shim := grpc.NewServer(grpc.ForceServerCodec(joinedCodec{}), grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error { return gate.serve(stream, core) }))
@@ -217,8 +255,8 @@ func TestDomainJoinedRealSiteCore(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, site.Close()) })
 	atom := siteclient.NewCoreGrpcAtomicClient(&siteclient.CoreGrpcClientConfig{Address: listener.Addr().String(), Secure: siteclient.InsecureGrpc})
 	atom.SwapClient(site)
-	bridge := &joinedTemporalClient{activity: siteactivity.NewManageCoreProxy(atom, "")}
-	ids := make([]uuid.UUID, 0, 2)
+	bridge := &joinedTemporalClient{activity: siteactivity.NewManageCoreProxy(atom, ""), successCreates: make(chan grpcproxy.Response, 1)}
+	ids := make([]uuid.UUID, 0, 3)
 
 	t.Run("delayed create after real REST delete", func(t *testing.T) {
 		f := newDomainHandlerFixture(t, nil)
@@ -293,6 +331,12 @@ func TestDomainJoinedRealSiteCore(t *testing.T) {
 		workflowPool.IDClientMap[f.site.ID.String()] = bridge
 		manager := recovery.ManageDomain{DB: f.dbSession, Sites: workflowPool}
 		require.NoError(t, manager.ReconcileReservedDomains(ctx))
+		select {
+		case got := <-gate.canceled:
+			require.Equal(t, coreID, got, "recovery must reach real Core")
+		case <-ctx.Done():
+			t.Fatal("recovery cancellation did not reach Core")
+		}
 		f.requireDomainWithStatus(t, "joined-conflict.example.com", cdbm.DomainStatusError)
 		changed, err := cdb.WithTxResult(ctx, f.dbSession, func(tx *cdb.Tx) (bool, error) {
 			return cdbm.NewDomainDAO(f.dbSession).TransitionOwned(ctx, tx, domains[0].ID, coreID, cdbm.DomainStatusPending, cdbm.DomainStatusReady)
@@ -300,11 +344,68 @@ func TestDomainJoinedRealSiteCore(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, changed, "late Create success must not mark cancelled intent Ready")
 	})
+	t.Run("late real Create success cannot revive deleted REST intent", func(t *testing.T) {
+		f := newDomainHandlerFixture(t, nil)
+		f.scp.IDClientMap[f.site.ID.String()] = bridge
+		type result struct {
+			code int
+			body string
+		}
+		done := make(chan result, 1)
+		go func() {
+			r := f.requestWithContext(t, ctx, NewCreateDomainHandler(f.dbSession, f.scp).Handle,
+				http.MethodPost, "/", "", model.APIDomainCreateRequest{
+					Name: "joined-late-success.example.com", SiteID: f.site.ID.String(),
+				})
+			done <- result{r.Code, r.Body.String()}
+		}()
+		var coreID uuid.UUID
+		select {
+		case coreID = <-gate.created:
+		case <-ctx.Done():
+			t.Fatal("real Core Create did not commit before delayed reply")
+		}
+		ids = append(ids, coreID)
+		f.requireDomainWithStatus(t, "joined-late-success.example.com", cdbm.DomainStatusPending)
+		domains, _, err := cdbm.NewDomainDAO(f.dbSession).GetAll(ctx, nil,
+			cdbm.DomainFilterInput{TenantIDs: []uuid.UUID{f.tenant.ID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		require.Len(t, domains, 1)
+		require.Equal(t, coreID, *domains[0].ControllerDomainID)
+		deleted := f.requestWithContext(t, ctx, NewDeleteDomainHandler(f.dbSession, f.scp).Handle,
+			http.MethodDelete, "/", domains[0].ID.String(), nil)
+		require.Equal(t, http.StatusNoContent, deleted.Code, deleted.Body.String())
+		select {
+		case got := <-gate.canceled:
+			require.Equal(t, coreID, got, "real Core must delete the committed Create")
+		case <-ctx.Done():
+			t.Fatal("real Core Delete did not finish")
+		}
+		close(gate.releaseCreated)
+		select {
+		case created := <-done:
+			require.Equal(t, http.StatusAccepted, created.code, created.body)
+		case <-ctx.Done():
+			t.Fatal("delayed successful Core reply did not reach REST")
+		}
+		select {
+		case response := <-bridge.successCreates:
+			var actual corev1.Domain
+			require.NoError(t, protojson.Unmarshal(response.ResponseJSON, &actual))
+			require.Equal(t, coreID.String(), actual.GetId().GetValue())
+			require.Equal(t, "joined-late-success.example.com", actual.GetName())
+		case <-ctx.Done():
+			t.Fatal("late successful Core response did not cross Site workflow and Get")
+		}
+		f.requireNoDomains(t)
+	})
+
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 	require.Contains(t, gate.methods, corev1.Forge_CreateDomain_FullMethodName, "real Create dispatch must occur")
 	require.Contains(t, gate.methods, corev1.Forge_DeleteDomain_FullMethodName, "real Delete dispatch must occur")
-	require.Len(t, ids, 2)
+	require.Len(t, ids, 3)
 	file, err := os.Create(resultPath)
 	require.NoError(t, err)
 	for _, id := range ids {

@@ -95,8 +95,8 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
         .lines()
         .map(str::to_owned)
         .collect();
-    assert_eq!(ids.len(), 2, "each joined scenario must report one ID");
-    for id in ids {
+    assert_eq!(ids.len(), 3, "each joined scenario must report one ID");
+    for (scenario, id) in ids.into_iter().enumerate() {
         let uuid = uuid::Uuid::parse_str(&id).expect("recorded reserved UUID");
         let cancelled: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM domain_reserved_id_cancellations WHERE id = $1)",
@@ -105,13 +105,25 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .expect("Core cancellation query");
-        assert!(cancelled, "Core must commit cancellation for {id}");
+        if scenario < 2 {
+            assert!(cancelled, "Core must commit cancellation for {id}");
+        } else {
+            // Once Create committed, Delete marks its owned row deleted; it
+            // need not add an absent-ID cancellation tombstone.
+            let deleted: bool =
+                sqlx::query_scalar("SELECT deleted IS NOT NULL FROM domains WHERE id = $1")
+                    .bind(uuid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("real late-success Core row must exist as deleted");
+            assert!(deleted, "Core must delete the created zone {id}");
+        }
         let live: i64 =
             sqlx::query_scalar("SELECT count(*) FROM domains WHERE id = $1 AND deleted IS NULL")
                 .bind(uuid)
                 .fetch_one(&pool)
                 .await
                 .expect("Core live domain query");
-        assert_eq!(live, 0, "cancelled Core ID must not have a live Domain");
+        assert_eq!(live, 0, "terminal Core ID must not have a live Domain");
     }
 }
