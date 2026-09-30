@@ -240,6 +240,12 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 			}
 		}
 	}
+	// Empty operator metadata must not erase provider-maintained values.
+	// Tenant descriptions remain authoritative, including an explicit clear.
+	var description *string
+	if tenantID != nil || prefix.Metadata.Description != "" {
+		description = &prefix.Metadata.Description
+	}
 	previousStatus := ""
 	if block == nil {
 		if tenantID == nil {
@@ -250,8 +256,12 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 				return false, err
 			}
 		}
+		name := prefix.Metadata.Name
+		if name == "" {
+			name = cidr.String()
+		}
 		block, err = dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
-			Name: prefix.Metadata.Name, Description: &prefix.Metadata.Description,
+			Name: name, Description: description,
 			SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
 			SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
 			ProtocolVersion: family, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly,
@@ -259,9 +269,11 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 		})
 	} else {
 		previousStatus = block.Status
-		_, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{
-			IPBlockID: block.ID, Name: &prefix.Metadata.Name, Description: &prefix.Metadata.Description, Status: &status,
-		})
+		update := cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Description: description, Status: &status}
+		if prefix.Metadata.Name != "" {
+			update.Name = &prefix.Metadata.Name
+		}
+		_, err = dao.Update(ctx, tx, update)
 	}
 	if err != nil {
 		return false, err
