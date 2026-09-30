@@ -3348,19 +3348,10 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Site-side Core rejected the deletion because its preconditions were not satisfied.
+          description: Deletion was rejected because certain preconditions were not satisfied.
           $ref: '#/components/responses/GenericHttpError'
-        '429':
-          description: Site-side Core could not perform the deletion because a required resource was exhausted.
-          $ref: '#/components/responses/ResourceExhaustedError'
         '500':
           description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
-          $ref: '#/components/responses/GenericHttpError'
-        '501':
-          description: The Site's Core version does not implement VPC deletion.
-          $ref: '#/components/responses/GenericHttpError'
-        '503':
-          description: Site-side Core or the Site workflow service is unavailable.
           $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a specific VPC by ID.
