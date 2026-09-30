@@ -30,7 +30,7 @@ tests:
           command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
         - name: boot-artifacts-aarch64
           image: registry.example.com/boot-artifacts-aarch64:latest
-          command: ["sh", "-c", "cp -r /aarch64 /apt /firmware /forge-boot-artifacts/blobs/internal"]
+          command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt"]
     asserts:
       - exists:
           path: spec.template.spec.initContainers

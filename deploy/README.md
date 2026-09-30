@@ -56,7 +56,10 @@ The templates in `deploy/files/` are mounted into services and must be filled wi
 - `deploy/files/kea_config.json` – provide the Kea DHCPv4 configuration tailored to your admin/tenant networks, including option definitions, subnets, pools, and relay settings. Reference the same service IPs used elsewhere and ensure leases align with the admin network pool.
 - `deploy/files/vtysh.conf` – FRRouting vtysh shell configuration. Align hostname and service addresses here with the FRR service IPs chosen from your service VIP pool.
 
-After populating `deploy/kustomization.yaml` and all files under `deploy/files/`, deploy everything with:
+Before deploying everything, provide the [PXE external inputs](#nico-pxe) including
+`nico-pxe-config` with `Rocket.toml` in the deployment namespace (`nico-system`
+for the top-level `deploy/` overlay). After populating `deploy/kustomization.yaml`
+and all files under `deploy/files/`, deploy with:
 
 ```bash
 kustomize build . --enable-helm --enable-alpha-plugins --enable-exec | kubectl apply -f -
@@ -327,9 +330,10 @@ The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io`, reads Rocket/pxe
 **Quick start**
 
 1. Build/publish the PXE image and patch the Deployment to use it.
-2. Create `nico-pxe-config` with `Rocket.toml` for your environment before
-   applying the Deployment; provide the optional env ConfigMap if needed. Do
-   not commit site credentials to this repo.
+2. Create `nico-pxe-config` with `Rocket.toml` for your environment in the
+   **same namespace** as the Deployment (for this standalone command,
+   `<NICO_NAMESPACE>`), before applying it. Provide the optional env ConfigMap
+   if needed. Do not commit site credentials to this repo.
 3. If a downstream JSON6902 overlay already adds a `config` volume to
    `nico-pxe`, remove that addition or replace the base `config` volume instead.
    Duplicate volume names are invalid; retain the site-specific Rocket source.
