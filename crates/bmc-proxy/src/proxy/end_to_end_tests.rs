@@ -71,7 +71,7 @@ const UPLOAD_PATH: &str = "/redfish/v1/UpdateService/upload";
 const ROTATED_PATH: &str = "/redfish/v1/Rotated";
 /// Rejects every credential, echoing the password it was sent.
 const REJECTING_PATH: &str = "/redfish/v1/UpdateService/rejecting";
-/// Answers any method after [`SLOW_ANSWER_DELAY`].
+/// Answers after [`SLOW_ANSWER_DELAY`].
 const SLOW_PATH: &str = "/redfish/v1/Slow";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
 /// after [`SLOW_ANSWER_DELAY`].
@@ -79,10 +79,11 @@ const SLOW_ROTATED_PATH: &str = "/redfish/v1/SlowRotated";
 /// Answers at once with part of its body, and sends the rest after
 /// [`SLOW_ANSWER_DELAY`].
 const SLOW_BODY_PATH: &str = "/redfish/v1/SlowBody";
-/// Three times [`QUICK_CLASS`]'s budget, so the budget has run out well
-/// before the BMC answers, and an attempt the BMC answers at once has time
-/// to spare.
-const SLOW_ANSWER_DELAY: Duration = Duration::from_millis(1500);
+/// Ten times [`QUICK_CLASS`]'s budget, and a third of the default budget:
+/// a request held to its class's budget is cut off long before the BMC
+/// answers, and one held to the default budget gets the answer. A test
+/// waits only for the budget, never for this.
+const SLOW_ANSWER_DELAY: Duration = Duration::from_secs(20);
 
 fn fake_bmc_mac() -> MacAddress {
     MacAddress::new([0x02, 0, 0, 0, 0, 0x08])
@@ -161,7 +162,7 @@ async fn fake_bmc_handler(
             SYSTEM_BODY.into_response()
         }
         (Method::GET, ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
-        (_, SLOW_PATH) => {
+        (Method::GET, SLOW_PATH) => {
             tokio::time::sleep(SLOW_ANSWER_DELAY).await;
             SYSTEM_BODY.into_response()
         }
@@ -881,8 +882,9 @@ async fn requests_the_proxy_does_not_deliver() {
     .await;
 }
 
-/// A class for `GET`s of the slow paths, whose budget [`SLOW_ANSWER_DELAY`]
-/// exceeds.
+/// A class for `GET`s of the slow paths. Its budget is far shorter than
+/// [`SLOW_ANSWER_DELAY`], and long enough for an attempt to reach the BMC
+/// even on a loaded machine.
 const QUICK_CLASS: &str = r#"
     [[class]]
     name = "quick"
@@ -891,35 +893,16 @@ const QUICK_CLASS: &str = r#"
         "GET /redfish/v1/SlowRotated",
         "GET /redfish/v1/SlowBody",
     ]
-    upstream_timeout = "500ms"
+    upstream_timeout = "2s"
 "#;
-
-/// Keeps tracing's process-wide callsite cache interested in every span, as
-/// `carbide_instrument::testing` does for its captures. Without it, while a
-/// test's thread-local subscriber is the only one alive, other threads can
-/// cache the request span's callsite as unwanted, and the span is never
-/// created.
-fn keep_callsites_enabled() {
-    static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
-    DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
-}
 
 /// What a request for `method` on `path` gets from a proxy with
 /// [`QUICK_CLASS`]: (status the caller got, whether the body arrived
-/// "whole" or was "cut off", the class the request's span names, the
-/// credential each attempt at the BMC carried).
+/// "whole" or was "cut off", the credential each attempt at the BMC
+/// carried).
 async fn under_the_quick_class(
     (method, path): (Method, &'static str),
-) -> (u16, &'static str, String, Vec<&'static str>) {
-    keep_callsites_enabled();
-    let exporter = InMemorySpanExporter::default();
-    let provider = SdkTracerProvider::builder()
-        .with_simple_exporter(exporter.clone())
-        .build();
-    let _traced = tracing::subscriber::set_default(
-        tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
-    );
+) -> (u16, &'static str, Vec<&'static str>) {
     let (addr, bmc) = spawn_fake_bmc();
     let mut state = proxy_configured(
         &format!(":{}", addr.port()),
@@ -942,6 +925,64 @@ async fn under_the_quick_class(
         Ok(_) => "whole",
         Err(_) => "cut off",
     };
+    let attempts = bmc.received().iter().map(credential_sent).collect();
+    (status, body, attempts)
+}
+
+/// A request is held to its class's upstream budget, response body and
+/// replay with fresh credentials included.
+#[tokio::test]
+async fn a_request_is_held_to_its_classs_budget() {
+    check_cases_async(
+        [
+            Case {
+                scenario: "the BMC answers after the budget, classified by path alone",
+                input: (Method::GET, "/redfish/v1/Slow?$select=PowerState"),
+                expect: Yields((502, "whole", vec!["cached"])),
+            },
+            Case {
+                scenario: "the replay with fresh credentials is answered after the budget",
+                input: (Method::GET, SLOW_ROTATED_PATH),
+                expect: Yields((502, "whole", vec!["cached", "fresh"])),
+            },
+            Case {
+                scenario: "the body is still streaming when the budget runs out",
+                input: (Method::GET, SLOW_BODY_PATH),
+                expect: Yields((200, "cut off", vec!["cached"])),
+            },
+        ],
+        |input| async move { Ok::<_, Infallible>(under_the_quick_class(input).await) },
+    )
+    .await;
+}
+
+/// Keeps tracing's process-wide callsite cache interested in every span, as
+/// `carbide_instrument::testing` does for its captures. Without it, while a
+/// test's thread-local subscriber is the only one alive, other threads can
+/// cache the request span's callsite as unwanted, and the span is never
+/// created.
+fn keep_callsites_enabled() {
+    static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
+    DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+}
+
+/// What a request for `method` on [`SLOW_PATH`] that names no BMC gets from a
+/// proxy with [`QUICK_CLASS`]: (status the caller got, the class its trace
+/// span names). The proxy refuses the request right after classifying it,
+/// so no task outlives the capture: a span such a task closed after the
+/// capture ended would reach a subscriber that never saw it.
+async fn class_on_the_span(method: Method) -> (u16, String) {
+    keep_callsites_enabled();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _traced = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+    let state = proxy_configured(":1", r#"["/**"]"#, QUICK_CLASS, root_password()).await;
+    let answer = exchange(&state, proxied(method, SLOW_PATH, None, &[], Body::empty())).await;
     let span = exporter
         .get_finished_spans()
         .expect("finished spans")
@@ -956,39 +997,26 @@ async fn under_the_quick_class(
             || "(none)".to_string(),
             |attribute| attribute.value.to_string(),
         );
-    let attempts = bmc.received().iter().map(credential_sent).collect();
-    (status, body, class, attempts)
+    (answer.status, class)
 }
 
-/// A request is held to its class's upstream budget, response body and
-/// replay with fresh credentials included, and its trace span names the
-/// class. A request no class pattern matches keeps the default budget.
+/// A request's trace span names the class it was classified into.
 #[tokio::test]
-async fn a_request_is_held_to_its_classs_budget() {
+async fn the_request_span_names_its_class() {
     check_cases_async(
         [
             Case {
-                scenario: "the BMC answers after the budget, classified by path alone",
-                input: (Method::GET, "/redfish/v1/Slow?$select=PowerState"),
-                expect: Yields((502, "whole", "quick".to_string(), vec!["cached"])),
+                scenario: "a class pattern matches",
+                input: Method::GET,
+                expect: Yields((400, "quick".to_string())),
             },
             Case {
-                scenario: "the replay with fresh credentials is answered after the budget",
-                input: (Method::GET, SLOW_ROTATED_PATH),
-                expect: Yields((502, "whole", "quick".to_string(), vec!["cached", "fresh"])),
-            },
-            Case {
-                scenario: "the body is still streaming when the budget runs out",
-                input: (Method::GET, SLOW_BODY_PATH),
-                expect: Yields((200, "cut off", "quick".to_string(), vec!["cached"])),
-            },
-            Case {
-                scenario: "no class pattern matches its method",
-                input: (Method::POST, SLOW_PATH),
-                expect: Yields((200, "whole", "default".to_string(), vec!["cached"])),
+                scenario: "no class pattern matches",
+                input: Method::POST,
+                expect: Yields((400, "default".to_string())),
             },
         ],
-        |input| async move { Ok::<_, Infallible>(under_the_quick_class(input).await) },
+        |method| async move { Ok::<_, Infallible>(class_on_the_span(method).await) },
     )
     .await;
 }
