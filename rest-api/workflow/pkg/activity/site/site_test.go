@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -466,7 +467,7 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 
 	cfg := config.NewConfig()
@@ -661,81 +662,108 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites(t *testing.T) {
 
 	site1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
+	siteIDs := []uuid.UUID{site1.ID, site2.ID}
 
-	// Mock the HTTP server to simulate Site Manager responses
 	almostExpired := time.Now().Add(-23 * time.Hour).Format("2006-01-02 15:04:05 -0700 MST")
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
-			"siteuuid": "` + uuid.New().String() + `",
-			"otp": "mocked-otp",
-			"otpexpiry": "` + almostExpired + `"
-		}`))
-	}))
-	defer testServer.Close()
 
-	// Mock Temporal Client
-	wrun1 := &tmocks.WorkflowRun{}
-	wrun1.On("GetID").Return("test-workflow-id-1")
-
-	mockTemporalClient := &tmocks.Client{}
-	mockTemporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RotateTemporalCertAccessOTP", mock.Anything).Return(wrun1, nil)
-
-	tSiteClientPool := sc.NewClientPool(nil)
-	tSiteClientPool.IDClientMap[site1.ID.String()] = mockTemporalClient
-	tSiteClientPool.IDClientMap[site2.ID.String()] = mockTemporalClient
-
-	// Set up test environment
-	cfg := config.NewConfig()
-	cfg.SetSiteManagerEndpoint(testServer.URL)
-
-	temporalsuit := testsuite.WorkflowTestSuite{}
-	temporalsuit.NewTestWorkflowEnvironment()
-
-	// Define test cases
-	type fields struct {
-		dbSession      *cdb.Session
-		siteClientPool *sc.ClientPool
-	}
 	tests := []struct {
-		name       string
-		fields     fields
-		wantErr    bool
-		wantStatus map[uuid.UUID]string
+		name          string
+		unsetEndpoint bool
+		// rollFailSiteIDs are the Sites whose OTP roll Site Manager rejects.
+		rollFailSiteIDs         []uuid.UUID
+		wantErr                 bool
+		wantErrSiteIDs          []uuid.UUID
+		wantSiteManagerRequests int
+		wantWorkflowStarts      int
 	}{
 		{
-			name: "Test OTP expiration and renewal for all sites with no errors",
-			fields: fields{
-				dbSession:      dbSession,
-				siteClientPool: tSiteClientPool,
-			},
-			wantErr: false,
-			wantStatus: map[uuid.UUID]string{
-				site1.ID: cdbm.SiteStatusRegistered,
-				site2.ID: cdbm.SiteStatusRegistered,
-			},
+			name:                    "rotates the OTP of every Site due for rotation",
+			wantSiteManagerRequests: 4,
+			wantWorkflowStarts:      2,
+		},
+		{
+			name:          "fails without contacting Site Manager when its endpoint is not configured",
+			unsetEndpoint: true,
+			wantErr:       true,
+		},
+		{
+			name:                    "reports a Site whose rotation failed after rotating the others",
+			rollFailSiteIDs:         []uuid.UUID{site1.ID},
+			wantErr:                 true,
+			wantErrSiteIDs:          []uuid.UUID{site1.ID},
+			wantSiteManagerRequests: 3,
+			wantWorkflowStarts:      1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			siteManagerRequests := 0
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				siteManagerRequests++
+				for _, id := range tt.rollFailSiteIDs {
+					if r.Method == http.MethodPost && r.URL.Path == "/roll/"+id.String() {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{
+					"siteuuid": "` + uuid.New().String() + `",
+					"otp": "mocked-otp",
+					"otpexpiry": "` + almostExpired + `"
+				}`))
+			}))
+			defer testServer.Close()
+
+			wrun := &tmocks.WorkflowRun{}
+			wrun.On("GetID").Return("test-workflow-id")
+
+			mockTemporalClient := &tmocks.Client{}
+			mockTemporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RotateTemporalCertAccessOTP", mock.Anything).Return(wrun, nil)
+
+			tSiteClientPool := sc.NewClientPool(nil)
+			for _, id := range siteIDs {
+				tSiteClientPool.IDClientMap[id.String()] = mockTemporalClient
+			}
+
+			// NewConfig returns a process-wide Config, so every case sets the endpoint explicitly.
+			cfg := config.NewConfig()
+			endpoint := testServer.URL
+			if tt.unsetEndpoint {
+				endpoint = ""
+			}
+			cfg.SetSiteManagerEndpoint(endpoint)
+
 			mst := ManageSite{
-				dbSession:      tt.fields.dbSession,
-				siteClientPool: tt.fields.siteClientPool,
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
 				cfg:            cfg,
 			}
 
-			err := mst.CheckOTPExpirationAndRenewForAllSites(context.Background())
-			if (err != nil) != tt.wantErr {
-				t.Errorf("CheckOTPExpirationAndRenewForAllSites() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			err := mst.CheckOTPExpirationAndRenewForAllSites(ctx)
+			if tt.wantErr {
+				var appErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &appErr)
+				assert.True(t, appErr.NonRetryable())
+				for _, id := range siteIDs {
+					if slices.Contains(tt.wantErrSiteIDs, id) {
+						assert.Contains(t, err.Error(), id.String())
+					} else {
+						assert.NotContains(t, err.Error(), id.String())
+					}
+				}
+			} else {
+				require.NoError(t, err)
 			}
 
-			for siteID, wantStatus := range tt.wantStatus {
-				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
-				assert.NoError(t, err)
-				assert.Equal(t, wantStatus, site.Status)
+			assert.Equal(t, tt.wantSiteManagerRequests, siteManagerRequests)
+			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", tt.wantWorkflowStarts)
+
+			for _, id := range siteIDs {
+				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.SiteStatusRegistered, site.Status)
 			}
 		})
 	}
@@ -768,7 +796,7 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites_MoreThanDefaultPageSiz
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
             "siteuuid": "` + uuid.New().String() + `",
             "otp": "mocked-otp",
             "otpexpiry": "` + almostExpiredTime + `"

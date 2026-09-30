@@ -101,24 +101,25 @@ type FlowGrpcConfig struct {
 
 // Config for Site Agent
 type Config struct {
-	Temporal         TemporalConfig
-	CoreGrpc         CoreGrpcConfig
-	FlowGrpc         FlowGrpcConfig
-	IsMasterPod      bool          `json:"isMasterPod"`
-	EnableDebug      bool          `json:"enableDebug"`
-	DevMode          bool          `json:"devMode"`
-	EnableTLS        bool          `json:"enableTLS"`
-	DisableBootstrap bool          `json:"disableBootstrap"`
-	BootstrapSecret  string        `json:"bootstrapSecret"` // Path to the bootstrap secret file
-	WatcherInterval  time.Duration `json:"watcherInterval"`
-	PodNamespace     string        `json:"podNamespace"`
-	TemporalSecret   string        `json:"temporalSecret"`
-	MetricsPort      string        `json:"metricsPort"`
-	MetricsNamespace string        `json:"metricsNamespace"`
-	SiteVersion      string        `json:"siteVersion"`
-	CloudVersion     string        `json:"cloudVersion"`
-	RunningIn        RunInEnvironment
-	UtMode           bool
+	Temporal            TemporalConfig
+	CoreGrpc            CoreGrpcConfig
+	FlowGrpc            FlowGrpcConfig
+	IsMasterPod         bool          `json:"isMasterPod"`
+	EnableDebug         bool          `json:"enableDebug"`
+	DevMode             bool          `json:"devMode"`
+	EnableTLS           bool          `json:"enableTLS"`
+	DisableBootstrap    bool          `json:"disableBootstrap"`
+	BootstrapSecret     string        `json:"bootstrapSecret"`     // Path to the bootstrap secret file
+	BootstrapSecretName string        `json:"bootstrapSecretName"` // Name of the Secret mounted at BootstrapSecret, OTP rotation writes to it
+	WatcherInterval     time.Duration `json:"watcherInterval"`
+	PodNamespace        string        `json:"podNamespace"`
+	TemporalSecret      string        `json:"temporalSecret"`
+	MetricsPort         string        `json:"metricsPort"`
+	MetricsNamespace    string        `json:"metricsNamespace"`
+	SiteVersion         string        `json:"siteVersion"`
+	CloudVersion        string        `json:"cloudVersion"`
+	RunningIn           RunInEnvironment
+	UtMode              bool
 }
 
 // String - json string

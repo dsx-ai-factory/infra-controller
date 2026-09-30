@@ -48,6 +48,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: BOOTSTRAP_SECRET_NAME
+              value: {{ .Values.secrets.siteRegistration | quote }}
           volumeMounts:
             - name: site-registration
               mountPath: /etc/sitereg
