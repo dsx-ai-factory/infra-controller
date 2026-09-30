@@ -186,7 +186,8 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
   separate enabled flag and no runtime toggle.
 - **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (`otlpEndpoint` Helm value) or `OTEL_EXPORTER_OTLP_ENDPOINT`, which
   also applies to metrics and logs. The `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` var takes precedence when both are set.
-  If OTLP endpoint is not set or invalid `nico-pxe` logs a warning and disables span export.
+  If no endpoint is set, span export stays off and `nico-pxe` logs at `debug`. If the exporter
+  rejects the endpoint, it logs a warning and disables span export.
 - **Span level, separate from the log level.** `NICO_TRACES_SPAN_LEVEL` sets the most verbose span
   level exported, defaulting to `info`. A span's level is set by the macro that creates it, such as
   `info_span!` or `#[instrument(level = "debug")]`, and decides only whether the exporter receives
