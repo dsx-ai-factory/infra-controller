@@ -25003,10 +25003,14 @@ components:
           vpcId: bdd3d1af-b4a8-4675-a59c-56548716ef45
           ipFamilies:
             - IPv4
+            - IPv6
           isPhysical: true
           macAddress: 2F-FC-34-AE-9C-2D
           ipAddresses:
             - 200.32.11.196
+          ipPrefixes:
+            - 200.32.11.0/24
+            - 2001:db8::/64
           status: Ready
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
@@ -25098,6 +25102,14 @@ components:
           description: A list of IPv4 or IPv6 addresses
           items:
             type: string
+        ipPrefixes:
+          type: array
+          readOnly: true
+          description: Reported IPv4 or IPv6 prefixes in CIDR notation, ordered IPv4 before IPv6. This list is independent of `ipAddresses`; SLAAC can report an IPv6 prefix without a fixed host address. Match prefixes and addresses by address family, not list position. Empty when no prefixes are available.
+          items:
+            type: string
+          examples:
+            - ['192.0.2.0/24', '2001:db8::/64']
         requestedIpAddress:
           type:
             - string

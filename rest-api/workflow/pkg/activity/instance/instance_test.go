@@ -556,6 +556,65 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	assert.Equal(t, vpc.ID, *clearedResolution.VpcID)
 	require.NotNil(t, clearedResolution.VpcIPFamilyMode)
 	assert.Equal(t, cdbm.InterfaceVpcIPFamilyModeDualStack, *clearedResolution.VpcIPFamilyMode)
+
+	prefixTests := []struct {
+		name          string
+		status        *corev1.InstanceInterfaceStatus
+		wantPrefixes  []string
+		wantAddresses []string
+	}{
+		{
+			name: "dual-stack prefixes with only an IPv4 address",
+			status: &corev1.InstanceInterfaceStatus{
+				Addresses: []string{"192.0.2.10"},
+				Prefixes:  []string{"192.0.2.0/28", "2001:db8::/64"},
+			},
+			wantPrefixes:  []string{"192.0.2.0/28", "2001:db8::/64"},
+			wantAddresses: []string{"192.0.2.10"},
+		},
+		{
+			name: "SLAAC prefix without a fixed address",
+			status: &corev1.InstanceInterfaceStatus{
+				Prefixes: []string{"2001:db8::/64"},
+			},
+			wantPrefixes:  []string{"2001:db8::/64"},
+			wantAddresses: []string{},
+		},
+		{
+			name:          "present status clears removed prefixes",
+			status:        &corev1.InstanceInterfaceStatus{},
+			wantPrefixes:  []string{},
+			wantAddresses: []string{},
+		},
+		{
+			name:          "missing status preserves prefixes",
+			wantPrefixes:  []string{"2001:db8:1::/64"},
+			wantAddresses: []string{"2001:db8:1::10"},
+		},
+	}
+	for _, tt := range prefixTests {
+		t.Run("interface prefixes/"+tt.name, func(t *testing.T) {
+			_, err := interfaceDAO.Update(ctx, nil, cdbm.InterfaceUpdateInput{
+				InterfaceID: deviceLessIfc.ID,
+				IPPrefixes:  []string{"2001:db8:1::/64"},
+				IpAddresses: []string{"2001:db8:1::10"},
+			})
+			require.NoError(t, err)
+			_, err = dbSession.DB.Exec(
+				"UPDATE instance SET updated = ? WHERE id = ?",
+				time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2),
+				deviceLessInstance.ID,
+			)
+			require.NoError(t, err)
+			inventory.Instances[0].Status.Network.Interfaces = []*corev1.InstanceInterfaceStatus{tt.status}
+			_, err = manager.UpdateInstancesInDB(ctx, site.ID, inventory)
+			require.NoError(t, err)
+			persisted, err := interfaceDAO.GetByID(ctx, nil, deviceLessIfc.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPrefixes, persisted.IPPrefixes)
+			assert.Equal(t, tt.wantAddresses, persisted.IPAddresses)
+		})
+	}
 }
 
 func TestManageInstance_deleteInstanceFromDB(t *testing.T) {

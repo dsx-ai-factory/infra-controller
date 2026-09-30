@@ -580,6 +580,8 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						status = cwutil.GetPtr(cdbm.InterfaceStatusReady)
 					}
 
+					// A present report with no prefixes must clear stored values;
+					// a nil `IPPrefixes` input would preserve them.
 					_, updateErr := interfaceDAO.Update(ctx, nil, cdbm.InterfaceUpdateInput{
 						InterfaceID:          ifc.ID,
 						VpcPrefixID:          vpcPrefixID,
@@ -591,6 +593,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						InlineRoutingProfile: inlineRoutingProfile,
 						MacAddress:           macAddress,
 						IpAddresses:          ipAddresses,
+						IPPrefixes:           append([]string{}, interfaceStatus.Prefixes...),
 						Status:               status,
 					})
 					if updateErr != nil {
