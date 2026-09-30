@@ -24,7 +24,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-carbide-api-core = { path = "../api-core", features = ["test-support"] }
+carbide-api-core = { path = "../api-core", default-features = false, features = ["test-support"] }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
