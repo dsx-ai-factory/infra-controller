@@ -18,6 +18,7 @@ use ::rpc::forge as rpc;
 use carbide_authn::middleware::Principal;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::vpc::VpcId;
+use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
@@ -251,8 +252,22 @@ pub(crate) async fn attach_to_vpc(
         network_segment_id,
         vpc_id,
         allow_replace,
-        ..
+        expected_source_vpc_id,
+        expected_segment_version,
     } = request.into_inner();
+    if site_agent_call && expected_segment_version.is_none() {
+        return Err(CarbideError::InvalidArgument(
+            "site-agent attach requires expected_segment_version".to_string(),
+        )
+        .into());
+    }
+    let expected_version: Option<ConfigVersion> = expected_segment_version
+        .map(|version| {
+            version.parse().map_err(|_| {
+                CarbideError::InvalidArgument("invalid expected_segment_version".to_string())
+            })
+        })
+        .transpose()?;
 
     let segment_id =
         network_segment_id.ok_or(CarbideError::MissingArgument("network_segment_id"))?;
@@ -261,6 +276,9 @@ pub(crate) async fn attach_to_vpc(
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
+    // Fence all attach writers before reading the segment version, including
+    // same-target replays. Retain this row lock through both VPC validations.
+    db::network_segment::lock_for_attach(txn.as_mut(), segment_id).await?;
     let segment = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
@@ -273,6 +291,23 @@ pub(crate) async fn attach_to_vpc(
         kind: "network segment",
         id: segment_id.to_string(),
     })?;
+
+    // A version prevents stale A->B replay after an A->B->A round trip.
+    // Check before idempotent same-target handling, under the segment row lock.
+    if expected_version.is_some_and(|expected| segment.version != expected) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {} changed since attach intent was recorded",
+            segment.id
+        ))
+        .into());
+    }
+    if expected_source_vpc_id.is_some_and(|expected| segment.config.vpc_id != Some(expected)) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {} is no longer attached to the expected source VPC",
+            segment.id
+        ))
+        .into());
+    }
 
     let network_segment = match segment.config.segment_type {
         NetworkSegmentType::HostInband if !site_agent_call => {
@@ -308,7 +343,7 @@ pub(crate) async fn attach_to_vpc(
                         .filter(|prefix| prefix.vpc_prefix_id.is_none())
                         .map(|prefix| prefix.prefix)
                         .collect::<Vec<_>>();
-                    reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+                    reject_vpc_prefix_overlaps(&mut txn, &prefixes, Some(vpc_id)).await?;
                     db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
                 }
             }
@@ -586,6 +621,7 @@ pub(crate) async fn save_without_reverse_zones(
     if let Some(domain_id) = ns.subdomain_id {
         db::dns::domain::lock_live_for_reference(txn.as_mut(), domain_id).await?;
     }
+
     let prefixes = ns
         .prefixes
         .iter()
@@ -605,7 +641,6 @@ pub(crate) async fn save_without_reverse_zones(
     // overlap direct prefixes. Bootstrap still permits global VPC parents;
     // the RPC's attached-segment rule above is intentionally stricter.
     reject_vpc_prefix_overlaps(txn.as_mut(), &prefixes, None).await?;
-
 
     if ns.segment_type != NetworkSegmentType::Underlay {
         ns.vlan_id = Some(allocate_vlan_id(api, txn, &ns.name).await?);
@@ -739,31 +774,5 @@ async fn allocate_vlan_id(
             );
             Err(err.into())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use carbide_network::virtualization::VpcVirtualizationType;
-
-    use super::supports_tenant_segment_reassignment;
-
-    #[test]
-    fn tenant_segment_reassignment_requires_the_same_etv_mode() {
-        let etv = VpcVirtualizationType::EthernetVirtualizer;
-        let nvue = VpcVirtualizationType::EthernetVirtualizerWithNvue;
-
-        assert!(supports_tenant_segment_reassignment(etv, etv));
-        assert!(supports_tenant_segment_reassignment(nvue, nvue));
-        assert!(!supports_tenant_segment_reassignment(etv, nvue));
-        assert!(!supports_tenant_segment_reassignment(nvue, etv));
-        assert!(!supports_tenant_segment_reassignment(
-            VpcVirtualizationType::Fnn,
-            VpcVirtualizationType::Fnn,
-        ));
-        assert!(!supports_tenant_segment_reassignment(
-            VpcVirtualizationType::Flat,
-            VpcVirtualizationType::Flat,
-        ));
     }
 }

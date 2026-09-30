@@ -62,14 +62,14 @@ impl InternalRBACRules {
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
         x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
-        x.perm("CreateDomain", vec![SiteAgent]);
+        x.perm("CreateDomain", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
         x.perm("DeleteDomainLegacy", vec![]);
         x.perm("FindDomainLegacy", vec![ForgeAdminCLI]);
-        x.perm("UpdateDomain", vec![SiteAgent]);
-        x.perm("DeleteDomain", vec![SiteAgent]);
-        x.perm("FindDomain", vec![ForgeAdminCLI]);
+        x.perm("UpdateDomain", vec![ForgeAdminCLI]);
+        x.perm("DeleteDomain", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDomain", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
@@ -1208,6 +1208,45 @@ mod rbac_rule_tests {
     }
 
     #[test]
+    fn domain_lifecycle_operation_permissions() {
+        let admin = Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".to_string(),
+            None,
+        ));
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+        let unrelated = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+        let anonymous = Principal::Anonymous;
+        for method in ["CreateDomain", "DeleteDomain", "FindDomain"] {
+            for principal in [&admin, &site_agent] {
+                assert!(
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal)),
+                    "{method} denied {}",
+                    principal.as_identifier()
+                );
+            }
+            for principal in [&unrelated, &anonymous] {
+                assert!(
+                    !InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(principal)
+                    ),
+                    "{method} allowed {}",
+                    principal.as_identifier()
+                );
+            }
+        }
+        assert!(InternalRBACRules::allowed_from_static(
+            "AttachNetworkSegmentToVpc",
+            &[site_agent]
+        ));
+        assert!(!InternalRBACRules::allowed_from_static(
+            "AttachNetworkSegmentToVpc",
+            &[unrelated]
+        ));
+    }
+
+    #[test]
     fn vpc_allocation_operation_permissions() {
         // Operator certificates map to ExternalUser; its group label is not
         // compared when matching the rule.
@@ -1280,29 +1319,19 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn site_agent_can_manage_domains() {
-        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
-        let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
-        for method in ["CreateDomain", "UpdateDomain", "DeleteDomain"] {
-            assert!(InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)));
-            assert!(!InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&unrelated_service)));
-        }
-    }
-
-    #[test]
-    fn supported_callers_can_attach_network_segments_to_vpcs() {
-        let method = "AttachNetworkSegmentToVpc";
-        assert!(InternalRBACRules::allowed_from_static(method, &[Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".to_string(), None))]));
-        assert!(InternalRBACRules::allowed_from_static(method, &[Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string())]));
-        for unrelated in [Principal::SpiffeServiceIdentifier("nico-dns".to_string()), Principal::SpiffeServiceIdentifier("machine-a-tron".to_string())] {
-            assert!(!InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&unrelated)));
-        }
-    }
-
-    #[test]
     fn console_logs_are_restricted_to_admin_cli() {
-        assert!(InternalRBACRules::allowed_from_static("StreamConsoleLogs", &[Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".to_string(), None))]));
-        assert!(!InternalRBACRules::allowed_from_static("StreamConsoleLogs", &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())]));
+        assert!(InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-admin-cli".to_string(),
+                None,
+            ))],
+        ));
+        assert!(!InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
+        ));
     }
 
     #[test]

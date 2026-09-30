@@ -1427,6 +1427,8 @@ async fn unattached_segment_preserves_global_compatibility_and_rechecks_stored_s
                         network_segment_id: Some(segment_id),
                         vpc_id: Some(attach_vpc),
                         allow_replace: false,
+                        expected_source_vpc_id: None,
+                        expected_segment_version: None,
                     },
                 ))
                 .await

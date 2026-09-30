@@ -52,6 +52,8 @@ impl From<Args> for ::rpc::forge::AttachNetworkSegmentToVpcRequest {
             network_segment_id: Some(args.id),
             vpc_id: Some(args.vpc_id),
             allow_replace: args.force,
+            expected_source_vpc_id: None,
+            expected_segment_version: None,
         }
     }
 }

@@ -2457,6 +2457,53 @@ async fn attach_to_different_vpc_requires_force(
     Ok(())
 }
 
+/// An A -> B -> A move must invalidate a timed-out A -> B request,
+/// even though its source VPC ID becomes the same again.
+#[crate::sqlx_test]
+async fn tenant_attach_stale_version_rejected_after_aba(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let a = create_attach_test_vpc(
+        &env,
+        "aba-etv-a",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let b = create_attach_test_vpc(
+        &env,
+        "aba-etv-b",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let id = create_live_tenant_segment(&env, a, 0, "TENANT_ABA_FENCE").await;
+    let (source, original_version) = tenant_attach_intent(&env.pool, id).await;
+    assert_eq!(source, Some(a));
+    let moved = attach_tenant_network_segment_to_vpc(&env, id, b, true)
+        .await?
+        .into_inner();
+    assert_eq!(moved.config.unwrap().vpc_id, Some(b));
+    let returned = attach_tenant_network_segment_to_vpc(&env, id, a, true)
+        .await?
+        .into_inner();
+    assert_eq!(returned.config.unwrap().vpc_id, Some(a));
+    let stale = env
+        .api
+        .attach_network_segment_to_vpc(authenticated_attach_request(
+            id,
+            b,
+            true,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            Some(a),
+            Some(original_version),
+        ))
+        .await
+        .expect_err("stale A->B must be fenced even after A->B->A");
+    assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+    assert_segment_vpc(&env, id, a).await;
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn site_agent_moves_unallocated_tenant_segment_between_etv_vpcs_with_force(
     pool: sqlx::PgPool,
@@ -2667,6 +2714,7 @@ async fn site_agent_attach_waits_for_machine_interface_creation(
     .execute(writer.as_mut())
     .await?;
 
+    let intent = tenant_attach_intent(&env.pool, segment_id).await;
     let api = env.api.clone();
     let attach_task = tokio::spawn(async move {
         api.attach_network_segment_to_vpc(authenticated_attach_request(
@@ -2674,6 +2722,8 @@ async fn site_agent_attach_waits_for_machine_interface_creation(
             target_vpc_id,
             true,
             Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            intent.0,
+            Some(intent.1),
         ))
         .await
     });
@@ -2749,6 +2799,7 @@ async fn site_agent_attach_waits_for_instance_address_allocation(
     )
     .await?;
 
+    let intent = tenant_attach_intent(&env.pool, segment_id).await;
     let api = env.api.clone();
     let attach_task = tokio::spawn(async move {
         api.attach_network_segment_to_vpc(authenticated_attach_request(
@@ -2756,6 +2807,8 @@ async fn site_agent_attach_waits_for_instance_address_allocation(
             target_vpc_id,
             true,
             Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            intent.0,
+            Some(intent.1),
         ))
         .await
     });
@@ -2901,11 +2954,9 @@ async fn attach_network_segment_to_vpc(
             network_segment_id,
             vpc_id,
             allow_replace,
-            Principal::ExternalUser(ExternalUserInfo::new(
-                None,
-                "nico-admin-cli".to_string(),
-                None,
-            )),
+            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None)),
+            None,
+            None,
         ))
         .await
 }
@@ -2916,14 +2967,28 @@ async fn attach_tenant_network_segment_to_vpc(
     vpc_id: VpcId,
     allow_replace: bool,
 ) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
+    let (source, version) = tenant_attach_intent(&env.pool, network_segment_id).await;
     env.api
         .attach_network_segment_to_vpc(authenticated_attach_request(
             network_segment_id,
             vpc_id,
             allow_replace,
             Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            source,
+            Some(version),
         ))
         .await
+}
+
+async fn tenant_attach_intent(
+    pool: &sqlx::PgPool,
+    network_segment_id: NetworkSegmentId,
+) -> (Option<VpcId>, String) {
+    sqlx::query_as("SELECT vpc_id, version::text FROM network_segments WHERE id = $1")
+        .bind(network_segment_id)
+        .fetch_one(pool)
+        .await
+        .expect("live segment for attach intent")
 }
 
 fn authenticated_attach_request(
@@ -2931,15 +2996,68 @@ fn authenticated_attach_request(
     vpc_id: VpcId,
     allow_replace: bool,
     principal: Principal,
+    expected_source_vpc_id: Option<VpcId>,
+    expected_segment_version: Option<String>,
 ) -> Request<rpc::forge::AttachNetworkSegmentToVpcRequest> {
     let mut request = Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
         network_segment_id: Some(network_segment_id),
         vpc_id: Some(vpc_id),
         allow_replace,
+        expected_source_vpc_id,
+        expected_segment_version,
     });
     request.extensions_mut().insert(AuthContext {
         principals: vec![principal],
         authorization: None,
     });
     request
+}
+
+async fn create_unattached_segment(
+    env: &common::api_fixtures::TestEnv,
+    name: &str,
+    prefix: &str,
+    gateway: &str,
+    segment_type: rpc::forge::NetworkSegmentType,
+) -> Result<rpc::forge::NetworkSegment, tonic::Status> {
+    env.api
+        .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+            id: None,
+            mtu: Some(1500),
+            name: name.to_string(),
+            prefixes: vec![rpc::forge::NetworkPrefix {
+                id: None,
+                prefix: prefix.to_string(),
+                gateway: Some(gateway.to_string()),
+                reserve_first: 3,
+                free_ip_count: 0,
+                svi_ip: None,
+                free_ip_count_v2: None,
+                free_ip_count_saturated: false,
+            }],
+            subdomain_id: None,
+            vpc_id: None,
+            segment_type: segment_type as i32,
+            infer_slaac_eui64_addresses: false,
+        }))
+        .await
+        .map(|response| response.into_inner())
+}
+
+async fn attach_network_segment_to_vpc(
+    env: &common::api_fixtures::TestEnv,
+    network_segment_id: NetworkSegmentId,
+    vpc_id: VpcId,
+    allow_replace: bool,
+) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
+    env.api
+        .attach_network_segment_to_vpc(authenticated_attach_request(
+            network_segment_id,
+            vpc_id,
+            allow_replace,
+            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None)),
+            None,
+            None,
+        ))
+        .await
 }

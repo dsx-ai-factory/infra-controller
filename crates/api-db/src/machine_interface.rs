@@ -3557,12 +3557,10 @@ async fn update_hostname_and_domain(
         crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
     }
 
-
     // The old zone loses the name and the new zone gains it, so both serials
     // advance when the row actually changed. The sub-select in RETURNING runs
     // under the statement's snapshot, which cannot see the row this same
     // statement modified, so it yields the domain_id from before the update.
-
     let query = r#"
 UPDATE machine_interfaces
 SET hostname = $1, domain_id = $2

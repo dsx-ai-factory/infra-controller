@@ -647,6 +647,8 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
                 network_segment_id: Some(host_inband_segment.id),
                 vpc_id: Some(conflicting_vpc_id),
                 allow_replace: false,
+                expected_source_vpc_id: None,
+                expected_segment_version: None,
             },
         ))
         .await

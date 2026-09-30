@@ -1844,6 +1844,7 @@ async fn create_test_env_with_overrides_inner(
         .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
             name: "dwrt1.com".to_string(),
             default_ttl: None,
+            reserved_id: None,
         }))
         .await
         .unwrap()
