@@ -31,6 +31,25 @@ func TestAPIDomainCreateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "trailing presentation dot allowed",
+			request: APIDomainCreateRequest{Name: "Tenant.Example.COM.", SiteID: uuid.NewString()},
+		},
+		{
+			name:    "whitespace cannot become a different Core identity",
+			request: APIDomainCreateRequest{Name: " tenant.example.com", SiteID: uuid.NewString()},
+			wantErr: true,
+		},
+		{
+			name:    "unicode whitespace rejected",
+			request: APIDomainCreateRequest{Name: "tenant.\u00a0example.com", SiteID: uuid.NewString()},
+			wantErr: true,
+		},
+		{
+			name:    "presentation dots alone are not a DNS name",
+			request: APIDomainCreateRequest{Name: "...", SiteID: uuid.NewString()},
+			wantErr: true,
+		},
+		{
 			name:    "missing site ID",
 			request: APIDomainCreateRequest{Name: "tenant.example.com"},
 			wantErr: true,

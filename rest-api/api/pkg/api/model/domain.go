@@ -4,7 +4,10 @@
 package model
 
 import (
+	"errors"
+	"strings"
 	"time"
+	"unicode"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
@@ -22,7 +25,13 @@ type APIDomainCreateRequest struct {
 // Validate checks the Domain create request before it is sent to Core.
 func (dcr APIDomainCreateRequest) Validate() error {
 	return validation.ValidateStruct(&dcr,
-		validation.Field(&dcr.Name, validation.Required.Error(validationErrorValueRequired)),
+		validation.Field(&dcr.Name, validation.Required.Error(validationErrorValueRequired), validation.By(func(value interface{}) error {
+			name := value.(string)
+			if strings.TrimRight(name, ".") == "" || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
+				return errors.New("Domain name must not be empty or contain whitespace")
+			}
+			return nil
+		})),
 		validation.Field(&dcr.SiteID,
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.UUID.Error(validationErrorInvalidUUID)),
