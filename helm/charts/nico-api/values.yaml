@@ -124,6 +124,7 @@ fileDescriptorLimit: 65536
 
 ## Optional general-purpose init containers, run in list order after bootArtifactContainers.
 ## Omitted or empty lists add no general-purpose init containers.
+## Non-null tags must be strings; quote numeric-looking tags (for example, "1.10").
 ## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
 ## they take precedence over `image`. If either is omitted or empty, supply `image`.
 ## Rendering fails if neither form supplies an image; the error identifies the list entry.
@@ -139,6 +140,7 @@ initContainers: []
 ## Boot-artifact init containers
 ## Each entry is rendered as a Kubernetes init container with the boot-artifacts
 ## volume automatically mounted at /forge-boot-artifacts/blobs/internal.
+## Non-null tags must be strings; quote numeric-looking tags (for example, "1.10").
 ## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
 ## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
 ## Rendering fails if neither form supplies an image; the error identifies the list entry.
@@ -146,16 +148,16 @@ bootArtifactContainers: []
 # bootArtifactContainers:
 #   - name: boot-artifacts-x86-64
 #     repository: <your-registry>/boot-artifacts-x86_64
-#     tag: latest
+#     tag: "latest"
 #     command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
 #   - name: boot-artifacts-aarch64
 #     repository: <your-registry>/boot-artifacts-aarch64
-#     tag: latest
+#     tag: "latest"
 #     # NOTE: the aarch64 image ships /aarch64 + /apt (NOT /firmware) — copying a missing dir crash-loops the init.
 #     command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
 #   - name: machine-validation-config
 #     repository: <your-registry>/machine-validation-config
-#     tag: latest
+#     tag: "latest"
 #     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
 
 service:

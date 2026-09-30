@@ -7,10 +7,10 @@ tests:
       initContainers:
         - name: split-image
           repository: registry.example.com/custom-init
-          tag: v1.2.3
+          tag: "1.10"
         - name: overridden-image
           repository: registry.example.com/custom-init
-          tag: v2.0.0
+          tag: "0"
           image: legacy.example.com/ignored:old
           imagePullPolicy: Always
           command: ["sh", "-c"]
@@ -31,9 +31,9 @@ tests:
           path: spec.template.spec.initContainers
           value:
             - name: split-image
-              image: registry.example.com/custom-init:v1.2.3
+              image: registry.example.com/custom-init:1.10
             - name: overridden-image
-              image: registry.example.com/custom-init:v2.0.0
+              image: registry.example.com/custom-init:0
               imagePullPolicy: Always
               command: ["sh", "-c"]
               args: ["echo initializing"]
@@ -95,3 +95,27 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "nico-api.initContainers[1] requires either non-empty repository and tag or a non-empty image"
+
+  - it: should reject a numeric tag instead of rendering its coerced value
+    set:
+      initContainers:
+        - name: valid-init
+          image: registry.example.com/custom-init:original
+        - name: numeric-tag
+          repository: registry.example.com/custom-init
+          tag: 1.10
+          image: registry.example.com/custom-init:fallback
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-api.initContainers[1].tag must be a string; quote numeric-looking tags (for example, "1.10")'
+
+  - it: should reject a numeric zero tag instead of silently using the fallback image
+    set:
+      initContainers:
+        - name: zero-tag
+          repository: registry.example.com/custom-init
+          tag: 0
+          image: registry.example.com/custom-init:fallback
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-api.initContainers[0].tag must be a string; quote numeric-looking tags (for example, "1.10")'
