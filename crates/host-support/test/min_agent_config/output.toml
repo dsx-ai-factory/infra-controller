@@ -13,6 +13,7 @@ address = "0.0.0.0:7777"
 
 [telemetry]
 metrics-address = "0.0.0.0:8888"
+prometheus-enabled = true
 
 [hbn]
 root-dir = "/var/lib/hbn"
