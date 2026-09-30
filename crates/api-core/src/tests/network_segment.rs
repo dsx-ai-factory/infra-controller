@@ -2615,6 +2615,8 @@ async fn site_agent_rejects_tenant_segment_moves_across_modes(
         TestEnvOverrides::no_network_segments().with_fnn_config(None),
     )
     .await;
+    // FNN VPC admission requires a persisted tenant, unlike ETV and Flat.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
     let etv_vpc_id = create_attach_test_vpc(
         &env,
         "mode-etv",
@@ -2710,6 +2712,9 @@ async fn site_agent_attach_waits_for_machine_interface_creation(
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(writer.as_mut())
         .await?;
+    // The insert's FK lock on this segment precedes the attachment's
+    // machine-interface table lock; prove the serialized race at that first
+    // lock, then check the post-commit in-use rejection below.
     sqlx::query(
         "INSERT INTO machine_interfaces \
          (segment_id, mac_address, primary_interface, hostname) \
@@ -2732,12 +2737,7 @@ async fn site_agent_attach_waits_for_machine_interface_creation(
         ))
         .await
     });
-    wait_until_query_blocked_by(
-        &env.pool,
-        writer_pid,
-        "LOCK TABLE machine_interfaces IN SHARE MODE",
-    )
-    .await;
+    wait_until_query_blocked_by(&env.pool, writer_pid, "SELECT id FROM network_segments").await;
     writer.commit().await?;
 
     let err = attach_task
