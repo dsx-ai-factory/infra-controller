@@ -2759,6 +2759,8 @@ dependencies = [
  "carbide-version",
  "clap",
  "http-body",
+ "hyper",
+ "hyper-util",
  "logfmt",
  "metrics",
  "metrics-endpoint",
