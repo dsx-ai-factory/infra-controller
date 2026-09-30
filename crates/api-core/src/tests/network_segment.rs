@@ -2551,6 +2551,7 @@ async fn site_agent_tenant_segment_same_target_is_idempotent(
     .await;
     let segment_id = create_live_tenant_segment(&env, vpc_id, 0, "TENANT_ETV_IDEMPOTENT").await;
 
+    let initial_version = tenant_attach_intent(&env.pool, segment_id).await.1;
     let first = attach_tenant_network_segment_to_vpc(&env, segment_id, vpc_id, false)
         .await?
         .into_inner();
@@ -2559,7 +2560,11 @@ async fn site_agent_tenant_segment_same_target_is_idempotent(
         .into_inner();
 
     assert_eq!(second.config.unwrap().vpc_id, Some(vpc_id));
-    assert_eq!(second.version, first.version);
+    assert_eq!(first.config.unwrap().vpc_id, Some(vpc_id));
+    assert_eq!(
+        tenant_attach_intent(&env.pool, segment_id).await.1,
+        initial_version
+    );
 
     Ok(())
 }
@@ -2767,7 +2772,7 @@ async fn site_agent_attach_waits_for_instance_address_allocation(
     let instance_id = InstanceId::new();
     let network_config_version = ConfigVersion::initial();
     let mut setup = env.db_txn().await;
-    let machine = managed_host.host().db_machine(&mut setup).await;
+    let machine = managed_host.host_as_any().db_machine(&mut setup).await;
     sqlx::query(
         "INSERT INTO instances (id, machine_id, network_config, network_config_version, \
                                 nvlink_config) \
@@ -3011,53 +3016,4 @@ fn authenticated_attach_request(
         authorization: None,
     });
     request
-}
-
-async fn create_unattached_segment(
-    env: &common::api_fixtures::TestEnv,
-    name: &str,
-    prefix: &str,
-    gateway: &str,
-    segment_type: rpc::forge::NetworkSegmentType,
-) -> Result<rpc::forge::NetworkSegment, tonic::Status> {
-    env.api
-        .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
-            id: None,
-            mtu: Some(1500),
-            name: name.to_string(),
-            prefixes: vec![rpc::forge::NetworkPrefix {
-                id: None,
-                prefix: prefix.to_string(),
-                gateway: Some(gateway.to_string()),
-                reserve_first: 3,
-                free_ip_count: 0,
-                svi_ip: None,
-                free_ip_count_v2: None,
-                free_ip_count_saturated: false,
-            }],
-            subdomain_id: None,
-            vpc_id: None,
-            segment_type: segment_type as i32,
-            infer_slaac_eui64_addresses: false,
-        }))
-        .await
-        .map(|response| response.into_inner())
-}
-
-async fn attach_network_segment_to_vpc(
-    env: &common::api_fixtures::TestEnv,
-    network_segment_id: NetworkSegmentId,
-    vpc_id: VpcId,
-    allow_replace: bool,
-) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
-    env.api
-        .attach_network_segment_to_vpc(authenticated_attach_request(
-            network_segment_id,
-            vpc_id,
-            allow_replace,
-            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None)),
-            None,
-            None,
-        ))
-        .await
 }
