@@ -479,12 +479,13 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tnOrg2 := "test-tn-org-2"
 	tnOrg3 := "test-tn-org-3"
 	tnOrg4 := "test-tn-org-4"
+	tnOrg5 := "test-tn-org-5"
 
 	ipOrgRoles := []string{authz.ProviderAdminRole}
 	tnOrgRoles := []string{authz.TenantAdminRole}
 
 	ipUser := testTenantAccountBuildUser(t, dbSession, "test123", []string{ipOrg}, ipOrgRoles, "John", "Doe")
-	tnUser := testTenantAccountBuildUser(t, dbSession, "test456", []string{tnOrg1, tnOrg2, tnOrg3, tnOrg4}, tnOrgRoles, "Jimmy", "Doe")
+	tnUser := testTenantAccountBuildUser(t, dbSession, "test456", []string{tnOrg1, tnOrg2, tnOrg3, tnOrg4, tnOrg5}, tnOrgRoles, "Jimmy", "Doe")
 
 	ip := testTenantAccountBuildInfrastructureProvider(t, dbSession, "Test Infrastructure Provider", ipOrg, ipUser)
 	assert.NotNil(t, ip)
@@ -509,6 +510,16 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	ta3 := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, tn3, tnOrg3, cdbm.TenantAccountStatusReady, ipUser.ID, uuid.Nil)
 	assert.NotNil(t, ta3)
 
+	// The Provider can invite an org before that org's Tenant exists, which leaves
+	// tenantId empty. tnOrg5 has a Tenant so the org lookup succeeds and the request
+	// reaches the link check rather than stopping at the 404.
+	tn5 := testTenantAccountBuildTenant(t, dbSession, tnOrg5, "Test Tenant Account 5", ipUser)
+	assert.NotNil(t, tn5)
+
+	taUnlinked := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, nil, tnOrg5, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
+	assert.NotNil(t, taUnlinked)
+	assert.Nil(t, taUnlinked.TenantID)
+
 	errBody1, err := json.Marshal(model.APITenantAccountUpdateRequest{TenantContactID: cutil.GetPtr("non-uuid$!")})
 	assert.Nil(t, err)
 	errBody2, err := json.Marshal(model.APITenantAccountUpdateRequest{TenantContactID: cutil.GetPtr(uuid.New().String())})
@@ -526,15 +537,18 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		name               string
-		reqOrgName         string
-		reqBody            string
-		user               *cdbm.User
-		tnID               string
-		taID               string
-		ta                 *cdbm.TenantAccount
-		expectedErr        bool
-		expectedStatus     int
+		name           string
+		reqOrgName     string
+		reqBody        string
+		user           *cdbm.User
+		tnID           string
+		taID           string
+		ta             *cdbm.TenantAccount
+		expectedErr    bool
+		expectedStatus int
+		// expectedMessage is asserted where the status alone cannot tell two rejections
+		// apart, so re-merging the unlinked and mismatched checks fails here.
+		expectedMessage    string
 		verifyChildSpanner bool
 	}{
 		{
@@ -604,15 +618,28 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 		{
-			name:           "error when specified org does not have matching tenant in tenant account",
-			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
-			user:           tnUser,
-			tnID:           tn1.ID.String(),
-			taID:           ta2.ID.String(),
-			ta:             ta2,
-			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			name:            "error when specified org does not have matching tenant in tenant account",
+			reqOrgName:      tnOrg1,
+			reqBody:         string(okBody1),
+			user:            tnUser,
+			tnID:            tn1.ID.String(),
+			taID:            ta2.ID.String(),
+			ta:              ta2,
+			expectedErr:     true,
+			expectedStatus:  http.StatusBadRequest,
+			expectedMessage: "Tenant in org does not match tenant in TenantAccount",
+		},
+		{
+			name:            "error when tenant account is not linked to a tenant yet",
+			reqOrgName:      tnOrg5,
+			reqBody:         string(okBody1),
+			user:            tnUser,
+			tnID:            tn5.ID.String(),
+			taID:            taUnlinked.ID.String(),
+			ta:              taUnlinked,
+			expectedErr:     true,
+			expectedStatus:  http.StatusBadRequest,
+			expectedMessage: "TenantAccount is not linked to a Tenant yet",
 		},
 		{
 			name:           "error when specified tenant account doesnt exist",
@@ -694,6 +721,10 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 
 			require.Equal(t, tc.expectedStatus, rec.Code)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
+
+			if tc.expectedMessage != "" {
+				assert.Contains(t, rec.Body.String(), tc.expectedMessage)
+			}
 
 			if !tc.expectedErr {
 				rsp := &model.APITenantAccount{}
