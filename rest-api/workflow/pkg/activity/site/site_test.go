@@ -4,6 +4,7 @@
 package site
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -33,6 +34,8 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -1814,7 +1817,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 		{
 			// Earlier releases created DatacenterOnly IP Blocks for public prefixes,
 			// and IPAM keeps those apart from the Public prefix that replaces them.
-			name: "fails when a new prefix overlaps an IP Block that Allocations still use",
+			name: "skips a new prefix that overlaps an IP Block that Allocations still use",
 			existingIPBlocks: map[string]siteIPBlock{
 				"198.51.100.0/24": {
 					name:            "site-fabric-ipv4-198-51-100-0-24",
@@ -1822,9 +1825,15 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 					protocolVersion: cdbm.IPBlockProtocolVersionV4,
 				},
 			},
-			allocatedCIDRs:  []string{"198.51.100.0/24"},
-			prefixes:        []string{"198.51.100.0/23"},
-			wantErrContains: "overlaps IP Block",
+			allocatedCIDRs: []string{"198.51.100.0/24"},
+			prefixes:       []string{"198.51.100.0/23", "10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
 		},
 		{
 			name:               "returns error while another writer holds the Site fabric lock",
@@ -2089,6 +2098,53 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+
+	t.Run("logs removed and created IP Blocks only once they commit", func(t *testing.T) {
+		ctx := context.Background()
+		resources := setupSiteFabricIPBlockTest(t)
+		mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
+		ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
+		getRootIPBlocks := func(t *testing.T) []cdbm.IPBlock {
+			t.Helper()
+			ipBlocks, _, err := ipBlockDAO.GetAll(ctx, nil, cdbm.IPBlockFilterInput{
+				SiteIDs:        []uuid.UUID{resources.site.ID},
+				ExcludeDerived: true,
+			}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			return ipBlocks
+		}
+
+		require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.9.0.0/16"}))
+		droppedIPBlocks := getRootIPBlocks(t)
+		require.Len(t, droppedIPBlocks, 1)
+
+		// An IPAM entry with no IP Block behind it makes IPAM reject 10.1.0.0/16,
+		// after the activity has already removed 10.9.0.0/16 and created 10.0.0.0/16.
+		_, err := ipam.CreateIpamEntryForIPBlock(ctx, ipam.NewIpamStorage(resources.dbSession.DB, nil), "10.1.0.0", 24,
+			cdbm.IPBlockRoutingTypeDatacenterOnly, resources.provider.ID.String(), resources.site.ID.String())
+		require.NoError(t, err)
+
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		err = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16", "10.1.0.0/16"})
+		require.ErrorContains(t, err, "overlaps")
+		assert.NotContains(t, logOutput.String(), "removed Site fabric IP Block")
+		assert.NotContains(t, logOutput.String(), "created Site fabric IP Block")
+
+		logOutput.Reset()
+		require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"}))
+		createdIPBlocks := getRootIPBlocks(t)
+		require.Len(t, createdIPBlocks, 1)
+		assert.Contains(t, logOutput.String(), "removed Site fabric IP Block for an unreported prefix")
+		assert.Contains(t, logOutput.String(), droppedIPBlocks[0].ID.String())
+		assert.Contains(t, logOutput.String(), "created Site fabric IP Block")
+		assert.Contains(t, logOutput.String(), createdIPBlocks[0].ID.String())
+	})
 }
 
 func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {

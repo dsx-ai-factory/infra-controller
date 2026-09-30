@@ -11,6 +11,8 @@ use uuid::Uuid;
 pub(crate) enum Args {
     #[clap(
         about = "Show stored logs for a validation attempt",
+        long_about = "Show stored logs for a validation attempt. Provide --attempt-id, or provide both --validation-id and --test-id.",
+        override_usage = "nico-admin-cli machine-validation logs show [--extended] [--sort-by <SORT_BY>] [--stdout-only | --stderr-only] [--raw] [-h|--help] (--attempt-id <ATTEMPT_ID> | --validation-id <VALIDATION_ID> --test-id <TEST_ID>)",
         after_long_help = "\
 EXAMPLES:
 
@@ -28,6 +30,8 @@ Print only stderr content without metadata:
     Show(Options),
     #[clap(
         about = "Show stored logs and follow an active validation attempt",
+        long_about = "Show stored logs and follow an active validation attempt. Provide --attempt-id, or provide both --validation-id and --test-id.",
+        override_usage = "nico-admin-cli machine-validation logs follow [--extended] [--sort-by <SORT_BY>] [--stdout-only | --stderr-only] [--raw] [-h|--help] (--attempt-id <ATTEMPT_ID> | --validation-id <VALIDATION_ID> --test-id <TEST_ID>)",
         after_long_help = "\
 EXAMPLES:
 
@@ -45,6 +49,7 @@ Follow stdout content without metadata:
     Follow(Options),
     #[clap(
         about = "List attempt IDs for one test in a validation run",
+        override_usage = "nico-admin-cli machine-validation logs attempts [--extended] [--sort-by <SORT_BY>] [-h|--help] --validation-id <VALIDATION_ID> --test-id <TEST_ID>",
         after_long_help = "\
 EXAMPLES:
 
