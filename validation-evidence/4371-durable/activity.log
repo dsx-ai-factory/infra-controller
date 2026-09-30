@@ -1,0 +1,19 @@
+make: Entering directory '/home/developer/workspace/verify-4371-56fa/rest-api'
+/home/developer/workspace/verify-4371-56fa/evidence/4371-56fa/verify.mk:3: warning: overriding recipe for target 'ensure-postgres'
+Makefile:118: warning: ignoring old recipe for target 'ensure-postgres'
+Owned disposable PostgreSQL 127.0.0.1:31435; Docker disabled
+go test -p 1 -count=1 -run '^TestReservedDomainDurableRejection_SQLStateOrders$' -v ./workflow/pkg/activity/domain
+=== RUN   TestReservedDomainDurableRejection_SQLStateOrders
+=== RUN   TestReservedDomainDurableRejection_SQLStateOrders/stale_token_no_destructive_dispatch
+connections count = 6
+=== RUN   TestReservedDomainDurableRejection_SQLStateOrders/ready_before_reject_no_destructive_dispatch
+connections count = 6
+=== RUN   TestReservedDomainDurableRejection_SQLStateOrders/cancel_reply_lost_then_recovery_confirms
+connections count = 6
+--- PASS: TestReservedDomainDurableRejection_SQLStateOrders (0.32s)
+    --- PASS: TestReservedDomainDurableRejection_SQLStateOrders/stale_token_no_destructive_dispatch (0.11s)
+    --- PASS: TestReservedDomainDurableRejection_SQLStateOrders/ready_before_reject_no_destructive_dispatch (0.13s)
+    --- PASS: TestReservedDomainDurableRejection_SQLStateOrders/cancel_reply_lost_then_recovery_confirms (0.09s)
+PASS
+ok  	github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/domain	0.412s
+make: Leaving directory '/home/developer/workspace/verify-4371-56fa/rest-api'
