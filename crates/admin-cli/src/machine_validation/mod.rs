@@ -34,7 +34,11 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "External config", subcommand, visible_alias = "mve")]
     ExternalConfig(external_config::Args),
-    #[clap(about = "Show or follow Machine Validation attempt logs", subcommand)]
+    #[clap(
+        about = "Show or follow Machine Validation attempt logs",
+        subcommand,
+        override_usage = "nico-admin-cli machine-validation logs [--extended] [--sort-by <SORT_BY>] [-h|--help] <subcommands>"
+    )]
     Logs(logs::Args),
     #[clap(about = "Ondemand Validation", subcommand, visible_alias = "mvo")]
     OnDemand(on_demand::Args),
