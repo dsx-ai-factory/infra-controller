@@ -545,12 +545,12 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.BridgeName != nil {
 		sxa.BridgeName = input.BridgeName
 		updatedFields = append(updatedFields, "bridge_name")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "bridge_name", *input.BridgeName)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("bridge_name", *input.BridgeName))
 	}
 	if input.OvnNetworkName != nil {
 		sxa.OvnNetworkName = input.OvnNetworkName
 		updatedFields = append(updatedFields, "ovn_network_name")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "ovn_network_name", *input.OvnNetworkName)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("ovn_network_name", *input.OvnNetworkName))
 	}
 	if input.MacAddress != nil {
 		sxa.MacAddress = input.MacAddress
