@@ -26,7 +26,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
@@ -137,7 +136,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	assert.NotNil(t, existingVP)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -373,8 +372,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cvph.Handle(ec)
 			require.NoError(t, err)
@@ -473,7 +471,7 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 	err := vpPeeringDAO.UpdateStatusByID(ctx, nil, vp12.ID, cdbm.VpcPeeringStatusReady)
 	require.NoError(t, err)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	mockTC := &tmocks.Client{}
 	cfg := common.GetTestConfig()
 
@@ -759,8 +757,7 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gavph.Handle(ec)
 			require.NoError(t, err)
@@ -887,7 +884,7 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 	vp14 := common.TestBuildVpcPeering(t, dbSession, vpc1.ID, vpc4.ID, st1.ID, &ip.ID, nil, true, ipu.ID)
 	vp56 := common.TestBuildVpcPeering(t, dbSession, vpc5.ID, vpc6.ID, st2.ID, &ip2.ID, nil, true, ipu2.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	mockTC := &tmocks.Client{}
 	cfg := common.GetTestConfig()
 
@@ -1115,8 +1112,7 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.peeringID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gvph.Handle(ec)
 			require.NoError(t, err)
@@ -1220,7 +1216,7 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 	vp45 := common.TestBuildVpcPeering(t, dbSession, vpc4.ID, vpc5.ID, st2.ID, nil, &tn2.ID, false, tnu2.ID)
 	vp67 := common.TestBuildVpcPeering(t, dbSession, vpc6.ID, vpc7.ID, st2.ID, nil, &tnProvider.ID, false, ipu2.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	cfg := common.GetTestConfig()
 
@@ -1349,8 +1345,7 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.peeringID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dvph.Handle(ec)
 			require.NoError(t, err)

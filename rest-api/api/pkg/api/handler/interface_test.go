@@ -25,7 +25,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -121,7 +120,7 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -401,7 +400,6 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstanceID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {

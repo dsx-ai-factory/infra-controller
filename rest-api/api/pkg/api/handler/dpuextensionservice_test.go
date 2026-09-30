@@ -25,7 +25,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -70,7 +69,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, existingDES)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374052"
@@ -333,8 +332,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cdesh.Handle(ec)
 			require.NoError(t, err)
@@ -435,7 +433,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -546,8 +544,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gadesh.Handle(ec)
 			require.NoError(t, err)
@@ -612,7 +609,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -707,8 +704,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesh.Handle(ec)
 			require.NoError(t, err)
@@ -765,7 +761,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374065"
@@ -1033,8 +1029,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := udesh.Handle(ec)
 			require.NoError(t, err)
@@ -1139,7 +1134,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1241,8 +1236,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesh.Handle(ec)
 			require.NoError(t, err)
@@ -1298,7 +1292,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1424,8 +1418,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID, tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesvh.Handle(ec)
 			require.NoError(t, err)
@@ -1537,7 +1530,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1692,8 +1685,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID.String(), tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesvh.Handle(ec)
 			require.NoError(t, err)

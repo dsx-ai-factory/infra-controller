@@ -19,7 +19,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -275,7 +274,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 	assert.NotNil(t, parentPrefIBP2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -581,7 +580,6 @@ func TestAllocationHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{
@@ -781,8 +779,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(ipOrg1)
 		ec.Set("user", ipu)
-		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
+		ec.SetRequest(ec.Request().WithContext(raceCtx))
 
 		handlerStarted = true
 		go func() {
@@ -880,9 +877,8 @@ func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipa
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	// Mock Temporal Site Client pool for ALlocaiton creation
@@ -1035,7 +1031,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1652,8 +1648,6 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
-
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gaah := GetAllAllocationHandler{
@@ -1803,7 +1797,7 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 	assert.NotNil(t, aIPB)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1999,7 +1993,6 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetAllocationHandler{
@@ -2140,7 +2133,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2333,7 +2326,6 @@ func TestAllocationHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateAllocationHandler{
@@ -2561,7 +2553,7 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	vpcPrefix := testAllocationBuildVpcPrefix(t, dbSession, tenant1, vpc1, "testVPCPrefix", childVpcPrefixIBP)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2793,7 +2785,6 @@ func TestAllocationHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dah := DeleteAllocationHandler{
@@ -2934,7 +2925,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 		"CreateTenant", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                 string
@@ -2983,7 +2974,6 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{

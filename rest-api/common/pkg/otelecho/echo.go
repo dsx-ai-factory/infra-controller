@@ -10,12 +10,6 @@ import (
 )
 
 const (
-	// TracerKey is a key for current tracer
-	//
-	// Deprecated: spans are created from the global TracerProvider; nothing
-	// reads this context key anymore.
-	TracerKey = "otel-go-contrib-tracer-labstack-echo"
-
 	// TracerName is name of the tracer
 	TracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho"
 

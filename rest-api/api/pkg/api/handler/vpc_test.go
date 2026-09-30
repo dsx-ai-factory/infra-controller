@@ -33,7 +33,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -582,7 +581,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	routingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
 		RouteTargetImports:           &model.APIVpcRouteTargets{{ASN: 64512, VNI: 559}},
 		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
@@ -1495,7 +1494,6 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -1818,7 +1816,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 	updateRoutingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
 		RouteTargetsOnExports:         &model.APIVpcRouteTargets{{ASN: 64513, VNI: 61}},
 		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
@@ -2314,7 +2312,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2540,7 +2537,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st3
 	tsc := &tmocks.Client{}
@@ -2791,7 +2788,6 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := uvvh.Handle(ec); (err != nil) != tt.wantErr {
@@ -2895,7 +2891,7 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -3099,7 +3095,6 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPCID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -3276,7 +3271,7 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                             string
@@ -3797,7 +3792,6 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -4017,7 +4011,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		"DeleteVPCV2", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configurations
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -4209,7 +4203,6 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqVPC)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {

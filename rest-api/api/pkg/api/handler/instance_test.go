@@ -40,7 +40,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -1398,7 +1397,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	tst4.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	setupIbInactiveDevicesInstanceType := func(t *testing.T, allocName string, machineInactiveDevices []int) (*cdbm.InstanceType, *cdbm.Machine) {
 		ist := testInstanceBuildInstanceType(t, dbSession, ip, "ist-ib-inactive-"+uuid.NewString(), st1, cdbm.InstanceStatusReady)
@@ -4061,7 +4060,6 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -5071,7 +5069,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	ifcDAO := cdbm.NewInterfaceDAO(dbSession)
 
@@ -7813,7 +7811,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstance)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if tt.args.beforeHandle != nil {
@@ -8653,7 +8650,7 @@ func TestGetInstanceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name    string
@@ -9002,7 +8999,6 @@ func TestGetInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstanceID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -9359,7 +9355,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name    string
@@ -10554,7 +10550,6 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -10813,7 +10808,7 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	//
 	// Timeout mocking
@@ -11100,7 +11095,6 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstance)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -11468,7 +11462,7 @@ func TestInstanceHandler_GetStatusDetails(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name          string
@@ -11529,7 +11523,6 @@ func TestInstanceHandler_GetStatusDetails(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.reqInstanceID)
 			ec.Set("user", tt.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			assert.NoError(t, handler.Handle(ec))

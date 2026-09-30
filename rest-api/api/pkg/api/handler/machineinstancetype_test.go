@@ -32,7 +32,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -136,7 +135,7 @@ func TestCreateMachineInstanceTypeHandler_Handle(t *testing.T) {
 	mDAO := cdbm.NewMachineDAO(dbSession)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -255,7 +254,6 @@ func TestCreateMachineInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(ip.Org, tt.reqInstaceTypeID.String())
 			ec.Set("user", ipu)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cmith.Handle(ec)
@@ -354,7 +352,7 @@ func TestGetAllMachineInstanceTypeHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -460,7 +458,6 @@ func TestGetAllMachineInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, it.ID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gamith.Handle(ec)
@@ -667,7 +664,7 @@ func TestDeleteMachineInstanceTypeHandler_Handle(t *testing.T) {
 	tscWithTimeout.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -841,7 +838,6 @@ func TestDeleteMachineInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.it.ID.String(), tt.args.deleteID)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dmith.Handle(ec)
