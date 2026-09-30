@@ -15,9 +15,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo"
-
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const dbIndex = `prefix.cidr`
@@ -43,9 +40,6 @@ func (m *mongodb) Name() string {
 }
 
 func newMongo(ctx context.Context, config MongoConfig) (*mongodb, error) {
-	if cotel.Enabled() && config.MongoClientOptions.Monitor == nil {
-		config.MongoClientOptions.SetMonitor(otelmongo.NewMonitor())
-	}
 	m, err := mongo.NewClient(config.MongoClientOptions)
 	if err != nil {
 		return nil, err

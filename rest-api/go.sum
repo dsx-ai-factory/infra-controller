@@ -712,10 +712,6 @@ github.com/quic-go/quic-go v0.60.0 h1:xcQioE8OM66UQLeUMHltK1CCcOu3JbVB4JAQdDQSB+
 github.com/quic-go/quic-go v0.60.0/go.mod h1:wpKpjmPpftl30sL6pFh7REVpjbcCVy4zt2vDyK1TuJk=
 github.com/raeperd/recvcheck v0.2.0 h1:GnU+NsbiCqdC2XX5+vMZzP+jAJC5fht7rcVTAhX74UI=
 github.com/raeperd/recvcheck v0.2.0/go.mod h1:n04eYkwIR0JbgD73wT8wL4JjPC3wm0nFtzBnWNocnYU=
-github.com/redis/go-redis/extra/rediscmd/v9 v9.17.2 h1:KYWnHK9pwzOUo3sNJlNmzRwZ5mw7opugn8njtGThKNg=
-github.com/redis/go-redis/extra/rediscmd/v9 v9.17.2/go.mod h1:wsfMQVl/GFYD9Gx/tlxurlTtvHkZRAt8j1qi27eIlTk=
-github.com/redis/go-redis/extra/redisotel/v9 v9.17.2 h1:wthFPRW3Y50CknMrjjJoYwXUFR4U7hMVJCMeLzDI8s4=
-github.com/redis/go-redis/extra/redisotel/v9 v9.17.2/go.mod h1:iqfQX7U2o8MWSl8W+Ah8KqbQyi/UoR/MQNgvaUyA1wc=
 github.com/redis/go-redis/v9 v9.17.2 h1:P2EGsA4qVIM3Pp+aPocCJ7DguDHhqrXNhVcEp4ViluI=
 github.com/redis/go-redis/v9 v9.17.2/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
@@ -939,8 +935,6 @@ go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux v0.64
 go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux v0.64.0/go.mod h1:D96L6/izMrfhIlFm1sFiyEC8zVyMcDzC8dwqUoTmGT8=
 go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho v0.65.0 h1:pPQ0G8ql6v+OTo65t28jcm7QWrJTw1Jr5JESzEagtNE=
 go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho v0.65.0/go.mod h1:vQwiruxeni575TCQ/OOJa4Rew7qIvmiLCyoWc/D51Gs=
-go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo v0.64.0 h1:/jNnYHxei43Rn6d6B4BCjhvYtL3UmhfMBVlfPruddxg=
-go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo v0.64.0/go.mod h1:fCwr528Fsk2KnKBk5khdhlLWKSLPMkOQtum/MRTgks0=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 h1:YH4g8lQroajqUwWbq/tr2QX1JFmEXaDLgG+ew9bLMWo=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0/go.mod h1:fvPi2qXDqFs8M4B4fmJhE92TyQs9Ydjlg3RvfUp+NbQ=
 go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.64.0 h1:OXSUzgmIFkcC4An+mv+lqqZSndTffXpjAyoR+1f8k/A=
