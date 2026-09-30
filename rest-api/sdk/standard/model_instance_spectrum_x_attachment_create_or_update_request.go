@@ -35,9 +35,9 @@ type InstanceSpectrumXAttachmentCreateOrUpdateRequest struct {
 	// Must be omitted, as virtual functions are not currently supported
 	VirtualFunctionId NullableInt32 `json:"virtualFunctionId,omitempty"`
 	// OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type
-	BridgeName NullableString `json:"bridgeName,omitempty"`
+	BridgeName NullableString `json:"bridgeName,omitempty" validate:"regexp=^[a-zA-Z0-9_.-]+$"`
 	// OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type
-	OvnNetworkName NullableString `json:"ovnNetworkName,omitempty"`
+	OvnNetworkName NullableString `json:"ovnNetworkName,omitempty" validate:"regexp=^[a-zA-Z0-9_-]+$"`
 }
 
 type _InstanceSpectrumXAttachmentCreateOrUpdateRequest InstanceSpectrumXAttachmentCreateOrUpdateRequest

@@ -25576,11 +25576,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9_.-]+$'
           description: 'OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type'
         ovnNetworkName:
           type:
             - string
             - 'null'
+          minLength: 1
+          maxLength: 256
+          pattern: '^[a-zA-Z0-9_-]+$'
           description: 'OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type'
       required:
         - spectrumXPartitionId
