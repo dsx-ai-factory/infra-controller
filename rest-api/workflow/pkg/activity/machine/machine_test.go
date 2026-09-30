@@ -1580,6 +1580,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		ctx := context.Background()
 		assignmentSite := testMachineBuildSite(t, dbSession, ip, "assignment-site", cdbm.SiteStatusRegistered)
 		machine := testMachineBuildMachine(t, dbSession, ip.ID, assignmentSite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusInUse))
+		testMachineBuildStatusDetail(t, dbSession, machine.ID, cdbm.MachineStatusInUse, cutil.GetPtr(cdbm.MachineStatusInUseMessage))
 		machineDAO := cdbm.NewMachineDAO(dbSession)
 		manager := ManageMachine{dbSession: dbSession, siteClientPool: tSiteClientPool}
 		inventory := &corev1.MachineInventory{
@@ -1587,14 +1588,19 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 		}
 		for _, phase := range []struct {
-			name     string
-			assigned bool
-			want     string
+			name         string
+			assigned     bool
+			coreState    string
+			want         string
+			historyCount int
 		}{
-			{"assignment remains", true, cdbm.MachineStatusInUse},
-			{"assignment cleared", false, cdbm.MachineStatusReady},
+			{"assignment remains", true, cdbm.ControllerMachineStateReady, cdbm.MachineStatusInUse, 1},
+			{"Core observes assignment", true, "Assigned", cdbm.MachineStatusInUse, 1},
+			{"Core returns Ready before release", true, cdbm.ControllerMachineStateReady, cdbm.MachineStatusInUse, 1},
+			{"assignment cleared", false, cdbm.ControllerMachineStateReady, cdbm.MachineStatusReady, 2},
 		} {
 			t.Run(phase.name, func(t *testing.T) {
+				inventory.Machines[0].Machine.State = phase.coreState
 				_, updateErr := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, IsAssigned: &phase.assigned})
 				require.NoError(t, updateErr)
 				_, updateErr = dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).Set("updated = ?", time.Now().Add(-2*time.Duration(cutil.DefaultInventoryReceiptInterval))).Where("id = ?", machine.ID).Exec(ctx)
@@ -1607,14 +1613,14 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 				_, readyCount, getErr := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: []string{machine.ID}, Statuses: []string{cdbm.MachineStatusReady}}, cdbp.PageInput{}, nil)
 				require.NoError(t, getErr)
 				assert.Equal(t, !phase.assigned, readyCount == 1, "Ready filters use the persisted effective status")
-				assert.Equal(t, cdbm.ControllerMachineStateReady, persisted.Metadata.GetNormalizedState(), "Core lifecycle is retained")
-				details, _, getErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(1)})
+				assert.Equal(t, phase.coreState, persisted.Metadata.GetNormalizedState(), "Core lifecycle is retained")
+				details, historyCount, getErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(1)})
 				require.NoError(t, getErr)
 				require.Len(t, details, 1)
 				assert.Equal(t, phase.want, details[0].Status)
+				assert.Equal(t, phase.historyCount, historyCount, "Core observations must not flip-flop the InUse history message")
 				if phase.assigned {
-					require.NotNil(t, details[0].Message)
-					assert.Contains(t, *details[0].Message, "waiting for Instance assignment")
+					assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
 				}
 			})
 		}

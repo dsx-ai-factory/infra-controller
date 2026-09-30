@@ -2177,6 +2177,20 @@ func allocateMachinesForBatch(
 			fmt.Sprintf("Failed to batch update machines: %v", err), nil)
 	}
 
+	statusDetails := make([]cdbm.StatusDetailCreateInput, 0, len(allocatedMachines))
+	for _, machine := range allocatedMachines {
+		statusDetails = append(statusDetails, cdbm.StatusDetailCreateInput{
+			EntityID: machine.ID,
+			Status:   cdbm.MachineStatusInUse,
+			Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+		})
+	}
+	_, err = cdbm.NewStatusDetailDAO(dbSession).CreateMultiple(ctx, tx, statusDetails)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create Machine status details for batch allocation")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status changes", nil)
+	}
+
 	// Log NVLink domain distribution for observability
 	nvlinkDomainDistribution := make(map[string]int)
 	for _, machine := range allocatedMachines {

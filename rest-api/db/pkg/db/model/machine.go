@@ -78,6 +78,12 @@ var (
 // It is separate from the REST status, which also accounts for assignment and health.
 const ControllerMachineStateReady = "Ready"
 
+// Canonical Machine history messages shared by allocation, release, and inventory.
+const (
+	MachineStatusInUseMessage = "Machine is being used by an Instance"
+	MachineStatusReadyMessage = "Machine is ready for assignment"
+)
+
 // A light wrapper around the protobuf so
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages

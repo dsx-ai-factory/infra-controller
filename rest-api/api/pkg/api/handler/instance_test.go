@@ -4038,6 +4038,17 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				tt.args.prepareReq(t, tt.args.reqData)
 			}
 
+			var targetedMachine *cdbm.Machine
+			var machineHistoryBefore int
+			if tt.args.reqData.MachineID != nil {
+				targetedMachine, _ = cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, *tt.args.reqData.MachineID, nil, false)
+				if targetedMachine != nil {
+					_, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+					require.NoError(t, historyErr)
+					machineHistoryBefore = count
+				}
+			}
+
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
@@ -4081,6 +4092,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 			if tt.args.respCode != http.StatusCreated {
+				if targetedMachine != nil {
+					_, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+					require.NoError(t, historyErr)
+					assert.Equal(t, machineHistoryBefore, count, "failed creation must not leave Machine history")
+				}
 				return
 			}
 			rst := &model.APIInstance{}
@@ -4095,6 +4111,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			require.NoError(t, getMachineErr)
 			assert.True(t, assignedMachine.IsAssigned)
 			assert.NotEqual(t, cdbm.MachineStatusReady, assignedMachine.Status, "creation must persist assignment and status together")
+			if targetedMachine != nil {
+				details, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				wantCount := machineHistoryBefore
+				if targetedMachine.Status != assignedMachine.Status {
+					wantCount++
+					require.NotEmpty(t, details)
+					assert.Equal(t, assignedMachine.Status, details[0].Status)
+					assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
+				}
+				assert.Equal(t, wantCount, count, "only a Machine status transition adds history")
+			}
 
 			assert.Equal(t, rst.Name, tt.args.reqData.Name)
 			assert.Equal(t, rst.NetworkSecurityGroupID, tt.args.reqData.NetworkSecurityGroupID)

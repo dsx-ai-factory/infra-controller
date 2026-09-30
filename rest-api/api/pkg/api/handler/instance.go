@@ -1318,6 +1318,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				IsAssigned: cutil.GetPtr(true),
 				Status:     cutil.GetPtr(machine.StatusForAssignment(true)),
 			}
+			statusChanged := machine.Status != *updateInput.Status
 			machine, err = mDAO.Update(ctx, tx, updateInput)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
@@ -1325,6 +1326,18 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				}
 				logger.Error().Err(err).Msg("error retrieving Machine from DB by ID")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Machine with ID specified in request data", nil)
+			}
+
+			if statusChanged {
+				_, err = cdbm.NewStatusDetailDAO(cih.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: machine.ID,
+					Status:   machine.Status,
+					Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+				})
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to create Machine status detail")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status change", nil)
+				}
 			}
 
 			instanceTypeID = machine.InstanceTypeID

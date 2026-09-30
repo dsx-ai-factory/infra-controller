@@ -33,6 +33,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -1107,6 +1108,11 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 				require.NoError(t, getErr)
 				assert.True(t, persisted.IsAssigned)
 				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{s.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, persisted.Status, details[0].Status)
+				assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
 				if tc.request != nil {
 					assert.True(t, s.MatchesLabelSelector(tc.request.MachineLabelSelector))
 				}

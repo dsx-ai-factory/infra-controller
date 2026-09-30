@@ -1458,7 +1458,18 @@ func (mi ManageInstance) clearMachineIsAssigned(ctx context.Context, tx *cdb.Tx,
 		logger.Error().Err(err).Msg("failed to update machine isassigned in DB")
 		return err
 	}
-	return err
+	if machine.Status != *updateInput.Status {
+		_, err = cdbm.NewStatusDetailDAO(mi.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: machine.ID,
+			Status:   *updateInput.Status,
+			Message:  cwutil.GetPtr(cdbm.MachineStatusReadyMessage),
+		})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to create Machine status detail on release")
+			return err
+		}
+	}
+	return nil
 }
 
 // updateInstanceStatusInDB is helper function to write Instance status updates to DB

@@ -494,7 +494,9 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			effectiveStatus := reportedMachine.StatusForAssignment(existingCloudMachine.IsAssigned)
 			if effectiveStatus != machineStatus {
 				machineStatus = effectiveStatus
-				statusMessage = "Machine lifecycle is Ready; waiting for Instance assignment to clear"
+				// Keep this message equal to Core's Assigned message to avoid
+				// flip-flopping messages in status history.
+				statusMessage = cdbm.MachineStatusInUseMessage
 			}
 
 			// Update existing Machine record
@@ -1161,10 +1163,10 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is undergoing machine validation"
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
-			statusMessage = "Machine is being used by an Instance"
+			statusMessage = cdbm.MachineStatusInUseMessage
 		case cdbm.ControllerMachineStateReady:
 			machineStatus = cdbm.MachineStatusReady
-			statusMessage = "Machine is ready for assignment"
+			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is being force deleted"

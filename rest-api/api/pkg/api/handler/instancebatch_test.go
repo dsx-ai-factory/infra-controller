@@ -109,9 +109,7 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			tx, err := cdb.BeginTx(ctx, dbSession, nil)
 			require.NoError(t, err)
-			defer func() {
-				require.NoError(t, tx.Rollback())
-			}()
+			t.Cleanup(func() { _ = tx.Rollback() })
 
 			machines, apiErr := allocateMachinesForBatch(
 				ctx, tx, dbSession, instanceType, 2, true,
@@ -131,6 +129,21 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 				require.NoError(t, getErr)
 				assert.True(t, persisted.IsAssigned)
 				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, persisted.Status, details[0].Status)
+				assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
+			}
+			require.NoError(t, tx.Rollback())
+			for _, machine := range machines {
+				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.False(t, persisted.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusReady, persisted.Status)
+				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				assert.Empty(t, details, "allocation history must roll back with the machine update")
 			}
 		})
 	}
