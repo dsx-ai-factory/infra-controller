@@ -1038,7 +1038,8 @@ func (mst ManageSite) DeleteOrphanedSiteTemporalNamespaces(ctx context.Context) 
 // Once the Site stops reporting a prefix, the IP Block created for it is
 // removed unless Allocations still use it. This also lets a resized prefix
 // replace its old IP Block. A prefix that overlaps a remaining root IP Block
-// fails the activity, and no IP Block changes.
+// is skipped with a warning, so it doesn't hold back the Site's other IP
+// Block changes.
 func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, siteID uuid.UUID, siteFabricPrefixes []string) error {
 	logger := log.With().
 		Str("Activity", "UpdateIPBlocksInDBFromFabricPrefixes").
@@ -1083,6 +1084,9 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	allocationConstraintDAO := cdbm.NewAllocationConstraintDAO(mst.dbSession)
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mst.dbSession)
 
+	// IP Blocks are logged as removed or created only once the transaction
+	// commits, since an error later in the loop rolls back every change.
+	var removedIPBlocks, createdIPBlocks []*cdbm.IPBlock
 	err = cdb.WithTx(ctx, mst.dbSession, func(tx *cdb.Tx) error {
 		derr := tx.AcquireAdvisoryLock(
 			ctx,
@@ -1193,11 +1197,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				return derr
 			}
 
-			logger.Info().
-				Str("IPBlockID", lockedIPBlock.ID.String()).
-				Str("Prefix", prefix.String()).
-				Str("RoutingType", lockedIPBlock.RoutingType).
-				Msg("removed Site fabric IP Block for an unreported prefix")
+			removedIPBlocks = append(removedIPBlocks, lockedIPBlock)
 		}
 
 		for _, prefix := range prefixes {
@@ -1209,13 +1209,12 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			// detect an overlap with a root IP Block of the other routing type.
 			overlap := slices.IndexFunc(rootPrefixes, func(root rootPrefix) bool { return root.prefix.Overlaps(prefix) })
 			if overlap >= 0 {
-				logger.Error().
+				logger.Warn().
 					Str("Prefix", prefix.String()).
 					Str("IPBlockID", rootPrefixes[overlap].ipBlockID.String()).
 					Str("IPBlockPrefix", rootPrefixes[overlap].prefix.String()).
-					Msg("Site fabric prefix overlaps a root IP Block")
-				return fmt.Errorf("create IP Block for Site fabric prefix %s: overlaps IP Block %s with prefix %s",
-					prefix, rootPrefixes[overlap].ipBlockID, rootPrefixes[overlap].prefix)
+					Msg("skipping Site fabric prefix that overlaps a root IP Block")
+				continue
 			}
 
 			address := prefix.Addr()
@@ -1274,13 +1273,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 				return derr
 			}
 
-			logger.Info().
-				Str("IPBlockID", createdIPBlock.ID.String()).
-				Str("Prefix", prefixAddr).
-				Int("PrefixLength", prefixLength).
-				Str("RoutingType", routingType).
-				Msg("created Site fabric IP Block")
-
+			createdIPBlocks = append(createdIPBlocks, createdIPBlock)
 			rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: createdIPBlock.ID})
 		}
 
@@ -1288,6 +1281,22 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	})
 	if err != nil {
 		return err
+	}
+
+	for _, ipBlock := range removedIPBlocks {
+		logger.Info().
+			Str("IPBlockID", ipBlock.ID.String()).
+			Str("Prefix", ipam.GetCidrForIPBlock(ctx, ipBlock.Prefix, ipBlock.PrefixLength)).
+			Str("RoutingType", ipBlock.RoutingType).
+			Msg("removed Site fabric IP Block for an unreported prefix")
+	}
+	for _, ipBlock := range createdIPBlocks {
+		logger.Info().
+			Str("IPBlockID", ipBlock.ID.String()).
+			Str("Prefix", ipBlock.Prefix).
+			Int("PrefixLength", ipBlock.PrefixLength).
+			Str("RoutingType", ipBlock.RoutingType).
+			Msg("created Site fabric IP Block")
 	}
 
 	logger.Info().Msg("successfully completed activity")

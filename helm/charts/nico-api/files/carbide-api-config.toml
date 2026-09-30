@@ -179,25 +179,19 @@ test_selection_mode = "EnableAll"
 # rack. Each count is the minimum number of devices required to exit Created
 # (present) and Discovering (ready).
 #
-# NVL72 and NVL72_GB300 remain platform-level profiles. Machine-a-tron uses
+# Profile ids name the platform (NVL72 / NVL72_GB300), not a single OEM —
+# inventory references stay stable as vendors change. Machine-a-tron uses
 # the vendor-qualified IDs below because the expected-rack-group API derives
 # profile IDs from group topology and member manufacturers. Figment merges
 # site-config over this file per-key, including capability vendor overrides.
+#
+# Site-config merges per key, allowing vendor/count overrides and custom profiles.
 [rack_profiles.NVL72]
 product_family = "gb200"
 rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
-
-[rack_profiles.NVL72.rack_capabilities.compute]
-vendor = "NVIDIA"
-count = 18
-
-[rack_profiles.NVL72.rack_capabilities.switch]
-vendor = "NVIDIA"
-count = 9
-
-[rack_profiles.NVL72.rack_capabilities.power_shelf]
-vendor = "LiteOn"
-count = 8
+rack_capabilities.compute = { vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
 
 [rack_profiles.GB200_NVL72_WIWYNN]
 product_family = "gb200"
@@ -218,18 +212,94 @@ count = 8
 [rack_profiles.NVL72_GB300]
 product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "Lenovo", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
 
-[rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
-count = 18
+# Defaults for topology/vendor-derived profile IDs; site-config overrides per key.
+[rack_profiles.VR_NVL72R1_C2G4_NVIDIA]
+product_family = "vrnvl72"
+rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 4 }
 
-[rack_profiles.NVL72_GB300.rack_capabilities.switch]
-vendor = "NVIDIA"
-count = 9
+[rack_profiles.VR_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "vrnvl72"
+rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 
-[rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
-vendor = "LiteOn"
-count = 6
+[rack_profiles.GB300_NVL72R1_C2G4_NVIDIA]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_LENOVO]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Lenovo", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_LENOVO_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Lenovo", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_SMC]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Supermicro", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "Delta", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Supermicro", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "Delta", count = 0 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_NVIDIA]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "NVIDIA", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 18 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 
 [rack_profiles.GB300_NVL72_LENOVO]
 product_family = "gb300"

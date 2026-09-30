@@ -295,7 +295,7 @@ def test_machine_without_instance_type_is_safe(monkeypatch):
     monkeypatch.setattr(
         admin_cli,
         "get_machine_from_m_show",
-        lambda _machine_id, allow_missing: {"instance_type_id": None},
+        lambda _machine_id, allow_missing: {"config": {"instance_type_id": None}},
     )
 
     lifecycle.verify_machine_has_no_instance_type(
@@ -325,7 +325,7 @@ def test_machine_with_instance_type_is_rejected(monkeypatch):
     monkeypatch.setattr(
         admin_cli,
         "get_machine_from_m_show",
-        lambda _machine_id, allow_missing: {"instance_type_id": "type-id"},
+        lambda _machine_id, allow_missing: {"config": {"instance_type_id": "type-id"}},
     )
 
     def fail(message):
@@ -334,6 +334,27 @@ def test_machine_with_instance_type_is_rejected(monkeypatch):
     monkeypatch.setattr(lifecycle, "_error_and_exit", fail)
 
     with pytest.raises(ValueError, match="dissociate this instance type"):
+        lifecycle.verify_machine_has_no_instance_type(
+            SimpleNamespace(machine_under_test="machine-id")
+        )
+
+
+@pytest.mark.parametrize(
+    "machine", [{}, {"config": None}, {"config": {}}, {"instance_type_id": None}]
+)
+def test_missing_instance_type_field_is_rejected(monkeypatch, machine):
+    monkeypatch.setattr(
+        admin_cli,
+        "get_machine_from_m_show",
+        lambda _machine_id, allow_missing: machine,
+    )
+
+    def fail(message):
+        raise ValueError(message)
+
+    monkeypatch.setattr(lifecycle, "_error_and_exit", fail)
+
+    with pytest.raises(ValueError, match="config.instance_type_id"):
         lifecycle.verify_machine_has_no_instance_type(
             SimpleNamespace(machine_under_test="machine-id")
         )

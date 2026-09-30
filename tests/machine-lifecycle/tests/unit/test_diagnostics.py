@@ -65,7 +65,13 @@ def _install_successful_probes(monkeypatch):
         lambda machine_id, allow_missing, timeout: {
             "id": machine_id,
             "state": "Ready",
-            "discovery_info": "must-not-be-collected",
+            "status": {
+                "discovery_info": "must-not-be-collected",
+                "interfaces": ["must-not-be-collected"],
+                "failure_details": "waiting for network",
+                "last_observation_time": "2026-09-03T00:00:00Z",
+                "health": {"alerts": [{"id": "DpuNetworkUnhealthy"}]},
+            },
         },
     )
     monkeypatch.setattr(
@@ -126,6 +132,11 @@ def test_collects_targeted_timeout_snapshot(monkeypatch, tmp_path, capsys):
     rendered = json.dumps(snapshot)
     assert snapshot["stage"] == "assignment"
     assert snapshot["managed_host"]["state"] == "Assigned/Configuring"
+    assert snapshot["machines"][HOST_ID]["status"] == {
+        "failure_details": "waiting for network",
+        "last_observation_time": "2026-09-03T00:00:00Z",
+        "health": {"alerts": [{"id": "DpuNetworkUnhealthy"}]},
+    }
     assert snapshot["dpus"][DPU_IDS[1]]["health"]["alerts"][0]["id"] == ("DpuNetworkUnhealthy")
     assert snapshot["desired_dpu_network_config"][DPU_IDS[0]] == {
         "instance_network_config_version": "instance-version-1",
@@ -427,6 +438,11 @@ def test_null_managed_host_dpus_do_not_abort_collection(monkeypatch, tmp_path):
     snapshot = json.loads(output_path.read_text(encoding="utf-8"))
     assert snapshot["managed_host"] == {}
     assert set(snapshot["dpus"]) == set(DPU_IDS)
+    assert snapshot["dpus"][DPU_IDS[0]]["machine_id"] == DPU_IDS[0]
+    assert snapshot["dpus"][DPU_IDS[0]]["health"]["alerts"] == [
+        {"id": "DpuNetworkUnhealthy"}
+    ]
+    assert "must-not-be-collected" not in json.dumps(snapshot)
     assert snapshot["desired_dpu_network_config"][DPU_IDS[0]] is not None
     assert snapshot["cloud"]["machine_status"] == "Provisioning"
 

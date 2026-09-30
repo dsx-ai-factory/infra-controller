@@ -24,7 +24,7 @@ use rpc::forge::{ExpectedSwitch, ExpectedSwitchList, ExpectedSwitchRequest, Link
 
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
-use crate::{async_write, async_writeln};
+use crate::{async_write, async_write_table_as_csv, async_writeln};
 
 enum ShowResult {
     Single(ExpectedSwitch),
@@ -36,33 +36,57 @@ enum RenderOutcome {
     TableRequired(ExpectedSwitchList),
 }
 
+// Keep the existing JSON and human-readable outputs unchanged. YAML uses the
+// same protobuf-shaped objects as JSON, but must not expose BMC credentials.
+fn redact_credentials(record: &mut ExpectedSwitch) {
+    if !record.bmc_password.is_empty() {
+        record.bmc_password = "***".to_string();
+    }
+    if let Some(password) = &mut record.nvos_password {
+        *password = "***".to_string();
+    }
+}
+
 async fn render_show_result(
     result: ShowResult,
     output_format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> CarbideCliResult<RenderOutcome> {
-    match result {
-        ShowResult::Single(expected_switch) => {
-            if output_format == OutputFormat::Json {
-                async_writeln!(
-                    output,
-                    "{}",
-                    serde_json::to_string_pretty(&expected_switch)?
-                )?;
-            } else {
-                async_writeln!(output, "{:#?}", expected_switch)?;
+    match (result, output_format) {
+        (ShowResult::Single(record), OutputFormat::Json) => {
+            async_writeln!(output, "{}", serde_json::to_string_pretty(&record)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::Single(mut record), OutputFormat::Yaml) => {
+            redact_credentials(&mut record);
+            async_write!(output, "{}", serde_yaml::to_string(&record)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::Single(record), OutputFormat::Csv) => {
+            // Reuse the list's table projection (and its field escaping) for a
+            // one-row CSV document. The caller fetches linked columns as usual.
+            Ok(RenderOutcome::TableRequired(ExpectedSwitchList {
+                expected_switches: vec![record],
+            }))
+        }
+        (ShowResult::Single(record), OutputFormat::AsciiTable) => {
+            async_writeln!(output, "{:#?}", record)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::List(records), OutputFormat::Json) => {
+            async_writeln!(output, "{}", serde_json::to_string_pretty(&records)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::List(mut records), OutputFormat::Yaml) => {
+            for record in &mut records.expected_switches {
+                redact_credentials(record);
             }
+            async_write!(output, "{}", serde_yaml::to_string(&records)?)?;
             Ok(RenderOutcome::Complete)
         }
-        ShowResult::List(expected_switches) if output_format == OutputFormat::Json => {
-            async_writeln!(
-                output,
-                "{}",
-                serde_json::to_string_pretty(&expected_switches)?
-            )?;
-            Ok(RenderOutcome::Complete)
+        (ShowResult::List(records), OutputFormat::Csv | OutputFormat::AsciiTable) => {
+            Ok(RenderOutcome::TableRequired(records))
         }
-        ShowResult::List(expected_switches) => Ok(RenderOutcome::TableRequired(expected_switches)),
     }
 }
 
@@ -107,8 +131,14 @@ pub(super) async fn show(
             }
         }));
 
-    convert_and_print_into_nice_table(output, &expected_switches, &linked_by_bmc_mac, &expected_mi)
-        .await?;
+    convert_and_print_into_nice_table(
+        output,
+        &expected_switches,
+        &linked_by_bmc_mac,
+        &expected_mi,
+        output_format,
+    )
+    .await?;
 
     Ok(())
 }
@@ -137,6 +167,7 @@ async fn convert_and_print_into_nice_table(
     expected_switches: &::rpc::forge::ExpectedSwitchList,
     linked_by_bmc_mac: &HashMap<String, LinkedExpectedSwitch>,
     expected_discovered_machine_interfaces: &HashMap<MacAddress, ::rpc::forge::MachineInterface>,
+    output_format: OutputFormat,
 ) -> CarbideCliResult<()> {
     let mut table = Box::new(Table::new());
 
@@ -193,7 +224,11 @@ async fn convert_and_print_into_nice_table(
         ]);
     }
 
-    async_write!(output, "{}", table)?;
+    if output_format == OutputFormat::Csv {
+        async_write_table_as_csv!(output, table)?;
+    } else {
+        async_write!(output, "{}", table)?;
+    }
 
     Ok(())
 }
@@ -244,5 +279,157 @@ mod tests {
             json["expected_switches"][0]["switch_serial_number"],
             "switch-1"
         );
+    }
+
+    #[tokio::test]
+    async fn yaml_output_is_one_redacted_document_for_single_list_and_empty() {
+        let mut record = expected_switch();
+        record.bmc_password = "SYNTHETIC_BMC_SECRET".into();
+        record.nvos_password = Some("SYNTHETIC_NVOS_SECRET".into());
+        record.metadata = Some(rpc::forge::Metadata {
+            name: "quoted \"name\"".into(),
+            description: "line one\nline two".into(),
+            ..Default::default()
+        });
+        let mut without_metadata = expected_switch();
+        without_metadata.bmc_mac_address = "00:11:22:33:44:66".into();
+        for (result, is_single, is_empty) in [
+            (ShowResult::Single(record.clone()), true, false),
+            (
+                ShowResult::List(ExpectedSwitchList {
+                    expected_switches: vec![record, without_metadata],
+                }),
+                false,
+                false,
+            ),
+            (ShowResult::List(ExpectedSwitchList::default()), false, true),
+        ] {
+            let mut captured = CapturedOutput::new();
+            let outcome = render_show_result(result, OutputFormat::Yaml, captured.writer())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, RenderOutcome::Complete));
+            let output = captured.into_bytes().await;
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(!text.contains("SYNTHETIC_BMC_SECRET"));
+            assert!(!text.contains("SYNTHETIC_NVOS_SECRET"));
+            let yaml: Value = serde_yaml::from_str(text).unwrap();
+            let item = if is_single {
+                &yaml
+            } else {
+                &yaml["expected_switches"][0]
+            };
+            if !is_empty {
+                assert_eq!(item["switch_serial_number"], "switch-1");
+                assert_eq!(item["bmc_password"], "***");
+                assert_eq!(item["metadata"]["description"], "line one\nline two");
+                if !is_single {
+                    assert!(yaml["expected_switches"][1]["metadata"].is_null());
+                    assert_eq!(yaml["expected_switches"][1]["bmc_password"], "");
+                    assert!(yaml["expected_switches"][1]["nvos_password"].is_null());
+                }
+                assert_eq!(item["nvos_password"], "***");
+            } else {
+                assert_eq!(yaml["expected_switches"].as_array().unwrap().len(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn csv_output_has_one_header_and_escaped_rows() {
+        let mut record = expected_switch();
+        record.bmc_password = "SYNTHETIC_BMC_SECRET".into();
+        record.nvos_password = Some("SYNTHETIC_NVOS_SECRET".into());
+        record.metadata = Some(rpc::forge::Metadata {
+            name: "quoted \"name\"".into(),
+            description: "line one,\nline two".into(),
+            ..Default::default()
+        });
+        let mut without_metadata = expected_switch();
+        without_metadata.bmc_mac_address = "00:11:22:33:44:66".into();
+        for (result, row_count) in [
+            (ShowResult::Single(record.clone()), 1),
+            (
+                ShowResult::List(ExpectedSwitchList {
+                    expected_switches: vec![record, without_metadata],
+                }),
+                2,
+            ),
+            (ShowResult::List(ExpectedSwitchList::default()), 0),
+        ] {
+            let mut captured = CapturedOutput::new();
+            let outcome = render_show_result(result, OutputFormat::Csv, captured.writer())
+                .await
+                .unwrap();
+            let RenderOutcome::TableRequired(records) = outcome else {
+                panic!("CSV must use the table projection");
+            };
+            convert_and_print_into_nice_table(
+                captured.writer(),
+                &records,
+                &HashMap::new(),
+                &HashMap::new(),
+                OutputFormat::Csv,
+            )
+            .await
+            .unwrap();
+            let output = captured.into_bytes().await;
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(!text.contains("SYNTHETIC_BMC_SECRET"));
+            assert!(!text.contains("SYNTHETIC_NVOS_SECRET"));
+            let mut reader = csv::Reader::from_reader(output.as_slice());
+            let headers = reader.headers().unwrap().clone();
+            assert!(headers.iter().any(|header| header == "Description"));
+            let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows.len(), row_count);
+            if let Some(row) = rows.first() {
+                assert_eq!(
+                    row.get(
+                        headers
+                            .iter()
+                            .position(|header| header == "Description")
+                            .unwrap()
+                    ),
+                    Some("line one,\nline two")
+                );
+                assert_eq!(
+                    row.get(headers.iter().position(|header| header == "Name").unwrap()),
+                    Some("quoted \"name\"")
+                );
+                assert_eq!(
+                    row.get(
+                        headers
+                            .iter()
+                            .position(|header| header == "NVOS Password")
+                            .unwrap()
+                    ),
+                    Some("***")
+                );
+            }
+            if row_count == 2 {
+                assert_eq!(
+                    rows[1].get(headers.iter().position(|header| header == "Name").unwrap()),
+                    Some("")
+                );
+                assert_eq!(
+                    rows[1].get(
+                        headers
+                            .iter()
+                            .position(|header| header == "Labels")
+                            .unwrap()
+                    ),
+                    Some("")
+                );
+                assert_eq!(
+                    rows[1].get(
+                        headers
+                            .iter()
+                            .position(|header| header == "NVOS Password")
+                            .unwrap()
+                    ),
+                    Some("")
+                );
+            }
+        }
     }
 }

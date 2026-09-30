@@ -361,7 +361,7 @@ componentManager:
 ## not run RMS.
 ##
 ## NVL72 / NVL72_GB300 and machine-a-tron's vendor-qualified rack profiles
-## ship in the global toml; override OEM vendors via site-config merge.
+## ship in the global toml; override OEM vendors (or add test profiles) via site-config merge.
 ##
 ## Enabling BEFORE rack-manager is deployed is safe: the client is constructed
 ## lazily and every RMS-backed operation guards on it, so Core runs healthy

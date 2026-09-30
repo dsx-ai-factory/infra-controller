@@ -245,6 +245,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
         http.response.status_code = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
         bmc.ip_address = tracing::field::Empty,
+        bmc_proxy.class = tracing::field::Empty,
         logfmt.suppress = true,
     );
     set_span_parent_from_headers(&request_span, request.headers());
@@ -270,6 +271,11 @@ async fn proxy_request_inner(
     if !state.allows(&request) {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     }
+    let class = state
+        .config
+        .classes
+        .classify(request.method(), request.uri().path());
+    tracing::Span::current().record("bmc_proxy.class", class.name.as_str());
     let (parts, body) = request.into_parts();
     let forwarded_target = forwarded_header_value(&parts.headers)
         .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?
@@ -330,6 +336,7 @@ async fn proxy_request_inner(
         &parts,
         path_and_query.clone(),
         &mut upstream_body,
+        class.upstream_timeout,
     )
     .await?;
 
@@ -352,6 +359,7 @@ async fn proxy_request_inner(
             &parts,
             path_and_query,
             &mut upstream_body,
+            class.upstream_timeout,
         )
         .await?;
     }

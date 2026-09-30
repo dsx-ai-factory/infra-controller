@@ -23,24 +23,30 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use carbide_authn::middleware::AuthContext;
+use carbide_instrument::testing::MetricsCapture;
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_utils::redfish::redfish_basic_authorization_context;
+use futures_util::StreamExt;
 use mac_address::MacAddress;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use rpc::forge;
 use rpc::forge::find_bmc_ips_request::LookupBy;
 use rpc::forge_api_client::ForgeApiClient;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::proxy::credentials::BmcCredentials;
 use crate::proxy::test_support::*;
@@ -65,6 +71,19 @@ const UPLOAD_PATH: &str = "/redfish/v1/UpdateService/upload";
 const ROTATED_PATH: &str = "/redfish/v1/Rotated";
 /// Rejects every credential, echoing the password it was sent.
 const REJECTING_PATH: &str = "/redfish/v1/UpdateService/rejecting";
+/// Answers after [`SLOW_ANSWER_DELAY`].
+const SLOW_PATH: &str = "/redfish/v1/Slow";
+/// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
+/// after [`SLOW_ANSWER_DELAY`].
+const SLOW_ROTATED_PATH: &str = "/redfish/v1/SlowRotated";
+/// Answers at once with part of its body, and sends the rest after
+/// [`SLOW_ANSWER_DELAY`].
+const SLOW_BODY_PATH: &str = "/redfish/v1/SlowBody";
+/// Ten times [`QUICK_CLASS`]'s budget, and a third of the default budget:
+/// a request held to its class's budget is cut off long before the BMC
+/// answers, and one held to the default budget gets the answer. A test
+/// waits only for the budget, never for this.
+const SLOW_ANSWER_DELAY: Duration = Duration::from_secs(20);
 
 fn fake_bmc_mac() -> MacAddress {
     MacAddress::new([0x02, 0, 0, 0, 0, 0x08])
@@ -143,6 +162,26 @@ async fn fake_bmc_handler(
             SYSTEM_BODY.into_response()
         }
         (Method::GET, ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
+        (Method::GET, SLOW_PATH) => {
+            tokio::time::sleep(SLOW_ANSWER_DELAY).await;
+            SYSTEM_BODY.into_response()
+        }
+        (Method::GET, SLOW_BODY_PATH) => {
+            let parts = futures_util::stream::iter([false, true]).then(|late| async move {
+                if late {
+                    tokio::time::sleep(SLOW_ANSWER_DELAY).await;
+                }
+                Ok::<_, Infallible>(Bytes::from_static(b"{}"))
+            });
+            Body::from_stream(parts).into_response()
+        }
+        (Method::GET, SLOW_ROTATED_PATH)
+            if authorization == Some(basic(FRESH_PASSWORD).as_str()) =>
+        {
+            tokio::time::sleep(SLOW_ANSWER_DELAY).await;
+            SYSTEM_BODY.into_response()
+        }
+        (Method::GET, SLOW_ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
         (_, REJECTING_PATH) => {
             let sent = [BMC_PASSWORD, FRESH_PASSWORD]
                 .into_iter()
@@ -327,6 +366,16 @@ fn root_password() -> BmcCredentials {
 /// whose ACL grants the anonymous caller `acl`, and which holds
 /// `credentials` for [`FAKE_BMC_IP`] so no nico-api call is made.
 async fn proxy_to(upstream: &str, acl: &str, credentials: BmcCredentials) -> BmcProxyState {
+    proxy_configured(upstream, acl, "", credentials).await
+}
+
+/// [`proxy_to`], with the `[[class]]` tables `classes`.
+async fn proxy_configured(
+    upstream: &str,
+    acl: &str,
+    classes: &str,
+    credentials: BmcCredentials,
+) -> BmcProxyState {
     let state = test_state_with_config(&format!(
         r#"
         bmc_proxy = "{upstream}"
@@ -341,6 +390,8 @@ async fn proxy_to(upstream: &str, acl: &str, credentials: BmcCredentials) -> Bmc
 
         [auth.acls]
         anonymous = {acl}
+
+        {classes}
         "#
     ));
     state
@@ -593,6 +644,18 @@ struct Rejected {
     body_len: usize,
 }
 
+/// Which credential a request reached the BMC with.
+fn credential_sent(received: &Received) -> &'static str {
+    let sent = values(&received.headers, "authorization");
+    if sent == [basic(BMC_PASSWORD)] {
+        "cached"
+    } else if sent == [basic(FRESH_PASSWORD)] {
+        "fresh"
+    } else {
+        "other"
+    }
+}
+
 /// What a request the BMC rejects for its credential leads to: (status the
 /// caller got, the password each attempt carried, the password cached
 /// afterwards, whether the caller saw either password).
@@ -613,20 +676,7 @@ async fn after_rejection(input: Rejected) -> (u16, Vec<&'static str>, Option<Str
     };
     let answer = exchange(&state, request).await;
 
-    let attempts = bmc
-        .received()
-        .iter()
-        .map(|received| {
-            let sent = values(&received.headers, "authorization");
-            if sent == [basic(BMC_PASSWORD)] {
-                "cached"
-            } else if sent == [basic(FRESH_PASSWORD)] {
-                "fresh"
-            } else {
-                "other"
-            }
-        })
-        .collect();
+    let attempts = bmc.received().iter().map(credential_sent).collect();
     let cached = match state
         .credential_cache
         .get(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
@@ -828,6 +878,145 @@ async fn requests_the_proxy_does_not_deliver() {
             },
         ],
         |input| async { Ok::<_, Infallible>(refusal(input).await) },
+    )
+    .await;
+}
+
+/// A class for `GET`s of the slow paths. Its budget is far shorter than
+/// [`SLOW_ANSWER_DELAY`], and long enough for an attempt to reach the BMC
+/// even on a loaded machine.
+const QUICK_CLASS: &str = r#"
+    [[class]]
+    name = "quick"
+    match = [
+        "GET /redfish/v1/Slow",
+        "GET /redfish/v1/SlowRotated",
+        "GET /redfish/v1/SlowBody",
+    ]
+    upstream_timeout = "2s"
+"#;
+
+/// What a request for `method` on `path` gets from a proxy with
+/// [`QUICK_CLASS`]: (status the caller got, whether the body arrived
+/// "whole" or was "cut off", the credential each attempt at the BMC
+/// carried).
+async fn under_the_quick_class(
+    (method, path): (Method, &'static str),
+) -> (u16, &'static str, Vec<&'static str>) {
+    let (addr, bmc) = spawn_fake_bmc();
+    let mut state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        QUICK_CLASS,
+        root_password(),
+    )
+    .await;
+    state.api_client = fake_nico_api().await;
+
+    // The request emits metrics that other tests measure, so it is sent
+    // inside their serialized window.
+    let _metrics = MetricsCapture::start();
+    let request = proxied(method, path, to_the_bmc(), &[], Body::empty());
+    let response = match proxy_request(axum::extract::State(state.clone()), request).await {
+        Ok(response) | Err(response) => response,
+    };
+    let status = response.status().as_u16();
+    let body = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+        Ok(_) => "whole",
+        Err(_) => "cut off",
+    };
+    let attempts = bmc.received().iter().map(credential_sent).collect();
+    (status, body, attempts)
+}
+
+/// A request is held to its class's upstream budget, response body and
+/// replay with fresh credentials included.
+#[tokio::test]
+async fn a_request_is_held_to_its_classs_budget() {
+    check_cases_async(
+        [
+            Case {
+                scenario: "the BMC answers after the budget, classified by path alone",
+                input: (Method::GET, "/redfish/v1/Slow?$select=PowerState"),
+                expect: Yields((502, "whole", vec!["cached"])),
+            },
+            Case {
+                scenario: "the replay with fresh credentials is answered after the budget",
+                input: (Method::GET, SLOW_ROTATED_PATH),
+                expect: Yields((502, "whole", vec!["cached", "fresh"])),
+            },
+            Case {
+                scenario: "the body is still streaming when the budget runs out",
+                input: (Method::GET, SLOW_BODY_PATH),
+                expect: Yields((200, "cut off", vec!["cached"])),
+            },
+        ],
+        |input| async move { Ok::<_, Infallible>(under_the_quick_class(input).await) },
+    )
+    .await;
+}
+
+/// Keeps tracing's process-wide callsite cache interested in every span, as
+/// `carbide_instrument::testing` does for its captures. Without it, while a
+/// test's thread-local subscriber is the only one alive, other threads can
+/// cache the request span's callsite as unwanted, and the span is never
+/// created.
+fn keep_callsites_enabled() {
+    static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
+    DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+}
+
+/// What a request for `method` on [`SLOW_PATH`] that names no BMC gets from a
+/// proxy with [`QUICK_CLASS`]: (status the caller got, the class its trace
+/// span names). The proxy refuses the request right after classifying it,
+/// so no task outlives the capture: a span such a task closed after the
+/// capture ended would reach a subscriber that never saw it.
+async fn class_on_the_span(method: Method) -> (u16, String) {
+    keep_callsites_enabled();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _traced = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+    let state = proxy_configured(":1", r#"["/**"]"#, QUICK_CLASS, root_password()).await;
+    let answer = exchange(&state, proxied(method, SLOW_PATH, None, &[], Body::empty())).await;
+    let span = exporter
+        .get_finished_spans()
+        .expect("finished spans")
+        .into_iter()
+        .find(|span| span.name == "bmc_proxy_request")
+        .expect("the request span is exported");
+    let class = span
+        .attributes
+        .into_iter()
+        .find(|attribute| attribute.key.as_str() == "bmc_proxy.class")
+        .map_or_else(
+            || "(none)".to_string(),
+            |attribute| attribute.value.to_string(),
+        );
+    (answer.status, class)
+}
+
+/// A request's trace span names the class it was classified into.
+#[tokio::test]
+async fn the_request_span_names_its_class() {
+    check_cases_async(
+        [
+            Case {
+                scenario: "a class pattern matches",
+                input: Method::GET,
+                expect: Yields((400, "quick".to_string())),
+            },
+            Case {
+                scenario: "no class pattern matches",
+                input: Method::POST,
+                expect: Yields((400, "default".to_string())),
+            },
+        ],
+        |method| async move { Ok::<_, Infallible>(class_on_the_span(method).await) },
     )
     .await;
 }

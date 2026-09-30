@@ -493,7 +493,9 @@ for the complete Helm guidance.
 (used by `nico-bmc-proxy` and other authenticating proxies). The example
 ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
-is the reference.
+is the reference. `nico-bmc-proxy` also takes `[[class]]` tables that set how
+long it waits on a BMC for groups of requests; see
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class).
 
 ### DPU configuration — `[dpu_config]`
 
