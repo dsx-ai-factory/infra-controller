@@ -151,8 +151,8 @@ func TestDomain_MarshalJSON(t *testing.T) {
 
 	var response map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &response))
-	require.Len(t, response, 6)
-	for _, field := range []string{"id", "name", "siteId", "tenantId", "created", "updated"} {
+	require.Len(t, response, 7)
+	for _, field := range []string{"id", "name", "siteId", "tenantId", "status", "created", "updated"} {
 		require.Contains(t, response, field)
 	}
 	require.NotContains(t, response, "controllerDomainId")
