@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -121,6 +122,9 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 type DomainDAO interface {
 	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
 	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
+	ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error)
+	CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error)
+	DeferRecovery(ctx context.Context, id, token uuid.UUID, delay time.Duration) (bool, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, error)
 	//
@@ -243,6 +247,73 @@ func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, core
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// ClaimRecovery leases only previously reserved REST-owned intents. SKIP LOCKED
+// prevents two replicas from claiming the same row concurrently; the persisted
+// token fences completions by workers whose leases have expired. The Core
+// operations themselves must remain idempotent and version-fenced: a DB lease
+// cannot stop an already dispatched Site RPC from arriving late.
+func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error) {
+	if maxRows < 1 || maxRows > 32 || lease < time.Second || lease > 5*time.Minute {
+		return nil, fmt.Errorf("invalid Domain recovery claim bounds")
+	}
+	claimed := []Domain{}
+	err := dsd.dbSession.DB.NewRaw(`
+		WITH due AS (
+			SELECT id FROM domain
+			WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
+			AND controller_domain_id IS NOT NULL AND status IN (?, ?)
+			AND (recovery_next_at IS NULL OR recovery_next_at <= current_timestamp)
+			AND (recovery_lease_until IS NULL OR recovery_lease_until <= current_timestamp)
+			ORDER BY updated, id LIMIT ? FOR UPDATE SKIP LOCKED
+		)
+		UPDATE domain AS d SET recovery_token = gen_random_uuid(),
+			recovery_lease_until = current_timestamp + (? * interval '1 second'),
+			recovery_attempts = recovery_attempts + 1
+		FROM due WHERE d.id = due.id RETURNING d.*`,
+		DomainStatusPending, DomainStatusDeleting, maxRows, lease.Seconds()).Scan(ctx, &claimed)
+	return claimed, err
+}
+
+// CompleteRecovery accepts only the worker that still holds an unexpired
+// lease and only the immutable reserved Core identity from the claim.
+func (dsd DomainSQLDAO) CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error) {
+	if token == uuid.Nil || coreID == uuid.Nil || (from != DomainStatusPending && from != DomainStatusDeleting) ||
+		(!softDelete && to != DomainStatusReady) || (softDelete && from != DomainStatusDeleting) {
+		return false, fmt.Errorf("invalid Domain recovery completion")
+	}
+	q := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
+		Set("status = ?", to).Set("updated = current_timestamp").
+		Set("recovery_token = NULL").Set("recovery_lease_until = NULL").Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token = ? AND recovery_lease_until > current_timestamp AND deleted IS NULL", id, coreID, from, token)
+	if softDelete {
+		q = q.Set("deleted = current_timestamp")
+	}
+	result, err := q.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// DeferRecovery releases a claim after an uncertain Site reply; the durable
+// row remains retriable without dropping its owner, intent, or Core ID.
+func (dsd DomainSQLDAO) DeferRecovery(ctx context.Context, id, token uuid.UUID, delay time.Duration) (bool, error) {
+	if token == uuid.Nil || delay < time.Second || delay > time.Hour {
+		return false, fmt.Errorf("invalid Domain recovery delay")
+	}
+	result, err := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
+		Set("recovery_token = NULL").Set("recovery_lease_until = NULL").
+		Set("recovery_next_at = current_timestamp + (? * interval '1 second')", delay.Seconds()).
+		Where("id = ? AND recovery_token = ? AND recovery_lease_until > current_timestamp AND status IN (?, ?) AND deleted IS NULL", id, token, DomainStatusPending, DomainStatusDeleting).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 // GetByID returns a Domain by ID

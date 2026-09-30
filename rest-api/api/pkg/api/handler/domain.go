@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,7 +80,8 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 	// proxy timeout can conceal a successfully executed Core write.
 	domainDAO := cdbm.NewDomainDAO(cdh.dbSession)
 	coreID := uuid.New()
-	domain, inserted, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (*cdbm.Domain, error) {
+	inserted := false
+	domain, err := cdb.WithTxResult(ctx, cdh.dbSession, func(tx *cdb.Tx) (*cdbm.Domain, error) {
 		row, fresh, reserveErr := domainDAO.ReserveOwned(ctx, tx, cdbm.DomainCreateInput{
 			Hostname: apiRequest.Name, Org: org, TenantID: &tenant.ID, SiteID: &site.ID,
 			ControllerDomainID: &coreID, Status: cdbm.DomainStatusPending, CreatedBy: dbUser.ID,
@@ -369,24 +371,42 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, &corev1.DomainDeletionRequest{
-		Id: &corev1.DomainId{Value: domain.ControllerDomainID.String()},
-	}, nil, site.ID.String())
-	if apiErr != nil && apiErr.Code != http.StatusNotFound {
-		logAPIError(logger, apiErr, "failed to delete Domain via Core proxy")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-	if apiErr != nil {
-		logger.Warn().Str("domainID", domain.ID.String()).Str("controllerDomainID", domain.ControllerDomainID.String()).Msg("Domain not found in Core, removing stale REST projection")
+	// Commit Deleting before contacting Core. This blocks new REST subnet
+	// references and leaves a recoverable owner/Core-ID mapping if a proxy
+	// times out, the API process exits, or the final REST write fails.
+	domainDAO := cdbm.NewDomainDAO(ddh.dbSession)
+	if domain.Status != cdbm.DomainStatusDeleting {
+		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
+		}
+		changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
+			return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, domain.Status, cdbm.DomainStatusDeleting)
+		})
+		if transitionErr != nil {
+			return common.HandleTxError(c, logger, transitionErr, "Failed to reserve Domain deletion, DB transaction error")
+		}
+		if !changed {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain changed while reserving deletion", nil)
+		}
 	}
 
-	domainDAO := cdbm.NewDomainDAO(ddh.dbSession)
+	// Cancellation creates a terminal Core tombstone if a late reserved-ID
+	// create has not yet arrived. A plain not-found delete cannot close that
+	// race, and a timeout is NEVER interpreted as successful deletion.
+	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, &corev1.DomainDeletionRequest{
+		Id: &corev1.DomainId{Value: domain.ControllerDomainID.String()}, CancelReservedId: true,
+	}, nil, site.ID.String())
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "Domain deletion is unconfirmed; durable Deleting reservation retained")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
 	err = cdb.WithTx(ctx, ddh.dbSession, func(tx *cdb.Tx) error {
 		return domainDAO.Delete(ctx, tx, domain.ID)
 	})
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to delete Domain from REST DB")
-		return common.HandleTxError(c, logger, err, "Failed to delete Domain, DB transaction error")
+		logger.Error().Err(err).Str("domainID", domain.ID.String()).Msg("Core deletion confirmed but REST projection still Deleting")
+		return common.HandleTxError(c, logger, err, "Failed to finalize Domain deletion, DB transaction error")
 	}
 
 	return c.NoContent(http.StatusNoContent)

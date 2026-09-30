@@ -483,10 +483,11 @@ func TestGeneratedCommandInfos_DomainAndSubnetSurface(t *testing.T) {
 	}
 
 	for name, operationID := range map[string]string{
-		"domain create":     "create-domain",
-		"domain list":       "get-all-domain",
-		"domain get":        "get-domain",
-		"domain delete":     "delete-domain",
+		"dns-domain create": "create-domain",
+		"dns-domain list":   "get-all-domain",
+		"dns-domain get":    "get-domain",
+		"dns-domain delete": "delete-domain",
+		"domain get":        "get-nvlink-domain",
 		"subnet create":     "create-subnet",
 		"subnet attach-vpc": "attach-vpc-to-subnet",
 	} {
@@ -495,9 +496,27 @@ func TestGeneratedCommandInfos_DomainAndSubnetSurface(t *testing.T) {
 		assert.Equal(t, operationID, info.OperationID)
 	}
 
+	// Tenant DNS Domain and pre-existing NVLink fabric Domain are distinct:
+	// never repurpose fabric `domain get` for tenant data.
+	for _, test := range []struct {
+		command, method, path string
+	}{
+		{"dns-domain create", http.MethodPost, "/v2/org/{org}/nico/domain"},
+		{"dns-domain list", http.MethodGet, "/v2/org/{org}/nico/domain"},
+		{"dns-domain get", http.MethodGet, "/v2/org/{org}/nico/domain/{domainId}"},
+		{"dns-domain delete", http.MethodDelete, "/v2/org/{org}/nico/domain/{domainId}"},
+		{"domain get", http.MethodGet, "/v2/org/{org}/nico/domain/nvlink/{id}"},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			info := infos[test.command]
+			assert.Equal(t, test.method, info.Method)
+			assert.Equal(t, test.path, info.Path)
+		})
+	}
+
 	for name, expectedFlags := range map[string][]string{
-		"domain create":     {"name", "site-id"},
-		"domain list":       {"site-id", "tenant-id", "page-number", "page-size", "order-by"},
+		"dns-domain create": {"name", "site-id"},
+		"dns-domain list":   {"site-id", "tenant-id", "page-number", "page-size", "order-by"},
 		"subnet create":     {"subdomain-id"},
 		"subnet attach-vpc": {"vpc-id", "allow-replace"},
 	} {
@@ -509,6 +528,8 @@ func TestGeneratedCommandInfos_DomainAndSubnetSurface(t *testing.T) {
 			assert.Containsf(t, flagNames, expectedFlag, "%s flag", name)
 		}
 	}
+}
+
 func TestGeneratedCommandInfos_ExpectedInventoryBulkPaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)

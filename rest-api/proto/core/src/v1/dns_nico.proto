@@ -134,6 +134,9 @@ message CreateDomainRequest {
   // range are rejected with INVALID_ARGUMENT. Absent means the site default
   // of 300.
   optional uint32 default_ttl = 2;
+  // Internal REST ownership-index retry: reserve this ID durably before creating
+  // the zone. Omit for legacy callers; never accept an unowned tenant ID.
+  common.DomainId reserved_id = 3;
 }
 
 message UpdateDomainRequest {
@@ -150,6 +153,10 @@ message DomainSearchQuery {
 
 message DomainDeletionRequest {
   common.DomainId id = 1;
+  // Internal SiteAgent-only cancellation of an owned, durably reserved ID.
+  // On an absent ID this records a terminal tombstone so a delayed CreateDomain
+  // cannot resurrect the zone. Omit for legacy/admin CLI deletes.
+  bool cancel_reserved_id = 2;
 }
 
 message DomainDeletionResult{

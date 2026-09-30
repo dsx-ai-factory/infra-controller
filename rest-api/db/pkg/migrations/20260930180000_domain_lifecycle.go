@@ -5,6 +5,7 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/uptrace/bun"
@@ -15,13 +16,53 @@ func init() {
 }
 
 func domainLifecycleUpMigration(ctx context.Context, db *bun.DB) error {
+	// Detect duplicates before installing the index. Historical REST rows may
+	// contain equivalent dotted/case variants; never choose a winner or infer
+	// Core ownership from a name. Fail with the exact rows to reconcile.
+	var tenantID, siteID, name, conflictingIDs string
+	err := db.QueryRowContext(ctx, `
+		SELECT tenant_id::text, site_id::text, lower(rtrim(hostname, '.')),
+			string_agg(id::text, ', ' ORDER BY id::text)
+		FROM domain
+		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
+		AND controller_domain_id IS NOT NULL
+		GROUP BY tenant_id, site_id, lower(rtrim(hostname, '.'))
+		HAVING count(*) > 1 LIMIT 1
+	`).Scan(&tenantID, &siteID, &name, &conflictingIDs)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("inspect preexisting owned Domain reservations: %w", err)
+	}
+	if err == nil {
+		return fmt.Errorf("cannot enforce owned Domain uniqueness: tenant %s site %s normalized name %q has conflicting REST row IDs [%s]; reconcile existing ownership before migration", tenantID, siteID, name, conflictingIDs)
+	}
 	// Only REST-owned reservations participate. Existing unowned inventory rows
 	// remain untouched; a name never establishes Core ownership.
-	_, err := db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		CREATE UNIQUE INDEX domain_owned_name_idx
 		ON domain (tenant_id, site_id, lower(rtrim(hostname, '.')))
 		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
 		AND controller_domain_id IS NOT NULL
+	`)
+	if err != nil {
+		return err
+	}
+	// Recovery claims are durable across workflow-worker restarts and expire
+	// automatically. Legacy/inventory Domain rows are never eligible.
+	_, err = db.ExecContext(ctx, `
+		ALTER TABLE domain
+		ADD COLUMN recovery_token uuid,
+		ADD COLUMN recovery_lease_until timestamptz,
+		ADD COLUMN recovery_next_at timestamptz,
+		ADD COLUMN recovery_attempts integer NOT NULL DEFAULT 0
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+		CREATE INDEX domain_recovery_due_idx ON domain (recovery_next_at, updated, id)
+		WHERE deleted IS NULL AND tenant_id IS NOT NULL AND site_id IS NOT NULL
+		AND controller_domain_id IS NOT NULL
+		AND status IN ('DomainStatusPending', 'DomainStatusDeleting')
 	`)
 	if err != nil {
 		return err
