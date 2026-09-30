@@ -49,9 +49,12 @@ tenant-owned REST IDs; Core DNS IDs are not accepted from clients.
 Repeating the same authenticated tenant/Site/normalized name creation
 intent returns the same reserved Domain (202 while Pending, 200 once
 Ready), not a new Core Domain or an adoption by DNS name. After 202,
-poll GET on the returned Domain ID until status is Ready before using
-that REST ID as a Subnet subdomainId. Pending, Deleting and Error are
-not usable for Subnet creation; a 504 does not prove that a Core write
+poll GET on the returned Domain ID until status is Ready or Error.
+Only Ready may be used as a Subnet subdomainId. Error is terminal and
+unusable: an identical create retry returns 409; an authorized caller
+can delete the owned REST Domain ID for that Site before retrying a
+new create. Pending and Deleting are also unusable for Subnet creation;
+a 504 does not prove that a Core write
 was rolled back. A create timeout at the Core proxy normally returns
 202 Pending here, not 504. Tenant-managed DNS zones cannot claim a
 reverse DNS zone, or equal/contain/be contained by an existing Site
