@@ -108,7 +108,7 @@ func runCreateDomainHandlerSuccess(t *testing.T) {
 
 	var response model.APIDomain
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-	assert.Equal(t, cdbm.DomainStatusReady, response.Status)
+	assert.Equal(t, "Ready", response.Status)
 	assert.Equal(t, fixture.tenant.ID.String(), response.TenantID)
 	assert.Equal(t, fixture.site.ID.String(), response.SiteID)
 	assert.Equal(t, "tenant.example.com", response.Name)
