@@ -246,6 +246,49 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Nil(t, f.blocks(t)[0].Deleted)
 			require.Nil(t, f.inventorySite(t).SitePrefixInventoryObservedAt)
 		}},
+		{"late final page in the current collection is reconciled", func(t *testing.T, f fixture) {
+			ids := []string{uuid.NewString(), uuid.NewString()}
+			slices.Sort(ids)
+			first := testInventory(testPrefix())
+			first.SitePrefixes[0].Id.Value = ids[0]
+			first.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 2, PageSize: 1, ItemIds: ids}
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, first))
+
+			// Backdate the accepted collection and its receipt to model four
+			// minutes passing without sleeping.
+			first.Timestamp = timestamppb.New(time.Now().Add(-4 * time.Minute))
+			progress := f.inventorySite(t).SitePrefixInventoryProgress
+			progress.ReportedAt = first.Timestamp.AsTime()
+			receipt := progress.Pages[1]
+			hash, err := validatePage(first)
+			require.NoError(t, err)
+			receipt.Hash = hash
+			progress.Pages[1] = receipt
+			_, err = cdbm.NewSiteDAO(f.session).Update(ctx, nil, cdbm.SiteUpdateInput{
+				SiteID: f.site.ID, SitePrefixInventoryProgress: progress,
+			})
+			require.NoError(t, err)
+
+			final := proto.Clone(first).(*corev1.SitePrefixInventory)
+			final.InventoryPage.CurrentPage = 2
+			final.SitePrefixes[0].Id.Value = ids[1]
+			final.SitePrefixes[0].Config.Prefix = "10.1.0.0/24"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, final))
+			block, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, uuid.MustParse(ids[1]))
+			require.NoError(t, err)
+			require.Equal(t, "10.1.0.0", block.Prefix)
+			saved := f.inventorySite(t).SitePrefixInventoryProgress
+			require.Equal(t, progress.ReportedAt, saved.ReportedAt)
+			require.Len(t, saved.Pages, 2)
+			require.Equal(t, receipt, saved.Pages[1])
+			hash, err = validatePage(final)
+			require.NoError(t, err)
+			require.Equal(t, cdbm.SitePrefixInventoryPage{
+				Hash: hash, ItemIDs: []string{ids[1]}, DeferredIDs: []string{},
+			}, saved.Pages[2])
+			require.EqualValues(t, 2, saved.FinalPage)
+			require.Nil(t, f.inventorySite(t).SitePrefixInventoryObservedAt)
+		}},
 		{"failure diagnostics do not change progress or resources", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
