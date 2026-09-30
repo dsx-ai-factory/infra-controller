@@ -29,11 +29,12 @@ import (
 // contain only a subset of components (e.g., those selected for an operation).
 // Always verify the context in which a Rack object is used.
 type Rack struct {
-	Info        deviceinfo.DeviceInfo `json:"info"`
-	ExternalID  string                `json:"external_id,omitempty"`
-	Loc         location.Location     `json:"loc"`
-	Components  []component.Component `json:"components"`
-	NVLDomainID uuid.UUID             `json:"nvl_domain_id"`
+	RackProfileID *string               `json:"rack_profile_id,omitempty"`
+	Info          deviceinfo.DeviceInfo `json:"info"`
+	ExternalID    string                `json:"external_id,omitempty"`
+	Loc           location.Location     `json:"loc"`
+	Components    []component.Component `json:"components"`
+	NVLDomainID   uuid.UUID             `json:"nvl_domain_id"`
 	// OperationStatus is derived from supported active components in the rack.
 	// It is an operability summary, not the Core rack controller lifecycle state.
 	OperationStatus types.Phase `json:"operation_status"`

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -842,7 +843,29 @@ func ComponentOperationStatusTo(s *types.ComponentOperationStatus) *pb.Component
 	}
 }
 
-// RackTo converts an internal Rack to a protobuf Rack
+// NVLinkDomainFromRack projects rack inventory into domain inventory.
+func NVLinkDomainFromRack(r *pb.Rack) *pb.NVLinkDomain {
+	if r == nil {
+		return nil
+	}
+	d := &pb.NVLinkDomain{
+		Id: r.GetExternalId(), Name: r.GetInfo().GetName(),
+		OperationStatus: r.GetOperationStatus(), Components: r.GetComponents(),
+	}
+	profile := strings.TrimSuffix(r.GetRackProfileId(), "_NO_POWERSHELF")
+	for _, suffix := range []string{"_WIWYNN", "_LENOVO", "_SMC", "_NVIDIA"} {
+		if strings.HasSuffix(profile, suffix) {
+			topology := strings.TrimSuffix(profile, suffix)
+			if topology != "" {
+				d.Topology = &topology
+			}
+			break
+		}
+	}
+	return d
+}
+
+// RackTo converts an internal Rack to a protobuf Rack.
 func RackTo(r *rack.Rack) *pb.Rack {
 	if r == nil {
 		return nil
@@ -859,6 +882,7 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	result := &pb.Rack{
 		Info:            DeviceInfoTo(&r.Info),
 		ExternalId:      r.ExternalID,
+		RackProfileId:   r.RackProfileID,
 		Location:        LocationTo(&r.Loc),
 		Components:      components,
 		OperationStatus: PhaseTo(r.OperationStatus),
@@ -1297,7 +1321,9 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 		domains := make([]*pb.NVLDomainTarget, 0, len(ts.NVLDomains))
 		for _, domain := range ts.NVLDomains {
 			target := &pb.NVLDomainTarget{}
-			if domain.Identifier.ID != uuid.Nil {
+			if domain.Identifier.ExternalID != "" {
+				target.Identifier = &pb.NVLDomainTarget_ExternalId{ExternalId: domain.Identifier.ExternalID}
+			} else if domain.Identifier.ID != uuid.Nil {
 				target.Identifier = &pb.NVLDomainTarget_Id{
 					Id: UUIDTo(domain.Identifier.ID),
 				}
@@ -1306,7 +1332,7 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 					Name: domain.Identifier.Name,
 				}
 			} else {
-				return nil, fmt.Errorf("invalid NVLink domain target: neither id nor name is set")
+				return nil, fmt.Errorf("invalid NVLink domain target: neither id, external_id, nor name is set")
 			}
 
 			for _, componentType := range domain.ComponentTypes {
@@ -1373,6 +1399,11 @@ func NVLDomainTargetFrom(dt *pb.NVLDomainTarget) (operation.NVLDomainTarget, err
 
 	var target operation.NVLDomainTarget
 	switch id := dt.GetIdentifier().(type) {
+	case *pb.NVLDomainTarget_ExternalId:
+		if strings.TrimSpace(id.ExternalId) == "" {
+			return operation.NVLDomainTarget{}, fmt.Errorf("NVLink domain external id must not be blank")
+		}
+		target.Identifier.ExternalID = id.ExternalId
 	case *pb.NVLDomainTarget_Id:
 		parsed, err := uuid.Parse(id.Id.GetId())
 		if err != nil {
@@ -1388,7 +1419,7 @@ func NVLDomainTargetFrom(dt *pb.NVLDomainTarget) (operation.NVLDomainTarget, err
 		target.Identifier.Name = id.Name
 	default:
 		return operation.NVLDomainTarget{}, fmt.Errorf(
-			"NVLink domain target must have either id or name set",
+			"NVLink domain target must have id, external_id, or name set",
 		)
 	}
 

@@ -307,3 +307,10 @@ API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'else' subschema to 
 
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
 API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/security`
+
+# Domain IDs previously required UUIDs, which already satisfy these nonblank constraints.
+# Accepting opaque nonblank strings broadens that contract; blank IDs remain invalid.
+API PATCH /v2/org/{org}/nico/domain/nvlink/firmware the `domainIds/items/` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/domain/nvlink/firmware added the pattern `\S` to the request property `domainIds/items/`
+API PATCH /v2/org/{org}/nico/domain/nvlink/power the `domainIds/items/` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/domain/nvlink/power added the pattern `\S` to the request property `domainIds/items/`

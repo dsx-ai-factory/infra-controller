@@ -26,7 +26,7 @@ var _ MappedNullable = &BatchUpdateNVLinkDomainPowerStateRequest{}
 type BatchUpdateNVLinkDomainPowerStateRequest struct {
 	// ID of the Site
 	SiteId string `json:"siteId"`
-	// UUIDs of the NVLink Domains to power control. IDs must be unique after UUID normalization (case-insensitive).
+	// Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
 	DomainIds []string `json:"domainIds"`
 	// Target power state. Exact lowercase forms are also accepted for compatibility.
 	State string `json:"state"`

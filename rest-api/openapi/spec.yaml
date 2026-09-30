@@ -252,7 +252,7 @@ tags:
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
   - name: Domain
     description: |-
-      Domain endpoints group fabric-scoped operations by domain type. The `nvlink` subpath operates on NVLink Domains, which span one or more Racks, and submits asynchronous work for every Rack in each selected Domain.
+      Domain endpoints expose fabric inventory and operations by domain type. The `nvlink` subpath provides NVLink Domain detail and list reads, power control, and firmware updates.
   - name: Tray
     description: |-
       Tray represents a component within a Rack.
@@ -9971,7 +9971,7 @@ paths:
             type: string
           in: query
           name: nvLinkDomainId
-          description: Filter NVLink Interfaces by NVLink Domain ID.  Can be specified multiple times to filter on more than one ID.
+          description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the Rack external ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
         - schema:
             type: string
             enum:
@@ -12618,6 +12618,140 @@ paths:
           name: orderBy
           description: |-
             Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
+  '/v2/org/{org}/nico/domain/nvlink':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+    get:
+      summary: Retrieve all NVLink Domains
+      operationId: get-all-nvlink-domain
+      description: |-
+        Retrieve NVLink Domains for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+      tags:
+        - Domain
+      parameters:
+        - name: includeComponents
+          in: query
+          description: Include component details in the response.
+          schema:
+            type: boolean
+            default: false
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+        - name: name
+          in: query
+          description: Filter by Domain name. Repeated values are ORed.
+          schema:
+            type: array
+            items:
+              type: string
+        - name: pageNumber
+          in: query
+          description: Page number
+          schema:
+            $ref: '#/components/schemas/PageNumber'
+        - name: pageSize
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: orderBy
+          in: query
+          description: Order by name; immutable Rack UUID ascending breaks ties.
+          schema:
+            type: string
+            enum: [NAME_ASC, NAME_DESC]
+            default: NAME_ASC
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON-encoded pagination metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NVLinkDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Site does not have NICo Flow enabled.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/domain/nvlink/{id}':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: Case-sensitive NVLink Domain ID
+        schema:
+          type: string
+          minLength: 1
+          pattern: '\S'
+    get:
+      summary: Retrieve an NVLink Domain
+      operationId: get-nvlink-domain
+      description: |-
+        Retrieve an NVLink Domain for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+      tags:
+        - Domain
+      parameters:
+        - name: includeComponents
+          in: query
+          description: Include component details in the response.
+          schema:
+            type: boolean
+            default: false
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NVLinkDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Site does not have NICo Flow enabled.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/domain/nvlink/power':
     parameters:
       - schema:
@@ -12630,7 +12764,7 @@ paths:
       summary: Power control NVLink Domains
       operationId: power-control-nvlink-domains
       description: |-
-        Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+        Power control one or more NVLink Domains identified by their case-sensitive IDs.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -15049,7 +15183,8 @@ paths:
         description: Name of the Org
       - schema:
           type: string
-          format: uuid
+          minLength: 1
+          pattern: '\S'
         name: id
         in: path
         required: true
@@ -15058,7 +15193,7 @@ paths:
       summary: Power control an NVLink Domain
       operationId: power-control-nvlink-domain
       description: |-
-        Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+        Power control an NVLink Domain identified by its case-sensitive ID.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -15108,7 +15243,7 @@ paths:
       summary: Firmware update NVLink Domains
       operationId: firmware-update-nvlink-domains
       description: |-
-        Update firmware for one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+        Update firmware for one or more NVLink Domains identified by their case-sensitive IDs.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -15156,7 +15291,8 @@ paths:
         description: Name of the Org
       - schema:
           type: string
-          format: uuid
+          minLength: 1
+          pattern: '\S'
         name: id
         in: path
         required: true
@@ -15165,7 +15301,7 @@ paths:
       summary: Firmware update an NVLink Domain
       operationId: firmware-update-nvlink-domain
       description: |-
-        Update firmware for an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+        Update firmware for an NVLink Domain identified by its case-sensitive ID.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -25462,7 +25598,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the NVLink Domain associated with this Interface
+          description: Core-reported NVLink domain UUID associated with this Interface, not the Rack external ID returned by the Domain API.
         deviceInstance:
           type: integer
           description: 'Index of the device, used to identify the GPU associated with this Interface'
@@ -25707,7 +25843,7 @@ components:
             Operability phase aggregated from tray operationStatus values.
         nvLinkDomainIds:
           type: array
-          description: IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.
+          description: Core-reported NVLink domain UUIDs containing this Rack, not the Rack external ID returned by the Domain API. Empty when the Rack is not assigned to a Core NVLink domain.
           items:
             type: string
             format: uuid
@@ -26021,7 +26157,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
+          description: Core-reported NVLink domain UUID containing this Tray's Rack, not the Rack external ID returned by the Domain API. Null when the Rack is not assigned to a Core NVLink domain.
         taskStats:
           $ref: '#/components/schemas/TaskStats'
         health:
@@ -26088,6 +26224,35 @@ components:
           minimum: 0
           description: |-
             Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+    NVLinkDomain:
+      title: NVLinkDomain
+      type: object
+      description: NVLink Domain inventory and its components.
+      required: [id, name, topology, operationStatus, components]
+      properties:
+        id:
+          type: string
+          description: Case-sensitive Domain ID, equal to its Rack external ID.
+        name:
+          type: string
+          description: Domain name, equal to its Rack name.
+        topology:
+          type: [string, 'null']
+          description: Rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable or unrecognized.
+        operationStatus:
+          type: string
+          description: Operability phase aggregated from the Rack components, not the Core lifecycle state.
+        components:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/RackComponent'
+          description: Components belonging to this Domain. Null when includeComponents is false; an empty array when requested but none are known.
+      examples:
+        - id: rack-01
+          name: nvl5-gp1-jhb01
+          topology: GB200_NVL72R1_C2G4
+          operationStatus: Ready
+          components: []
     BatchUpdateNVLinkDomainPowerStateRequest:
       title: BatchUpdateNVLinkDomainPowerStateRequest
       type: object
@@ -26107,8 +26272,9 @@ components:
           uniqueItems: true
           items:
             type: string
-            format: uuid
-          description: UUIDs of the NVLink Domains to power control. IDs must be unique after UUID normalization (case-insensitive).
+            minLength: 1
+            pattern: '\S'
+          description: Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
         state:
           type: string
           enum:
@@ -26208,8 +26374,9 @@ components:
           uniqueItems: true
           items:
             type: string
-            format: uuid
-          description: UUIDs of the NVLink Domains to update. IDs must be unique after UUID normalization (case-insensitive).
+            minLength: 1
+            pattern: '\S'
+          description: Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
         version:
           type:
             - string

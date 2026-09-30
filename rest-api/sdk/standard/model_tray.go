@@ -53,7 +53,7 @@ type Tray struct {
 	Bmcs []BMCInfo `json:"bmcs,omitempty"`
 	// ID of the Rack this Tray belongs to
 	RackId *string `json:"rackId,omitempty"`
-	// ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
+	// Core-reported NVLink domain UUID containing this Tray's Rack, not the Rack external ID returned by the Domain API. Null when the Rack is not assigned to a Core NVLink domain.
 	NvLinkDomainId NullableString `json:"nvLinkDomainId"`
 	TaskStats      TaskStats      `json:"taskStats"`
 	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.

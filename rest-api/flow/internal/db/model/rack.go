@@ -227,6 +227,7 @@ func GetListOfRacks(
 	pagination *dbquery.Pagination,
 	orderBy *dbquery.OrderBy,
 	withComponents bool,
+	withExternalIDOnly bool,
 ) ([]Rack, int32, error) {
 	var racks []Rack
 	conf := &dbquery.Config{
@@ -242,6 +243,11 @@ func GetListOfRacks(
 
 	// Build filterables list from all provided filters
 	filterables := make([]dbquery.Filterable, 0)
+	if withExternalIDOnly {
+		filterables = append(filterables, &dbquery.Filter{
+			Column: "external_id", Operator: dbquery.OperatorNotEqual, Value: "",
+		})
+	}
 
 	if filterable := info.ToFilterable("name"); filterable != nil {
 		filterables = append(filterables, filterable)
@@ -321,9 +327,13 @@ func GetRacksForNVLDomain(
 	ctx context.Context,
 	idb bun.IDB,
 	nvlDomainID uuid.UUID,
+	withComponents bool,
 ) ([]Rack, error) {
 	var racks []Rack
 	q := idb.NewSelect().Model(&racks).Where("nvldomain_id = ?", nvlDomainID)
+	if withComponents {
+		q = q.Relation("Components").Relation("Components.BMCs")
+	}
 
 	if err := q.Scan(ctx); err != nil {
 		return nil, err

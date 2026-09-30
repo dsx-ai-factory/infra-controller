@@ -65,6 +65,8 @@ const (
 	Flow_DetachRacksFromNVLDomain_FullMethodName = "/v1.Flow/DetachRacksFromNVLDomain"
 	Flow_GetListOfNVLDomains_FullMethodName      = "/v1.Flow/GetListOfNVLDomains"
 	Flow_GetRacksForNVLDomain_FullMethodName     = "/v1.Flow/GetRacksForNVLDomain"
+	Flow_GetNVLinkDomain_FullMethodName          = "/v1.Flow/GetNVLinkDomain"
+	Flow_GetListOfNVLinkDomains_FullMethodName   = "/v1.Flow/GetListOfNVLinkDomains"
 	Flow_ListTasks_FullMethodName                = "/v1.Flow/ListTasks"
 	Flow_GetTasksByIDs_FullMethodName            = "/v1.Flow/GetTasksByIDs"
 	Flow_CancelTask_FullMethodName               = "/v1.Flow/CancelTask"
@@ -151,6 +153,8 @@ type FlowClient interface {
 	DetachRacksFromNVLDomain(ctx context.Context, in *DetachRacksFromNVLDomainRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetListOfNVLDomains(ctx context.Context, in *GetListOfNVLDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLDomainsResponse, error)
 	GetRacksForNVLDomain(ctx context.Context, in *GetRacksForNVLDomainRequest, opts ...grpc.CallOption) (*GetRacksForNVLDomainResponse, error)
+	GetNVLinkDomain(ctx context.Context, in *GetNVLinkDomainRequest, opts ...grpc.CallOption) (*GetNVLinkDomainResponse, error)
+	GetListOfNVLinkDomains(ctx context.Context, in *GetListOfNVLinkDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLinkDomainsResponse, error)
 	// Tasks
 	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
 	GetTasksByIDs(ctx context.Context, in *GetTasksByIDsRequest, opts ...grpc.CallOption) (*GetTasksByIDsResponse, error)
@@ -625,6 +629,26 @@ func (c *flowClient) GetRacksForNVLDomain(ctx context.Context, in *GetRacksForNV
 	return out, nil
 }
 
+func (c *flowClient) GetNVLinkDomain(ctx context.Context, in *GetNVLinkDomainRequest, opts ...grpc.CallOption) (*GetNVLinkDomainResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetNVLinkDomainResponse)
+	err := c.cc.Invoke(ctx, Flow_GetNVLinkDomain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetListOfNVLinkDomains(ctx context.Context, in *GetListOfNVLinkDomainsRequest, opts ...grpc.CallOption) (*GetListOfNVLinkDomainsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetListOfNVLinkDomainsResponse)
+	err := c.cc.Invoke(ctx, Flow_GetListOfNVLinkDomains_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *flowClient) ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListTasksResponse)
@@ -997,6 +1021,8 @@ type FlowServer interface {
 	DetachRacksFromNVLDomain(context.Context, *DetachRacksFromNVLDomainRequest) (*emptypb.Empty, error)
 	GetListOfNVLDomains(context.Context, *GetListOfNVLDomainsRequest) (*GetListOfNVLDomainsResponse, error)
 	GetRacksForNVLDomain(context.Context, *GetRacksForNVLDomainRequest) (*GetRacksForNVLDomainResponse, error)
+	GetNVLinkDomain(context.Context, *GetNVLinkDomainRequest) (*GetNVLinkDomainResponse, error)
+	GetListOfNVLinkDomains(context.Context, *GetListOfNVLinkDomainsRequest) (*GetListOfNVLinkDomainsResponse, error)
 	// Tasks
 	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
 	GetTasksByIDs(context.Context, *GetTasksByIDsRequest) (*GetTasksByIDsResponse, error)
@@ -1176,6 +1202,12 @@ func (UnimplementedFlowServer) GetListOfNVLDomains(context.Context, *GetListOfNV
 }
 func (UnimplementedFlowServer) GetRacksForNVLDomain(context.Context, *GetRacksForNVLDomainRequest) (*GetRacksForNVLDomainResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRacksForNVLDomain not implemented")
+}
+func (UnimplementedFlowServer) GetNVLinkDomain(context.Context, *GetNVLinkDomainRequest) (*GetNVLinkDomainResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetNVLinkDomain not implemented")
+}
+func (UnimplementedFlowServer) GetListOfNVLinkDomains(context.Context, *GetListOfNVLinkDomainsRequest) (*GetListOfNVLinkDomainsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetListOfNVLinkDomains not implemented")
 }
 func (UnimplementedFlowServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTasks not implemented")
@@ -2050,6 +2082,42 @@ func _Flow_GetRacksForNVLDomain_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_GetNVLinkDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetNVLinkDomainRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetNVLinkDomain(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetNVLinkDomain_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetNVLinkDomain(ctx, req.(*GetNVLinkDomainRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetListOfNVLinkDomains_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetListOfNVLinkDomainsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetListOfNVLinkDomains(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetListOfNVLinkDomains_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetListOfNVLinkDomains(ctx, req.(*GetListOfNVLinkDomainsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Flow_ListTasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListTasksRequest)
 	if err := dec(in); err != nil {
@@ -2800,6 +2868,14 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRacksForNVLDomain",
 			Handler:    _Flow_GetRacksForNVLDomain_Handler,
+		},
+		{
+			MethodName: "GetNVLinkDomain",
+			Handler:    _Flow_GetNVLinkDomain_Handler,
+		},
+		{
+			MethodName: "GetListOfNVLinkDomains",
+			Handler:    _Flow_GetListOfNVLinkDomains_Handler,
 		},
 		{
 			MethodName: "ListTasks",

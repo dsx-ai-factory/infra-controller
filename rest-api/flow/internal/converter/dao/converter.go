@@ -157,7 +157,8 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 			SerialNumber: dao.SerialNumber,
 			Description:  description,
 		},
-		ExternalID: cutil.GetValueOrZero(dao.ExternalID),
+		ExternalID:    cutil.GetValueOrZero(dao.ExternalID),
+		RackProfileID: dao.RackProfileID,
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),

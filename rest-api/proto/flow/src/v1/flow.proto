@@ -66,6 +66,8 @@ service Flow {
     rpc DetachRacksFromNVLDomain(DetachRacksFromNVLDomainRequest) returns (google.protobuf.Empty);
     rpc GetListOfNVLDomains(GetListOfNVLDomainsRequest) returns (GetListOfNVLDomainsResponse);
     rpc GetRacksForNVLDomain(GetRacksForNVLDomainRequest) returns (GetRacksForNVLDomainResponse);
+    rpc GetNVLinkDomain(GetNVLinkDomainRequest) returns (GetNVLinkDomainResponse);
+    rpc GetListOfNVLinkDomains(GetListOfNVLinkDomainsRequest) returns (GetListOfNVLinkDomainsResponse);
 
     // Tasks
     rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
@@ -324,6 +326,7 @@ message Rack {
     // Operability phase aggregated from component phases.
     Phase operation_status = 7;
     HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
+    optional string rack_profile_id = 9; // Core rack profile mirrored by expected inventory sync.
 }
 
 message Identifier {
@@ -511,6 +514,7 @@ message GetListOfRacksRequest {
     optional Pagination pagination = 3;
     // Defaults to name ascending. Rack UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
+    bool with_external_id_only = 5;
 }
 
 message GetListOfRacksResponse {
@@ -543,6 +547,36 @@ message GetListOfNVLDomainsRequest {
 
 message GetListOfNVLDomainsResponse {
     repeated NVLDomain nvl_domains = 1;
+    int32 total = 2;
+}
+
+message GetNVLinkDomainRequest {
+    string id = 1;
+    bool with_components = 2;
+}
+
+message NVLinkDomain {
+    string id = 1;
+    string name = 2;
+    optional string topology = 3;
+    Phase operation_status = 4;
+    repeated Component components = 5;
+}
+
+message GetNVLinkDomainResponse {
+    NVLinkDomain domain = 1;
+}
+
+message GetListOfNVLinkDomainsRequest {
+    StringQueryInfo info = 1;
+    bool with_components = 2;
+    optional Pagination pagination = 3;
+    // NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order.
+    string order_by = 4;
+}
+
+message GetListOfNVLinkDomainsResponse {
+    repeated NVLinkDomain domains = 1;
     int32 total = 2;
 }
 
@@ -1891,6 +1925,7 @@ message NVLDomainTarget {
     oneof identifier {
         UUID id = 1;        // NVLink domain UUID
         string name = 2;    // NVLink domain name
+        string external_id = 4;
     }
     // Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain.
     repeated ComponentType component_types = 3;
