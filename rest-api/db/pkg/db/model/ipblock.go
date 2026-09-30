@@ -77,8 +77,8 @@ var (
 )
 
 // SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
-// prefix import and root IP Block creation for one Site. Later SitePrefix
-// inventory reconciliation can use the same lock when linking these records.
+// prefix import, root IP Block creation, and SitePrefix inventory reconciliation
+// for one Site.
 // The key keeps its DatacenterOnly suffix, so an upgrade doesn't change the ID
 // that processes from the previous release still take.
 func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
@@ -258,6 +258,8 @@ func (it *IPBlock) BeforeCreateTable(ctx context.Context, query *bun.CreateTable
 
 // IPBlockDAO is an interface for interacting with the IPBlock model
 type IPBlockDAO interface {
+	// GetBySitePrefixID includes soft-deleted identities so Core IDs cannot be reused.
+	GetBySitePrefixID(ctx context.Context, tx *db.Tx, sitePrefixID uuid.UUID) (*IPBlock, error)
 	//
 	Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error)
 	//
@@ -279,6 +281,18 @@ type IPBlockDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
+}
+
+// GetBySitePrefixID finds the globally unique Core identity, including deleted rows.
+// The receiver must verify ownership and reject a deleted identity before mutation.
+func (ipbsd IPBlockSQLDAO) GetBySitePrefixID(ctx context.Context, tx *db.Tx, sitePrefixID uuid.UUID) (*IPBlock, error) {
+	ipb := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).NewSelect().Model(ipb).
+		WhereAllWithDeleted().Where("ipb.site_prefix_id = ?", sitePrefixID).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrDoesNotExist
+	}
+	return ipb, err
 }
 
 // IPBlockSQLDAO is an implementation of the IPBlockDAO interface
