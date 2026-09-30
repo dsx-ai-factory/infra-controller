@@ -425,8 +425,11 @@ NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 m
 ### 2.2 → 2.3: Vault Probe Settings
 
 NICo 2.3 raises the Vault server probe `timeoutSeconds` from 3 to 10 and `failureThreshold` from 2 to 5 in `helm-prereqs/operators/values/vault.yaml`.
+
 For example, on a 250-rack site, the active node missed two 3-second liveness probes under load, was killed, came back sealed, and the standby nodes stayed leaderless.
+
 The Vault StatefulSet uses `updateStrategy: OnDelete`. This means that `helmfile sync` updates the pod template, but running pods keep the old probes until they are deleted. Phase 3 prints a warning naming the pods still running the previous revision. If the StatefulSet status cannot be read or has not caught up, the warning indicates that the revision could not be verified.
+
 After the upgrade finishes, find the active node, then roll the pods one at a time, standby nodes first, and the active node last. The active node is the pod whose `HA Mode` is `active`:
 
 ```bash
@@ -451,7 +454,9 @@ kubectl -n vault get secret vaultroottoken -o jsonpath='{.data.token}' | base64 
 The root token travels on standard input; it does not appear in the `kubectl exec` arguments that the API server records in audit events. The `sed` operation trims the output to the cluster summary: `Healthy`, `Failure Tolerance`, `Leader`, and `Voters`.
 
 `unseal_vault.sh` returns once `vault status` reports the pod unsealed. Unsealing only opens the pod's own storage, and does not show that the pod has rejoined the cluster as a healthy voter. Continue to the next pod only when `Healthy` is `true`, `Failure Tolerance` is `1` on a three-node cluster, and `<pod>` is listed under `Voters`.
+
 Right after the unseal, the summary can still show `Healthy` `false` and `Failure Tolerance` `0` until the leader hears from the pod. Rerun the check after a few seconds. A pod that comes back without its Raft data joins as a non-voter and appears under `Voters` only after autopilot promotes it. Deleting the next standby before the promotion can leave the three-node cluster below quorum. When the former active node is rolled, a standby has taken over; run the status loop again to find `<active>`.
+
 If `kubectl wait` reports the pod as not found, the StatefulSet has not recreated it yet. Run the wait again.
 
 ### 2.2 → 2.3: Kustomize deployment deprecated
