@@ -161,11 +161,22 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, inventory.SitePrefixes[0].Id.Value, blocks[0].SitePrefixID.String())
+			require.Equal(t, inventory.SitePrefixes[0].Metadata.Name, blocks[0].Name)
+			require.Equal(t, &inventory.SitePrefixes[0].Metadata.Description, blocks[0].Description)
 			_, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, "10.0.0.0/24", f.namespace())
 			require.NoError(t, err)
 			site := f.inventorySite(t)
 			require.Nil(t, site.SitePrefixInventoryObservedAt)
 			require.Len(t, site.SitePrefixInventoryProgress.Pages, 1)
+		}},
+		{"unnamed operator root uses CIDR and absent description", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Metadata = &corev1.Metadata{}
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, prefix.Config.Prefix, blocks[0].Name)
+			require.Nil(t, blocks[0].Description)
 		}},
 		{"adopts root preserving REST identity and allocated child", func(t *testing.T, f fixture) {
 			root := f.root(t, false)
@@ -173,14 +184,60 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			allocator.SetNamespace(f.namespace())
 			child, err := allocator.AcquireChildPrefix(ctx, "10.0.0.0/24", 28)
 			require.NoError(t, err)
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())))
+			prefix := testPrefix()
+			prefix.Metadata = &corev1.Metadata{}
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, root.ID, blocks[0].ID)
 			require.NotNil(t, blocks[0].SitePrefixID)
+			require.Equal(t, root.Name, blocks[0].Name)
+			require.Nil(t, blocks[0].Description)
 			retained, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, child.Cidr, f.namespace())
 			require.NoError(t, err)
 			require.Equal(t, *child, retained)
+		}},
+		{"linked operator preserves absent metadata and applies populated metadata", func(t *testing.T, f fixture) {
+			root := f.root(t, true)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			inventory := testInventory(prefix)
+			for _, step := range []struct {
+				name     string
+				metadata *corev1.Metadata
+			}{
+				{"populated", prefix.Metadata},
+				{"absent", &corev1.Metadata{}},
+			} {
+				t.Run(step.name, func(t *testing.T) {
+					prefix.Metadata = step.metadata
+					inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(time.Second))
+					require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+					blocks := f.blocks(t)
+					require.Len(t, blocks, 1)
+					require.Equal(t, root.ID, blocks[0].ID)
+					require.Equal(t, "test-prefix", blocks[0].Name)
+					require.Equal(t, cutil.GetPtr("reported by Core"), blocks[0].Description)
+				})
+			}
+		}},
+		{"tenant metadata updates can clear the description", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			prefix.Config.TenantOrganizationId = &f.tenant.Org
+			inventory := testInventory(prefix)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			block := f.blocks(t)[0]
+			require.Equal(t, &prefix.Metadata.Description, block.Description)
+			prefix.Metadata.Name = "renamed tenant prefix"
+			prefix.Metadata.Description = ""
+			inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(time.Second))
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, block.ID, blocks[0].ID)
+			require.Equal(t, prefix.Metadata.Name, blocks[0].Name)
+			require.Equal(t, cutil.GetPtr(""), blocks[0].Description)
 		}},
 		{"tenant lifecycle and overlapping tenant ownership use no cloud IPAM", func(t *testing.T, f fixture) {
 			prefix := testPrefix()
