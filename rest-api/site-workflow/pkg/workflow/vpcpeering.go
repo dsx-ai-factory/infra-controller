@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func CreateVpcPeering(ctx workflow.Context, request *corev1.VpcPeeringCreationRequest) error {
@@ -18,17 +20,16 @@ func CreateVpcPeering(ctx workflow.Context, request *corev1.VpcPeeringCreationRe
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -55,17 +56,16 @@ func DeleteVpcPeering(ctx workflow.Context, request *corev1.VpcPeeringDeletionRe
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

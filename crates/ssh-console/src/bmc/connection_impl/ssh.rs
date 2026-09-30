@@ -31,10 +31,10 @@ use ringbuf::traits::RingBuffer;
 use russh::client::{AuthResult, GexParams, KeyboardInteractiveAuthResponse};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::{Channel, ChannelMsg, MethodKind};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::POWER_RESET_COMMAND;
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl::echo_connected_message;
 use crate::bmc::message_proxy::{
@@ -42,6 +42,7 @@ use crate::bmc::message_proxy::{
 };
 use crate::bmc::pending_output_line::PendingOutputLine;
 use crate::bmc::vendor::SshBmcVendor;
+use crate::{POWER_RESET_COMMAND, fork_cancel_token};
 
 static RUSSH_CLIENT_CONFIG: LazyLock<Arc<russh::client::Config>> =
     LazyLock::new(russh_client_config);
@@ -51,8 +52,9 @@ pub(in crate::bmc) async fn spawn(
     connection_details: Arc<ConnectionDetails>,
     to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     metrics: Arc<BmcPoolMetrics>,
+    cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let (to_bmc_msg_tx, mut to_bmc_msg_rx) = mpsc::channel::<ToBmcMessage>(1);
     let metrics_attrs = vec![KeyValue::new(
         "machine_id",
@@ -87,7 +89,7 @@ pub(in crate::bmc) async fn spawn(
 
         loop {
             tokio::select! {
-                _ = &mut shutdown_rx => {
+                _ = cancel_token.cancelled() => {
                     tracing::info!(%machine_id, "BMC connection shutting down");
                     break;
                 }
@@ -174,16 +176,16 @@ pub(in crate::bmc) async fn spawn(
 
     Ok(Handle {
         to_bmc_msg_tx,
-        shutdown_tx,
         join_handle,
+        drop_guard,
     })
 }
 
 /// A handle to a BMC connection, which will shut down when dropped.
 pub(in crate::bmc) struct Handle {
     pub(in crate::bmc) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
-    pub(in crate::bmc) shutdown_tx: oneshot::Sender<()>,
     pub(in crate::bmc) join_handle: JoinHandle<Result<(), SpawnError>>,
+    pub(in crate::bmc) drop_guard: DropGuard,
 }
 
 #[derive(thiserror::Error, Debug)]

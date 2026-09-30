@@ -34,7 +34,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
 use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
 use rpc::protos::dns::{
-    DnsResourceRecord, DnsResourceRecordLookupRequest, DnsResourceRecordLookupResponse,
+    DnsLookupOutcome, DnsResourceRecord, DnsResourceRecordLookupRequest,
+    DnsResourceRecordLookupResponse,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -289,7 +290,12 @@ async fn mock_lookup(
         .try_send(DnsResourceRecordLookupRequest::decode(payload).expect("LookupRecord decodes"))
         .expect("each test sends exactly one lookup");
 
-    let response = DnsResourceRecordLookupResponse { records };
+    let response = DnsResourceRecordLookupResponse {
+        records,
+        outcome: DnsLookupOutcome::Records.into(),
+        authority_soa: None,
+        authoritative: true,
+    };
     let mut data = vec![0];
     data.extend_from_slice(&u32::try_from(response.encoded_len()).unwrap().to_be_bytes());
     response.encode(&mut data).unwrap();

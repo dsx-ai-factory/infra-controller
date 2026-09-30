@@ -827,6 +827,155 @@ func (a *ExpectedRackAPIService) ReplaceAllExpectedRackExecute(r ApiReplaceAllEx
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-rack/all"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.expectedRackList == nil {
+		return localVarReturnValue, nil, reportError("expectedRackList is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.expectedRackList
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiReplaceAllExpectedRackLegacyRequest struct {
+	ctx              context.Context
+	ApiService       *ExpectedRackAPIService
+	org              string
+	expectedRackList *ExpectedRackList
+}
+
+// Replace-all Expected Racks request
+func (r ApiReplaceAllExpectedRackLegacyRequest) ExpectedRackList(expectedRackList ExpectedRackList) ApiReplaceAllExpectedRackLegacyRequest {
+	r.expectedRackList = &expectedRackList
+	return r
+}
+
+func (r ApiReplaceAllExpectedRackLegacyRequest) Execute() ([]ExpectedRack, *http.Response, error) {
+	return r.ApiService.ReplaceAllExpectedRackLegacyExecute(r)
+}
+
+/*
+ReplaceAllExpectedRackLegacy Replace all Expected Racks
+
+Deprecated compatibility route. Use `PUT /v2/org/{org}/nico/expected-rack/all` instead. This route preserves the same Site scoping, authorization, validation, response, and mutation semantics during migration.
+
+Replace the full set of Expected Racks for a Site with the provided list. All existing Expected Racks for the Site that are not in the request body will be deleted, and any new Expected Racks in the request will be created. Existing Expected Racks with matching `rackId` values will be updated.
+
+Every entry in `expectedRacks` must reference the same `siteId` as the top-level `siteId`. `rackId` values must be unique within the request. The `expectedRacks` array may be empty to clear all Expected Racks for the Site.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Racks if they have an account with the Site's Infrastructure Provider.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiReplaceAllExpectedRackLegacyRequest
+
+Deprecated
+*/
+func (a *ExpectedRackAPIService) ReplaceAllExpectedRackLegacy(ctx context.Context, org string) ApiReplaceAllExpectedRackLegacyRequest {
+	return ApiReplaceAllExpectedRackLegacyRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []ExpectedRack
+//
+// Deprecated
+func (a *ExpectedRackAPIService) ReplaceAllExpectedRackLegacyExecute(r ApiReplaceAllExpectedRackLegacyRequest) ([]ExpectedRack, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPut
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []ExpectedRack
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedRackAPIService.ReplaceAllExpectedRackLegacy")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
 	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-rack"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
 
@@ -922,7 +1071,7 @@ type ApiUpdateExpectedRackRequest struct {
 	expectedRackUpdateRequest *ExpectedRackUpdateRequest
 }
 
-// Expected Rack update request
+// Expected Rack update request.  Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
 func (r ApiUpdateExpectedRackRequest) ExpectedRackUpdateRequest(expectedRackUpdateRequest ExpectedRackUpdateRequest) ApiUpdateExpectedRackRequest {
 	r.expectedRackUpdateRequest = &expectedRackUpdateRequest
 	return r

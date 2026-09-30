@@ -29,6 +29,9 @@ use crate::ConfigValidationError;
 pub struct InstanceExtensionServiceConfig {
     pub service_id: ExtensionServiceId,
     pub version: ConfigVersion,
+    /// Immutable registration policy, populated by the API during admission.
+    #[serde(default)]
+    pub dpu_target: Option<crate::extension_service::DpuTarget>,
     pub removed: Option<DateTime<Utc>>, // We need to track terminating services
 }
 
@@ -135,6 +138,7 @@ impl InstanceExtensionServicesConfig {
                 } else {
                     // The service is not being terminated, so we need to mark it as terminated
                     result.push(InstanceExtensionServiceConfig {
+                        dpu_target: service.dpu_target,
                         service_id: service.service_id,
                         version: service.version,
                         removed: Some(now),
@@ -198,11 +202,13 @@ mod tests {
         let config = InstanceExtensionServicesConfig {
             service_configs: vec![
                 InstanceExtensionServiceConfig {
+                    dpu_target: None,
                     service_id: sid,
                     version: second_version,
                     removed: None,
                 },
                 InstanceExtensionServiceConfig {
+                    dpu_target: None,
                     service_id: sid,
                     version: init_version,
                     removed: Some(Utc::now()),
@@ -226,6 +232,7 @@ mod tests {
         let initial_version = ConfigVersion::initial();
         let current = InstanceExtensionServicesConfig {
             service_configs: vec![InstanceExtensionServiceConfig {
+                dpu_target: None,
                 service_id: existing_id,
                 version: initial_version,
                 removed: None,
@@ -242,6 +249,7 @@ mod tests {
             service_configs: vec![
                 unchanged.service_configs[0].clone(),
                 InstanceExtensionServiceConfig {
+                    dpu_target: None,
                     service_id: new_id,
                     version: initial_version,
                     removed: None,
@@ -252,6 +260,7 @@ mod tests {
 
         let upgraded = InstanceExtensionServicesConfig {
             service_configs: vec![InstanceExtensionServiceConfig {
+                dpu_target: None,
                 service_id: existing_id,
                 version: initial_version.increment(),
                 removed: None,

@@ -32,11 +32,13 @@ mod rack_health_report;
 mod switch_health_report;
 mod tracing;
 
+use std::sync::Arc;
+
 pub use composite::CompositeDataSink;
 pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
-    MetricSample, Probe, ReportSource, SensorThresholdContext,
+    MetricSample, Probe, ReportSource, SensorAttribution, SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;
@@ -47,6 +49,7 @@ pub use rack_health_report::RackHealthReportSink;
 pub use switch_health_report::SwitchHealthReportSink;
 pub use tracing::TracingSink;
 
+pub(crate) use self::dedup_queue::DedupQueue;
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
@@ -55,6 +58,31 @@ use crate::HealthError;
 
 pub trait DataSink: Send + Sync {
     fn sink_type(&self) -> &'static str;
+
+    /// Removes retained samples for this endpoint and collector. Label values
+    /// select a subset; optional label names select the complete dynamic label
+    /// set. An absent type or unit matches all. Sinks without retention ignore
+    /// the request.
+    fn prune_metrics(
+        &self,
+        _context: &EventContext,
+        _metric_type: Option<&str>,
+        _labels: &[crate::metrics::MetricLabel],
+        _unit: Option<&str>,
+        _label_names: Option<&[&str]>,
+    ) {
+    }
+
+    /// Removes one retained reading identified by its metric sample key,
+    /// type, and unit. Sinks without retention ignore the request.
+    fn prune_metric_key(
+        &self,
+        _context: &EventContext,
+        _key: &str,
+        _metric_type: &str,
+        _unit: &str,
+    ) {
+    }
 
     /// Handles one event, surfacing failure to the caller.
     ///
@@ -66,6 +94,24 @@ pub trait DataSink: Send + Sync {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError>;
+
+    /// Whether this sink can retain a metric payload shared within one fanout.
+    fn accepts_shared_metric(&self) -> bool {
+        false
+    }
+
+    /// Handles a metric using one immutable payload across capable sinks.
+    ///
+    /// Other sinks receive the original event so their dispatch behavior stays
+    /// independent of how OTLP targets retain queue entries.
+    fn try_handle_shared_metric(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        _shared: &Arc<(EventContext, MetricSample)>,
+    ) -> Result<(), HealthError> {
+        self.try_handle_event(context, event)
+    }
 
     /// Fire-and-forget entry point for callers that do not track outcomes.
     ///
@@ -213,7 +259,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -262,7 +308,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -364,7 +410,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -445,7 +491,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -505,7 +551,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),

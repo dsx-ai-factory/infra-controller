@@ -146,14 +146,17 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
     // group-sync helper should also bump each DPU's version to the same
     // new value.
     let host_before = mh.host().db_machine(&mut txn).await;
-    db::machine::try_update_network_config(
-        txn.as_mut(),
-        &mh.id,
-        host_before.network_config.version,
-        &host_before.network_config.value,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &mh.id,
+            host_before.network_config.version,
+            &host_before.network_config.value,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 
     let mut txn = env.db_txn().await;
@@ -191,14 +194,17 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
     // machine_discovery's loopback_ip allocation). The group-sync helper
     // fans that bump out to the host's row too, keeping versions equal.
     let dpu_before_dpu_write = mh.dpu().db_machine(&mut txn).await;
-    db::machine::try_update_network_config(
-        txn.as_mut(),
-        &dpu_before_dpu_write.id,
-        dpu_before_dpu_write.network_config.version,
-        &dpu_before_dpu_write.network_config.value,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &dpu_before_dpu_write.id,
+            dpu_before_dpu_write.network_config.version,
+            &dpu_before_dpu_write.network_config.value,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 
     let mut txn = env.db_txn().await;
@@ -216,6 +222,81 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
         !snapshot.managed_host_network_config_version_synced(),
         "sync should be false after a DPU-row write bumps the group"
     );
+}
+
+#[crate::sqlx_test]
+async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    create_instance(&env, &mh, false, segment_id).await;
+    let host_id: HostMachineId = mh.id.into();
+
+    for instance_state in [
+        InstanceState::SwitchToAdminNetwork,
+        InstanceState::WaitingForNetworkSegmentToBeReady,
+    ] {
+        let state = ManagedHostState::Assigned { instance_state };
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(&mut txn, &host_id, &state)
+            .await
+            .unwrap();
+        let mut snapshot = mh.snapshot(&mut txn).await;
+        let host_network = snapshot.host_snapshot.network_config.clone();
+        let dpu_network = mh.dpu().db_machine(&mut txn).await.network_config;
+        txn.commit().await.unwrap();
+
+        // A network-only write invalidates the prerequisite, even though the
+        // controller-state version still matches the handler's snapshot.
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            db::machine::try_update_network_config(
+                &mut txn,
+                &host_id,
+                host_network.version,
+                &host_network.value,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await.unwrap();
+        let winning_version = db::machine::get_network_config(&mut env.db_reader(), &host_id)
+            .await
+            .unwrap()
+            .version;
+
+        let mut services = env.machine_state_handler_services();
+        let mut site_config = env.config.machine_state_handler_site_config();
+        site_config.ewethers_enabled = false;
+        site_config.restart_ovs_on_use_admin_network_change = true;
+        services.site_config = Arc::new(site_config);
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let result = env
+            .machine_state_handler
+            .handle_object_state(&host_id, &mut snapshot, &state, &mut ctx)
+            .await;
+        assert!(
+            matches!(result, Err(StateHandlerError::IterationInvalidated { .. })),
+            "{state} must not return a transition after its network write was rejected"
+        );
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &state);
+        assert_eq!(host.network_config.value, host_network.value);
+        assert_eq!(host.network_config.version, winning_version);
+        assert_eq!(dpu.network_config.value, dpu_network.value);
+        assert_eq!(dpu.network_config.version, winning_version);
+        txn.commit().await.unwrap();
+    }
 }
 
 #[crate::sqlx_test]
@@ -415,14 +496,17 @@ async fn test_use_admin_network_reads_host_network_config(pool: sqlx::PgPool) {
     let host = mh.host().db_machine(&mut txn).await;
     let mut netconf = host.network_config.value.clone();
     netconf.use_admin_network = Some(false);
-    db::machine::try_update_network_config(
-        txn.as_mut(),
-        &mh.id,
-        host.network_config.version,
-        &netconf,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &mh.id,
+            host.network_config.version,
+            &netconf,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 
     let mut txn = env.db_txn().await;
@@ -3361,15 +3445,9 @@ async fn test_ready_boot_config_defers_dpu_restart_verification(pool: sqlx::PgPo
         verification_attempts: Some(2),
     };
     let mut txn = env.db_txn().await;
-    db::machine::update_restart_verification_status(
-        &mh.dpu().id,
-        threshold_retry,
-        Some(false),
-        2,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    db::machine::record_reboot_request(&mh.dpu().id, txn.as_mut(), &threshold_retry)
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
 
     env.redfish_sim.set_is_bios_setup(true);
@@ -3439,7 +3517,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
 
     let mut txn = env.db_txn().await;
     let host = mh.host().db_machine(&mut txn).await;
-    assert!(
+    assert_eq!(
         db::machine::try_update_network_config(
             txn.as_mut(),
             &host.id,
@@ -3448,6 +3526,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
         )
         .await
         .expect("network configuration generation should advance"),
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await.unwrap();
 
@@ -3495,10 +3574,12 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
     env.run_machine_state_controller_iteration().await;
 
     let mut txn = env.db_txn().await;
+    let machine = mh.host().db_machine(&mut txn).await;
     assert_eq!(
-        mh.host().db_machine(&mut txn).await.current_state(),
+        machine.current_state(),
         &ManagedHostState::Maintenance {
             operation: MachineMaintenanceOperation::PowerOff,
+            request: machine.machine_maintenance_requested.clone(),
         },
         "maintenance must remain available while Prepare waits",
     );
@@ -3534,7 +3615,7 @@ async fn test_supermicro_ready_boot_config_stale_dpu_status_returns_to_prepare_a
     set_host_controller_state_stuck_in(&env, mh.host().id, &unlocking, 0).await;
     let mut txn = env.db_txn().await;
     let host = mh.host().db_machine(&mut txn).await;
-    assert!(
+    assert_eq!(
         db::machine::try_update_network_config(
             txn.as_mut(),
             &host.id,
@@ -3543,6 +3624,7 @@ async fn test_supermicro_ready_boot_config_stale_dpu_status_returns_to_prepare_a
         )
         .await
         .expect("network configuration generation should advance"),
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await.unwrap();
 
@@ -3569,15 +3651,9 @@ async fn test_supermicro_ready_boot_config_stale_dpu_status_returns_to_prepare_a
         verification_attempts: Some(2),
     };
     let mut txn = env.db_txn().await;
-    db::machine::update_restart_verification_status(
-        &mh.host().id,
-        threshold_retry,
-        Some(false),
-        2,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    db::machine::record_reboot_request(&mh.host().id, txn.as_mut(), &threshold_retry)
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
     let cleanup_checkpoint = env.redfish_sim.timepoint();
 
@@ -4428,19 +4504,22 @@ async fn test_assigned_ready_retries_pending_provisioning_boot(pool: sqlx::PgPoo
         .await
         .unwrap()
         .expect("fixture BMC address should have an owner");
-    db::machine::update_restart_verification_status(
-        &mh.host().id,
-        *host_before_failed_attempt
-            .status
-            .last_reboot_requested
-            .as_ref()
-            .unwrap(),
-        Some(false),
-        0,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::machine::update_restart_verification_status(
+            &mh.host().id,
+            *host_before_failed_attempt
+                .status
+                .last_reboot_requested
+                .as_ref()
+                .unwrap(),
+            Some(false),
+            0,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     assert!(
         db::machine_interface_address::delete_by_interface_and_address(
             txn.as_mut(),

@@ -65,7 +65,7 @@ pub(crate) struct ForceSet {
 
     #[clap(
         long,
-        help = "MAC of the machine's BMC. Provide this or --id; if both are given \
+        help = "MAC of the BMC for the machine. Provide this or --id; if both are given \
                 they must identify the same machine."
     )]
     pub(super) bmc_mac: Option<MacAddress>,
@@ -104,7 +104,7 @@ pub(crate) struct ForceClear {
 
     #[clap(
         long,
-        help = "MAC of the machine's BMC whose pending request should be cleared."
+        help = "MAC of the BMC for the machine whose pending request should be cleared."
     )]
     pub(super) bmc_mac: Option<MacAddress>,
 }

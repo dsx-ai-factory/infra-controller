@@ -124,13 +124,24 @@ func (t *Task) UpdateScheduledTask(
 
 	t.UpdatedAt = time.Now().UTC()
 
-	_, err := idb.NewUpdate().
+	result, err := idb.NewUpdate().
 		Model(t).
-		Column("execution_id", "executor_type", "updated_at").
+		Column("execution_id", "executor_type", "applied_rule_id", "updated_at").
 		Where("id = ?", t.ID).
 		Exec(ctx)
+	if err != nil {
+		return err
+	}
 
-	return err
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("update scheduled task %s affected %d rows", t.ID, rowsAffected)
+	}
+
+	return nil
 }
 
 // UpdateTaskStatus updates the status of the task. Non-nil report and

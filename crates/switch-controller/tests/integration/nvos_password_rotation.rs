@@ -116,10 +116,10 @@ async fn publish_target(
 
     txn.commit().await?;
 
-    assert_eq!(
-        staged.map(|target| target.target_version),
-        Some(target_version)
-    );
+    let ConditionalWrite::Applied(staged) = staged else {
+        panic!("the target must be published");
+    };
+    assert_eq!(staged.target_version, target_version);
 
     Ok(())
 }
@@ -150,14 +150,17 @@ async fn stage_submitted_rotation(
 ) -> TestResult<i32> {
     let mut txn = pool.begin().await?;
 
-    let attempt = db::credential_rotation::record_device_rotation_started(
-        txn.as_mut(),
-        bmc_mac_address,
-        db::credential_rotation::CredentialRotationType::Nvos,
-        target_version,
-    )
-    .await?
-    .expect("stage rotation");
+    let ConditionalWrite::Applied(attempt) =
+        db::credential_rotation::record_device_rotation_started(
+            txn.as_mut(),
+            bmc_mac_address,
+            db::credential_rotation::CredentialRotationType::Nvos,
+            target_version,
+        )
+        .await?
+    else {
+        panic!("the rotation must be staged");
+    };
 
     let submitted = db::credential_rotation::record_device_rotation_submitted(
         txn.as_mut(),
@@ -348,6 +351,51 @@ async fn configuring_skips_credentials_when_rotation_is_not_actionable(
             "{case} should bypass malformed credential data"
         );
     }
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn rejected_work_claim_waits_without_dispatch(pool: sqlx::PgPool) -> TestResult {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let (switch_id, bmc_mac_address) = prepare_version_one_rotation(&env, &pool).await?;
+
+    let quarantined_until: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "UPDATE device_credential_rotation \
+         SET rotate_quarantined_until = now() + interval '1 hour' \
+         WHERE device_mac = $1 AND credential_type = 'nvos' \
+         RETURNING rotate_quarantined_until",
+    )
+    .bind(bmc_mac_address)
+    .fetch_one(&pool)
+    .await?;
+
+    let before = operation_state(&pool, bmc_mac_address).await?;
+
+    // Dispatch would reject this password. The exact waiting reason below
+    // distinguishes a rejected work claim from submission failure.
+    let manager = MockNvSwitchManager::default()
+        .with_password_rotation_enabled()
+        .with_expected_password_rotation_password("Must-Not-Be-Dispatched!");
+
+    assert_eq!(
+        reconcile(&env, &pool, &switch_id, manager).await?,
+        NvosPasswordRotationOutcome::Waiting(
+            "NVOS rotation could not be claimed because target or device state changed".to_string()
+        )
+    );
+
+    let after = operation_state(&pool, bmc_mac_address).await?;
+    assert_eq!(after, before);
+
+    let retained_quarantine: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT rotate_quarantined_until FROM device_credential_rotation \
+         WHERE device_mac = $1 AND credential_type = 'nvos'",
+    )
+    .bind(bmc_mac_address)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained_quarantine, quarantined_until);
 
     Ok(())
 }

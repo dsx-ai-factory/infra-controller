@@ -433,20 +433,15 @@ fn build_endpoints(
     for node in nodes {
         let rack_id = node.rack.as_deref().map(RackId::new);
 
-        let IpAddr::V4(v4) = node.bmc_ip else {
-            tracing::warn!(
-                hostname = %node.hostname,
-                bmc_ip_address = %node.bmc_ip,
-                rack_id = rack_id.as_ref().map(tracing::field::display),
-                "cluster endpoint has non-IPv4 BMC address; skipping"
-            );
-            continue;
+        let mac = match node.bmc_ip {
+            IpAddr::V4(v4) => {
+                // Retain the synthetic MAC already used in IPv4 logs and metric labels.
+                let [o1, o2, o3, o4] = v4.octets();
+                Some(MacAddress::new([0x02, 0x00, o1, o2, o3, o4]))
+            }
+            // IPv6 needs the full address; a synthetic MAC cannot distinguish all IPv6 BMCs.
+            IpAddr::V6(_) => None,
         };
-
-        // Deterministic locally-administered MAC: 02:00:<o1>:<o2>:<o3>:<o4>.
-        // MAC is an internal cache key only; connectivity is IP-based.
-        let [o1, o2, o3, o4] = v4.octets();
-        let mac = MacAddress::new([0x02, 0x00, o1, o2, o3, o4]);
 
         let addr = BmcAddr {
             ip: node.bmc_ip,
@@ -499,5 +494,98 @@ fn build_endpoints(
 impl EndpointSource for ClusterEndpointSource {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
         Box::pin(self.load_endpoints())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+    use crate::endpoint::test_support::reqwest;
+    use crate::sink::EventContext;
+
+    #[tokio::test]
+    async fn file_inventory_preserves_ipv4_keys_and_distinguishes_ipv6_addresses() {
+        let cases = [
+            Check {
+                scenario: "IPv4 retains its synthetic MAC identity",
+                input: "10.2.3.4",
+                expect: (
+                    Some(MacAddress::new([0x02, 0x00, 10, 2, 3, 4])),
+                    "02:00:0A:02:03:04".to_string(),
+                ),
+            },
+            Check {
+                scenario: "IPv6 uses its full normalized address",
+                input: "2001:0db8:0001:0000:0000:0000:0000:0001",
+                expect: (None, "ip:2001:db8:1::1".to_string()),
+            },
+            Check {
+                scenario: "IPv6 with the same suffix remains distinct",
+                input: "2001:db8:2::1",
+                expect: (None, "ip:2001:db8:2::1".to_string()),
+            },
+        ];
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        let nodes: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                json!({"hostname": format!("host-{index}"), "bmc_ip": case.input, "rack": "rack-a"})
+            })
+            .collect();
+        std::fs::write(
+            inventory.path(),
+            json!({
+                "default_credentials": {"username": "reader", "password": "test-password"},
+                "nodes": nodes,
+            })
+            .to_string(),
+        )
+        .expect("write inventory file");
+        let source = ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                port: Some(9443),
+                ..Default::default()
+            },
+            &reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
+        assert_eq!(endpoints.len(), cases.len());
+        check_values(cases, |ip| {
+            let ip: IpAddr = ip.parse().expect("valid inventory IP");
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint.addr.ip == ip)
+                .expect("inventory endpoint is retained");
+            (endpoint.addr.mac, endpoint.key())
+        });
+
+        for endpoint in &endpoints {
+            assert_eq!(endpoint.addr.port, Some(9443));
+            assert_eq!(endpoint.rack_id, Some(RackId::new("rack-a")));
+            assert_eq!(endpoint.log_identity(), endpoint.key());
+            assert_eq!(
+                EventContext::from_endpoint(endpoint, "test").endpoint_key(),
+                endpoint.key(),
+            );
+            let credentials = endpoint
+                .bmc()
+                .credential_provider()
+                .fetch_credentials(&endpoint.addr)
+                .await
+                .expect("inventory credentials");
+            let BmcCredentials::UsernamePassword { username, password } = credentials else {
+                panic!("expected inventory username and password");
+            };
+            assert_eq!(username, "reader");
+            assert_eq!(password.as_deref(), Some("test-password"));
+        }
     }
 }

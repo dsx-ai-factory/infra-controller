@@ -21,9 +21,12 @@ use async_trait::async_trait;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use health_report::{HealthReport, HealthReportApplyMode};
 use model::machine::{MachineLastRebootRequested, MachineLastRebootRequestedMode};
 use sqlx::PgTransaction;
+use state_controller::CheckApplied as _;
 use state_controller::db_write_batch::WriteOp;
 use state_controller::state_handler::StateHandlerError;
 
@@ -31,9 +34,11 @@ use state_controller::state_handler::StateHandlerError;
 ///
 /// Operations that are appropriate here are ones where:
 ///
-/// - The operation can be deferred to the end without worrying about whether it will succeed. This
-///   means operations mustn't have preconditions other than there being a valid machine ID.
-///   For example, bumping timestamps or clearing errors.
+/// - Deferring the write does not change the decision to perform earlier external work.
+///   Most operations, such as bumping timestamps or clearing errors, only require a valid
+///   machine ID. Conditional writes must handle rejection explicitly: required writes
+///   invalidate the whole batch without undoing earlier external work, while optional
+///   writes can be skipped.
 /// - We can't open a transaction and do the write operation directly because we have to a
 ///   long-running operation next (like rebooting a host) and we don't want to hold the transaction
 ///   across an await point.
@@ -75,6 +80,8 @@ pub enum MachineWriteOp {
     ClearFailureDetails {
         machine_id: MachineId,
     },
+    /// Updates only the captured reboot record. A changed or absent record
+    /// invalidates the iteration instead of updating a different attempt.
     UpdateRestartVerificationStatus {
         machine_id: MachineId,
         current_reboot: MachineLastRebootRequested,
@@ -164,16 +171,15 @@ impl WriteOp for MachineWriteOp {
                 current_reboot,
                 verified,
                 attempts,
-            } => {
-                db::machine::update_restart_verification_status(
-                    &machine_id,
-                    current_reboot,
-                    verified,
-                    attempts,
-                    txn,
-                )
-                .await?
-            }
+            } => db::machine::update_restart_verification_status(
+                &machine_id,
+                current_reboot,
+                verified,
+                attempts,
+                txn,
+            )
+            .await?
+            .check_applied()?,
             UpdateFirmwareVersionByMachineId {
                 machine_id,
                 bmc_version,
@@ -203,8 +209,13 @@ impl WriteOp for MachineWriteOp {
                     .await?
             }
             ReExploreIfVersionMatches { address, version } => {
-                db::explored_endpoints::re_explore_if_version_matches(address, version, txn)
-                    .await?;
+                // A changed report version or removed endpoint makes this queued
+                // request unnecessary, but must not discard the other queued writes.
+                match db::explored_endpoints::re_explore_if_version_matches(address, version, txn)
+                    .await?
+                {
+                    Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+                }
             }
             UseCustomIpxeOnNextBoot {
                 machine_id,

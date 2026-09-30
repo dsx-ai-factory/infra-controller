@@ -36,6 +36,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) reconnect_interval_max: Option<Duration>,
     pub(crate) successful_connection_minimum_duration: Option<Duration>,
     pub(crate) force_deactivate_conflicting_ipmi_sol_sessions: Option<bool>,
+    pub(crate) log_rotate_max_size: Option<Size>,
 }
 
 pub(crate) async fn spawn(
@@ -44,12 +45,15 @@ pub(crate) async fn spawn(
 ) -> eyre::Result<NewSshConsoleHandle> {
     let listen_address = "127.0.0.1:0".parse().expect("Invalid listen address");
     let metrics_address = "127.0.0.1:0".parse().expect("Invalid metrics address");
+    let api_listen_address = "127.0.0.1:0".parse().expect("Invalid API listen address");
 
     let logs_dir = TempDir::new().context("error creating temp dir for console logs")?;
 
     let config = ssh_console::config::Config {
         listen_address,
         metrics_address,
+        api_listen_address,
+        api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
         carbide_uri: format!("https://localhost:{carbide_port}")
             .try_into()
             .expect("Invalid URI?"),
@@ -89,7 +93,10 @@ pub(crate) async fn spawn(
             .and_then(|c| c.successful_connection_minimum_duration)
             .unwrap_or(Duration::ZERO),
         log_rotate_max_rotated_files: 3,
-        log_rotate_max_size: Size::from_kib(10),
+        log_rotate_max_size: config_overrides
+            .as_ref()
+            .and_then(|config| config.log_rotate_max_size)
+            .unwrap_or_else(|| Size::from_kib(10)),
         hosts: true,
         openssh_certificate_authorization: ssh_console::config::Defaults::cert_authorization(),
     };

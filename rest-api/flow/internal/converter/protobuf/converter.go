@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,7 +125,10 @@ func LocationFrom(loc *pb.Location) location.Location {
 	}
 }
 
-// UUIDFrom converts a protobuf UUID to an internal uuid.UUID
+// UUIDFrom converts a protobuf UUID to an internal uuid.UUID for paths where
+// uuid.Nil is itself handled as an error or represents trusted missing data.
+// Optional request fields must use OptionalUUIDFrom so malformed values remain
+// distinguishable from omission.
 func UUIDFrom(id *pb.UUID) uuid.UUID {
 	if id != nil {
 		if parsed, err := uuid.Parse(id.Id); err == nil {
@@ -135,35 +139,34 @@ func UUIDFrom(id *pb.UUID) uuid.UUID {
 	return uuid.Nil
 }
 
-// UUIDStringFrom converts a *pb.UUID to a plain string.
-// Returns "" if the input is nil or cannot be parsed.
-func UUIDStringFrom(id *pb.UUID) string {
-	parsed := UUIDFrom(id)
-	if parsed == uuid.Nil {
-		return ""
+// OptionalUUIDFrom converts an optional protobuf UUID without conflating an
+// omitted value with a malformed or zero UUID.
+func OptionalUUIDFrom(id *pb.UUID) (*uuid.UUID, error) {
+	if id == nil {
+		return nil, nil
 	}
-	return parsed.String()
+
+	parsed, err := uuid.Parse(id.GetId())
+	if err != nil || parsed == uuid.Nil {
+		return nil, fmt.Errorf("must be a valid non-zero UUID")
+	}
+
+	return &parsed, nil
 }
 
-// OptionalUUIDFrom converts a *pb.UUID to *uuid.UUID.
-// Returns nil if the input is nil or cannot be parsed.
-func OptionalUUIDFrom(id *pb.UUID) *uuid.UUID {
-	parsed := UUIDFrom(id)
-	if parsed == uuid.Nil {
-		return nil
-	}
-	return &parsed
-}
-
-// UUIDsFrom converts a slice of *pb.UUID to a slice of uuid.UUID.
-func UUIDsFrom(ids []*pb.UUID) []uuid.UUID {
+// RequiredUUIDsFrom converts a repeated protobuf UUID field. Every entry must
+// be present and valid so callers never receive a partial result.
+func RequiredUUIDsFrom(ids []*pb.UUID) ([]uuid.UUID, error) {
 	result := make([]uuid.UUID, 0, len(ids))
-	for _, id := range ids {
-		if parsed := UUIDFrom(id); parsed != uuid.Nil {
-			result = append(result, parsed)
+	for i, id := range ids {
+		parsed, err := OptionalUUIDFrom(id)
+		if err != nil || parsed == nil {
+			return nil, fmt.Errorf("entry %d must be a valid non-zero UUID", i)
 		}
+		result = append(result, *parsed)
 	}
-	return result
+
+	return result, nil
 }
 
 // RackPositionFrom converts a protobuf RackPosition to an internal
@@ -216,33 +219,64 @@ func BMCsFrom(pbBmcs []*pb.BMCInfo) map[devicetypes.BMCType][]bmc.BMC {
 	return bmcsByType
 }
 
-// ComponentFrom converts a protobuf Component to an internal Component
-func ComponentFrom(c *pb.Component) *component.Component {
+// ComponentFrom converts a protobuf Component to an internal Component.
+// Optional UUID fields may be omitted, but present values must be valid.
+func ComponentFrom(c *pb.Component) (*component.Component, error) {
 	if c == nil {
-		return nil
+		return nil, nil
 	}
 
 	bmcsByType := BMCsFrom(c.GetBmcs())
+	info := DeviceInfoFrom(c.GetInfo())
+	componentID, err := OptionalUUIDFrom(c.GetInfo().GetId())
+	if err != nil {
+		return nil, fmt.Errorf("component info.id %w", err)
+	}
+	if componentID != nil {
+		info.ID = *componentID
+	}
+	domainID, err := OptionalUUIDFrom(c.GetNvlDomainId())
+	if err != nil {
+		return nil, fmt.Errorf("component nvl_domain_id %w", err)
+	}
 
-	return &component.Component{
+	result := &component.Component{
 		Type:            ComponentTypeFrom(c.GetType()),
-		Info:            DeviceInfoFrom(c.GetInfo()),
+		Info:            info,
 		FirmwareVersion: c.GetFirmwareVersion(),
 		Position:        RackPositionFrom(c.GetPosition()),
 		BmcsByType:      bmcsByType,
-		NVLDomainID:     UUIDFrom(c.GetNvlDomainId()),
+		ComponentID:     c.GetComponentId(),
 		PowerState:      c.GetPowerState(),
 		RackExternalID:  c.GetRackExternalId(),
+		Health:          HealthReportFrom(c.GetHealth()),
 	}
+	if domainID != nil {
+		result.NVLDomainID = *domainID
+	}
+	return result, nil
 }
 
-// RackFrom converts a protobuf Rack to an internal Rack
-func RackFrom(r *pb.Rack) *rack.Rack {
+// RackFrom converts a protobuf Rack to an internal Rack. It rejects invalid
+// UUIDs before any nested identifier can be discarded or replaced by a
+// fallback identity.
+func RackFrom(r *pb.Rack) (*rack.Rack, error) {
 	if r == nil {
-		return nil
+		return nil, nil
 	}
 
-	domainIDs := UUIDsFrom(r.GetNvlDomainIds())
+	info := DeviceInfoFrom(r.GetInfo())
+	rackID, err := OptionalUUIDFrom(r.GetInfo().GetId())
+	if err != nil {
+		return nil, fmt.Errorf("rack info.id %w", err)
+	}
+	if rackID != nil {
+		info.ID = *rackID
+	}
+	domainIDs, err := RequiredUUIDsFrom(r.GetNvlDomainIds())
+	if err != nil {
+		return nil, fmt.Errorf("rack nvl_domain_ids %w", err)
+	}
 	var domainID uuid.UUID
 	if len(domainIDs) > 0 {
 		domainID = domainIDs[0]
@@ -250,29 +284,36 @@ func RackFrom(r *pb.Rack) *rack.Rack {
 	if len(domainIDs) > 1 {
 		log.Warn().
 			Int("domain_id_count", len(domainIDs)).
-			Str("rack_id", UUIDFrom(r.GetInfo().GetId()).String()).
+			Str("rack_id", info.ID.String()).
 			Msg("Rack has multiple NVLink domain IDs; using the first")
 	}
 
 	components := make([]component.Component, 0, len(r.GetComponents()))
-	for _, c := range r.GetComponents() {
-		converted := ComponentFrom(c)
+	for i, c := range r.GetComponents() {
+		converted, err := ComponentFrom(c)
+		if err != nil {
+			return nil, fmt.Errorf("rack component %d: %w", i, err)
+		}
+		if converted == nil {
+			return nil, fmt.Errorf("rack component %d is required", i)
+		}
 		if converted.NVLDomainID == uuid.Nil {
 			converted.NVLDomainID = domainID
 		}
 		components = append(components, *converted)
 	}
 	result := &rack.Rack{
-		Info:            DeviceInfoFrom(r.GetInfo()),
+		Info:            info,
 		ExternalID:      r.GetExternalId(),
 		Loc:             LocationFrom(r.GetLocation()),
 		Components:      components,
 		OperationStatus: types.PhaseUnknown,
+		Health:          HealthReportFrom(r.GetHealth()),
 	}
 	// OperationStatus is deliberately ignored on input. Flow derives this
 	// read-only field from persisted component statuses for Rack responses.
 	result.NVLDomainID = domainID
-	return result
+	return result, nil
 }
 
 // PaginationFrom converts a protobuf Pagination to an internal Pagination.
@@ -646,9 +687,94 @@ func ComponentTo(c *component.Component) *pb.Component {
 		NvlDomainId:     UUIDTo(c.NVLDomainID),
 		PowerState:      c.PowerState,
 		Status:          ComponentOperationStatusTo(c.Status),
+		Health:          HealthReportTo(c.Health),
 		LeakStatus:      LeakStatusTo(c.LeakStatus),
 		RackExternalId:  c.RackExternalID,
 	}
+}
+
+// HealthReportTo converts a persisted Core health snapshot to Flow's protobuf form.
+func HealthReportTo(report *types.HealthReport) *pb.HealthReport {
+	if report == nil {
+		return nil
+	}
+	successes := make([]*pb.HealthProbeSuccess, 0, len(report.Successes))
+	for _, success := range report.Successes {
+		successes = append(successes, &pb.HealthProbeSuccess{
+			Id:     success.ID,
+			Target: success.Target,
+		})
+	}
+	alerts := make([]*pb.HealthProbeAlert, 0, len(report.Alerts))
+	for _, alert := range report.Alerts {
+		protoAlert := &pb.HealthProbeAlert{
+			Id:              alert.ID,
+			Target:          alert.Target,
+			Message:         alert.Message,
+			TenantMessage:   alert.TenantMessage,
+			Classifications: alert.Classifications,
+		}
+		if alert.InAlertSince != nil {
+			protoAlert.InAlertSince = timestamppb.New(*alert.InAlertSince)
+		}
+		alerts = append(alerts, protoAlert)
+	}
+	result := &pb.HealthReport{
+		Source:      report.Source,
+		TriggeredBy: report.TriggeredBy,
+		Successes:   successes,
+		Alerts:      alerts,
+	}
+	if report.ObservedAt != nil {
+		result.ObservedAt = timestamppb.New(*report.ObservedAt)
+	}
+	return result
+}
+
+// HealthReportFrom converts Flow's protobuf health report to its persisted form.
+func HealthReportFrom(report *pb.HealthReport) *types.HealthReport {
+	if report == nil {
+		return nil
+	}
+	successes := make([]types.HealthProbeSuccess, 0, len(report.GetSuccesses()))
+	for _, success := range report.GetSuccesses() {
+		if success == nil {
+			continue
+		}
+		successes = append(successes, types.HealthProbeSuccess{
+			ID:     success.GetId(),
+			Target: success.Target,
+		})
+	}
+	alerts := make([]types.HealthProbeAlert, 0, len(report.GetAlerts()))
+	for _, alert := range report.GetAlerts() {
+		if alert == nil {
+			continue
+		}
+		converted := types.HealthProbeAlert{
+			ID:              alert.GetId(),
+			Target:          alert.Target,
+			Message:         alert.GetMessage(),
+			TenantMessage:   alert.TenantMessage,
+			Classifications: append([]string(nil), alert.GetClassifications()...),
+		}
+		if alert.GetInAlertSince() != nil {
+			inAlertSince := alert.GetInAlertSince().AsTime()
+			converted.InAlertSince = &inAlertSince
+		}
+		alerts = append(alerts, converted)
+	}
+	result := &types.HealthReport{
+		Source:      report.GetSource(),
+		TriggeredBy: report.TriggeredBy,
+		Successes:   successes,
+		Alerts:      alerts,
+	}
+	if report.GetObservedAt() != nil {
+		observedAt := report.GetObservedAt().AsTime()
+		result.ObservedAt = &observedAt
+	}
+	return result
 }
 
 // LeakStatusTo converts the Flow-internal LeakStatus to its protobuf
@@ -717,7 +843,29 @@ func ComponentOperationStatusTo(s *types.ComponentOperationStatus) *pb.Component
 	}
 }
 
-// RackTo converts an internal Rack to a protobuf Rack
+// NVLinkDomainFromRack projects rack inventory into domain inventory.
+func NVLinkDomainFromRack(r *pb.Rack) *pb.NVLinkDomain {
+	if r == nil {
+		return nil
+	}
+	d := &pb.NVLinkDomain{
+		Id: r.GetExternalId(), Name: r.GetInfo().GetName(),
+		OperationStatus: r.GetOperationStatus(), Components: r.GetComponents(),
+	}
+	profile := strings.TrimSuffix(r.GetRackProfileId(), "_NO_POWERSHELF")
+	for _, suffix := range []string{"_WIWYNN", "_LENOVO", "_SMC", "_NVIDIA"} {
+		if strings.HasSuffix(profile, suffix) {
+			topology := strings.TrimSuffix(profile, suffix)
+			if topology != "" {
+				d.Topology = &topology
+			}
+			break
+		}
+	}
+	return d
+}
+
+// RackTo converts an internal Rack to a protobuf Rack.
 func RackTo(r *rack.Rack) *pb.Rack {
 	if r == nil {
 		return nil
@@ -734,9 +882,11 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	result := &pb.Rack{
 		Info:            DeviceInfoTo(&r.Info),
 		ExternalId:      r.ExternalID,
+		RackProfileId:   r.RackProfileID,
 		Location:        LocationTo(&r.Loc),
 		Components:      components,
 		OperationStatus: PhaseTo(r.OperationStatus),
+		Health:          HealthReportTo(r.Health),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
@@ -1171,7 +1321,9 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 		domains := make([]*pb.NVLDomainTarget, 0, len(ts.NVLDomains))
 		for _, domain := range ts.NVLDomains {
 			target := &pb.NVLDomainTarget{}
-			if domain.Identifier.ID != uuid.Nil {
+			if domain.Identifier.ExternalID != "" {
+				target.Identifier = &pb.NVLDomainTarget_ExternalId{ExternalId: domain.Identifier.ExternalID}
+			} else if domain.Identifier.ID != uuid.Nil {
 				target.Identifier = &pb.NVLDomainTarget_Id{
 					Id: UUIDTo(domain.Identifier.ID),
 				}
@@ -1180,7 +1332,7 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 					Name: domain.Identifier.Name,
 				}
 			} else {
-				return nil, fmt.Errorf("invalid NVLink domain target: neither id nor name is set")
+				return nil, fmt.Errorf("invalid NVLink domain target: neither id, external_id, nor name is set")
 			}
 
 			for _, componentType := range domain.ComponentTypes {
@@ -1247,6 +1399,11 @@ func NVLDomainTargetFrom(dt *pb.NVLDomainTarget) (operation.NVLDomainTarget, err
 
 	var target operation.NVLDomainTarget
 	switch id := dt.GetIdentifier().(type) {
+	case *pb.NVLDomainTarget_ExternalId:
+		if strings.TrimSpace(id.ExternalId) == "" {
+			return operation.NVLDomainTarget{}, fmt.Errorf("NVLink domain external id must not be blank")
+		}
+		target.Identifier.ExternalID = id.ExternalId
 	case *pb.NVLDomainTarget_Id:
 		parsed, err := uuid.Parse(id.Id.GetId())
 		if err != nil {
@@ -1262,7 +1419,7 @@ func NVLDomainTargetFrom(dt *pb.NVLDomainTarget) (operation.NVLDomainTarget, err
 		target.Identifier.Name = id.Name
 	default:
 		return operation.NVLDomainTarget{}, fmt.Errorf(
-			"NVLink domain target must have either id or name set",
+			"NVLink domain target must have id, external_id, or name set",
 		)
 	}
 
@@ -1449,6 +1606,7 @@ func ScheduledOperationFrom(
 			TargetVersion:          r.UpgradeFirmware.GetTargetVersion(),
 			SubTargets:             r.UpgradeFirmware.GetSubTargets(),
 			OverrideReadinessCheck: r.UpgradeFirmware.GetOverrideReadinessCheck(),
+			OverrideVersionCheck:   r.UpgradeFirmware.GetOverrideVersionCheck(),
 		}
 
 		if r.UpgradeFirmware.GetStartTime() != nil {

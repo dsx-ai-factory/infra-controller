@@ -19,6 +19,7 @@
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 pub mod attestation;
+pub mod attestation_profile;
 pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
@@ -40,10 +41,12 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;
@@ -109,7 +112,9 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 
-pub use conditional_write::{ConditionalWrite, ControllerStateNotCurrent};
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

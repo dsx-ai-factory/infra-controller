@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -627,6 +628,53 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(cih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
+		}
+	}
+
 	dbInterfaces := []cdbm.Interface{}
 	isInterfaceDeviceInfoPresent := false
 
@@ -1105,6 +1153,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	var instance *cdbm.Instance
 	var ifcs []cdbm.Interface
 	var ibifcs []cdbm.InfiniBandInterface
+	var sxas []cdbm.SpectrumXAttachment
 	var desds []cdbm.DpuExtensionServiceDeployment
 	var nvlifcs []cdbm.NVLinkInterface
 	var ssd *cdbm.StatusDetail
@@ -1135,6 +1184,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// the DB tx unwinds before we make the second remote call. nil means
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
+	var allocationCompleted bool
 	var dpsRollback func() error
 
 	err = cdb.WithTx(ctx, cih.dbSession, func(tx *cdb.Tx) error {
@@ -1216,7 +1266,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			// Always check if Machine is already assigned
 			if machine.IsAssigned {
 				logger.Warn().Str("MachineID", machine.ID).Bool("AllowUnhealthyMachine", allowUnhealthyMachine).Msg("Machine is already assigned to an Instance, cannot be used for new Instance")
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID), nil)
+				return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID))
 			}
 
 			// Check if it's possible to provision the Machine
@@ -1242,6 +1292,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 							return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has controller state: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, controllerState), nil)
 						} else {
 							mlogger.Warn().Msg("Machine has status that does not allow Instance creation")
+							if machine.Status == cdbm.MachineStatusInUse {
+								return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, machine.Status))
+							}
 							return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, machine.Status), nil)
 						}
 					}
@@ -1251,6 +1304,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is not in Ready state, but it can be provisioned by setting `allowUnhealthyMachine` to true in request", machine.ID), nil)
 					} else {
 						mlogger.Warn().Msg("Machine has status that does not allow Instance creation")
+						if machine.Status == cdbm.MachineStatusInUse {
+							return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation", machine.ID, machine.Status))
+						}
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation", machine.ID, machine.Status), nil)
 					}
 				}
@@ -1260,7 +1316,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  machine.ID,
 				IsAssigned: cutil.GetPtr(true),
+				Status:     cutil.GetPtr(machine.StatusForAssignment(true)),
 			}
+			statusChanged := machine.Status != *updateInput.Status
 			machine, err = mDAO.Update(ctx, tx, updateInput)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
@@ -1268,6 +1326,18 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				}
 				logger.Error().Err(err).Msg("error retrieving Machine from DB by ID")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Machine with ID specified in request data", nil)
+			}
+
+			if statusChanged {
+				_, err = cdbm.NewStatusDetailDAO(cih.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: machine.ID,
+					Status:   machine.Status,
+					Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+				})
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to create Machine status detail")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status change", nil)
+				}
 			}
 
 			instanceTypeID = machine.InstanceTypeID
@@ -1928,9 +1998,35 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			description = *instance.Description
 		}
 
-		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
+		// Persist the SpectrumX Attachments, then build the Site request from the
+		// persisted rows so inventory has something to reconcile against.
+		sxaInputs := make([]cdbm.SpectrumXAttachmentCreateInput, 0, len(apiRequest.SpectrumXAttachments))
 		for _, sac := range apiRequest.SpectrumXAttachments {
-			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+			// The Partition ID was parsed during validation, so it cannot fail here.
+			partitionID, _ := uuid.Parse(sac.SpectrumXPartitionID)
+			sxaInputs = append(sxaInputs, cdbm.SpectrumXAttachmentCreateInput{
+				InstanceID:           instance.ID,
+				SiteID:               site.ID,
+				SpectrumXPartitionID: partitionID,
+				Device:               sac.Device,
+				DeviceInstance:       *sac.DeviceInstance,
+				AttachmentType:       sac.AttachmentType,
+				VirtualFunctionID:    sac.VirtualFunctionID,
+				Status:               cdbm.SpectrumXAttachmentStatusPending,
+				CreatedBy:            dbUser.ID,
+			})
+		}
+
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(cih.dbSession)
+		sxas, serr = sxaDAO.CreateMultiple(ctx, tx, sxaInputs)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("error creating Instance SpectrumX Attachment DB entries")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(sxas))
+		for i := range sxas {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sxas[i].ToProto())
 		}
 
 		// Prepare the create request workflow object
@@ -1986,7 +2082,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "CreateInstanceV2", createInstanceRequest)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to create Instance")
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil)
+			// A failed start acknowledgement does not prove the workflow never started.
+			return instanceCreateUncertainError(cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil), instance)
 		}
 
 		wid := we.GetID()
@@ -2000,17 +2097,26 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				logger.Error().Err(err).Msg("failed to create Instance, timeout occurred executing workflow on Site.")
 				timeoutCause := err
 				timeoutResp = func() error {
-					return common.TerminateWorkflowOnTimeOut(c, logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2")
+					return instanceCreateUncertainError(common.TerminateWorkflowOnTimeOutError(logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2"), instance).Send(c)
 				}
 				return cutil.NewAPIError(http.StatusInternalServerError, "Instance create workflow timed out", nil)
 			}
 
+			var workflowErr *tp.WorkflowExecutionError
+			outcomeUnknown := !errors.As(err, &workflowErr)
 			code, err := common.UnwrapWorkflowError(err)
+			// A completed workflow failure may still contain a lost Core reply.
+			outcomeUnknown = outcomeUnknown || code == http.StatusInternalServerError || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 			logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to create Instance")
-			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create Instance on Site: %s", err), nil)
+			apiErr := cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create Instance on Site: %s", err), nil)
+			if outcomeUnknown {
+				return instanceCreateUncertainError(apiErr, instance)
+			}
+			return apiErr
 		}
 
 		logger.Info().Str("Workflow ID", wid).Msg("completed synchronous create Instance workflow")
+		allocationCompleted = true
 
 		return nil
 	})
@@ -2026,6 +2132,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				if rollbackErr != nil {
 					logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance creation failure")
 				}
+			}
+			if allocationCompleted {
+				logger.Error().Err(err).Msg("Instance allocation completed but REST transaction failed")
+				return instanceCreateUncertainError(cutil.NewAPIError(http.StatusInternalServerError, "Instance allocation completed but REST transaction failed", nil), instance).Send(c)
 			}
 			return common.HandleTxError(c, logger, err, "Failed to create Instance, DB transaction error")
 		}
@@ -2044,10 +2154,37 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// ==================== Step 7: Response ====================
 
 	// Create response
-	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
+	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, sxas, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, apiInstance)
+}
+
+// instanceCreateUncertainError prevents blind retries when REST rollback cannot
+// establish whether the Site allocated the Instance. Include IDs for operator lookup.
+func instanceCreateUncertainError(apiErr *cutil.APIError, instance *cdbm.Instance) *cutil.APIError {
+	apiErr.Message += fmt.Sprintf(". Do not retry automatically. Check Instance %s on Site %s in REST. If it is absent or its outcome is unclear, ask the Site operator to verify the Core allocation and workflow instance-create-%s before creating again.", instance.ID, instance.SiteID, instance.ID)
+	return apiErr.WithRetryable(false)
+}
+
+// machineUnavailableError classifies only an unambiguous current association.
+// The caller holds the machine row/advisory locks in tx. Do not filter by tenant:
+// that would hide a conflicting occupant. GetAll excludes soft-deleted instances.
+func (cih CreateInstanceHandler) machineUnavailableError(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machine *cdbm.Machine, tenantID uuid.UUID, message string) *cutil.APIError {
+	apiErr := cutil.NewAPIError(http.StatusBadRequest, message, nil)
+	instances, total, err := cdbm.NewInstanceDAO(cih.dbSession).GetAll(ctx, tx,
+		cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}, SiteIDs: []uuid.UUID{machine.SiteID}},
+		cdbp.PageInput{Limit: cutil.GetPtr(2)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Str("MachineID", machine.ID).Msg("Failed to retrieve Instance association for rejected create")
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine Instance association", nil)
+	}
+	// Missing or ambiguous associations cannot establish ownership or release.
+	if total != 1 || len(instances) != 1 {
+		return apiErr
+	}
+	occupant := instances[0]
+	return apiErr.WithRetryable(occupant.TenantID == tenantID && occupant.Status == cdbm.InstanceStatusTerminating)
 }
 
 // ~~~~~ Update Handler ~~~~~ //
@@ -2239,8 +2376,22 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		return timeoutResp()
 	}
 
+	// A reboot leaves the Instance's SpectrumX Attachments untouched, so load them rather
+	// than returning an empty array that contradicts the GET immediately afterward.
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(reqCtx, nil, cdbm.SpectrumXAttachmentFilterInput{
+		InstanceIDs: []uuid.UUID{ui.ID},
+	}, cdbp.PageInput{
+		OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+		Limit:   cutil.GetPtr(cdbp.TotalLimit),
+	}, []string{cdbm.SpectrumXPartitionRelationName})
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving SpectrumX Attachments for rebooted Instance")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, nil, nil, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, sxas, nil, nil, dbskgs, ssds)
 	if ui.NetworkSecurityGroupID == nil {
 		err = AttachVpcNsgPropagationDetailsToApiInstance(c, reqCtx, logger, uih.dbSession, ui, retifc, apiInstance)
 		if err != nil {
@@ -2741,6 +2892,53 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(uih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
+		}
 	}
 
 	existingSubnetIfcMap := map[uuid.UUID]uint64{}
@@ -3335,6 +3533,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	var existingNvlIfcs []cdbm.NVLinkInterface
 	var newOrExistingIbIfcs []cdbm.InfiniBandInterface
 	var newOrExistingNvlIfcs []cdbm.NVLinkInterface
+	var newOrExistingSxAs []cdbm.SpectrumXAttachment
 	var dbskgs []cdbm.SSHKeyGroup
 	var ssds []cdbm.StatusDetail
 	reqCtx := ctx
@@ -3839,6 +4038,104 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 		}
 
+		// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
+		// an explicit list replaces them, reusing any row whose partition, device, and device
+		// instance are still requested so an unchanged attachment is not torn down and rebuilt.
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+
+		existingSxAs, _, derr := sxaDAO.GetAll(ctx, tx, cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		}, cdbp.PageInput{
+			OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+			Limit:   cutil.GetPtr(cdbp.TotalLimit),
+		}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to retrieve SpectrumX Attachment details for Instance")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		if apiRequest.SpectrumXAttachments == nil {
+			newOrExistingSxAs = existingSxAs
+		} else {
+			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
+			for i := range existingSxAs {
+				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					continue
+				}
+				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
+			}
+
+			retainedSxAIDs := map[uuid.UUID]bool{}
+			sxaCreateInputs := []cdbm.SpectrumXAttachmentCreateInput{}
+
+			for _, apiSxA := range apiRequest.SpectrumXAttachments {
+				partitionID, perr := uuid.Parse(apiSxA.SpectrumXPartitionID)
+				if perr != nil {
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
+				}
+
+				// Keyed through the persisted row so a requested Attachment and the row it
+				// would reuse cannot disagree. The attachment type is part of that identity,
+				// so changing it retires the old row rather than silently keeping the type.
+				requestedSxA := cdbm.SpectrumXAttachment{
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+				}
+
+				existing, reusable := existingSxAByKey[requestedSxA.Key()]
+				if reusable {
+					retainedSxAIDs[existing.ID] = true
+					newOrExistingSxAs = append(newOrExistingSxAs, existing)
+					continue
+				}
+
+				sxaCreateInputs = append(sxaCreateInputs, cdbm.SpectrumXAttachmentCreateInput{
+					InstanceID:           instanceID,
+					SiteID:               site.ID,
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+					VirtualFunctionID:    apiSxA.VirtualFunctionID,
+					Status:               cdbm.SpectrumXAttachmentStatusPending,
+					CreatedBy:            dbUser.ID,
+				})
+			}
+
+			createdSxAs, derr := sxaDAO.CreateMultiple(ctx, tx, sxaCreateInputs)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("failed to create SpectrumX Attachment records in DB")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+			}
+			newOrExistingSxAs = append(newOrExistingSxAs, createdSxAs...)
+
+			// Anything no longer requested moves to Deleting. Instance inventory removes the
+			// row once the Site stops reporting the attachment.
+			for i := range existingSxAs {
+				if retainedSxAIDs[existingSxAs[i].ID] {
+					continue
+				}
+				if existingSxAs[i].Status != cdbm.SpectrumXAttachmentStatusDeleting {
+					existingSxAs[i].Status = cdbm.SpectrumXAttachmentStatusDeleting
+					_, derr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+						SpectrumXAttachmentID: existingSxAs[i].ID,
+						Status:                cutil.GetPtr(cdbm.SpectrumXAttachmentStatusDeleting),
+					})
+					if derr != nil {
+						logger.Error().Err(derr).Msg("failed to update SpectrumX Attachment record in DB")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+					}
+				}
+
+				// Carried into the response so a retiring attachment still appears with its
+				// Deleting status, matching what a following GET reports. The Site config
+				// build below filters these out.
+				newOrExistingSxAs = append(newOrExistingSxAs, existingSxAs[i])
+			}
+		}
+
 		// Fetch existing DPU Extension Service Deployments for the Instance
 		desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(uih.dbSession)
 		existingDesds, _, derr := desdDAO.GetAll(ctx, tx, cdbm.DpuExtensionServiceDeploymentFilterInput{
@@ -4224,13 +4521,19 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 		}
 
-		if apiRequest.SpectrumXAttachments != nil {
-			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
-			for _, sac := range apiRequest.SpectrumXAttachments {
-				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+		// The Site treats the config as a full replacement rather than a merge, so this
+		// always carries the current attachments. A nil request list leaves the persisted
+		// rows alone, and newOrExistingSxAs is then the existing set, which keeps an
+		// unrelated PATCH from clearing the Instance's attachments on the Site.
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
+		for i := range newOrExistingSxAs {
+			if newOrExistingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				// NOTE: Don't send any SpectrumX Attachments that are being deleted
+				continue
 			}
-			updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
 		}
+		updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "instance-update-" + instance.ID.String(),
@@ -4310,7 +4613,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, newOrExistingSxAs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if its parent VPC does.
 	// We'll need to pull that separately because the user might not have asked for
@@ -4560,6 +4863,22 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance Interfaces for Instance", nil)
 	}
 
+	// Get the instance SpectrumX attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gih.dbSession)
+	sxas, _, err := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		},
+		cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending}, Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Get the instance infiniband interface record from the db
 	ibifcDAO := cdbm.NewInfiniBandInterfaceDAO(gih.dbSession)
 	ibIfcs, _, err := ibifcDAO.GetAll(
@@ -4634,7 +4953,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, desds, nvlIfcs, dbskgs, ssds)
+	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, sxas, desds, nvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if any parent VPC does.
 	if instance.NetworkSecurityGroupID == nil {
@@ -4983,6 +5302,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Get IP addresses from query param and filter by interface IPs
 	if ipAddresses := qParams["ipAddress"]; len(ipAddresses) != 0 {
 		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("ipAddress", ipAddresses), logger)
+		// Core stores these addresses in compressed form, and the database
+		// compares them as text. Leave invalid filters unchanged to match nothing.
+		for i, value := range ipAddresses {
+			address, err := netip.ParseAddr(value)
+			if err == nil {
+				ipAddresses[i] = address.String()
+			}
+		}
 
 		// GetAll interfaces matching specified IP addresses
 		ifcDAO := cdbm.NewInterfaceDAO(gaih.dbSession)
@@ -5133,6 +5460,29 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		ibifcMap[ibifc.InstanceID] = append(ibifcMap[ibifc.InstanceID], cibifc)
 	}
 
+	// Get the instance SpectrumX Attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gaih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: insIDs,
+		},
+		cdbp.PageInput{
+			Limit: cutil.GetPtr(cdbp.TotalLimit),
+		},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance SpectrumX Attachments for Instance", nil)
+	}
+	sxaMap := map[uuid.UUID][]cdbm.SpectrumXAttachment{}
+	for _, sxa := range sxas {
+		csxa := sxa
+		sxaMap[sxa.InstanceID] = append(sxaMap[sxa.InstanceID], csxa)
+	}
+
 	// Get the instance NVLink Interface record from the db
 	retnvlifc, _, serr := nvlDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{}, nil)
 	if serr != nil {
@@ -5215,7 +5565,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	for _, ins := range dbInstances {
 		// Create response
 		dbInstance := ins
-		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
+		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], sxaMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
 		apiInstance.Deprecations = queryParamDeprecations
 
 		// If the instance has no NSG applied directly, and there

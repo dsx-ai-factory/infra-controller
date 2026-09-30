@@ -36,10 +36,14 @@ use carbide_rack_controller::validating::strip_rv_labels;
 use carbide_secrets::credentials::{CredentialKey, CredentialManager, Credentials};
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::switch::SwitchId;
 use component_manager::component_manager::ComponentManager;
+use component_manager::config::{
+    SwitchMtlsService, effective_switch_mtls_services, switch_mtls_services_as_i32,
+};
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{
-    ScaleUpFabricManagerJobStatus, SwitchPasswordRotationState,
+    ScaleUpFabricManagerJobStatus, SwitchCertificateEndpoint, SwitchPasswordRotationState,
 };
 use component_manager::{NvosUpdateRequest, RackFirmwareUpdateRequest};
 use db::{
@@ -47,13 +51,14 @@ use db::{
     machine_topology as db_machine_topology, power_options as db_power_options,
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
+use model::component_manager::ConfigureSwitchCertificateState;
 use model::machine::HostMachine;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackErrorRecoveryPolicy,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
+    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -303,7 +308,11 @@ async fn terminate_active_rack_maintenance(
         "Terminating rack maintenance",
     );
 
-    Ok(StateHandlerOutcome::transition(RackState::Error { cause }).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    })
+    .with_txn(txn))
 }
 
 /// Aggregated firmware progress for machines, switches, and power shelves
@@ -789,7 +798,10 @@ async fn transition_to_rack_error(
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     let cause = cause.into();
     tracing::warn!(rack_id = %rack_id, %cause, "Rack maintenance failed, transitioning to Error");
-    let outcome = StateHandlerOutcome::transition(RackState::Error { cause });
+    let outcome = StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    });
     clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
 }
 
@@ -818,7 +830,11 @@ async fn transition_to_rack_error_with_firmware_job(
     db_rack::update_firmware_upgrade_job(txn.as_mut(), rack_id, Some(&job)).await?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
-    Ok(StateHandlerOutcome::transition(RackState::Error { cause }).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    })
+    .with_txn(txn))
 }
 
 /// If `maintenance_requested` is set, clear it and persist the updated config
@@ -1190,12 +1206,353 @@ async fn load_nmx_fabric_inventory(
     Ok(switch_inventory)
 }
 
-/// Submits the complete rack fabric topology to the idempotent RMS V2 API.
+enum CertificateEndpointLoadError {
+    Retry(StateHandlerError),
+    Invalid(String),
+}
+
+/// Loads the NVOS-only endpoint data used to rotate rack switch certificates.
 ///
-/// RMS selects the primary and ensures its NMX Controller security before
-/// reconciling the fabric, so NICo does not run V1 certificate preparation.
-/// Submission failures retain the current durable state for retry. A successful
-/// response advances only after RMS returns a non-empty job identifier.
+/// BMC MAC addresses identify persisted switches, but the certificate request
+/// does not read or submit BMC endpoint credentials. RMS accepts one host
+/// endpoint per switch, so zero or multiple usable NVOS endpoints are invalid.
+/// An optional target limits validation and credential loading to one switch.
+async fn load_nmx_certificate_endpoints(
+    db_pool: &sqlx::PgPool,
+    credential_manager: &dyn CredentialManager,
+    rack_id: &RackId,
+    target_switch_id: Option<SwitchId>,
+) -> Result<Vec<SwitchCertificateEndpoint>, CertificateEndpointLoadError> {
+    let rows = db_switch::find_switch_certificate_endpoint_candidates_by_rack_id(db_pool, rack_id)
+        .await
+        .map_err(|error| CertificateEndpointLoadError::Retry(StateHandlerError::from(error)))?;
+
+    let mut endpoints = Vec::new();
+
+    for switch_rows in rows.chunk_by(|left, right| left.switch_id == right.switch_id) {
+        let Some(first_row) = switch_rows.first() else {
+            continue;
+        };
+
+        if target_switch_id.is_some_and(|switch_id| first_row.switch_id != switch_id) {
+            continue;
+        }
+
+        let Some(bmc_mac) = first_row.bmc_mac else {
+            return Err(CertificateEndpointLoadError::Invalid(format!(
+                "switch {} is missing its persisted BMC MAC identity for ConfigureSwitchCertificate",
+                first_row.switch_id
+            )));
+        };
+
+        let mut candidates = switch_rows
+            .iter()
+            .filter_map(|row| Some((row.nvos_mac?, row.nvos_ip?, row.nvos_hostname.clone())));
+
+        let Some((nvos_mac, nvos_ip, nvos_host_name)) = candidates.next() else {
+            return Err(CertificateEndpointLoadError::Invalid(format!(
+                "switch {} has no usable NVOS endpoint for ConfigureSwitchCertificate",
+                first_row.switch_id
+            )));
+        };
+
+        if candidates.next().is_some() {
+            return Err(CertificateEndpointLoadError::Invalid(format!(
+                "switch {} has multiple usable NVOS endpoints for ConfigureSwitchCertificate",
+                first_row.switch_id
+            )));
+        }
+
+        let nvos_credentials = credential_manager
+            .get_credentials(&CredentialKey::SwitchNvosAdmin {
+                bmc_mac_address: bmc_mac,
+            })
+            .await
+            .map_err(|error| {
+                CertificateEndpointLoadError::Retry(StateHandlerError::GenericError(eyre::eyre!(
+                    "failed to load NVOS credentials for switch {}: {}",
+                    first_row.switch_id,
+                    error
+                )))
+            })?
+            .ok_or_else(|| {
+                CertificateEndpointLoadError::Invalid(format!(
+                    "switch {} is missing NVOS credentials for ConfigureSwitchCertificate",
+                    first_row.switch_id
+                ))
+            })?;
+
+        endpoints.push(SwitchCertificateEndpoint {
+            bmc_mac,
+            nvos_ip,
+            nvos_mac,
+            nvos_credentials,
+            nvos_host_name,
+        });
+    }
+
+    Ok(endpoints)
+}
+
+/// Validates static V2 prerequisites, then rotates every rack switch's NVUE
+/// certificate before V2 fabric setup.
+/// Failures proven to occur before RMS dispatch retain `Start` for retry. All
+/// other submission errors transition the rack to `Error` because no durable
+/// job ID proves whether RMS accepted all or part of the batch.
+async fn start_configure_nmx_cluster(
+    id: &RackId,
+    state: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    rack_profile_id: Option<&RackProfileId>,
+    scope: &MaintenanceScope,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    if !scope.is_full_rack() && scope.switch_ids.is_empty() {
+        return Ok(skip_configure_nmx_cluster_outcome(
+            id,
+            "maintenance scope contains no switches",
+            scope,
+        ));
+    }
+
+    let Some(component_manager) = ctx.services.component_manager.clone() else {
+        return transition_to_rack_error(id, state, "component manager not configured", ctx).await;
+    };
+
+    let endpoints = match load_nmx_certificate_endpoints(
+        &ctx.services.db_pool,
+        ctx.services.credential_manager.as_ref(),
+        id,
+        None,
+    )
+    .await
+    {
+        Ok(endpoints) => endpoints,
+        Err(CertificateEndpointLoadError::Retry(error)) => return Err(error),
+        Err(CertificateEndpointLoadError::Invalid(cause)) => {
+            return transition_to_rack_error(id, state, cause, ctx).await;
+        }
+    };
+
+    if endpoints.is_empty() {
+        return Ok(skip_configure_nmx_cluster_outcome(
+            id,
+            "rack has no switches in inventory",
+            scope,
+        ));
+    }
+
+    let rack_profile_label = rack_profile_id
+        .map(|profile_id| profile_id.to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+
+    let Some(profile) = super::resolve_profile(id, rack_profile_id, ctx) else {
+        return transition_to_rack_error(
+            id,
+            state,
+            "rack profile is missing or unknown; cannot configure switch certificates",
+            ctx,
+        )
+        .await;
+    };
+
+    if profile.rack_hardware_topology.is_none() {
+        return transition_to_rack_error(
+            id,
+            state,
+            format!(
+                "rack profile '{}' does not define rack_hardware_topology",
+                rack_profile_label
+            ),
+            ctx,
+        )
+        .await;
+    }
+
+    let mut services = switch_mtls_services_as_i32(&[SwitchMtlsService::NvueApi]);
+
+    if ctx
+        .services
+        .switch_mtls_services
+        .contains(&SwitchMtlsService::ScaleUpFabricTelemetryInterface)
+    {
+        services.extend(switch_mtls_services_as_i32(&[
+            SwitchMtlsService::ScaleUpFabricTelemetryInterface,
+        ]));
+    }
+
+    let job_id = match component_manager
+        .batch_configure_switch_certificate(&endpoints, None, Some(&services))
+        .await
+    {
+        Ok(job_id) => job_id,
+        Err(ComponentManagerError::RejectedBeforeDispatch(error)) => {
+            return Err(StateHandlerError::GenericError(eyre::eyre!(
+                "unable to prepare rack switch certificate configuration: {error}"
+            )));
+        }
+        Err(error) => {
+            return transition_to_rack_error(
+                id,
+                state,
+                format!("Unable to submit rack switch certificate configuration: {error}"),
+                ctx,
+            )
+            .await;
+        }
+    };
+
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+            configure_nmx_cluster: ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id },
+        },
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum SwitchCertificateJobCompletion {
+    SubmitScaleUpFabricManager,
+    CompleteMaintenanceActivity,
+}
+
+/// Polls a rack certificate batch and advances to the requested next phase.
+async fn wait_for_switch_certificate_job(
+    id: &RackId,
+    state: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    rack_profile_id: Option<&RackProfileId>,
+    scope: &MaintenanceScope,
+    job_id: &str,
+    completion: SwitchCertificateJobCompletion,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let Some(component_manager) = ctx.services.component_manager.as_deref() else {
+        return Ok(StateHandlerOutcome::wait(format!(
+            "Unable to poll switch certificate job {job_id}: component manager not configured"
+        )));
+    };
+
+    let status = match component_manager
+        .get_configure_switch_certificate_job_status(job_id)
+        .await
+    {
+        Ok(status) => status,
+        Err(error @ ComponentManagerError::NotFound(_)) => {
+            return transition_to_rack_error(id, state, error.to_string(), ctx).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                rack_id = %id,
+                job_id,
+                error = %error,
+                "Unable to poll rack switch certificate configuration; retrying"
+            );
+
+            return Ok(StateHandlerOutcome::wait(format!(
+                "Unable to poll switch certificate job {job_id}: {error}"
+            )));
+        }
+    };
+
+    match status.state {
+        ConfigureSwitchCertificateState::Started | ConfigureSwitchCertificateState::InProgress => {
+            Ok(StateHandlerOutcome::wait(format!(
+                "Switch certificate job {job_id} is {}",
+                status.state
+            )))
+        }
+        ConfigureSwitchCertificateState::Completed => match completion {
+            SwitchCertificateJobCompletion::SubmitScaleUpFabricManager => {
+                configure_scale_up_fabric_manager_v2(id, state, ctx, rack_profile_id, scope).await
+            }
+            SwitchCertificateJobCompletion::CompleteMaintenanceActivity => {
+                Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                    maintenance_state: next_state_after_configure(scope),
+                }))
+            }
+        },
+        ConfigureSwitchCertificateState::Failed => {
+            let cause = status.error.map_or_else(
+                || format!("Switch certificate job {job_id} failed"),
+                |error| format!("Switch certificate job {job_id} failed: {error}"),
+            );
+
+            transition_to_rack_error(id, state, cause, ctx).await
+        }
+    }
+}
+
+/// Binds configured nmx-telemetry after the RMS-selected primary is persisted.
+async fn start_primary_switch_certificate_configuration(
+    id: &RackId,
+    state: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    component_manager: &ComponentManager,
+    primary_switch_id: SwitchId,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let endpoints = match load_nmx_certificate_endpoints(
+        &ctx.services.db_pool,
+        ctx.services.credential_manager.as_ref(),
+        id,
+        Some(primary_switch_id),
+    )
+    .await
+    {
+        Ok(endpoints) => endpoints,
+        Err(CertificateEndpointLoadError::Retry(error)) => return Err(error),
+        Err(CertificateEndpointLoadError::Invalid(cause)) => {
+            return transition_to_rack_error(id, state, cause, ctx).await;
+        }
+    };
+
+    let Some(primary_endpoint) = endpoints.into_iter().next() else {
+        return transition_to_rack_error(
+            id,
+            state,
+            format!("RMS-selected primary switch {primary_switch_id} has no certificate endpoint"),
+            ctx,
+        )
+        .await;
+    };
+
+    let services = switch_mtls_services_as_i32(&[SwitchMtlsService::ScaleUpFabricTelemetry]);
+
+    let job_id = match component_manager
+        .batch_configure_switch_certificate(&[primary_endpoint], None, Some(&services))
+        .await
+    {
+        Ok(job_id) => job_id,
+        Err(ComponentManagerError::RejectedBeforeDispatch(error)) => {
+            return Err(StateHandlerError::GenericError(eyre::eyre!(
+                "unable to prepare primary switch certificate configuration: {error}"
+            )));
+        }
+        Err(error) => {
+            return transition_to_rack_error(
+                id,
+                state,
+                format!("Unable to submit primary switch certificate configuration: {error}"),
+                ctx,
+            )
+            .await;
+        }
+    };
+
+    tracing::info!(
+        rack_id = %id,
+        %primary_switch_id,
+        %job_id,
+        "Submitted primary switch telemetry certificate binding"
+    );
+
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+            configure_nmx_cluster: ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob {
+                job_id,
+            },
+        },
+    }))
+}
+
+/// Submits the complete rack fabric topology to the idempotent RMS V2 API.
 async fn configure_scale_up_fabric_manager_v2(
     id: &RackId,
     state: &mut Rack,
@@ -1565,19 +1922,22 @@ async fn verify_scale_up_fabric_manager_v2(
 
     txn.commit().await?;
 
-    let next = next_state_after_configure(scope);
+    if !effective_switch_mtls_services(&ctx.services.switch_mtls_services)
+        .contains(&SwitchMtlsService::ScaleUpFabricTelemetry)
+    {
+        return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+            maintenance_state: next_state_after_configure(scope),
+        }));
+    }
 
-    tracing::info!(
-        rack_id = %id,
-        observed_primary_switch = %observed_primary,
-        switch_count = switch_inventory.switches.len(),
-        next_state = %next,
-        "Verified and persisted RMS v2 fabric status; advancing"
-    );
-
-    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-        maintenance_state: next,
-    }))
+    start_primary_switch_certificate_configuration(
+        id,
+        state,
+        ctx,
+        component_manager,
+        observed_primary,
+    )
+    .await
 }
 
 /// Advances the rack's current maintenance substate.
@@ -1790,6 +2150,20 @@ pub async fn handle_maintenance(
                     .await;
                 };
 
+                tracing::info!(
+                    rack_id = %id,
+                    firmware_source = if uses_stored_token {
+                        "maintenance_request"
+                    } else {
+                        "rack_profile"
+                    },
+                    machine_count = inventory.machines.len(),
+                    switch_count = inventory.switches.len(),
+                    component_count = components.len(),
+                    force_update,
+                    "Submitting rack firmware update"
+                );
+
                 let submit_result = rack_firmware_update_manager
                     .start_firmware_update(RackFirmwareUpdateRequest {
                         rack_id: id,
@@ -1836,6 +2210,15 @@ pub async fn handle_maintenance(
                         .await;
                     }
                 };
+
+                tracing::info!(
+                    rack_id = %id,
+                    backend_job_id = ?job.job_id,
+                    machine_result_count = job.machines.len(),
+                    switch_result_count = job.switches.len(),
+                    power_shelf_result_count = job.power_shelves.len(),
+                    "Rack firmware update was accepted"
+                );
 
                 let mut txn = ctx.services.db_pool.begin().await?;
                 let power_shelf_ids = db_power_shelf::find_ids(
@@ -1926,8 +2309,11 @@ pub async fn handle_maintenance(
                         state.config.maintenance_requested = None;
                         db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                     }
-                    return Ok(StateHandlerOutcome::transition(RackState::Error { cause })
-                        .with_txn(recovery_txn));
+                    return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        cause,
+                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                    })
+                    .with_txn(recovery_txn));
                 }
 
                 let Some(rack_firmware_update_manager) =
@@ -2122,8 +2508,11 @@ pub async fn handle_maintenance(
                             state.config.maintenance_requested = None;
                             db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                         }
-                        Ok(StateHandlerOutcome::transition(RackState::Error { cause })
-                            .with_txn(recovery_txn))
+                        Ok(StateHandlerOutcome::transition(RackState::Error {
+                            cause,
+                            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                        })
+                        .with_txn(recovery_txn))
                     }
                     DeviceFirmwareProgress::Completed { completed, total } => {
                         let now = chrono::Utc::now();
@@ -2448,6 +2837,7 @@ pub async fn handle_maintenance(
 
                         return Ok(StateHandlerOutcome::transition(RackState::Error {
                             cause: cause.to_string(),
+                            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
                         .with_txn(txn));
                     };
@@ -2660,6 +3050,7 @@ pub async fn handle_maintenance(
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
                         cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
+                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
                     .with_txn(txn));
                 }
@@ -2694,11 +3085,35 @@ pub async fn handle_maintenance(
             configure_nmx_cluster,
         } => match configure_nmx_cluster {
             ConfigureNmxClusterState::Start => {
-                configure_scale_up_fabric_manager_v2(id, state, ctx, rack_profile_id, scope).await
+                start_configure_nmx_cluster(id, state, ctx, rack_profile_id, scope).await
+            }
+            ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id } => {
+                wait_for_switch_certificate_job(
+                    id,
+                    state,
+                    ctx,
+                    rack_profile_id,
+                    scope,
+                    job_id,
+                    SwitchCertificateJobCompletion::SubmitScaleUpFabricManager,
+                )
+                .await
             }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 wait_for_scale_up_fabric_manager_job(id, state, ctx, rack_profile_id, scope, job_id)
                     .await
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                wait_for_switch_certificate_job(
+                    id,
+                    state,
+                    ctx,
+                    rack_profile_id,
+                    scope,
+                    job_id,
+                    SwitchCertificateJobCompletion::CompleteMaintenanceActivity,
+                )
+                .await
             }
             retired @ (ConfigureNmxClusterState::ConfigureCertificates {}
             | ConfigureNmxClusterState::DisableScaleUpFabricState

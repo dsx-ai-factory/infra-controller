@@ -40,8 +40,15 @@ pub enum ConditionalWrite<T, R> {
     NotApplied(R),
 }
 
-/// `ControllerStateNotCurrent` means the row is missing or its controller-state
-/// version no longer matches the snapshot. These cases share one rejection;
-/// the write does not distinguish them.
+/// `ControllerStateNotCurrent` means the row is missing, its controller-state
+/// version no longer matches the snapshot, or a producer's persistence condition
+/// no longer holds. These cases share one rejection; the write does not
+/// distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControllerStateNotCurrent;
+
+/// `MaintenanceRequestNotCurrent` means the device is missing or its pending
+/// request no longer matches the request being completed. The clear operation
+/// does not distinguish these cases; any replacement request is left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceRequestNotCurrent;

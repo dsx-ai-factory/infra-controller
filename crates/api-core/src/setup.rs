@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
@@ -287,23 +288,44 @@ pub(crate) async fn start_runtime(
         dynamic_settings.bmc_proxy.clone(),
     );
 
-    let (rms_client, switch_system_image_rms_api) = match carbide_config.rms.api_url.clone() {
-        Some(url) if !url.is_empty() => {
-            let rms_client_config = librms::client_config::RmsClientConfig::new(
-                carbide_config.rms.root_ca_path.clone(),
-                carbide_config.rms.client_cert.clone(),
-                carbide_config.rms.client_key.clone(),
-                carbide_config.rms.enforce_tls,
-            );
-            let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
-            let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
-            let shared_rms_client = rms_client_pool.create_client().await;
-            let switch_system_image_rms_api =
-                Arc::new(librms::RackManagerApi::new(&rms_api_config));
-            (Some(shared_rms_client), Some(switch_system_image_rms_api))
-        }
-        _ => (None, None),
-    };
+    let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
+        match carbide_config.rms.api_url.clone() {
+            Some(url) if !url.is_empty() => {
+                let rms_client_config = librms::client_config::RmsClientConfig::new(
+                    carbide_config.rms.root_ca_path.clone(),
+                    carbide_config.rms.client_cert.clone(),
+                    carbide_config.rms.client_key.clone(),
+                    carbide_config.rms.enforce_tls,
+                );
+                let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
+                let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
+                let shared_rms_client = rms_client_pool.create_client().await;
+                let site_explorer_rms_api_config =
+                    rms_api_config.with_retry_config(librms::client::RetryConfig {
+                        retries: 0,
+                        interval: Duration::ZERO,
+                    });
+                let site_explorer_rms_client =
+                    librms::RmsClientPool::new(&site_explorer_rms_api_config)
+                        .create_client()
+                        .await;
+
+                let site_explorer_machine_info_provider = Arc::new(
+                    component_manager::rms::rms_machine_info_provider(site_explorer_rms_client),
+                )
+                    as Arc<dyn component_manager::MachineInfoProvider>;
+
+                let switch_system_image_rms_api =
+                    Arc::new(librms::RackManagerApi::new(&rms_api_config));
+
+                (
+                    Some(shared_rms_client),
+                    Some(site_explorer_machine_info_provider),
+                    Some(switch_system_image_rms_api),
+                )
+            }
+            _ => (None, None, None),
+        };
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
     let fabric_manager_type = match ib_config.enabled {
         true => ib::IBFabricManagerType::Rest,
@@ -362,13 +384,23 @@ pub(crate) async fn start_runtime(
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        if !carbide_config.site_fabric_prefixes.is_empty() {
+        // Persisted roots can be retiring after the final configured root is
+        // removed, so current configuration alone cannot decide whether
+        // legacy VpcPrefix lineage must be repaired and validated.
+        if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
+            let require_parent_for_every_vpc_prefix =
+                !carbide_config.site_fabric_prefixes.is_empty();
+            let blocking_missing_vpc_prefix_ids = if require_parent_for_every_vpc_prefix {
+                lineage.missing_vpc_prefix_ids.as_slice()
+            } else {
+                &[]
+            };
             eyre::ensure!(
-                lineage.unresolved_vpc_prefix_count() == 0,
+                lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
                 "VpcPrefix SitePrefix lineage preflight failed: missing VpcPrefix IDs: {:?}; ambiguous VpcPrefixes: {:?}",
-                lineage.missing_vpc_prefix_ids,
+                blocking_missing_vpc_prefix_ids,
                 lineage.ambiguous,
             );
         }
@@ -377,9 +409,15 @@ pub(crate) async fn start_runtime(
 
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
-        // lockdown key without operator action. No-op once seeded or if the BMC
-        // root is not yet configured.
-        crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await?;
+        // lockdown key without operator action. No-op once seeded; if the BMC
+        // root is not yet configured, retry in the background until it appears.
+        if !crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await? {
+            crate::dpa::lockdown::start_lockdown_ikm_seed_retry(
+                join_set,
+                credential_manager.clone(),
+                cancel_token.clone(),
+            )?;
+        }
 
         // Initial credential-rotation bookkeeping is backfilled by the
         // `*_credential_rotation_backfill` data migration (see its header for the
@@ -387,11 +425,17 @@ pub(crate) async fn start_runtime(
     };
 
     // A listen-only replica trusts another instance to reconcile configuration,
-    // but it still must not serve a configured-root site with unresolved
-    // VpcPrefix lineage.
-    if carbide_config.listen_only && !carbide_config.site_fabric_prefixes.is_empty() {
-        let unassigned =
-            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?;
+    // but it must reject every unassigned row that the corresponding
+    // authoritative startup would require to be repaired.
+    if carbide_config.listen_only {
+        let unassigned = if carbide_config.site_fabric_prefixes.is_empty() {
+            db::site_prefix::find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(
+                &db_pool,
+            )
+            .await?
+        } else {
+            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?
+        };
         eyre::ensure!(
             unassigned.is_empty(),
             "VpcPrefix SitePrefix lineage preflight failed: unassigned VpcPrefix IDs: {:?}",
@@ -509,6 +553,10 @@ pub(crate) async fn start_runtime(
     // Validate unconditionally; when explicitly enabled, missing prerequisites
     // fail rather than silently degrading.
     carbide_config.node_auth.validate()?;
+    carbide_config
+        .machine_validation_config
+        .validate()
+        .map_err(|error| eyre::eyre!("machine_validation_config.{error}"))?;
     let node_jwt_validator = if carbide_config.node_auth.enabled {
         // Bearer tokens must never be accepted over plaintext, and the
         // validator trusts the same roots the TLS listener uses for client
@@ -591,6 +639,14 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -622,14 +678,17 @@ pub(crate) async fn start_runtime(
         component_manager,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
     });
 
     if carbide_config.listen_only {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
         tracing::info!("Not starting background services, as listen_only=true");
     } else {
         initialize_and_start_controllers(
             join_set,
             api_service.clone(),
+            site_explorer_machine_info_provider,
             meter.clone(),
             per_object_prometheus_registry,
             ipmi_tool.clone(),
@@ -888,6 +947,7 @@ async fn initialize_dpf_sdk(
                 .extra_bfcfg_parameters(
                     carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
                 )
+                .enable_delay_host_init(deployment.enable_delay_host_init)
                 .deployment_type(deployment_type);
             if let Some(bluefield_software) = bluefield_software {
                 builder = builder.bluefield_software(bluefield_software);
@@ -952,8 +1012,14 @@ async fn initialize_dpf_sdk(
     }
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
-    let provider = CarbideBmcPasswordProvider::new(credential_manager, db_pool.clone());
-    let sdk = carbide_dpf::DpfSdkBuilder::new(repo, carbide_dpf::NAMESPACE, provider)
+    let provider = CarbideBmcPasswordProvider::new(
+        credential_manager,
+        db_pool.clone(),
+        carbide_config
+            .credentials
+            .uses_authoritative_local_bmc_site_wide_root(),
+    );
+    let sdk = carbide_dpf::DpfSdkBuilder::new(repo.clone(), carbide_dpf::NAMESPACE, provider)
         .with_labeler(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),
@@ -1213,9 +1279,11 @@ impl<'a> SeedData<'a> {
 ///
 /// All background tasks will be spawned into `join_set`, which can be awaited with
 /// [`JoinSet::join_all`] to wait for them to complete.
+#[allow(clippy::too_many_arguments)]
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
+    site_explorer_machine_info_provider: Option<Arc<dyn component_manager::MachineInfoProvider>>,
     meter: Meter,
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
@@ -1376,7 +1444,9 @@ async fn initialize_and_start_controllers<'a>(
         && let Some(admin) = fnn_config.admin_vpc.as_ref()
         && admin.enabled
     {
-        db_init::create_admin_vpc(db_pool, admin.vpc_vni).await?;
+        db_init::create_admin_vpc(&api_service, admin.vpc_vni).await?;
+    } else {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
     }
     // Update SVI IP to segments which have VPC attached and type is FNN.
     db_init::update_network_segments_svi_ip(db_pool).await?;
@@ -1735,6 +1805,17 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build NetworkSegmentController");
 
+    StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(
+            crate::site_prefix_controller::SitePrefixReadiness {
+                vpc_isolation_behavior: carbide_config.vpc_isolation_behavior,
+            },
+        ))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())
@@ -1880,10 +1961,11 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
-                nmx_cluster_switch_mtls_services: carbide_config
-                    .rack_state_controller
-                    .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher),
+                switch_mtls_services: carbide_config
+                    .switch_state_controller
+                    .switch_mtls_services
+                    .clone(),
+                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2023,7 +2105,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
-        rms_client.clone(),
+        site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
@@ -2038,7 +2120,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    PreingestionManager::new(
+    let preingestion_manager = PreingestionManager::new(
         db_pool.clone(),
         carbide_config.preingestion_manager(),
         shared_redfish_pool.clone(),
@@ -2048,8 +2130,23 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
-    )
-    .start(join_set, cancel_token.clone())?;
+    );
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager)
+            if manager.compute_tray.backend()
+                == component_manager::compute_tray_manager::Backend::Rms =>
+        {
+            preingestion_manager.with_rack_firmware(
+                carbide_config.rack_profiles.clone(),
+                manager.compute_tray.clone(),
+                Arc::new(firmware_object_fetcher),
+            )
+        }
+        _ => preingestion_manager,
+    };
+
+    preingestion_manager.start(join_set, cancel_token.clone())?;
 
     MeasuredBootMetricsCollector::new(
         db_pool.clone(),

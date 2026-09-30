@@ -4,6 +4,7 @@
 ## Table of Contents
 
 - [flow.proto](#flow-proto)
+    - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
     - [AddComponentRequest](#v1-AddComponentRequest)
     - [AddComponentResponse](#v1-AddComponentResponse)
     - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
@@ -96,6 +97,9 @@
     - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
     - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
     - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
+    - [HealthProbeAlert](#v1-HealthProbeAlert)
+    - [HealthProbeSuccess](#v1-HealthProbeSuccess)
+    - [HealthReport](#v1-HealthReport)
     - [Identifier](#v1-Identifier)
     - [IngestRackRequest](#v1-IngestRackRequest)
     - [ListEventRulesRequest](#v1-ListEventRulesRequest)
@@ -210,6 +214,7 @@
     - [EventRuleSeverity](#v1-EventRuleSeverity)
     - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
     - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
     - [LeakStatus](#v1-LeakStatus)
     - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
     - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
@@ -238,6 +243,25 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## flow.proto
+
+
+
+<a name="v1-ACPowerCycleRackRequest"></a>
+
+### ACPowerCycleRackRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  | Target racks or NVLink domains with an optional type filter, or specific components |
+| description | [string](#string) |  | optional task description |
+| queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
+| rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+
+
+
 
 
 
@@ -525,6 +549,8 @@ An empty list means no conflicts were detected.
 | nvl_domain_id | [UUID](#v1-UUID) |  | NVLink Domain containing this component&#39;s rack; omitted when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
+| leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 
 
 
@@ -1358,6 +1384,7 @@ or values scoped to supported firmware tray types.
 | end_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | sub_targets | [string](#string) | repeated | Optional firmware sub-parts within each selected component. Empty means every firmware sub-part supported by that component. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
 
 
 
@@ -1423,7 +1450,7 @@ GetComponents - retrieves components from local database
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Component UUID ascending breaks equal-field ties. |
 
 
 
@@ -1503,7 +1530,7 @@ GetComponents - retrieves components from local database
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by name ascending, then UUID ascending. |
 
 
 
@@ -1537,7 +1564,7 @@ GetComponents - retrieves components from local database
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for rack queries |
 | with_components | [bool](#bool) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Rack UUID ascending breaks equal-field ties. |
 
 
 
@@ -1760,6 +1787,61 @@ GetComponents - retrieves components from local database
 
 
 
+<a name="v1-HealthProbeAlert"></a>
+
+### HealthProbeAlert
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+| in_alert_since | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| message | [string](#string) |  |  |
+| tenant_message | [string](#string) | optional |  |
+| classifications | [string](#string) | repeated |  |
+
+
+
+
+
+
+<a name="v1-HealthProbeSuccess"></a>
+
+### HealthProbeSuccess
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+
+
+
+
+
+
+<a name="v1-HealthReport"></a>
+
+### HealthReport
+HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| source | [string](#string) |  |  |
+| triggered_by | [string](#string) | optional |  |
+| observed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| successes | [HealthProbeSuccess](#v1-HealthProbeSuccess) | repeated |  |
+| alerts | [HealthProbeAlert](#v1-HealthProbeAlert) | repeated |  |
+
+
+
+
+
+
 <a name="v1-Identifier"></a>
 
 ### Identifier
@@ -1804,7 +1886,7 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | event_type | [string](#string) | optional | Optional. When set, must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. Omit to return every supported event type. |
 | enabled | [bool](#bool) | optional |  |
-| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. |
+| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. Results are ordered by UUID ascending. |
 
 
 
@@ -1830,7 +1912,7 @@ GetComponents - retrieves components from local database
 <a name="v1-ListOperationRulesRequest"></a>
 
 ### ListOperationRulesRequest
-
+Results are ordered by creation time descending, then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -1867,6 +1949,7 @@ GetComponents - retrieves components from local database
 ListOperationRunTargetsRequest lists materialized rack execution targets for
 one operation run. status UNKNOWN means no target-status filter is applied.
 phase_scope UNKNOWN defaults to CURRENT_PHASE.
+Results are ordered by phase index, then the unique sequence index.
 
 
 | Field | Type | Label | Description |
@@ -1900,7 +1983,8 @@ phase_scope UNKNOWN defaults to CURRENT_PHASE.
 <a name="v1-ListOperationRunsRequest"></a>
 
 ### ListOperationRunsRequest
-ListOperationRunsRequest lists operation runs, newest first by default.
+ListOperationRunsRequest lists operation runs by creation time descending,
+then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -1993,7 +2077,7 @@ ListTaskScheduleScopesRequest returns all scope entries for a given schedule.
 
 ### ListTaskSchedulesRequest
 ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-Results are ordered by creation time ascending.
+Results are ordered by creation time ascending, then UUID ascending.
 
 
 | Field | Type | Label | Description |
@@ -2037,7 +2121,7 @@ every Task is returned subject to pagination.
 | ----- | ---- | ----- | ----------- |
 | rack_id | [UUID](#v1-UUID) | optional | Restrict by rack identifier. |
 | active_only | [bool](#bool) |  | Restrict to non-terminal Tasks (Waiting, Pending, Running). |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by creation time descending, then UUID descending. |
 | component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component identifier, regardless of component type. A rack_id plus component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
 | with_report | [bool](#bool) |  | When true, populate Task.report on each returned task. Defaults to false because report bodies can be several KB and would otherwise be persisted in every Temporal activity / workflow result payload along the caller&#39;s path even when the caller never reads them. GetTasksByIDs and CancelTask always return the report and do not accept this flag. |
 
@@ -2692,6 +2776,7 @@ PatchComponent - update a single component&#39;s fields
 | description | [string](#string) | optional | Update description (JSON string) |
 | rack_id | [UUID](#v1-UUID) | optional | Re-assign to a different rack |
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
+| update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
 
 
@@ -2981,6 +3066,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
 | external_id | [string](#string) |  |  |
 | operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 
 
 
@@ -3480,6 +3566,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | sub_targets | [string](#string) | repeated | Optional subset of firmware sub-parts to update within each tray selected by target_spec, e.g. [&#34;bmc&#34;, &#34;nvos&#34;] for switch trays or [&#34;psu&#34;] for powershelf trays. Named &#34;sub_targets&#34; (not &#34;components&#34;) to avoid colliding with OperationTargetSpec.components, which selects tray INSTANCES rather than sub-parts of a tray. Names are lowercase. Empty or omitted means update everything in the bundle (current default behavior). Unknown names are rejected by the downstream component manager. |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
 
 
 
@@ -3497,7 +3584,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending for targeted components. Stable component and drift identities break equal-field ties before drift pagination. |
 
 
 
@@ -3693,6 +3780,23 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 
 
 
+<a name="v1-LeakHandlingStatus"></a>
+
+### LeakHandlingStatus
+LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
+component. It describes handling progress, not the component&#39;s current leak
+or power state.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LEAK_HANDLING_STATUS_UNKNOWN | 0 | Flow could not determine the status. |
+| LEAK_HANDLING_STATUS_NONE | 1 | No supported leakage-handling Task targets this component. |
+| LEAK_HANDLING_STATUS_SHUTTING_DOWN | 2 | A forced-shutdown Task is waiting, pending, or running. |
+| LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
+| LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
+
+
+
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
@@ -3832,7 +3936,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is Flow&#39;s coarse operability bucket.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3997,6 +4103,7 @@ RackOrderByField represents the supported order by field types for rack queries
 | PowerOnRack | [PowerOnRackRequest](#v1-PowerOnRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

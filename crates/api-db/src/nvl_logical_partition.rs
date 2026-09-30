@@ -23,7 +23,9 @@ use model::nvl_logical_partition::{
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{ColumnInfo, DatabaseError, FilterableQueryBuilder, ObjectColumnFilter};
+use crate::{
+    ColumnInfo, ConditionalWrite, DatabaseError, FilterableQueryBuilder, ObjectColumnFilter,
+};
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -186,23 +188,42 @@ pub async fn mark_as_deleted(
     Ok(partition)
 }
 
+/// `LogicalPartitionNotCurrent` means the partition is missing or its config
+/// version no longer matches the snapshot. The write does not distinguish these
+/// cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogicalPartitionNotCurrent;
+
+/// `update` changes metadata and advances the config version only while the
+/// partition still has the snapshot's version.
+///
+/// Returns `Applied(partition_id)` on success, or
+/// `NotApplied(LogicalPartitionNotCurrent)` for a missing or changed partition.
+/// Database failures remain errors; the caller must commit the transaction.
 pub async fn update(
     partition: &LogicalPartition,
     name: String,
     description: String,
     txn: &mut PgConnection,
-) -> Result<NvLinkLogicalPartitionId, DatabaseError> {
-    let query = "UPDATE nvlink_logical_partitions SET name=$1, description=$2, updated=NOW() WHERE id=$3::uuid RETURNING id";
+) -> Result<ConditionalWrite<NvLinkLogicalPartitionId, LogicalPartitionNotCurrent>, DatabaseError> {
+    let next_version = partition.config_version.increment();
+    let query = "UPDATE nvlink_logical_partitions SET name=$1, description=$2, updated=NOW(), config_version=$3
+                 WHERE id=$4::uuid AND config_version=$5 RETURNING id";
 
-    let partition: NvLinkLogicalPartitionId = sqlx::query_as(query)
+    let updated_id: Option<NvLinkLogicalPartitionId> = sqlx::query_as(query)
         .bind(name)
         .bind(&description)
+        .bind(next_version)
         .bind(partition.id)
-        .fetch_one(txn)
+        .bind(partition.config_version)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;
 
-    Ok(partition)
+    Ok(match updated_id {
+        Some(partition_id) => ConditionalWrite::Applied(partition_id),
+        None => ConditionalWrite::NotApplied(LogicalPartitionNotCurrent),
+    })
 }
 
 pub async fn final_delete(
@@ -217,4 +238,95 @@ pub async fn final_delete(
         .map_err(|e| DatabaseError::new(query, e))?;
 
     Ok(partition)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use model::metadata::Metadata;
+    use model::nvl_logical_partition::LogicalPartitionConfig;
+    use tokio::sync::Barrier;
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn concurrent_metadata_updates_require_current_version(pool: sqlx::PgPool) {
+        async fn update_metadata(
+            pool: &sqlx::PgPool,
+            barrier: &Barrier,
+            id: NvLinkLogicalPartitionId,
+            name: &str,
+        ) -> ConditionalWrite<NvLinkLogicalPartitionId, LogicalPartitionNotCurrent> {
+            let mut txn = pool.begin().await.unwrap();
+            let partition = find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id))
+                .await
+                .unwrap()
+                .remove(0);
+
+            // Both transactions must read the same revision before either writes.
+            barrier.wait().await;
+            let result = update(
+                &partition,
+                name.to_string(),
+                format!("{name} description"),
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+            result
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let partition = create(
+            &NewLogicalPartition {
+                id: uuid::Uuid::new_v4().into(),
+                config: LogicalPartitionConfig {
+                    metadata: Metadata {
+                        name: "initial".to_string(),
+                        ..Default::default()
+                    },
+                    tenant_organization_id: "example".parse().unwrap(),
+                },
+            },
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        let barrier = Barrier::new(2);
+        let results = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                update_metadata(&pool, &barrier, partition.id, "first"),
+                update_metadata(&pool, &barrier, partition.id, "second"),
+            )
+        })
+        .await
+        .expect("competing metadata updates must finish");
+
+        let (name, applied_id) = match results {
+            (
+                ConditionalWrite::Applied(id),
+                ConditionalWrite::NotApplied(LogicalPartitionNotCurrent),
+            ) => ("first", id),
+            (
+                ConditionalWrite::NotApplied(LogicalPartitionNotCurrent),
+                ConditionalWrite::Applied(id),
+            ) => ("second", id),
+            results => panic!("expected one applied update and one rejected update: {results:?}"),
+        };
+        assert_eq!(applied_id, partition.id);
+        let persisted = find_by(&pool, ObjectColumnFilter::One(IdColumn, &partition.id))
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(persisted.name, name);
+        assert_eq!(persisted.description, format!("{name} description"));
+        assert_eq!(
+            persisted.config_version.version_nr(),
+            partition.config_version.version_nr() + 1
+        );
+    }
 }

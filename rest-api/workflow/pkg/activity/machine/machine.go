@@ -39,7 +39,6 @@ const (
 	controllerMachineStatePrefixPostAssignedMeasuring = "PostAssignedMeasuring"
 	controllerMachineStatePrefixHostReprovisioning    = "HostReprovisioning"
 	controllerMachineStatePrefixReprovisioning        = "Reprovisioning"
-	controllerMachineStatePrefixReady                 = "Ready"
 	controllerMachineStatePrefixFailed                = "Failed"
 	controllerMachineStatePrefixCreated               = "Created"
 	controllerMachineStatePrefixForceDeletion         = "ForceDeletion"
@@ -489,6 +488,17 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				continue
 			}
 
+			// Use the assignment re-read under the row lock, not the initial inventory
+			// lookup: creation and release may have committed while inventory ran.
+			reportedMachine := cdbm.Machine{Status: machineStatus}
+			effectiveStatus := reportedMachine.StatusForAssignment(existingCloudMachine.IsAssigned)
+			if effectiveStatus != machineStatus {
+				machineStatus = effectiveStatus
+				// Keep this message equal to Core's Assigned message to avoid
+				// flip-flopping messages in status history.
+				statusMessage = cdbm.MachineStatusInUseMessage
+			}
+
 			// Update existing Machine record
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:             existingCloudMachine.ID,
@@ -822,11 +832,11 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	cloudCapMap := make(map[string]*cdbm.MachineCapability)
 	for _, emc := range mcs {
 		cemc := emc
-		cloudCapMap[fmt.Sprintf(`%s:%s`, cemc.Type, cemc.Name)] = &cemc
+		cloudCapMap[cemc.MapKey()] = &cemc
 	}
 
 	for _, cpuCap := range controllerCapsCpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeCPU, cpuCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeCPU, cpuCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -844,8 +854,6 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, gpuCap := range controllerCapsGpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeGPU, gpuCap.Name)
-
 		// Set the device type to NVLink if it's an NVLink GPU capability.
 		// Unknown wire values are coerced to the empty string with a
 		// warning logged — preserve the explicit `default` branch so
@@ -864,6 +872,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 				logger.Warn().Str("DeviceType", gpuCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty")
 			}
 		}
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeGPU, gpuCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:  &machine.ID,
@@ -881,7 +890,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, dpuCap := range controllerCapsDpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeDPU, dpuCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeDPU, dpuCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:        &machine.ID,
@@ -894,7 +903,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, memCap := range controllerCapsMemory {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeMemory, memCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeMemory, memCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -907,7 +916,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, ibCap := range controllerCapsInfiniband {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeInfiniBand, ibCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeInfiniBand, ibCap.Name, nil)
 
 		inactiveDevices := []int{}
 		if ibCap.InactiveDevices != nil {
@@ -928,14 +937,11 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, netCap := range controllerCapsNetwork {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeNetwork, netCap.Name)
-
-		// Set the device type to DPU if it's a DPU network capability.
+		// Preserve supported network device types so capability identity remains
+		// stable when otherwise identical generic, DPU, and SpectrumX entries coexist.
 		// Unknown wire values are coerced to the empty string with a
 		// warning logged — preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
-		// TODO: support other Network device-type variants as the wire
-		// enum grows; currently only DPU is recognized.
 		var deviceType *cdbm.MachineCapabilityDeviceType
 		dtEmpty := cdbm.MachineCapabilityDeviceType("")
 		deviceType = &dtEmpty
@@ -944,10 +950,14 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 				dt := cdbm.MachineCapabilityDeviceTypeDPU
 				deviceType = &dt
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+				dt := cdbm.MachineCapabilityDeviceTypeSpectrumX
+				deviceType = &dt
 			default:
 				logger.Warn().Str("DeviceType", netCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")
 			}
 		}
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeNetwork, netCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:  &machine.ID,
@@ -961,7 +971,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, storageCap := range controllerCapsStorage {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeStorage, storageCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeStorage, storageCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -1153,10 +1163,10 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is undergoing machine validation"
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
-			statusMessage = "Machine is being used by an Instance"
-		case controllerMachineStatePrefixReady:
+			statusMessage = cdbm.MachineStatusInUseMessage
+		case cdbm.ControllerMachineStateReady:
 			machineStatus = cdbm.MachineStatusReady
-			statusMessage = "Machine is ready for assignment"
+			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is being force deleted"

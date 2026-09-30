@@ -16,6 +16,7 @@
  */
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
+use carbide_utils::HostPortPair;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
@@ -430,6 +432,7 @@ async fn fetch_explored_endpoints(api: &Api) -> Result<SiteExplorationReport, to
 #[template(path = "explored_endpoint_detail.html")]
 struct ExploredEndpointDetail<'a> {
     endpoint: ExploredEndpoint,
+    redfish_url: String,
     has_exploration_error: bool,
     last_exploration_error: String,
     machine_setup_status: String,
@@ -491,6 +494,12 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             lockdown_status: lockdown_status_to_string(
                 report_ref.and_then(|report| report.lockdown_status.as_ref()),
             ),
+            redfish_url: format!(
+                "https://{}/redfish/v1",
+                HostPortPair::HostOnly(endpoint_info.endpoint.address.clone())
+                    .url_host()
+                    .expect("HostOnly always contains a host")
+            ),
             endpoint: endpoint_info.endpoint,
             credentials_set: endpoint_info.credentials_set,
             has_machine: endpoint_info.has_machine,
@@ -521,11 +530,16 @@ async fn fetch_explored_endpoint(
         }
     };
 
-    let endpoint: ExploredEndpoint = match report
-        .endpoints
-        .into_iter()
-        .find(|ep| ep.address.trim() == endpoint_ip.trim())
-    {
+    let Ok(endpoint_address) = endpoint_ip.trim().parse::<IpAddr>() else {
+        return Err(super::not_found_response(endpoint_ip).into_response());
+    };
+
+    let endpoint: ExploredEndpoint = match report.endpoints.into_iter().find(|ep| {
+        ep.address
+            .trim()
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address == endpoint_address)
+    }) {
         Some(ep) => ep,
         None => {
             return Err(super::not_found_response(endpoint_ip).into_response());
@@ -1348,9 +1362,13 @@ mod tests {
     use std::collections::HashMap;
 
     use askama::Template;
+    use carbide_test_support::value_scenarios;
     use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint, OperatorErrorSchema};
 
-    use super::{ExploredEndpointDisplay, ExploredEndpointsShow, query_filter_for};
+    use super::{
+        ExploredEndpointDetail, ExploredEndpointDisplay, ExploredEndpointInfo,
+        ExploredEndpointsShow, query_filter_for,
+    };
     use crate::pagination::PageContext;
 
     fn endpoint(address: &str, schema: Option<OperatorErrorSchema>) -> ExploredEndpoint {
@@ -1362,6 +1380,38 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn detail_form_uses_ipv4_and_ipv6_redfish_urls() {
+        value_scenarios!(run = |address| {
+            let rendered = ExploredEndpointDetail::from(ExploredEndpointInfo {
+                endpoint: endpoint(address, None),
+                credentials_set: "Not Configured".to_string(),
+                has_machine: false,
+            })
+            .render()
+            .expect("detail template renders");
+            assert!(
+                rendered.contains(&format!("<h1>Endpoint {address}</h1>")),
+                "detail heading preserves bare address {address}",
+            );
+            let url = rendered
+                .split_once(r#"name="url" value=""#)
+                .expect("Redfish URL input exists")
+                .1
+                .split_once('"')
+                .expect("Redfish URL value closes")
+                .0;
+            url.to_string()
+        };
+            "IPv4" {
+                "192.0.2.10" => "https://192.0.2.10/redfish/v1".to_string(),
+            }
+            "IPv6" {
+                "2001:db8::10" => "https://[2001:db8::10]/redfish/v1".to_string(),
+            }
+        );
     }
 
     #[test]

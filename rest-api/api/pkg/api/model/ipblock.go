@@ -4,6 +4,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -52,9 +53,11 @@ type APIIPBlockCreateRequest struct {
 	ProtocolVersion string `json:"protocolVersion"`
 }
 
-// Validate ensure the values passed in request are acceptable
-func (ipbcr APIIPBlockCreateRequest) Validate() error {
-	err := validation.ValidateStruct(&ipbcr,
+// Validate checks the request and normalizes `Prefix` on success. The database
+// compares prefixes as text, so equivalent IPv6 spellings must use the same
+// compressed, lowercase form before duplicate checks and persistence.
+func (ipbcr *APIIPBlockCreateRequest) Validate() error {
+	err := validation.ValidateStruct(ipbcr,
 		validation.Field(&ipbcr.Name,
 			validation.Required.Error(validationErrorStringLength),
 			validation.By(util.ValidateNameCharacters),
@@ -81,7 +84,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	// Validate ipv4
 	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV4 {
 		// Validate PrefixLength
-		err := validation.ValidateStruct(&ipbcr,
+		err := validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.PrefixLength,
 				validation.Min(IPv4BlockSizeMin).Error(validationErrorIPv4BlockSizeMin),
 				validation.Max(IPv4BlockSizeMax).Error(validationErrorIPv4BlockSizeMax)),
@@ -90,7 +93,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 			return err
 		}
 
-		err = validation.ValidateStruct(&ipbcr,
+		err = validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.Prefix,
 				validationis.IPv4.Error(validationErrorInvalidIPv4Address)),
 		)
@@ -101,7 +104,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	// validate ipv6
 	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV6 {
 		// Validate PrefixLength
-		err := validation.ValidateStruct(&ipbcr,
+		err := validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.PrefixLength,
 				validation.Min(IPv6BlockSizeMin).Error(validationErrorIPv6BlockSizeMin),
 				validation.Max(IPv6BlockSizeMax).Error(validationErrorIPv6BlockSizeMax)),
@@ -111,7 +114,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 		}
 
 		// Validate ipv6 prefix
-		err = validation.ValidateStruct(&ipbcr,
+		err = validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.Prefix,
 				validationis.IPv6.Error(validationErrorInvalidIPv6Address)),
 		)
@@ -121,13 +124,17 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	}
 
 	prefixWithLength := netip.MustParsePrefix(fmt.Sprintf("%s/%d", ipbcr.Prefix, ipbcr.PrefixLength))
-	maskedPrefix := prefixWithLength.Masked().Addr()
-	if maskedPrefix.String() != ipbcr.Prefix {
+	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV4 && !prefixWithLength.Addr().Is4() {
+		return validation.Errors{"prefix": errors.New(validationErrorInvalidIPv4Address)}
+	}
+	networkAddr := prefixWithLength.Masked().Addr()
+	if prefixWithLength.Addr() != networkAddr {
 		return validation.Errors{
-			"prefix": fmt.Errorf("prefix should have %d right most bits zeroed to match block size, e.g. %s", ipbcr.PrefixLength, maskedPrefix.String()),
+			"prefix": fmt.Errorf("prefix should have %d right most bits zeroed to match block size, e.g. %s", ipbcr.PrefixLength, networkAddr.String()),
 		}
 	}
 
+	ipbcr.Prefix = networkAddr.String()
 	return nil
 }
 

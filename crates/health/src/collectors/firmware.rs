@@ -90,14 +90,14 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
 
             let Some(version) = firmware_data.version.clone().flatten() else {
                 tracing::debug!(
-                    firmware_id = %firmware_data.base.id,
+                    firmware_id = %firmware_data.id,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Skipping firmware with no version"
                 );
                 continue;
             };
 
-            let component = firmware_data.base.name.clone();
+            let component = firmware_data.name.clone();
             let attributes = vec![
                 (Cow::Borrowed("firmware_name"), component.clone()),
                 (Cow::Borrowed("version"), version.clone()),

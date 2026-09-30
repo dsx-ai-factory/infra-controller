@@ -111,7 +111,7 @@ impl TestManagedHost {
             .as_ref()
             .expect("test host should have a desired boot interface")
             .version;
-        assert!(
+        assert_eq!(
             db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
                 &self.host.id,
@@ -120,6 +120,7 @@ impl TestManagedHost {
             )
             .await
             .expect("boot-interface verification should be recorded"),
+            db::ConditionalWrite::Applied(()),
             "test host's desired boot interface should still be current"
         );
         machine

@@ -97,6 +97,7 @@ pub(crate) mod bios;
 pub(crate) mod boot_option;
 pub(crate) mod chassis;
 mod collection;
+pub(crate) mod component_integrity;
 pub(crate) mod computer_system;
 pub(crate) mod ethernet_interface;
 pub(crate) mod event;
@@ -131,6 +132,8 @@ pub(crate) mod update_service;
 pub(crate) mod virtual_media;
 
 pub(crate) mod expander_router;
+mod filter;
+pub(crate) mod query_router;
 
 pub(super) use collection::Collection;
 use resource::Resource;

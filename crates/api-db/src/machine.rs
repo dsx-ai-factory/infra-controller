@@ -51,13 +51,14 @@ use model::machine::network::{
 };
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
+use model::machine::status::MlxDeviceObservation;
 use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, Dpf, DpuInfo, DpuInfoStatusObservation, DpuMachine,
     DpuOsOperationalState, DpuRepresentorStatus, FailureDetails, HostMachine, HostProfile, Machine,
     MachineInterfaceSnapshot, MachineLastRebootRequested, MachineLastRebootRequestedMode,
     MachineMaintenanceOperation, MachineValidationContext, ManagedHostState, ReprovisionRequest,
-    UpgradeDecision,
+    ResetRequest, UpgradeDecision,
 };
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
@@ -66,11 +67,11 @@ use model::resource_pool::ResourcePoolError;
 use model::resource_pool::common::{CommonPools, LOOPBACK_IP_V6};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
+use sqlx::{FromRow, PgConnection, PgTransaction, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
-use crate::DatabaseResult;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -661,18 +662,21 @@ pub async fn find_by_mac_address(
     Ok(machine)
 }
 
+/// Finds the machine with this address in either loopback field.
+/// Both fields are serialized from typed IP addresses, so their stored text
+/// matches `IpAddr::to_string()`.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
-    loopback_ip: &str,
+    loopback_ip: IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.network_config->>'loopback_ip' = $1",
+            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(loopback_ip)
+        .bind(loopback_ip.to_string())
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
@@ -721,6 +725,9 @@ pub async fn update_reboot_time<ID: MachineIdSubtypeTrait>(
     Ok(())
 }
 
+/// Records a new reboot or power request at the supplied time.
+/// Reboots start unverified; other modes skip restart verification. The
+/// verification attempt count starts at zero in either case.
 pub async fn update_reboot_requested_explicit_time(
     machine_id: &MachineId,
     txn: &mut PgConnection,
@@ -738,9 +745,20 @@ pub async fn update_reboot_requested_explicit_time(
         verification_attempts: Some(0),
     };
 
+    record_reboot_request(machine_id, txn, &data).await
+}
+
+/// Records a new reboot or power request, replacing the previous record in full.
+/// The caller supplies its timestamp, mode, and initial verification state.
+/// Use `update_restart_verification_status` to verify an existing attempt.
+pub async fn record_reboot_request(
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+    request: &MachineLastRebootRequested,
+) -> Result<(), DatabaseError> {
     let query = "UPDATE machines SET last_reboot_requested=$1 WHERE id=$2 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(&data))
+        .bind(sqlx::types::Json(request))
         .bind(machine_id)
         .fetch_one(txn)
         .await
@@ -756,24 +774,52 @@ pub async fn update_reboot_requested_time(
     update_reboot_requested_explicit_time(machine_id, txn, mode, Utc::now()).await
 }
 
+/// The captured reboot record no longer matches, or the machine or request is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebootVerificationNotCurrent;
+
+/// Updates verification only while every field of the captured request still matches.
+///
+/// Compares the record under a machine-row lock held until the caller's
+/// transaction ends. Only verification status and attempt count are changed.
+/// Missing machines, absent requests, and changed records share
+/// `NotApplied(RebootVerificationNotCurrent)`.
 pub async fn update_restart_verification_status(
     machine_id: &MachineId,
-    mut current_reboot: MachineLastRebootRequested,
+    current_reboot: MachineLastRebootRequested,
     verified: Option<bool>,
     attempts: i32,
-    txn: &mut PgConnection,
-) -> Result<(), DatabaseError> {
-    current_reboot.restart_verified = verified;
-    current_reboot.verification_attempts = Some(attempts);
+    txn: &mut PgTransaction<'_>,
+) -> Result<ConditionalWrite<(), RebootVerificationNotCurrent>, DatabaseError> {
+    let query = "SELECT last_reboot_requested FROM machines WHERE id=$1 FOR NO KEY UPDATE";
+    let stored: Option<Option<sqlx::types::Json<MachineLastRebootRequested>>> =
+        sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_optional(txn.as_mut())
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(sqlx::types::Json(stored_reboot)) = stored.flatten() else {
+        return Ok(ConditionalWrite::NotApplied(RebootVerificationNotCurrent));
+    };
 
-    let query = "UPDATE machines SET last_reboot_requested=$1 WHERE id=$2 RETURNING id";
+    // Compare typed values: legacy JSON can spell UTC as `+00:00` and omit
+    // optional fields. A SQL timestamp cast would also lose nanoseconds.
+    if stored_reboot != current_reboot {
+        return Ok(ConditionalWrite::NotApplied(RebootVerificationNotCurrent));
+    }
+
+    let query = "UPDATE machines
+                 SET last_reboot_requested = last_reboot_requested || jsonb_build_object(
+                     'restart_verified', $1::boolean, 'verification_attempts', $2::integer)
+                 WHERE id=$3 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(&current_reboot))
+        .bind(verified)
+        .bind(attempts)
         .bind(machine_id)
-        .fetch_one(txn)
+        .fetch_one(txn.as_mut())
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(())
+    Ok(ConditionalWrite::Applied(()))
 }
 
 /// Records the database statement execution time as the machine's cleanup timestamp.
@@ -1042,44 +1088,61 @@ pub async fn update_metadata(
     }
 }
 
-/// Only does the update if the passed observation is newer than any existing one
+/// `MachineObservationNotCurrent` means the machine is missing or its stored
+/// observation no longer satisfies the timestamp condition. The write does not
+/// distinguish those cases. Converting this reason to [`DatabaseError`] wraps
+/// `sqlx::Error::RowNotFound` for callers that require the observation to apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineObservationNotCurrent;
+
+impl From<MachineObservationNotCurrent> for DatabaseError {
+    #[track_caller]
+    fn from(_: MachineObservationNotCurrent) -> Self {
+        Self::new(
+            "update machine status observation",
+            sqlx::Error::RowNotFound,
+        )
+    }
+}
+
+/// Stores a network observation when its timestamp is at least as recent as the
+/// stored one, or no timestamp is stored. Compares both JSON timestamps at
+/// PostgreSQL's microsecond precision. Returns `NotApplied` for a missing
+/// machine or rejected timestamp.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     observation: &MachineNetworkStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    // Parse both timestamps from JSON so they round alike. SQLx truncates
+    // separately bound timestamps to microseconds.
     let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
-                    OR ((network_status_observation->>'observed_at')::timestamp <= $3::timestamp)
+                    OR ((network_status_observation->>'observed_at')::timestamp
+                        <= ($1::json->>'observed_at')::timestamp)
                 ) RETURNING id";
-    let _id: (MachineId,) = match sqlx::query_as(query)
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at)
-        .fetch_one(&mut *txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
-    {
-        Ok(result) => result,
-        Err(e) if e.is_not_found() => {
-            // This function is intended to be able to capture why the update sometimes fails in unit-test
-            // even though all prerequisite data is present.
-            // It compiles to a no-op in production environments.
-            debug_failed_machine_status_update(
-                txn,
-                machine_id,
-                "network_status_observation",
-                observation,
-            )
-            .await;
-            return Err(e);
-        }
-        Err(e) => return Err(e),
-    };
+        .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    if updated.is_some() {
+        return Ok(ConditionalWrite::Applied(()));
+    }
+
+    debug_failed_machine_status_update(txn, machine_id, "network_status_observation", observation)
+        .await;
+    Ok(ConditionalWrite::NotApplied(MachineObservationNotCurrent))
 }
+
+/// `ExtensionServiceObservationNotCurrent` means the conditional observation
+/// update did not match, but the machine was present when rechecked. The
+/// rejected observation does not replace the stored service entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionServiceObservationNotCurrent;
 
 /// Updates the current extension-service observation for one service type.
 ///
@@ -1088,16 +1151,19 @@ pub async fn update_network_status_observation(
 /// is a single JSONB update: PostgreSQL serializes concurrent row updates and
 /// `jsonb_set` retains every other service-type entry.
 ///
-/// Returns `false` when the machine exists but a newer observation for this
-/// same service type is already present, and [`DatabaseError::NotFoundError`]
-/// when the machine row is absent, so a superseded report is distinguishable
-/// from a machine that went away.
+/// Compares the stored and incoming JSON timestamps at PostgreSQL's microsecond
+/// precision, accepting equal timestamps and newer observations.
+///
+/// Returns `Applied(())` when the observation is stored. A conditional miss
+/// returns `NotApplied` if the machine exists when rechecked, or
+/// [`DatabaseError::NotFoundError`] if it is absent. The identity recheck is
+/// a separate read, not part of the timestamp comparison's snapshot.
 pub async fn update_extension_service_status_observation(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     service_type: ExtensionServiceType,
     observation: &InstanceExtensionServiceStatusObservation,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ExtensionServiceObservationNotCurrent>, DatabaseError> {
     let query = r#"
         UPDATE machines
         SET extension_service_status_observations = jsonb_set(
@@ -1110,7 +1176,7 @@ pub async fn update_extension_service_status_observation(
           AND (
               extension_service_status_observations -> $2 IS NULL
               OR (extension_service_status_observations -> $2 ->> 'observed_at')::timestamptz
-                    <= $4::timestamptz
+                    <= ($3::jsonb->>'observed_at')::timestamptz
           )
         RETURNING id
     "#;
@@ -1118,12 +1184,11 @@ pub async fn update_extension_service_status_observation(
         .bind(machine_id)
         .bind(service_type.to_string())
         .bind(sqlx::types::Json(observation))
-        .bind(observation.observed_at)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if updated.is_some() {
-        return Ok(true);
+        return Ok(ConditionalWrite::Applied(()));
     }
 
     // The update above matches on machine identity and observation freshness
@@ -1136,7 +1201,9 @@ pub async fn update_extension_service_status_observation(
         .await
         .map_err(|e| DatabaseError::query(identity_query, e))?;
     if machine_exists.is_some() {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(
+            ExtensionServiceObservationNotCurrent,
+        ));
     }
 
     // Captures why the update failed in unit tests even though all prerequisite
@@ -1154,44 +1221,57 @@ pub async fn update_extension_service_status_observation(
     })
 }
 
-/// Only does the update if the passed observation is newer than any existing one
+/// Stores an InfiniBand observation when none is stored or its timestamp is at
+/// least as recent, comparing both JSON timestamps at PostgreSQL's microsecond
+/// precision. A missing machine or an unmet condition returns `NotApplied`.
 pub async fn update_infiniband_status_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MachineInfinibandStatusObservation,
-) -> Result<(), DatabaseError> {
-    let query =
-            "UPDATE machines SET infiniband_status_observation = $1::json WHERE id = $2 AND
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    let query = "UPDATE machines SET infiniband_status_observation = $1::json WHERE id = $2 AND
              (infiniband_status_observation IS NULL
-                OR (infiniband_status_observation ? 'observed_at' AND infiniband_status_observation->>'observed_at' <= $3)
+                OR (infiniband_status_observation ? 'observed_at'
+                    AND (infiniband_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz)
             ) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
+/// Stores an NVLink observation when no timestamp is stored or its timestamp is
+/// at least as recent, comparing both JSON timestamps at PostgreSQL's
+/// microsecond precision. A missing machine or an unmet condition returns
+/// `NotApplied`.
 pub async fn update_nvlink_status_observation(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     observation: &MachineNvLinkStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     let query = "UPDATE machines SET nvlink_status_observation = $1::json WHERE id = $2 AND
-                (nvlink_status_observation->>'observed_at' IS NULL OR nvlink_status_observation->>'observed_at' <= $3) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+                (nvlink_status_observation->>'observed_at' IS NULL
+                    OR (nvlink_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
 /// Clears `machines.nvlink_status_observation` for the given machine IDs.
@@ -1216,26 +1296,61 @@ pub async fn clear_nvlink_status_observations(
     Ok(())
 }
 
+/// Stores a Spectrum-X observation when no timestamp is stored or its timestamp
+/// is at least as recent, comparing both JSON timestamps at PostgreSQL's
+/// microsecond precision. A missing machine or an unmet condition returns
+/// `NotApplied`.
 pub async fn update_spx_status_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MachineSpxStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     tracing::debug!(
         observation = ?observation,
         "updating SPX status observation",
     );
     let query = "UPDATE machines SET spx_status_observation = $1::json WHERE id = $2 AND
-                (spx_status_observation->>'observed_at' IS NULL OR spx_status_observation->>'observed_at' <= $3) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+                (spx_status_observation->>'observed_at' IS NULL
+                    OR (spx_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
+}
+
+/// `update_mlx_device_observation` saves an unfiltered observation if none
+/// exists or the new timestamp is at least as recent. Comparisons use the
+/// database's timestamp precision. Returns `NotApplied` if the machine is
+/// missing or a newer observation is stored. Callers must validate report
+/// ownership and completeness.
+pub async fn update_mlx_device_observation(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    observation: &MlxDeviceObservation,
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+                (mlx_device_observation IS NULL
+                    OR (mlx_device_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
+        .bind(sqlx::types::Json(observation))
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
 #[cfg(test)]
@@ -1505,6 +1620,12 @@ pub async fn force_cleanup(
     Ok(())
 }
 
+/// `MachineNetworkConfigNotCurrent` means the target is missing or its network
+/// version no longer matches. The guarded backfill also rejects force deletion;
+/// the write deliberately does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineNetworkConfigNotCurrent;
+
 /// Updates the `network_config` on the target machine row (host or
 /// DPU), and bumps the `network_config_version` on *every* machine
 /// row in the same "machine group" (host + every DPU attached to it)
@@ -1514,12 +1635,16 @@ pub async fn force_cleanup(
 /// computed by the `machine_group_member_ids` Postgres function, which
 /// walks `machine_interfaces`. For zero-DPU hosts, the group is just the
 /// target itself.
+///
+/// Returns `NotApplied(MachineNetworkConfigNotCurrent)` for a missing target or
+/// changed version. Database failures remain errors. The caller must commit
+/// both the target write and group version updates in the same transaction.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
 }
 
@@ -1528,7 +1653,7 @@ async fn try_update_network_config_unless_force_deleting(
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
 }
 
@@ -1552,7 +1677,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     // First, do our usual "optimistic" lock update on the target row, which
@@ -1590,9 +1715,11 @@ async fn try_update_network_config_inner(
                 .execute(&mut *txn)
                 .await
                 .map_err(|e| DatabaseError::query(group_query, e))?;
-            Ok(true)
+            Ok(ConditionalWrite::Applied(()))
         }
-        Err(sqlx::Error::RowNotFound) => Ok(false),
+        Err(sqlx::Error::RowNotFound) => {
+            Ok(ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent))
+        }
         Err(e) => Err(DatabaseError::query(target_query, e)),
     }
 }
@@ -1624,13 +1751,21 @@ pub async fn set_use_admin_network_changed(
     Ok(())
 }
 
-/// Clears the `use_admin_network_changed` flag only if the machine is still at
-/// the expected network config version.
+/// `AdminNetworkChangeNotPending` means no pending flag matches the acknowledged
+/// version. The machine may be missing, its network config version may differ,
+/// or `use_admin_network_changed` may already be false or unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminNetworkChangeNotPending;
+
+/// Clears the pending `use_admin_network_changed` flag only if the machine is
+/// still at the expected network config version, without advancing that version.
+/// Returns `NotApplied(AdminNetworkChangeNotPending)` when no pending flag matches;
+/// database failures remain errors.
 pub async fn clear_use_admin_network_changed_if_version_matches(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     expected_version: &ConfigVersion,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), AdminNetworkChangeNotPending>, DatabaseError> {
     let query = r#"
         UPDATE machines
         SET network_config = jsonb_set(COALESCE(network_config, '{}'::jsonb), '{use_admin_network_changed}', 'false'::jsonb)
@@ -1645,7 +1780,11 @@ pub async fn clear_use_admin_network_changed_if_version_matches(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(AdminNetworkChangeNotPending)
+    })
 }
 
 /// Replaces predicted host id with stable host id.
@@ -1901,13 +2040,16 @@ pub async fn update_slot_and_tray(
     slot_number: Option<i32>,
     tray_index: Option<i32>,
 ) -> DatabaseResult<()> {
-    sqlx::query("UPDATE machines SET slot_number = $1, tray_index = $2 WHERE id = $3")
-        .bind(slot_number)
-        .bind(tray_index)
-        .bind(machine_id)
-        .execute(txn)
-        .await
-        .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
+    sqlx::query(
+        "UPDATE machines SET slot_number = COALESCE($1, slot_number), \
+         tray_index = COALESCE($2, tray_index) WHERE id = $3",
+    )
+    .bind(slot_number)
+    .bind(tray_index)
+    .bind(machine_id)
+    .execute(txn)
+    .await
+    .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
     Ok(())
 }
 
@@ -2183,6 +2325,94 @@ pub async fn list_machines_requested_for_host_reprovisioning(
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
 
+/// Records a reset request, replacing a pending one. Reports false if one has already started.
+pub async fn trigger_managed_host_reset_request(
+    txn: &mut PgConnection,
+    initiator: &str,
+    machine_id: &MachineId,
+    ignore_cleanup: bool,
+) -> Result<bool, DatabaseError> {
+    let req = ResetRequest {
+        requested_at: chrono::Utc::now(),
+        initiator: initiator.to_string(),
+        started_at: None,
+        ignore_cleanup,
+    };
+
+    let query = "UPDATE machines SET reset_requested=$2
+                     WHERE id=$1
+                       AND (reset_requested IS NULL
+                            OR reset_requested->'started_at' = 'null'::jsonb) RETURNING id";
+    let requested = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(req))
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(requested.is_some())
+}
+
+/// Marks the reset as started, which closes it to `Clear` and stops the hinge re-firing.
+/// Guarded on `IS NOT NULL` because `jsonb_set` on a `NULL` column reports success unchanged.
+pub async fn update_managed_host_reset_start_time(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = r#"UPDATE machines
+                        SET reset_requested=
+                                    jsonb_set(reset_requested, '{started_at}', $2, true)
+                       WHERE id=$1 AND reset_requested IS NOT NULL RETURNING id"#;
+    let _id = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(chrono::Utc::now()))
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
+/// Clears a reset request and reports whether a row matched, optionally sparing a started one.
+pub async fn clear_managed_host_reset_request(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    only_if_not_started: bool,
+) -> Result<bool, DatabaseError> {
+    let query = if only_if_not_started {
+        "UPDATE machines SET reset_requested=NULL
+            WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
+    } else {
+        "UPDATE machines SET reset_requested=NULL WHERE id=$1 RETURNING id"
+    };
+
+    let cleared = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("clear reset_requested", e))?;
+
+    Ok(cleared.is_some())
+}
+
+pub async fn list_machines_requested_for_reset(
+    txn: impl DbReader<'_>,
+) -> Result<Vec<HostMachine>, DatabaseError> {
+    lazy_static! {
+        // Oldest first with the id breaking ties, since Postgres guarantees no order otherwise.
+        // Cast because the stored text has variable fractional digits and will not sort.
+        static ref query: String = format!(
+            "{} WHERE m.reset_requested IS NOT NULL
+                ORDER BY (m.reset_requested->>'requested_at')::timestamptz, m.id",
+            JSON_MACHINE_SNAPSHOT_QUERY.deref()
+        );
+    }
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query.as_str(), e))
+}
+
 /// Apply dpu agent upgrade policy to a single DPU.
 /// Returns Ok(true) if it needs upgrading, Ok(false) otherwise.
 pub async fn apply_agent_upgrade_policy(
@@ -2357,6 +2587,62 @@ where
         .into_iter()
         .map(ID::try_from)
         .collect::<Result<Vec<ID>, _>>()?)
+}
+
+/// `try_update_controller_state` updates a host and its attached DPUs only if
+/// the host's controller-state version still matches `expected_version`.
+///
+/// The caller supplies `new_version` for every machine and its history entry.
+/// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
+/// version changed; no state or history changes remain. Successful writes return
+/// `Applied(())` and remain in the caller's transaction. Database failures remain
+/// errors.
+pub async fn try_update_controller_state(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+    new_version: ConfigVersion,
+    new_state: &ManagedHostState,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+
+    // `advance` takes the history retention lock before the machine row lock.
+    // Reversing that order can deadlock. Roll back the history if the host
+    // version changed.
+    crate::state_history::persist(
+        inner_txn.as_pgconn(),
+        crate::state_history::StateHistoryTableId::Machine,
+        host_id,
+        new_state,
+        new_version,
+    )
+    .await?;
+
+    let query = r#"
+        UPDATE machines
+        SET controller_state_version = $1, controller_state = $2
+        WHERE id = $3 AND controller_state_version = $4
+        RETURNING id
+    "#;
+    let updated: Option<HostMachineId> = sqlx::query_scalar(query)
+        .bind(new_version)
+        .bind(sqlx::types::Json(new_state))
+        .bind(host_id)
+        .bind(expected_version)
+        .fetch_optional(inner_txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if updated.is_none() {
+        inner_txn.rollback().await?;
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+    }
+
+    tracing::info!(machine_id = %host_id, next_state = ?new_state, "Updating host state");
+    for dpu in find_dpus_by_host_machine_id(inner_txn.as_pgconn(), host_id).await? {
+        advance(&dpu, inner_txn.as_pgconn(), new_state, Some(new_version)).await?;
+    }
+    inner_txn.commit().await?;
+    Ok(ConditionalWrite::Applied(()))
 }
 
 pub async fn update_state(
@@ -2836,18 +3122,24 @@ pub async fn clear_decommission_requested(
         .map_err(|error| DatabaseError::new("clear_decommission_requested", error))
 }
 
+/// Clears only the maintenance request that the controller completed.
+/// A missing machine or a different pending request returns `NotApplied`.
 pub async fn clear_machine_maintenance_requested(
     txn: &mut PgConnection,
     machine_id: impl MachineIdSubtypeTrait,
-) -> DatabaseResult<()> {
-    let query =
-        "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 RETURNING id";
-    sqlx::query_as::<_, MachineId>(query)
+    request: &model::machine::MachineMaintenanceRequest,
+) -> DatabaseResult<ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
+    let query = "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 AND machine_maintenance_requested = $2 RETURNING id";
+    let cleared = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
-        .fetch_one(txn)
+        .bind(sqlx::types::Json(request))
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_machine_maintenance_requested", e))?;
-    Ok(())
+    Ok(match cleared {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
+    })
 }
 
 /// Record an operator "force-converge this BMC now" request on the machine that
@@ -3014,6 +3306,10 @@ pub async fn get_lockdown_ikm_credential_rotation_requested(
         })
 }
 
+/// `update_dpu_asns` backfills missing DPU ASNs. If an assignment no longer
+/// applies, its unused reservation is rolled back and the batch continues.
+/// Successful assignments commit together; allocation or database errors roll
+/// back the batch.
 pub async fn update_dpu_asns(
     db_pool: &Pool<Postgres>,
     common_pools: &CommonPools,
@@ -3030,7 +3326,6 @@ pub async fn update_dpu_asns(
         );
         return Ok(());
     }
-    // Get all DPU IP addresses except the requester DPU machine
     let query = "SELECT id FROM machines WHERE starts_with(id, $1) AND asn IS NULL";
 
     let dpu_ids: Vec<MachineId> = sqlx::query_as(query)
@@ -3044,9 +3339,10 @@ pub async fn update_dpu_asns(
     }
 
     for dpu_machine_id in dpu_ids.iter() {
+        let mut assignment_txn = Transaction::begin_inner(txn.as_pgconn()).await?;
         let asn: i64 = crate::resource_pool::allocate(
             &common_pools.ethernet.pool_fnn_asn,
-            &mut txn,
+            assignment_txn.as_pgconn(),
             resource_pool::OwnerType::Machine,
             &dpu_machine_id.to_string(),
             None,
@@ -3055,12 +3351,21 @@ pub async fn update_dpu_asns(
 
         let query = "UPDATE machines set asn=$1 WHERE id=$2 and asn is null";
 
-        sqlx::query(query)
+        let rows_affected = sqlx::query(query)
             .bind(asn)
             .bind(dpu_machine_id)
-            .execute(txn.as_pgconn())
+            .execute(assignment_txn.as_pgconn())
             .await
-            .map_err(|e| DatabaseError::query(query, e))?;
+            .map_err(|e| DatabaseError::query(query, e))?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            // Another writer assigned the ASN or removed the DPU after our
+            // scan. We no longer need the reservation made in this savepoint.
+            assignment_txn.rollback().await?;
+        } else {
+            assignment_txn.commit().await?;
+        }
     }
 
     txn.commit().await?;
@@ -3141,7 +3446,7 @@ pub async fn update_dpu_loopback_ips_v6(
             })?;
             network_config.loopback_ip_v6 = Some(loopback_ip_v6);
 
-            if try_update_network_config_unless_force_deleting(
+            match try_update_network_config_unless_force_deleting(
                 txn.as_pgconn(),
                 &dpu_machine_id,
                 network_config_version,
@@ -3149,9 +3454,12 @@ pub async fn update_dpu_loopback_ips_v6(
             )
             .await?
             {
-                txn.commit().await?;
-                last_conflicting_version = None;
-                break;
+                ConditionalWrite::Applied(()) => {
+                    txn.commit().await?;
+                    last_conflicting_version = None;
+                    break;
+                }
+                ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {}
             }
 
             let force_deleting_or_deleted =
@@ -3353,6 +3661,9 @@ pub async fn get_quarantine_state(
     Ok(network_config.value.quarantine_state)
 }
 
+/// Sets quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn set_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
@@ -3362,10 +3673,21 @@ pub async fn set_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = Some(quarantine_state);
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
+/// Clears quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn clear_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -3374,8 +3696,16 @@ pub async fn clear_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = None;
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
 pub async fn modify_dpf_state(
@@ -3446,6 +3776,10 @@ pub struct MachineRmsIdentity {
     pub bmc_mac_address: MacAddress,
     pub rack_id: Option<RackId>,
     pub rack_profile_id: Option<RackProfileId>,
+    /// Physical slot number last reported by RMS, or `None` if none has been recorded.
+    pub slot_number: Option<i32>,
+    /// Physical tray index last reported by RMS, or `None` if none has been recorded.
+    pub tray_index: Option<i32>,
 }
 
 /// Look up RMS identities and rack profile context for compute tray machines by
@@ -3461,7 +3795,9 @@ pub async fn find_rms_identities_by_bmc_ips(
             mia.address AS bmc_ip,
             mi.mac_address AS bmc_mac_address,
             m.rack_id,
-            r.rack_profile_id
+            r.rack_profile_id,
+            m.slot_number,
+            m.tray_index
         FROM machines m
         LEFT JOIN racks r ON r.id = m.rack_id
         JOIN machine_interfaces mi
@@ -3535,6 +3871,484 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    #[crate::sqlx_test]
+    async fn machine_observations_compare_timestamps_chronologically(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::infiniband::MachineInfinibandStatusObservation;
+        use model::machine::nvlink::MachineNvLinkStatusObservation;
+        use model::machine::spx::MachineSpxStatusObservation;
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{
+            MachineObservationNotCurrent, update_infiniband_status_observation,
+            update_mlx_device_observation, update_nvlink_status_observation,
+            update_spx_status_observation,
+        };
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        struct Case {
+            scenario: &'static str,
+            stored_at: Option<&'static str>,
+            observed_at: &'static str,
+            applies: bool,
+        }
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        // Each column has its own SQL predicate. Check persisted JSON, not only
+        // the result, so a rejected observation cannot replace newer data.
+        // Only the literal column names below are interpolated into SQL.
+        for column in [
+            "infiniband_status_observation",
+            "nvlink_status_observation",
+            "spx_status_observation",
+            "mlx_device_observation",
+        ] {
+            for Case {
+                scenario,
+                stored_at,
+                observed_at,
+                applies,
+            } in [
+                Case {
+                    scenario: "first observation",
+                    stored_at: None,
+                    observed_at: "2026-09-16T16:00:00.123Z",
+                    applies: true,
+                },
+                Case {
+                    scenario: "newer with more fractional digits",
+                    stored_at: Some("2026-09-16T16:00:00.123Z"),
+                    observed_at: "2026-09-16T16:00:00.123001+00:00",
+                    applies: true,
+                },
+                Case {
+                    scenario: "equal nanosecond timestamp",
+                    stored_at: Some("2026-09-16T16:00:00.123456789Z"),
+                    observed_at: "2026-09-16T16:00:00.123456789+00:00",
+                    applies: true,
+                },
+                Case {
+                    scenario: "older timestamp with a different offset",
+                    stored_at: Some("2026-09-16T15:00:00.123001-01:00"),
+                    observed_at: "2026-09-16T16:00:00.123Z",
+                    applies: false,
+                },
+            ] {
+                let stored =
+                    stored_at.map(|timestamp| serde_json::json!({"observed_at": timestamp}));
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "UPDATE machines SET {column} = $1 WHERE id = $2"
+                )))
+                .bind(stored.as_ref().map(sqlx::types::Json))
+                .bind(machine_id)
+                .execute(txn.as_mut())
+                .await?;
+                let observed_at = observed_at.parse()?;
+                let (result, incoming) = match column {
+                    "infiniband_status_observation" => {
+                        let observation = MachineInfinibandStatusObservation {
+                            observed_at,
+                            ib_interfaces: Vec::new(),
+                        };
+                        (
+                            update_infiniband_status_observation(
+                                txn.as_mut(),
+                                &machine_id,
+                                &observation,
+                            )
+                            .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    "nvlink_status_observation" => {
+                        let observation = MachineNvLinkStatusObservation {
+                            observed_at,
+                            nvlink_gpus: Vec::new(),
+                        };
+                        (
+                            update_nvlink_status_observation(
+                                txn.as_mut(),
+                                &machine_id,
+                                &observation,
+                            )
+                            .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    "spx_status_observation" => {
+                        let observation = MachineSpxStatusObservation {
+                            observed_at,
+                            spx_attachments: Vec::new(),
+                        };
+                        (
+                            update_spx_status_observation(txn.as_mut(), &machine_id, &observation)
+                                .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    "mlx_device_observation" => {
+                        let observation = MlxDeviceObservation {
+                            observed_at,
+                            devices: Vec::new(),
+                        };
+                        (
+                            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation)
+                                .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    _ => unreachable!("the table contains only observation columns"),
+                };
+                assert_eq!(
+                    result,
+                    if applies {
+                        Applied(())
+                    } else {
+                        NotApplied(MachineObservationNotCurrent)
+                    },
+                    "{column}: {scenario}"
+                );
+                let persisted: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(
+                    format!("SELECT {column} FROM machines WHERE id = $1"),
+                ))
+                .bind(machine_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+                assert_eq!(
+                    persisted,
+                    if applies { incoming } else { stored.unwrap() },
+                    "{column}: {scenario}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn mlx_observation_round_trips_through_machine_snapshot(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+            "observed_at": "2026-09-16T16:00:00.123456789Z",
+            "devices": [
+                {
+                    "pci_name": "0000:01:00.0",
+                    "device_type": "ConnectX8",
+                    "psid": "MT_0000001111",
+                    "part_number": "MCX813106AS-VEA",
+                    "fw_version_current": "40.45.1000"
+                },
+                {
+                    "pci_name": "0000:b4:00.0",
+                    "device_type": "BlueField3",
+                    "status": "Failed to open device"
+                }
+            ]
+        }))?;
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            NotApplied(MachineObservationNotCurrent),
+            "a missing machine cannot accept an observation"
+        );
+        let machine = super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        assert_eq!(machine.status.mlx_device_observation, None);
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            Applied(())
+        );
+        txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn concurrent_mlx_observations_preserve_newer_report(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let newer = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:01Z".parse()?,
+            devices: Vec::new(),
+        };
+        let older = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:00Z".parse()?,
+            devices: Vec::new(),
+        };
+        let mut newer_txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
+            Applied(())
+        );
+        let mut older_txn = pool.begin().await?;
+        let release_newer = async {
+            // The older write must reach the locked row before the newer
+            // report commits, so its predicate must be rechecked after waiting.
+            wait_until_blocked_on(&pool, "UPDATE machines SET mlx_device_observation", 1).await;
+            newer_txn.commit().await
+        };
+        let (older_result, released) =
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                tokio::join!(
+                    update_mlx_device_observation(older_txn.as_mut(), &machine_id, &older),
+                    release_newer,
+                )
+            })
+            .await
+            .expect("the older observation must finish after the newer transaction commits");
+        released?;
+        assert_eq!(older_result?, NotApplied(MachineObservationNotCurrent));
+        older_txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(newer));
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn network_observations_compare_fractional_timestamps(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::DpuMachineId;
+        use chrono::{DateTime, Duration, Utc};
+        use model::machine::network::MachineNetworkStatusObservation;
+
+        use super::{MachineObservationNotCurrent, update_network_status_observation};
+        use crate::ConditionalWrite::{self, Applied, NotApplied};
+
+        let machine_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let observed_at = DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap();
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        struct Case {
+            scenario: &'static str,
+            observed_at: DateTime<Utc>,
+            expect: ConditionalWrite<(), MachineObservationNotCurrent>,
+        }
+        let mut expected = None;
+        for case in [
+            Case {
+                scenario: "first observation",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "equal timestamp replaces the payload",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "older observation preserves the payload",
+                observed_at: observed_at - Duration::microseconds(1),
+                expect: NotApplied(MachineObservationNotCurrent),
+            },
+        ] {
+            let observation = MachineNetworkStatusObservation {
+                machine_id,
+                agent_version: Some(case.scenario.to_string()),
+                observed_at: case.observed_at,
+                network_config_version: None,
+                client_certificate_expiry: None,
+                agent_version_superseded_at: None,
+                instance_network_observation: None,
+                fabric_interfaces: Vec::new(),
+            };
+            let mut txn = pool.begin().await?;
+            let result =
+                update_network_status_observation(txn.as_mut(), &machine_id, &observation).await?;
+            txn.commit().await?;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            if let Applied(()) = case.expect {
+                expected = Some(observation);
+            }
+            let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
+                sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+                    .bind(machine_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(Some(persisted.0), expected, "{}", case.scenario);
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn extension_service_observations_preserve_per_service_timestamp_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use chrono::{DateTime, Utc};
+        use config_version::ConfigVersion;
+        use model::extension_service::ExtensionServiceType;
+        use model::instance::status::extension_service::{
+            InstanceExtensionServiceStatusObservation,
+            InstanceExtensionServiceStatusObservationByType,
+        };
+
+        use super::{
+            ExtensionServiceObservationNotCurrent, update_extension_service_status_observation,
+        };
+        use crate::ConditionalWrite::{self, Applied, NotApplied};
+
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        let observation = InstanceExtensionServiceStatusObservation {
+            config_version: ConfigVersion::initial(),
+            instance_config_version: None,
+            extension_service_statuses: Vec::new(),
+            observed_at: DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap(),
+        };
+        let mut txn = pool.begin().await?;
+        let missing = update_extension_service_status_observation(
+            txn.as_mut(),
+            &machine_id,
+            ExtensionServiceType::KubernetesPod,
+            &observation,
+        )
+        .await;
+        assert!(
+            matches!(missing, Err(crate::DatabaseError::NotFoundError { kind: "machine", id }) if id == machine_id.to_string())
+        );
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        struct Case {
+            scenario: &'static str,
+            service_type: ExtensionServiceType,
+            observed_at: DateTime<Utc>,
+            config_version: ConfigVersion,
+            expect: ConditionalWrite<(), ExtensionServiceObservationNotCurrent>,
+        }
+        let mut expected = InstanceExtensionServiceStatusObservationByType::default();
+        for case in [
+            Case {
+                scenario: "initial observation",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at,
+                config_version: observation.config_version,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "another service has an independent timestamp",
+                service_type: ExtensionServiceType::DpfHelmChart,
+                observed_at: observation.observed_at - chrono::Duration::seconds(1),
+                config_version: observation.config_version,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "older observation leaves both services unchanged",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at - chrono::Duration::seconds(1),
+                config_version: observation.config_version.increment(),
+                expect: NotApplied(ExtensionServiceObservationNotCurrent),
+            },
+            Case {
+                scenario: "equal timestamp can replace the payload",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at,
+                config_version: observation.config_version.increment(),
+                expect: Applied(()),
+            },
+        ] {
+            let incoming = InstanceExtensionServiceStatusObservation {
+                config_version: case.config_version,
+                observed_at: case.observed_at,
+                ..observation.clone()
+            };
+            let mut txn = pool.begin().await?;
+            let result = update_extension_service_status_observation(
+                txn.as_mut(),
+                &machine_id,
+                case.service_type.clone(),
+                &incoming,
+            )
+            .await?;
+            txn.commit().await?;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            if let Applied(()) = case.expect {
+                expected.set_for_service_type(case.service_type, incoming);
+            }
+            let persisted: sqlx::types::Json<InstanceExtensionServiceStatusObservationByType> =
+                sqlx::query_scalar(
+                    "SELECT extension_service_status_observations FROM machines WHERE id = $1",
+                )
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(persisted.0, expected, "{}", case.scenario);
+        }
+        Ok(())
+    }
 
     fn common_pools_without_seeded_values() -> CommonPools {
         let (stop_sender, _stop_receiver) = oneshot::channel();
@@ -3649,6 +4463,184 @@ mod test {
             "both dpa_interfaces rows should cascade to the stable id",
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn reboot_verification_waits_for_a_concurrent_request(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::{MachineLastRebootRequested, MachineLastRebootRequestedMode};
+
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let captured = MachineLastRebootRequested {
+            time: chrono::DateTime::from_timestamp(1_722_000_000, 0).unwrap(),
+            mode: MachineLastRebootRequestedMode::Reboot,
+            restart_verified: Some(false),
+            verification_attempts: Some(0),
+        };
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        super::record_reboot_request(&machine_id, setup.as_mut(), &captured).await?;
+        setup.commit().await?;
+
+        let newer = MachineLastRebootRequested {
+            time: captured.time + chrono::Duration::seconds(1),
+            ..captured
+        };
+        let mut replacement = pool.begin().await?;
+        super::record_reboot_request(&machine_id, replacement.as_mut(), &newer).await?;
+
+        let verify = async {
+            let mut txn = pool.begin().await?;
+            let result = super::update_restart_verification_status(
+                &machine_id,
+                captured,
+                Some(true),
+                1,
+                &mut txn,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_replacement = async {
+            // The new request is still uncommitted. Verification must wait at
+            // its locking read, then compare against the newly committed value.
+            // Without that lock, it reads the old value and only its UPDATE waits.
+            wait_until_blocked_on(&pool, "last_reboot_requested", 1).await;
+            replacement.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(verify, commit_replacement)
+        })
+        .await??;
+        assert_eq!(
+            result,
+            crate::ConditionalWrite::NotApplied(super::RebootVerificationNotCurrent)
+        );
+        let stored: sqlx::types::Json<MachineLastRebootRequested> =
+            sqlx::query_scalar("SELECT last_reboot_requested FROM machines WHERE id=$1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(stored.0, newer);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn controller_state_persistence_preserves_advance_lock_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        let host_id = HostMachineId::try_from(machine_id)?;
+        let mut setup_txn = pool.begin().await?;
+        super::create(
+            setup_txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        setup_txn.commit().await?;
+
+        let mut legacy_txn = pool.begin().await?;
+        let machine = super::find_one(
+            legacy_txn.as_mut(),
+            &host_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("fixture host");
+        let expected_version = machine.state.version;
+        let new_version = expected_version.increment();
+        let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(legacy_txn.as_mut())
+            .await?;
+
+        // Pause the legacy writer at the retention lock taken by `advance`.
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+            )",
+        )
+        .bind(host_id.to_string())
+        .execute(legacy_txn.as_mut())
+        .await?;
+
+        let mut controller_txn = pool.begin().await?;
+        let controller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(controller_txn.as_mut())
+            .await?;
+        let controller_write = async {
+            let applied = super::try_update_controller_state(
+                controller_txn.as_mut(),
+                &host_id,
+                expected_version,
+                new_version,
+                &ManagedHostState::Ready,
+            )
+            .await?;
+            controller_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(applied)
+        };
+        let legacy_write = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks
+                        WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                          AND $2 = ANY(pg_blocking_pids(pid))
+                    )",
+                )
+                .bind(controller_pid)
+                .bind(legacy_pid)
+                .fetch_one(&pool)
+                .await?;
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            // Waiting for history must not hold the host row. NOWAIT catches
+            // the reversed order without relying on a deadlock victim.
+            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(host_id)
+                .fetch_one(legacy_txn.as_mut())
+                .await?;
+            super::advance(
+                &machine,
+                legacy_txn.as_mut(),
+                &ManagedHostState::ForceDeletion,
+                Some(new_version),
+            )
+            .await?;
+            legacy_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(controller_write, legacy_write)
+        })
+        .await??;
+        assert_eq!(
+            applied,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent),
+            "the controller must reject the earlier snapshot"
+        );
         Ok(())
     }
 
@@ -3819,6 +4811,71 @@ mod test {
         Ok(())
     }
 
+    #[crate::sqlx_test]
+    async fn concurrent_asn_backfills_leave_one_reservation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let common_pools = common_pools(&pool, None).await?;
+        let dpu_id =
+            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &dpu_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut machine_lock = pool.begin().await?;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(dpu_id)
+            .fetch_one(machine_lock.as_mut())
+            .await?;
+
+        let release_machine = async {
+            // Both backfills must reserve an ASN and reach the machine update
+            // before either can assign it. The losing reservation must be freed.
+            wait_until_blocked_on(&pool, "UPDATE machines set asn=", 2).await;
+            machine_lock.commit().await
+        };
+        let (first, second, released) =
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                tokio::join!(
+                    super::update_dpu_asns(&pool, &common_pools),
+                    super::update_dpu_asns(&pool, &common_pools),
+                    release_machine,
+                )
+            })
+            .await
+            .expect("both ASN backfills must finish after the machine lock is released");
+        first?;
+        second?;
+        released?;
+
+        let assigned: i64 = sqlx::query_scalar("SELECT asn FROM machines WHERE id = $1")
+            .bind(dpu_id)
+            .fetch_one(&pool)
+            .await?;
+        let reserved: Vec<i64> = sqlx::query_scalar(
+            "SELECT value::bigint FROM resource_pool WHERE name = $1 AND state = $2",
+        )
+        .bind(FNN_ASN)
+        .bind(sqlx::types::Json(
+            model::resource_pool::ResourcePoolEntryState::Allocated {
+                owner: dpu_id.to_string(),
+                owner_type: model::resource_pool::OwnerType::Machine.to_string(),
+            },
+        ))
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(reserved, vec![assigned]);
+        Ok(())
+    }
+
     fn integer_pool() -> ResourcePoolDef {
         ResourcePoolDef {
             ranges: vec![Range {
@@ -3869,7 +4926,7 @@ mod test {
         Ok(crate::resource_pool::create_common_pools(pool.clone(), HashSet::new()).await?)
     }
 
-    async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str) {
+    async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str, expected_count: i64) {
         for _ in 0..600 {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity
@@ -3881,12 +4938,12 @@ mod test {
             .fetch_one(pool)
             .await
             .unwrap();
-            if waiting > 0 {
+            if waiting >= expected_count {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("query never blocked on {relation}");
+        panic!("expected {expected_count} queries blocked on {relation}");
     }
 
     /// The machine snapshot reports the BMC IP from the *live* `machine_interface_addresses`
@@ -4437,7 +5494,7 @@ mod test {
         let backfill = tokio::spawn(async move {
             super::update_dpu_loopback_ips_v6(&backfill_pool, &backfill_common_pools).await
         });
-        wait_until_blocked_on(&pool, "resource_pool").await;
+        wait_until_blocked_on(&pool, "resource_pool", 1).await;
 
         let mut txn = pool.begin().await?;
         let (mut network_config, version) =
@@ -4445,14 +5502,15 @@ mod test {
                 .await?
                 .take();
         network_config.use_admin_network = Some(false);
-        assert!(
+        assert_eq!(
             super::try_update_network_config(
                 txn.as_mut(),
                 &dpu_machine_id,
                 version,
                 &network_config,
             )
-            .await?
+            .await?,
+            crate::ConditionalWrite::Applied(())
         );
         txn.commit().await?;
         reservation_lock.commit().await?;

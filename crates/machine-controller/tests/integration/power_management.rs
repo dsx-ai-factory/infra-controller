@@ -488,7 +488,8 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         matches!(
             machine.state.value,
             ManagedHostState::Maintenance {
-                operation: MachineMaintenanceOperation::PowerOff
+                operation: MachineMaintenanceOperation::PowerOff,
+                ..
             }
         ),
         "expected Maintenance(PowerOff) after one iteration, got {:?}",

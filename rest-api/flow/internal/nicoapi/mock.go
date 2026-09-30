@@ -9,28 +9,35 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type mockClient struct {
-	machines                    map[string]MachineDetail
-	powerStates                 map[string]PowerState
-	machineInterfaces           map[string]MachineInterface
-	expectedSwitches            map[string]ExpectedSwitchInfo // keyed by BMC MAC
-	leakingMachineIds           []string
-	leakingSwitchIds            []string
-	firmwareUpdateTimeWindowErr error // If set, SetFirmwareUpdateTimeWindow will return this error
-	adminPowerControlErr        error // If set, AdminPowerControl will return this error
-	desiredFirmwareVersions     []*corev1.DesiredFirmwareVersionEntry
-	lastUpdateFirmwareRequest   *corev1.UpdateComponentFirmwareRequest
+	machines                      map[string]MachineDetail
+	powerStates                   map[string]PowerState
+	machineInterfaces             map[string]MachineInterface
+	expectedSwitches              map[string]ExpectedSwitchInfo // keyed by BMC MAC
+	leakingMachineIds             []string
+	leakingSwitchIds              []string
+	firmwareUpdateTimeWindowErr   error // If set, SetFirmwareUpdateTimeWindow will return this error
+	adminPowerControlErr          error // If set, AdminPowerControl will return this error
+	desiredFirmwareVersions       []*corev1.DesiredFirmwareVersionEntry
+	lastPowerControlRequest       *corev1.ComponentPowerControlRequest
+	lastUpdateFirmwareRequest     *corev1.UpdateComponentFirmwareRequest
+	lastFirmwareStatusRequest     *corev1.GetComponentFirmwareStatusRequest
+	lastComponentInventoryRequest *corev1.GetComponentInventoryRequest
 	// Topology lookups exercised by the rack-assignment safety check. Tests
 	// populate these via Set...RackId / Set...HostMachineIds helpers.
 	switchRackIDs              map[string]string // switch ID → rack ID
 	powerShelfRackIDs          map[string]string // power shelf ID → rack ID
 	switchControllerStates     map[string]string // switch ID → raw core controller_state
+	switchHealth               map[string]*types.HealthReport
 	switchNvosIPs              map[string]string // switch ID → resolved NVOS host IP
 	nvLinkDomainMemberships    []NVLinkDomainMembership
 	powerShelfControllerStates map[string]string // shelf ID → raw core controller_state
+	powerShelfHealth           map[string]*types.HealthReport
+	rackHealth                 map[string]*types.HealthReport
 	observedSwitches           []ObservedControllerDevice
 	observedPowerShelves       []ObservedControllerDevice
 	hostMachinesByRackID       map[string][]string
@@ -68,7 +75,10 @@ type mockClient struct {
 // test implementation.
 type MockClient interface {
 	Client
+	LastComponentPowerControlRequest() *corev1.ComponentPowerControlRequest
 	LastUpdateComponentFirmwareRequest() *corev1.UpdateComponentFirmwareRequest
+	LastGetComponentFirmwareStatusRequest() *corev1.GetComponentFirmwareStatusRequest
+	LastGetComponentInventoryRequest() *corev1.GetComponentInventoryRequest
 }
 
 // DpuReprovisioningCall captures a TriggerDpuReprovisioning invocation
@@ -85,6 +95,9 @@ type InstancePowerCall struct {
 	ApplyUpdates bool
 }
 
+// Close is a no-op because the mock owns no connection or certificate watcher.
+func (c *mockClient) Close() error { return nil }
+
 // NewMockClient returns a "GRPC" client that returns mock values so it can be used in unit tests.
 func NewMockClient() MockClient {
 	return &mockClient{
@@ -95,8 +108,11 @@ func NewMockClient() MockClient {
 		switchRackIDs:                 map[string]string{},
 		powerShelfRackIDs:             map[string]string{},
 		switchControllerStates:        map[string]string{},
+		switchHealth:                  map[string]*types.HealthReport{},
 		switchNvosIPs:                 map[string]string{},
 		powerShelfControllerStates:    map[string]string{},
+		powerShelfHealth:              map[string]*types.HealthReport{},
+		rackHealth:                    map[string]*types.HealthReport{},
 		hostMachinesByRackID:          map[string][]string{},
 		expectedRackDetails:           map[string]ExpectedRackDetail{},
 		expectedMachineDetails:        map[string]ExpectedMachineDetail{},
@@ -260,6 +276,18 @@ func (c *mockClient) FindSwitchControllerStates(_ context.Context, switchIds []s
 	return out, nil
 }
 
+func (c *mockClient) FindSwitchRuntimeStatuses(_ context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error) {
+	out := make(map[string]ComponentRuntimeStatus, len(switchIds))
+	for _, id := range switchIds {
+		state, hasState := c.switchControllerStates[id]
+		health, hasHealth := c.switchHealth[id]
+		if hasState || hasHealth {
+			out[id] = ComponentRuntimeStatus{ControllerState: state, Health: health}
+		}
+	}
+	return out, nil
+}
+
 func (c *mockClient) FindSwitchNvosIPs(_ context.Context, switchIds []string) (map[string]string, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
@@ -299,10 +327,37 @@ func (c *mockClient) FindPowerShelfControllerStates(_ context.Context, shelfIds 
 	return out, nil
 }
 
+func (c *mockClient) FindPowerShelfRuntimeStatuses(_ context.Context, shelfIds []string) (map[string]ComponentRuntimeStatus, error) {
+	out := make(map[string]ComponentRuntimeStatus, len(shelfIds))
+	for _, id := range shelfIds {
+		state, hasState := c.powerShelfControllerStates[id]
+		health, hasHealth := c.powerShelfHealth[id]
+		if hasState || hasHealth {
+			out[id] = ComponentRuntimeStatus{ControllerState: state, Health: health}
+		}
+	}
+	return out, nil
+}
+
+func (c *mockClient) FindRackHealthReports(_ context.Context, rackIds []string) (map[string]*types.HealthReport, error) {
+	out := make(map[string]*types.HealthReport, len(rackIds))
+	for _, id := range rackIds {
+		if health, ok := c.rackHealth[id]; ok {
+			out[id] = health
+		}
+	}
+	return out, nil
+}
+
 // SetSwitchControllerState records the raw controller_state Core reports for a
 // switch (mock only).
 func (c *mockClient) SetSwitchControllerState(switchID, state string) {
 	c.switchControllerStates[switchID] = state
+}
+
+// SetSwitchHealth records the aggregate health Core reports for a switch.
+func (c *mockClient) SetSwitchHealth(switchID string, health *types.HealthReport) {
+	c.switchHealth[switchID] = health
 }
 
 // SetSwitchNvosIP records the resolved NVOS host IP Core reports for a switch
@@ -315,6 +370,16 @@ func (c *mockClient) SetSwitchNvosIP(switchID, ip string) {
 // for a power shelf (mock only).
 func (c *mockClient) SetPowerShelfControllerState(shelfID, state string) {
 	c.powerShelfControllerStates[shelfID] = state
+}
+
+// SetPowerShelfHealth records the aggregate health Core reports for a shelf.
+func (c *mockClient) SetPowerShelfHealth(shelfID string, health *types.HealthReport) {
+	c.powerShelfHealth[shelfID] = health
+}
+
+// SetRackHealth records the aggregate health Core reports for a rack.
+func (c *mockClient) SetRackHealth(rackID string, health *types.HealthReport) {
+	c.rackHealth[rackID] = health
 }
 
 // SetRackHostMachineIDs records which host machines a rack contains (mock only).
@@ -374,7 +439,12 @@ func (c *mockClient) RemoveHealthReportOverride(ctx context.Context, machineID s
 }
 
 func (c *mockClient) ComponentPowerControl(ctx context.Context, req *corev1.ComponentPowerControlRequest) (*corev1.ComponentPowerControlResponse, error) {
+	c.lastPowerControlRequest = req
 	return &corev1.ComponentPowerControlResponse{}, nil
+}
+
+func (c *mockClient) LastComponentPowerControlRequest() *corev1.ComponentPowerControlRequest {
+	return c.lastPowerControlRequest
 }
 
 func (c *mockClient) UpdateComponentFirmware(ctx context.Context, req *corev1.UpdateComponentFirmwareRequest) (*corev1.UpdateComponentFirmwareResponse, error) {
@@ -389,7 +459,12 @@ func (c *mockClient) LastUpdateComponentFirmwareRequest() *corev1.UpdateComponen
 }
 
 func (c *mockClient) GetComponentFirmwareStatus(ctx context.Context, req *corev1.GetComponentFirmwareStatusRequest) (*corev1.GetComponentFirmwareStatusResponse, error) {
+	c.lastFirmwareStatusRequest = req
 	return &corev1.GetComponentFirmwareStatusResponse{}, nil
+}
+
+func (c *mockClient) LastGetComponentFirmwareStatusRequest() *corev1.GetComponentFirmwareStatusRequest {
+	return c.lastFirmwareStatusRequest
 }
 
 func (c *mockClient) ListComponentFirmwareVersions(ctx context.Context, req *corev1.ListComponentFirmwareVersionsRequest) (*corev1.ListComponentFirmwareVersionsResponse, error) {
@@ -397,7 +472,12 @@ func (c *mockClient) ListComponentFirmwareVersions(ctx context.Context, req *cor
 }
 
 func (c *mockClient) GetComponentInventory(ctx context.Context, req *corev1.GetComponentInventoryRequest) (*corev1.GetComponentInventoryResponse, error) {
+	c.lastComponentInventoryRequest = req
 	return &corev1.GetComponentInventoryResponse{}, nil
+}
+
+func (c *mockClient) LastGetComponentInventoryRequest() *corev1.GetComponentInventoryRequest {
+	return c.lastComponentInventoryRequest
 }
 
 func (c *mockClient) GetAllExpectedSwitchesLinked(_ context.Context) ([]LinkedExpectedSwitch, error) {

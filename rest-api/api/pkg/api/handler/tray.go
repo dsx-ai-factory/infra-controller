@@ -233,13 +233,13 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 	// about its transport, so the policy crosses to the proxy unchanged.
 	var flowResponse flowv1.GetComponentInfoResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetComponentInfoByID_FullMethodName,
 		flowRequest, &flowResponse,
 		fmt.Sprintf("tray-get-%s", trayStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -379,6 +379,9 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.TrayDefaultOrderBy)
+	}
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.TrayOrderByFieldMap)))
 	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
@@ -426,13 +429,13 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 	// it onto the proxy.
 	var flowResponse flowv1.GetComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	components := flowResponse.GetComponents()
@@ -614,13 +617,13 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		fmt.Sprintf("tray-validate-%s", trayStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -779,13 +782,13 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -820,7 +823,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Tray identified by component ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -917,10 +920,10 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", apiRequest.State, trayStrID), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -951,7 +954,7 @@ func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Trays
-// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all trays in the Site.
+// @Description Power control Trays with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all trays in the Site.
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -1047,10 +1050,10 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1135,7 +1138,7 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1176,11 +1179,12 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
-	if err != nil {
-		return err
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
+		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1229,7 +1233,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchTrayFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch tray firmware update request")
@@ -1307,11 +1311,12 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
-		request.OverrideReadinessCheck, fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+		request.OverrideReadinessCheck, request.OverrideVersionCheck,
+		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

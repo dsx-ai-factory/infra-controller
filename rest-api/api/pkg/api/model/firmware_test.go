@@ -4,11 +4,55 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestAPIFirmwareAuthenticationData_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name         string
+		payload      string
+		wantErr      string
+		wantNVSwitch *string
+	}{
+		{
+			name:         "supported per-component field",
+			payload:      `{"perComponent":{"nvswitch":"token"}}`,
+			wantNVSwitch: strPtr("token"),
+		},
+		{
+			name:    "unknown authentication representation",
+			payload: `{"perTray":{"nvswitch":"token"}}`,
+			wantErr: `authenticationData contains unknown field "perTray"`,
+		},
+		{
+			name:    "unknown per-component field",
+			payload: `{"perComponent":{"switch":"token"}}`,
+			wantErr: `authenticationData.perComponent contains unknown field "switch"`,
+		},
+		{
+			name:    "supported and unknown per-component fields",
+			payload: `{"perComponent":{"nvswitch":"valid-token","switch":"other-token"}}`,
+			wantErr: `authenticationData.perComponent contains unknown field "switch"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got APIFirmwareAuthenticationData
+			err := json.Unmarshal([]byte(tt.payload), &got)
+			if tt.wantErr != "" {
+				assert.EqualError(t, err, tt.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantNVSwitch, got.PerComponent.NVSwitch)
+		})
+	}
+}
 
 func TestAPIUpdateFirmwareRequest_Validate(t *testing.T) {
 	tests := []struct {

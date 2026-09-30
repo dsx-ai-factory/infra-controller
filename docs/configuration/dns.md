@@ -43,9 +43,13 @@ Like the forward zone, reverse zones must be delegated from your upstream DNS - 
 
 ## Server Behavior Worth Knowing
 
-- `nico-dns` answers A, AAAA, and PTR queries only; every other type answers "not implemented". It never recurses, and it serves no SOA or NS records and no zone transfers, so put it behind your recursive resolver (a forward zone works best) rather than in a client's resolver list.
-- Answers reflect the database live: there is no positive cache and no zone-serial machinery. A record change is visible on the next query.
-- A name that exists with only the other address family answers NXDomain rather than an empty answer, and negative answers are cached at the edge briefly (120 seconds by default).
+- `nico-dns` forwards A, AAAA, PTR, SOA, NS, CNAME, MX, and TXT queries to the API; any other type, and zone transfers, answer "not implemented". It never recurses. It publishes no NS or CNAME/MX/TXT records, so those types answer NOERROR with an empty answer section inside a held zone. SOA at a zone apex is answered. Put it behind your recursive resolver (a forward zone works best) rather than in a client's resolver list.
+- Positive answers reflect the database live: there is no positive cache and no zone-serial machinery. A new or changed record is visible on the next query for it unless a negative answer for that name and type is cached as described in the next items. In that case, the record appears when the cache entry expires.
+- Inside a zone NICo holds, a name that exists without the requested type (for example, only the other address family) answers NOERROR with an empty answer section, and a name that does not exist answers NXDomain; both carry the zone SOA and set the AA bit. A name outside every held zone answers Refused rather than NXDomain, since it may exist elsewhere.
+- `nico-dns` caches the negative answers it gets from the API. A cached answer replays the same response code, AA bit, and SOA.
+- NOERROR-with-no-data and NXDomain are cached for the shortest of the zone SOA record TTL, the SOA minimum, and `negative_cache_ttl_secs`, which defaults to 120 seconds. The SOA TTL in the first answer and in each replay is the time the cache entry has left.
+- Refused carries no SOA and is cached for `negative_cache_ttl_secs`. ServFail from an upstream failure is cached for `negative_cache_servfail_ttl_secs`, which defaults to 5 seconds and is clamped to 1–300 seconds. This collapses a retry storm into one upstream call without outliving the recovery.
+- The "not implemented" answer for an unsupported query type and the FORMERR for an unreadable query are decided before the API is asked and are not cached.
 - Hosts learn their own FQDN over DHCP option 12 on every path; hosts served by a DPU also receive it as DHCP option 15.
 
 ## Resolvers Handed to Hosts
@@ -54,7 +58,43 @@ DHCP option 6 tells managed machines where to resolve, and it must point at the 
 
 - On the site DHCP path, option 6 comes from the `nico-dhcp` Kea hook parameter `carbide-nameservers` (the `config.kea.hookParameters.nameservers` Helm value emits it).
 - Hosts behind a DPU receive the DPU's own resolver set.
-- The IPv6 side (DHCPv6 option 23) is implemented in the hook, but no DHCPv6 server ships yet, so IPv6 resolver advertisement is inert today.
+- The opt-in [DHCPv6 deployment](../provisioning/dhcpv6-deployment.md) advertises IPv6 recursive resolvers in option 23 through the `dhcp.v6DnsServers` Helm value.
+
+## Unbound IPv6 Transport
+
+The combined `nico-unbound` Service serves DNS on UDP/TCP 53 and, when `exporter.enabled` is true (chart default), exporter metrics on TCP 9167. `unbound.ipv6.enabled` is an optional Boolean with chart default `false`. An omitted or null map, or an omitted flag, also leaves the Service IPv4-only. `true` requests `PreferDualStack` while retaining IPv4 as the primary family. The flag controls this Service's exposure only. It does not change the image, startup command, mounted configuration, exporter, or the separate external DNS Services.
+
+You supply the Unbound and exporter images. IPv6 enablement requires that Unbound consumes the configuration mounted at `/etc/unbound/local.conf.d`, listens on IPv6 UDP and TCP 53, retains its existing IPv4 listeners, and permits the intended IPv6 clients. The exporter must separately listen on IPv6 TCP 9167 when enabled. Both containers need the pod's working IPv6 network. Image tags alone do not establish these capabilities.
+
+Use the image's existing configuration mechanism. For an image that includes the chart's fragments and has no listener directives elsewhere, the following umbrella-chart values illustrate the complete DNS listener and access configuration. Replace the IPv6 prefix with the source network Unbound will actually see. Preserve your site's existing IPv4 listener addresses and access rules. The example repeats the chart's default IPv4 access rule. Omit listener directives already present elsewhere in the image's effective configuration, since explicit interfaces accumulate. A subchart installation uses these values without the outer `unbound:` key.
+
+```yaml
+unbound:
+  ipv6:
+    enabled: true
+  localConfig:
+    access_control.conf: |
+      server:
+          do-ip4: yes
+          do-ip6: yes
+          interface: 0.0.0.0
+          interface: ::
+          access-control: 0.0.0.0/0 allow
+          access-control: 2001:db8:10::/64 allow
+```
+
+This string replaces the existing `access_control.conf` value. Merge all required site access rules into it, including any source addresses introduced by network address translation (NAT). `do-ip6: yes` also permits outbound IPv6 DNS traffic. You can still use existing IPv4 forwarders. Apply listener configuration first, restart the resolver through the site's normal rollout workflow, and verify it before enabling the Service's IPv6 exposure. Interface changes require a restart. A configuration reload alone is insufficient. The [Unbound configuration reference](https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html) describes listener and access-control semantics.
+
+For Kustomize, configure the image through the existing `deploy/nico-unbound-base/local.conf.d/access_control.conf` and change only `nico-unbound`'s Service `ipFamilyPolicy` to `PreferDualStack` in the site overlay, retaining its IPv4 primary family and all three ports. The base remains IPv4-only. The root deployment publishes this combined Service through a LoadBalancer, so IPv6 enablement also requires compatible virtual IP address (VIP) allocation and routing there. The Helm chart's separate external DNS Services remain IPv4-only. An internal dual-stack Service does not provide an external IPv6 resolver VIP for bare-metal hosts.
+
+Before advertising an IPv6 resolver to clients, validate the deployed images from an intended client network:
+
+- Query a configured local name and a name resolved through the existing forwarders over IPv6 UDP and TCP 53. Verify the expected DNS answers. Check the pod first, then the Service's IPv6 address after enabling exposure.
+- Repeat representative DNS queries over IPv4 and confirm the existing IPv4 Service address is retained.
+- Fetch the exporter's metrics through IPv6 and the existing `nico-unbound:9167` IPv4 endpoint when the exporter is enabled.
+- Confirm an IPv4-only installation still upgrades with its existing values. The default-off flag introduces no listener configuration or pod-template change.
+
+DNS transport and record type are independent: either IPv4 or IPv6 transport can carry A or AAAA queries. A TCP readiness connection proves neither DNS answers nor IPv6 Service routing. External IPv6 DNS additionally requires a reachable resolver VIP and advertising it to clients through the site's DHCPv6 configuration.
 
 ## Troubleshooting
 

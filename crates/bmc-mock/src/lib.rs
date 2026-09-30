@@ -66,6 +66,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
@@ -102,10 +103,13 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, EventServiceOverride, MachineRouterOptions, SetSystemPowerError,
-    SetSystemPowerResult, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
+pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
 pub use rack_info::RackInfo;
+/// BMC account state and the credential snapshot type used to persist and
+/// restore rotated passwords across a mock rebuild.
+pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
@@ -227,14 +231,67 @@ impl HardwareType {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("bad request: {0}")]
+    BadRequest(eyre::Error),
+    #[error("internal error: {0}")]
+    Internal(eyre::Error),
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub enum MockPowerState {
     #[default]
     On,
     Off,
+    /// Power could not be observed; Redfish reports a null `PowerState`.
+    Unknown,
+    /// Power-on accepted; the host is not yet `On` (POST has not begun).
+    PoweringOn,
+    /// Graceful shutdown accepted; the OS is going down but power is still applied.
+    PoweringOff,
     PowerCycling {
         since: Instant,
     },
+}
+
+impl MockPowerState {
+    /// Checks whether the current power state permits a reset request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActionError::Internal`] for every request when the state is
+    /// [`Self::Unknown`], because power state is unavailable. Returns
+    /// [`ActionError::BadRequest`] when a known state prevents the request.
+    pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        type C = ResourceResetType;
+        match (reset_type, self) {
+            (_, MockPowerState::Unknown) => Err(ActionError::Internal(eyre::eyre!(
+                "bmc-mock: power state is unavailable",
+            ))),
+            (
+                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
+                MockPowerState::Off,
+            ) => Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: cannot power off machine, it is already off",
+            ))),
+            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
+                Err(ActionError::BadRequest(eyre::eyre!(
+                    "bmc-mock: cannot power on machine, it is already on"
+                )))
+            }
+            (C::On | C::ForceOn, MockPowerState::PoweringOff) => Err(ActionError::BadRequest(
+                eyre::eyre!("bmc-mock: cannot power on machine, it is shutting down"),
+            )),
+            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
+                Err(ActionError::BadRequest(eyre::eyre!(
+                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
+                    since.elapsed()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl fmt::Display for MockPowerState {
@@ -242,6 +299,9 @@ impl fmt::Display for MockPowerState {
         match self {
             Self::On => "On".fmt(f),
             Self::Off => "Off".fmt(f),
+            Self::Unknown => "Unknown".fmt(f),
+            Self::PoweringOn => "PoweringOn".fmt(f),
+            Self::PoweringOff => "PoweringOff".fmt(f),
             Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
         }
     }
@@ -250,81 +310,19 @@ impl fmt::Display for MockPowerState {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
-pub trait Callbacks: std::fmt::Debug + Send + Sync {
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
-    fn send_power_command(&self, reset_type: SystemPowerControl)
-    -> Result<(), SetSystemPowerError>;
-    fn set_power_state(&self, reset_type: SystemPowerControl) -> Result<(), SetSystemPowerError> {
-        type C = SystemPowerControl;
-        match (reset_type, self.get_power_state()) {
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power off machine, it is already off".to_string(),
-            )),
-            (C::On | C::ForceOn, MockPowerState::On) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power on machine, it is already on".to_string(),
-            )),
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(SetSystemPowerError::BadRequest(format!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }?;
-        self.send_power_command(reset_type)
-    }
+    fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send;
 
     fn state_refresh_indication(&self);
 }
 
 pub trait HostnameQuerying: std::fmt::Debug + Send + Sync {
     fn get_hostname(&'_ self) -> Cow<'_, str>;
-}
-
-// https://www.dmtf.org/sites/default/files/standards/documents/DSP2046_2023.3.html
-// 6.5.5.1 ResetType
-#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
-pub enum SystemPowerControl {
-    /// Power on a machine
-    On,
-    /// Graceful host shutdown
-    GracefulShutdown,
-    /// Forcefully powers a machine off
-    ForceOff,
-    /// Graceful restart. Asks the OS to restart via ACPI
-    /// - Might restart DPUs if no OS is running
-    /// - Will not apply pending BIOS/UEFI setting changes
-    GracefulRestart,
-    /// Force restart. This is equivalent to pressing the reset button on the front panel.
-    /// - Will not restart DPUs
-    /// - Will apply pending BIOS/UEFI setting changes
-    ForceRestart,
-
-    //
-    // libredfish doesn't support these yet, and not all vendors provide them
-    //
-
-    // Cut then restore the power
-    PowerCycle,
-
-    // Forcefully power a machine on (?)
-    ForceOn,
-
-    // Like it says, pretend the button got pressed
-    PushPowerButton,
-
-    // Non-maskable interrupt then power off
-    Nmi,
-
-    // Write state to disk and power off
-    Suspend,
-
-    // VM / Hypervisor
-    Pause,
-    Resume,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

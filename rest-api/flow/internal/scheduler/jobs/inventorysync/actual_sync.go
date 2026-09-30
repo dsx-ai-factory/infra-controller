@@ -61,6 +61,11 @@ func runActualSync(
 		syncOK:        powershelfOK,
 	})
 
+	// Rack health is a runtime snapshot like component health. It does not
+	// participate in component drift replacement, so a failed refresh preserves
+	// the previous snapshot without making component reconciliation partial.
+	syncRackHealth(ctx, pool, nicoClient)
+
 	allSyncOK := machineOK && switchOK && powershelfOK
 
 	log.Info().
@@ -76,6 +81,85 @@ func runActualSync(
 			computeReceived, switchesReceived, powershelvesReceived)
 
 	return results
+}
+
+func persistComponentHealthSnapshots(
+	ctx context.Context,
+	pool *cdb.Session,
+	healthByID map[string]*types.HealthReport,
+	componentsByExternalID map[string]*model.Component,
+) {
+	var toUpdate []model.Component
+	for externalID, health := range healthByID {
+		comp, ok := componentsByExternalID[externalID]
+		if !ok || comp.Health.Equal(health) {
+			continue
+		}
+		comp.Health = health
+		toUpdate = append(toUpdate, *comp)
+	}
+	if len(toUpdate) == 0 {
+		return
+	}
+	err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for _, component := range toUpdate {
+			err := component.SetHealthByComponentID(ctx, tx)
+			if err != nil {
+				return fmt.Errorf("set component health: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Msgf("Unable to persist component health snapshots: %v", err)
+	}
+}
+
+func syncRackHealth(ctx context.Context, pool *cdb.Session, nicoClient nicoapi.Client) {
+	racks, err := model.GetAllRacks(ctx, pool.DB)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve racks for health sync: %v", err)
+		return
+	}
+	racksByExternalID := make(map[string]*model.Rack, len(racks))
+	ids := make([]string, 0, len(racks))
+	for i := range racks {
+		rack := &racks[i]
+		if rack.ExternalID == nil || *rack.ExternalID == "" {
+			continue
+		}
+		ids = append(ids, *rack.ExternalID)
+		racksByExternalID[*rack.ExternalID] = rack
+	}
+	healthByID, err := nicoClient.FindRackHealthReports(ctx, ids)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve rack health from NICo: %v", err)
+		return
+	}
+	toUpdate := make([]model.Rack, 0, len(healthByID))
+	for id, health := range healthByID {
+		rack := racksByExternalID[id]
+		if rack == nil || rack.Health.Equal(health) {
+			continue
+		}
+		rack.Health = health
+		toUpdate = append(toUpdate, *rack)
+	}
+	if len(toUpdate) == 0 {
+		return
+	}
+	err = pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		for _, rack := range toUpdate {
+			err := rack.SetHealthByExternalID(ctx, tx)
+			if err != nil {
+				return fmt.Errorf("set rack health: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Msgf("Unable to persist rack health snapshots: %v", err)
+	}
 }
 
 // mapKeys returns the keys of a string-keyed component map in arbitrary

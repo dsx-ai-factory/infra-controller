@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-power-shelf show`
 
-_[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **show**_
+*[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **show***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-expected-power-shelf-show - Show expected power shelf
 
 ## SYNOPSIS
 
-**nico-admin-cli expected-power-shelf show** \[**--id**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\[*BMC_MAC_ADDRESS*\]
+```text
+nico-admin-cli expected-power-shelf show [--id]
+[--extended] [--sort-by] [-h|--help]
+[BMC_MAC_ADDRESS]
+```
 
 ## DESCRIPTION
 
@@ -18,32 +20,37 @@ Show expected power shelf
 
 ## OPTIONS
 
-**--id** *\<ID\>*  
-ID (UUID) of the expected power shelf to show.
+`--id <ID>`
 
-**--extended**  
+ID (UUID) of the expected power shelf to show. Cannot be combined with a
+BMC MAC address.
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
-\[*BMC_MAC_ADDRESS*\]  
-BMC MAC address of the expected power shelf to show. Leave unset for
-all.
+[*BMC_MAC_ADDRESS*]
+
+BMC MAC address of the expected power shelf to show. Omit both this
+address and --id to list all expected power shelves.
 
 ## Examples
 
@@ -55,4 +62,4 @@ nico-admin-cli expected-power-shelf show --id 12345678-1234-5678-90ab-cdef012345
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**Related:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)

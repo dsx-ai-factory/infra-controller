@@ -24,10 +24,21 @@ func TestAPITrayJSONContract(t *testing.T) {
 	value, ok := got["nvLinkDomainId"]
 	assert.True(t, ok)
 	assert.Nil(t, value)
+	health, ok := got["health"]
+	assert.True(t, ok)
+	assert.Nil(t, health)
 	assert.Equal(t, map[string]any{
 		"pendingTaskCount": float64(0),
 		"activeTaskCount":  float64(0),
 	}, got["taskStats"])
+}
+
+func TestAPITrayFromProtoClearsMissingHealth(t *testing.T) {
+	var tray APITray
+	tray.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, tray.Health)
+	tray.FromProto(&flowv1.Component{})
+	assert.Nil(t, tray.Health)
 }
 
 func TestProtoToAPIComponentTypeName(t *testing.T) {
@@ -317,11 +328,12 @@ func TestAPITray_FromProto(t *testing.T) {
 			Id:   &flowv1.UUID{Id: "tray-uuid"},
 			Name: "My Tray",
 		},
-		Position:       &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
-		RackId:         &flowv1.UUID{Id: "rack-uuid"},
-		RackExternalId: "core-rack-1",
-		Status:         &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
-		LeakStatus:     flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+		Position:           &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
+		RackId:             &flowv1.UUID{Id: "rack-uuid"},
+		RackExternalId:     "core-rack-1",
+		Status:             &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
+		LeakStatus:         flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+		LeakHandlingStatus: flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN,
 	}
 	at := &APITray{}
 	at.FromProto(comp)
@@ -331,6 +343,7 @@ func TestAPITray_FromProto(t *testing.T) {
 	assert.Equal(t, "core-rack-1", at.RackID)
 	assert.Equal(t, "InUse", at.OperationStatus)
 	assert.Equal(t, "Leaking", at.LeakStatus)
+	assert.Equal(t, APILeakHandlingStatusShuttingDown, at.LeakHandlingStatus)
 	assert.NotNil(t, at.Position)
 	assert.Equal(t, int32(3), at.Position.SlotID)
 	assert.Equal(t, int32(0), at.Position.TrayIdx)
@@ -339,12 +352,32 @@ func TestAPITray_FromProto(t *testing.T) {
 	at.FromProto(nil) // no-op, fields unchanged
 	assert.Equal(t, "comp-1", at.ID)
 
-	// A component with no computed operation status and no leak status
-	// resolves both fields to "Unknown".
+	// A component with no computed operation, leak, or leak-handling status
+	// resolves all three fields to "Unknown".
 	bare := &APITray{}
 	bare.FromProto(&flowv1.Component{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE})
 	assert.Equal(t, "Unknown", bare.OperationStatus)
 	assert.Equal(t, "Unknown", bare.LeakStatus)
+	assert.Equal(t, APILeakHandlingStatusUnknown, bare.LeakHandlingStatus)
+}
+
+func TestProtoToAPILeakHandlingStatusName(t *testing.T) {
+	tests := []struct {
+		status flowv1.LeakHandlingStatus
+		want   APILeakHandlingStatus
+	}{
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_UNKNOWN, APILeakHandlingStatusUnknown},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_NONE, APILeakHandlingStatusNone},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN, APILeakHandlingStatusShuttingDown},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_DOWN, APILeakHandlingStatusDown},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_FAILED, APILeakHandlingStatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.want), func(t *testing.T) {
+			assert.Equal(t, tt.want, ProtoToAPILeakHandlingStatusName[tt.status])
+		})
+	}
 }
 
 func TestAPITrayGetAllRequest_Validate(t *testing.T) {

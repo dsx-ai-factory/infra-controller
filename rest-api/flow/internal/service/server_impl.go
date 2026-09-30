@@ -10,7 +10,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -124,7 +123,11 @@ func (rs *FlowServerImpl) CreateExpectedRack(
 	ctx context.Context,
 	req *pb.CreateExpectedRackRequest,
 ) (*pb.CreateExpectedRackResponse, error) {
-	id, err := rs.inventoryManager.CreateExpectedRack(ctx, protobuf.RackFrom(req.GetRack()))
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
+	id, err := rs.inventoryManager.CreateExpectedRack(ctx, r)
 
 	return &pb.CreateExpectedRackResponse{Id: protobuf.UUIDTo(id)}, err
 }
@@ -154,10 +157,53 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
+}
+
+// GetNVLinkDomain retrieves domain inventory by external ID.
+func (rs *FlowServerImpl) GetNVLinkDomain(ctx context.Context, req *pb.GetNVLinkDomainRequest) (*pb.GetNVLinkDomainResponse, error) {
+	if strings.TrimSpace(req.GetId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "domain identifier is required")
+	}
+	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, externalRackIdentifier(req.GetId()), req.GetWithComponents())
+	if err != nil {
+		return nil, err
+	}
+	if len(racks) == 0 {
+		return nil, status.Error(codes.NotFound, "NVLink domain not found")
+	}
+	if len(racks) != 1 {
+		return nil, status.Error(codes.FailedPrecondition, "domain resolves to multiple racks; specify a rack external ID")
+	}
+	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromRack(protobuf.RackTo(racks[0]))}, nil
+}
+
+// GetListOfNVLinkDomains retrieves paginated domain inventory.
+func (rs *FlowServerImpl) GetListOfNVLinkDomains(ctx context.Context, req *pb.GetListOfNVLinkDomainsRequest) (*pb.GetListOfNVLinkDomainsResponse, error) {
+	direction := "ASC"
+	switch req.GetOrderBy() {
+	case "", "NAME_ASC":
+	case "NAME_DESC":
+		direction = "DESC"
+	default:
+		return nil, status.Error(codes.InvalidArgument, "order_by must be NAME_ASC or NAME_DESC")
+	}
+	racks, err := rs.GetListOfRacks(ctx, &pb.GetListOfRacksRequest{
+		Filters:        []*pb.Filter{{Field: &pb.Filter_RackField{RackField: pb.RackFilterField_RACK_FILTER_FIELD_NAME}, QueryInfo: req.GetInfo()}},
+		WithComponents: req.GetWithComponents(), Pagination: req.GetPagination(), WithExternalIdOnly: true,
+		OrderBy: &pb.OrderBy{Field: &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME}, Direction: direction},
+	})
+	if err != nil {
+		return nil, err
+	}
+	domains := make([]*pb.NVLinkDomain, 0, len(racks.GetRacks()))
+	for _, r := range racks.GetRacks() {
+		domains = append(domains, protobuf.NVLinkDomainFromRack(r))
+	}
+	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: racks.GetTotal()}, nil
 }
 
 func externalRackIdentifier(rawID string) identifier.Identifier {
@@ -190,7 +236,7 @@ func (rs *FlowServerImpl) GetRackInfoBySerial(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -212,7 +258,10 @@ func (rs *FlowServerImpl) PatchRack(
 	ctx context.Context,
 	req *pb.PatchRackRequest,
 ) (*pb.PatchRackResponse, error) {
-	r := protobuf.RackFrom(req.GetRack())
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
 
 	report, err := rs.inventoryManager.PatchRack(ctx, r)
 
@@ -236,12 +285,22 @@ func (rs *FlowServerImpl) AddComponent(
 
 	// Convert proto component to internal; rack_id comes from the component
 	// itself and is optional.
-	comp := protobuf.ComponentFrom(pbComp)
-	comp.RackID = protobuf.UUIDFrom(pbComp.GetRackId())
+	comp, err := protobuf.ComponentFrom(pbComp)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid component: %v", err)
+	}
+	rackID, err := protobuf.OptionalUUIDFrom(pbComp.GetRackId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "component.rack_id %v", err)
+	}
+	if rackID != nil {
+		comp.RackID = *rackID
+	}
 
 	// Verify the rack exists only when one has been specified.
 	if comp.RackID != uuid.Nil {
-		if _, err := rs.inventoryManager.GetRackByID(ctx, comp.RackID, false); err != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, comp.RackID, false)
+		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
 	}
@@ -349,6 +408,15 @@ func (rs *FlowServerImpl) PatchComponent(
 	if compID == uuid.Nil {
 		return nil, errors.New("component id is required")
 	}
+	positionPaths, err := patchComponentPositionPaths(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rackID, err := protobuf.OptionalUUIDFrom(req.RackId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
+	}
 
 	// Get the existing component
 	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
@@ -362,23 +430,27 @@ func (rs *FlowServerImpl) PatchComponent(
 	}
 
 	if req.Position != nil {
-		existing.Position.SlotID = int(req.Position.SlotId)
-		existing.Position.TrayIndex = int(req.Position.TrayIdx)
-		existing.Position.HostID = int(req.Position.HostId)
+		if positionPaths == nil || positionPaths["position.slot_id"] {
+			existing.Position.SlotID = int(req.Position.SlotId)
+		}
+		if positionPaths == nil || positionPaths["position.tray_idx"] {
+			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+		}
+		if positionPaths == nil || positionPaths["position.host_id"] {
+			existing.Position.HostID = int(req.Position.HostId)
+		}
 	}
 
 	if req.Description != nil {
 		existing.Info.Description = *req.Description
 	}
 
-	if req.RackId != nil {
-		rackID := protobuf.UUIDFrom(req.RackId)
-		if rackID != uuid.Nil {
-			if _, err := rs.inventoryManager.GetRackByID(ctx, rackID, false); err != nil {
-				return nil, fmt.Errorf("rack not found: %w", err)
-			}
-			existing.RackID = rackID
+	if rackID != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, *rackID, false)
+		if err != nil {
+			return nil, fmt.Errorf("rack not found: %w", err)
 		}
+		existing.RackID = *rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
@@ -399,6 +471,29 @@ func (rs *FlowServerImpl) PatchComponent(
 	return &pb.PatchComponentResponse{
 		Component: protobuf.ComponentTo(updated),
 	}, nil
+}
+
+func patchComponentPositionPaths(req *pb.PatchComponentRequest) (map[string]bool, error) {
+	if req.UpdateMask == nil {
+		return nil, nil
+	}
+	if req.Position == nil {
+		return nil, status.Error(codes.InvalidArgument, "position is required when update_mask contains position fields")
+	}
+
+	paths := make(map[string]bool, len(req.UpdateMask.Paths))
+	for _, path := range req.UpdateMask.Paths {
+		switch path {
+		case "position.slot_id", "position.tray_idx", "position.host_id":
+			paths[path] = true
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported PatchComponent update_mask path %q", path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "update_mask paths are required")
+	}
+	return paths, nil
 }
 
 // GetComponentInfoByID retrieves component information by external component ID
@@ -438,7 +533,7 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -500,7 +595,7 @@ func (rs *FlowServerImpl) GetComponentInfoBySerial(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -570,6 +665,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 		pg,
 		orderBy,
 		req.GetWithComponents(),
+		req.GetWithExternalIdOnly(),
 	)
 	if err != nil {
 		return nil, err
@@ -579,7 +675,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 	for _, r := range racks {
 		results = append(results, protobuf.RackTo(r))
 	}
-	if err := rs.populateTaskStats(ctx, results, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, results, nil); err != nil {
 		return nil, err
 	}
 
@@ -691,6 +787,7 @@ func (rs *FlowServerImpl) GetRacksForNVLDomain(
 	racks, err := rs.inventoryManager.GetRacksForNVLDomain(
 		ctx,
 		*protobuf.IdentifierFrom(req.GetNvlDomainIdentifier()),
+		true,
 	)
 
 	results := make([]*pb.Rack, 0, len(racks))
@@ -762,6 +859,24 @@ func (rs *FlowServerImpl) PowerResetRack(
 	)
 }
 
+// ACPowerCycleRack triggers a cold AC power cycle for the selected targets.
+func (rs *FlowServerImpl) ACPowerCycleRack(
+	ctx context.Context,
+	req *pb.ACPowerCycleRackRequest,
+) (*pb.SubmitTaskResponse, error) {
+	return rs.handlePowerControlTask(
+		ctx,
+		req.GetTargetSpec(),
+		req.GetDescription(),
+		req.GetQueueOptions(),
+		req.GetRuleId(),
+		&operations.PowerControlTaskInfo{
+			Operation:              operations.PowerOperationColdReset,
+			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		},
+	)
+}
+
 func (rs *FlowServerImpl) BringUpRack(
 	ctx context.Context,
 	req *pb.BringUpRackRequest,
@@ -778,10 +893,16 @@ func (rs *FlowServerImpl) BringUpRack(
 			"target_spec is required",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	info := &operations.BringUpTaskInfo{
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+	}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -790,7 +911,7 @@ func (rs *FlowServerImpl) BringUpRack(
 		return nil, err
 	}
 
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -824,9 +945,14 @@ func (rs *FlowServerImpl) IngestRack(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.BringUpTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.BringUpTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 
 	opReq, err := rs.convertTargetSpecToOperationRequest(
@@ -839,7 +965,7 @@ func (rs *FlowServerImpl) IngestRack(
 	// Override the operation code so the rule resolver picks the
 	// ingestion-only rule instead of the full bring-up rule.
 	opReq.Operation.Code = taskcommon.OpCodeIngest
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -896,9 +1022,14 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 			"decommission requires rack targets; component targets are not supported",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.DecommissionTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.DecommissionTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -908,7 +1039,7 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 	}
 
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(req.GetQueueOptions())
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -941,8 +1072,14 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info.RuleID = protobuf.UUIDStringFrom(pbRuleID)
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
 
 	// Convert pb.OperationTargetSpec to internal operation.Request
 	req, err := rs.convertTargetSpecToOperationRequest(targetSpec, description, info)
@@ -951,7 +1088,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	}
 
 	req.ConflictStrategy, req.QueueTimeout = protobuf.QueueOptionsFrom(queueOptions)
-	req.RuleID = protobuf.OptionalUUIDFrom(pbRuleID)
+	req.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
@@ -1060,9 +1197,9 @@ func (rs *FlowServerImpl) GetTasksByIDs(
 	ctx context.Context,
 	req *pb.GetTasksByIDsRequest,
 ) (*pb.GetTasksByIDsResponse, error) {
-	taskIDs := make([]uuid.UUID, 0, len(req.GetTaskIds()))
-	for _, tid := range req.GetTaskIds() {
-		taskIDs = append(taskIDs, protobuf.UUIDFrom(tid))
+	taskIDs, err := protobuf.RequiredUUIDsFrom(req.GetTaskIds())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "task_ids %v", err)
 	}
 
 	tasks, err := rs.taskStore.GetTasks(ctx, taskIDs)
@@ -1092,6 +1229,9 @@ func (rs *FlowServerImpl) CancelTask(
 	}
 
 	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		return nil, err
 	}
 
@@ -1111,10 +1251,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 	ctx context.Context,
 	req *pb.CreateOperationRuleRequest,
 ) (*pb.CreateOperationRuleResponse, error) {
-	// Parse rule definition from JSON
-	var ruleDef operationrules.RuleDefinition
-	if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-		return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+	// Parse the rule definition through the version-aware decoder so every
+	// accepted definition can also be decoded after it is persisted.
+	ruleDef, err := operationrules.UnmarshalRuleDefinition(
+		[]byte(req.GetRuleDefinitionJson()),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 	}
 
 	// Create rule object
@@ -1124,13 +1267,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 		Description:    req.GetDescription(),
 		OperationType:  protobuf.OperationTypeFromProto(req.GetOperationType()),
 		OperationCode:  req.GetOperationCode(),
-		RuleDefinition: ruleDef,
+		RuleDefinition: *ruleDef,
 		IsDefault:      req.GetIsDefault(),
 	}
 
 	// Validate rule
 	if err := rule.Validate(); err != nil {
-		return nil, fmt.Errorf("rule validation failed: %w", err)
+		return nil, status.Errorf(codes.InvalidArgument, "rule validation failed: %v", err)
 	}
 
 	// Store in database
@@ -1163,15 +1306,17 @@ func (rs *FlowServerImpl) UpdateOperationRule(
 		updates["description"] = req.GetDescription()
 	}
 	if req.RuleDefinitionJson != nil {
-		var ruleDef operationrules.RuleDefinition
-		if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-			return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+		ruleDef, err := operationrules.UnmarshalRuleDefinition(
+			[]byte(req.GetRuleDefinitionJson()),
+		)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 		}
 		// Validate the rule definition
 		if err := ruleDef.Validate(); err != nil {
-			return nil, fmt.Errorf("rule definition validation failed: %w", err)
+			return nil, status.Errorf(codes.InvalidArgument, "rule definition validation failed: %v", err)
 		}
-		updates["rule_definition"] = ruleDef
+		updates["rule_definition"] = *ruleDef
 	}
 	// Note: is_default is NOT updatable via UpdateRule - use SetRuleAsDefault instead
 
@@ -1400,16 +1545,23 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	// Build FirmwareControlTaskInfo
 	info := &operations.FirmwareControlTaskInfo{
 		Operation:              operations.FirmwareOperationUpgrade,
 		TargetVersion:          req.GetTargetVersion(),
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		SubTargets:             req.GetSubTargets(),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   req.GetOverrideVersionCheck(),
 	}
-	err := rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
+	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
 	}
@@ -1431,7 +1583,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(
 		req.GetQueueOptions(),
 	)
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
@@ -1567,11 +1719,9 @@ func (rs *FlowServerImpl) GetComponents(
 			componentTypes,
 		)
 
-		// Apply ordering
-		if orderBy != nil {
-			if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", err)
-			}
+		// Apply ordering before pagination, using the default when omitted.
+		if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", err)
 		}
 
 		// Apply pagination
@@ -1606,7 +1756,7 @@ func (rs *FlowServerImpl) GetComponents(
 	for _, c := range components {
 		results = append(results, protobuf.ComponentTo(c))
 	}
-	if err := rs.populateTaskStats(ctx, nil, results); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, results); err != nil {
 		return nil, err
 	}
 
@@ -1695,6 +1845,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	targetSpec := req.GetTargetSpec()
 
 	var storeDrifts []inventorymanager.ComponentDrift
+	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
@@ -1710,16 +1861,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 			components = rs.applyComponentFilters(components, *infoFilter, manufacturerFilter, modelFilter, componentTypes)
 		}
 
-		// Apply ordering
-		if orderBy != nil {
-			if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", sortErr)
-			}
+		// Apply ordering, including the default, before deriving drift order.
+		if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", sortErr)
 		}
 
 		filteredComponentCount = int32(len(components))
 
-		componentIDs := make([]uuid.UUID, 0, len(components))
+		componentIDs = make([]uuid.UUID, 0, len(components))
 		for _, comp := range components {
 			componentIDs = append(componentIDs, comp.Info.ID)
 		}
@@ -1732,6 +1881,29 @@ func (rs *FlowServerImpl) ValidateComponents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get drifts: %w", err)
 	}
+
+	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
+	if targetSpec != nil {
+		for index, componentID := range componentIDs {
+			componentOrder[componentID] = index
+		}
+	}
+	sort.Slice(storeDrifts, func(i, j int) bool {
+		left, right := storeDrifts[i], storeDrifts[j]
+		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+			leftIndex, leftFound := componentOrder[*left.ComponentID]
+			rightIndex, rightFound := componentOrder[*right.ComponentID]
+			if leftFound && rightFound && leftIndex != rightIndex {
+				return leftIndex < rightIndex
+			}
+		}
+		leftKey := componentDriftSortKey(left)
+		rightKey := componentDriftSortKey(right)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return left.ID.String() < right.ID.String()
+	})
 
 	// Convert store drifts to proto response
 	var diffs []*pb.ComponentDiff
@@ -1818,6 +1990,21 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentDriftSortKey(drift inventorymanager.ComponentDrift) string {
+	if drift.ComponentID != nil {
+		return "component/" + drift.ComponentID.String() + "/" + drift.DriftType
+	}
+	componentType := ""
+	if drift.ComponentType != nil {
+		componentType = *drift.ComponentType
+	}
+	externalID := ""
+	if drift.ExternalID != nil {
+		externalID = *drift.ExternalID
+	}
+	return "external/" + componentType + "/" + externalID + "/" + drift.DriftType
 }
 
 func componentBMCMAC(comp *component.Component) string {
@@ -1968,44 +2155,45 @@ func (rs *FlowServerImpl) matchesWildcard(value, pattern string) bool {
 
 // sortComponents sorts components according to the OrderBy specification.
 func (rs *FlowServerImpl) sortComponents(components []*component.Component, orderBy *dbquery.OrderBy) error {
-	if orderBy == nil {
-		return nil
+	effectiveOrderBy := dbquery.OrderBy{
+		Column:    "name",
+		Direction: dbquery.OrderAscending,
+	}
+	if orderBy != nil {
+		effectiveOrderBy = *orderBy
+	}
+	less := func(i, j int, left, right string) bool {
+		if left == right {
+			return components[i].Info.ID.String() < components[j].Info.ID.String()
+		}
+		if effectiveOrderBy.Direction == dbquery.OrderAscending {
+			return left < right
+		}
+		return left > right
 	}
 
 	// Support sorting by common fields
-	switch orderBy.Column {
+	switch effectiveOrderBy.Column {
 	case "name":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Name < components[j].Info.Name
-			}
-			return components[i].Info.Name > components[j].Info.Name
+			return less(i, j, components[i].Info.Name, components[j].Info.Name)
 		})
 	case "manufacturer":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Manufacturer < components[j].Info.Manufacturer
-			}
-			return components[i].Info.Manufacturer > components[j].Info.Manufacturer
+			return less(i, j, components[i].Info.Manufacturer, components[j].Info.Manufacturer)
 		})
 	case "model":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Model < components[j].Info.Model
-			}
-			return components[i].Info.Model > components[j].Info.Model
+			return less(i, j, components[i].Info.Model, components[j].Info.Model)
 		})
 	case "type":
 		sort.Slice(components, func(i, j int) bool {
 			typeI := devicetypes.ComponentTypeToString(components[i].Type)
 			typeJ := devicetypes.ComponentTypeToString(components[j].Type)
-			if orderBy.Direction == dbquery.OrderAscending {
-				return typeI < typeJ
-			}
-			return typeI > typeJ
+			return less(i, j, typeI, typeJ)
 		})
 	default:
-		return fmt.Errorf("unsupported order by column: %s", orderBy.Column)
+		return fmt.Errorf("unsupported order by column: %s", effectiveOrderBy.Column)
 	}
 
 	return nil

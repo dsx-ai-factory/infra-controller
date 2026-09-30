@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -63,26 +64,64 @@ func AuditLog(dbSession *cdb.Session) echo.MiddlewareFunc {
 	})
 }
 
-// fields that should be obfuscated when recording body of the request
-var obfuscateFields = []string{
-	"ipxeScript",
-	"userData",
-	"publicKey",
-	"defaultBmcUsername",
-	"defaultBmcPassword",
-	"authenticationData",
-	"password",
-	"nvOsPassword",
+// obfuscateFields contains lowercase field names that should be obfuscated when recording request bodies.
+var obfuscateFields = map[string]struct{}{
+	"ipxescript":         {},
+	"userdata":           {},
+	"publickey":          {},
+	"defaultbmcusername": {},
+	"defaultbmcpassword": {},
+	"authenticationdata": {},
+	"authtoken":          {},
+	"clientsecret":       {},
+	"imageauthtoken":     {},
+	"password":           {},
+	"nvospassword":       {},
 }
 
-const auditObfuscatedValue = "*******************"
+const (
+	auditObfuscatedValue          = "*******************"
+	auditBodyValueField           = "value"
+	auditBodyJSONParseFailedField = "jsonParseFailed"
+)
 
-func obfuscateRequestBody(body map[string]interface{}) {
-	for _, field := range obfuscateFields {
-		if _, ok := body[field]; ok {
-			body[field] = auditObfuscatedValue
+func obfuscateRequestBody(body interface{}) {
+	switch body := body.(type) {
+	case map[string]interface{}:
+		for key, value := range body {
+			normalizedKey := strings.ToLower(key)
+			_, isSensitive := obfuscateFields[normalizedKey]
+			if isSensitive {
+				body[key] = auditObfuscatedValue
+				continue
+			}
+			obfuscateRequestBody(value)
+		}
+	case []interface{}:
+		for _, value := range body {
+			obfuscateRequestBody(value)
 		}
 	}
+}
+
+func prepareAuditRequestBody(reqBody []byte) (map[string]interface{}, error) {
+	var body interface{}
+	err := json.Unmarshal(reqBody, &body)
+	if err != nil {
+		return map[string]interface{}{
+			auditBodyJSONParseFailedField: true,
+		}, err
+	}
+
+	obfuscateRequestBody(body)
+	bodyMap, ok := body.(map[string]interface{})
+	if ok {
+		return bodyMap, nil
+	}
+
+	return map[string]interface{}{
+		auditBodyValueField: body,
+	}, nil
 }
 
 type ResponseError struct {
@@ -116,11 +155,10 @@ func AuditBody(dbSession *cdb.Session) echo.MiddlewareFunc {
 			}
 			// save request body
 			if len(reqBody) > 0 {
-				var bodyMap map[string]interface{}
-				if err := json.Unmarshal(reqBody, &bodyMap); err != nil {
+				bodyMap, err := prepareAuditRequestBody(reqBody)
+				if err != nil {
 					log.Error().Err(err).Msgf("failed to unmarshall body for audit entry %s", auditEntryID)
 				}
-				obfuscateRequestBody(bodyMap)
 				updateInput.Body = bodyMap
 			}
 			// update

@@ -20,7 +20,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use nv_redfish::core::{Bmc, EntityTypeRef, ToSnakeCase};
 use nv_redfish::schema::sensor::Sensor;
 use nv_redfish::sensor::SensorLink;
@@ -193,27 +194,35 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for SensorCollector<B> {
             }
         }
 
-        // Build the fetch futures borrowing from the shared snapshot, then
-        // drive them concurrently. Each future borrows `&self`, the entity, and
-        // its sensor (all alive for as long as `inventory` is held here). When
-        // probing, take just the first sensor: one fetch is enough to test
-        // reachability and re-arm or clear the breaker.
-        let this = &*self;
-        let failures = &fetch_failures;
-        let fetches = inventory.entities.iter().flat_map(|entity| {
-            entity
-                .sensors()
-                .iter()
-                .map(move |sensor| this.update_sensor(entity, sensor, failures))
-        });
-        let futures: Vec<_> = fetches.take(sensor_limit.unwrap_or(usize::MAX)).collect();
+        // Collect the sensors to fetch, borrowing from the shared snapshot, and
+        // create each fetch future only when a `request_concurrency` slot frees
+        // up: a fetch future is several KiB, so building one per sensor up
+        // front multiplies sweep memory by the sensor count. Each future
+        // borrows `&self`, the entity, and its sensor (all alive for as long as
+        // `inventory` is held here). No closure is held across an await, which
+        // keeps this future `Send`. When probing, take just the first sensor:
+        // one fetch is enough to test reachability and re-arm or clear the
+        // breaker.
+        let sensors: Vec<_> = inventory
+            .entities
+            .iter()
+            .flat_map(|entity| entity.sensors().iter().map(move |sensor| (entity, sensor)))
+            .take(sensor_limit.unwrap_or(usize::MAX))
+            .collect();
 
-        let processed: usize = stream::iter(futures)
-            .buffer_unordered(self.request_concurrency)
-            .collect::<Vec<usize>>()
-            .await
-            .into_iter()
-            .sum();
+        let mut in_flight = FuturesUnordered::new();
+        let mut processed = 0;
+        for (entity, sensor) in sensors {
+            if in_flight.len() == self.request_concurrency
+                && let Some(count) = in_flight.next().await
+            {
+                processed += count;
+            }
+            in_flight.push(self.update_sensor(entity, sensor, &fetch_failures));
+        }
+        while let Some(count) = in_flight.next().await {
+            processed += count;
+        }
 
         self.emit_event(CollectorEvent::MetricCollectionEnd);
 
@@ -248,6 +257,8 @@ impl<B: Bmc + 'static> SensorCollector<B> {
         let mut attributes = entity.base_attributes();
         attributes.extend(entity.entity_specific_attributes());
         for metric in derived {
+            let mut labels = attributes.clone();
+            labels.extend(metric.labels);
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
                     key: format!("{}/{}", entity.key(), metric.metric_type),
@@ -255,7 +266,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
                     metric_type: metric.metric_type.to_string(),
                     unit: metric.unit.to_string(),
                     value: metric.value,
-                    labels: attributes.clone(),
+                    labels,
                     context: None,
                 }
                 .into(),
@@ -295,7 +306,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
             Ok(projection) => projection,
             Err(SensorProjectionError::NoHealth) => {
                 tracing::debug!(
-                    sensor_id = %sensor.base.id,
+                    sensor_id = %sensor.id,
                     entity_type = entity.entity_type(),
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Sensor does not have health status field, skipping"
@@ -304,7 +315,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
             }
             Err(SensorProjectionError::IncompleteReading) => {
                 tracing::warn!(
-                    sensor_id = %sensor.base.id,
+                    sensor_id = %sensor.id,
                     entity_type = entity.entity_type(),
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Sensor missing required fields (reading, reading_type, or units)"
@@ -347,31 +358,23 @@ fn project_sensor(
 
     let mut attributes = base_attributes;
     attributes.reserve(6);
-    attributes.push((Cow::Borrowed("sensor_name"), sensor.base.id.clone()));
+    attributes.push((Cow::Borrowed("sensor_name"), sensor.id.clone()));
 
+    // An absent threshold is omitted rather than written as `0`: a zero upper
+    // bound would read as "every positive value is critical".
     if let Some(thresholds) = sensor
         .thresholds
         .as_ref()
         .filter(|_| include_sensor_thresholds)
     {
-        attributes.push((
-            Cow::Borrowed("upper_critical_threshold"),
-            thresholds
-                .upper_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
-        attributes.push((
-            Cow::Borrowed("lower_critical_threshold"),
-            thresholds
-                .lower_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
+        for (key, threshold) in [
+            ("upper_critical_threshold", &thresholds.upper_critical),
+            ("lower_critical_threshold", &thresholds.lower_critical),
+        ] {
+            if let Some(reading) = threshold.as_ref().and_then(|th| th.reading.flatten()) {
+                attributes.push((Cow::Borrowed(key), reading.to_string()));
+            }
+        }
     }
 
     let physical_context = sensor
@@ -428,7 +431,7 @@ fn project_sensor(
         labels: attributes.clone(),
         context: Some(SensorThresholdContext {
             entity_type: entity_type.to_string(),
-            sensor_id: sensor.base.id.clone(),
+            sensor_id: sensor.id.clone(),
             upper_fatal,
             lower_fatal,
             upper_critical,
@@ -980,6 +983,40 @@ mod tests {
                     }),
                 },
                 Case {
+                    scenario: "partial thresholds omit the absent critical label",
+                    input: ProjectionInput {
+                        sensor: sensor_json_with([(
+                            "Thresholds",
+                            json!({ "UpperCritical": { "Reading": 1.8 } }),
+                        )]),
+                        entity_type: "chassis",
+                        physical_context_fallback: "chassis",
+                        base_attributes: vec![("chassis_id", "CH0")],
+                        entity_attributes: vec![],
+                        include_sensor_thresholds: true,
+                    },
+                    expect: Yields(ObservedProjection {
+                        primary: observed_metric(
+                            SENSOR_PATH,
+                            "hw_sensor",
+                            "temperature",
+                            "celsius",
+                            42.5,
+                            &[
+                                ("chassis_id", "CH0"),
+                                ("sensor_name", "Sensor0"),
+                                ("upper_critical_threshold", "1.8"),
+                                ("physical_context", "chassis"),
+                            ],
+                            Some(ObservedContext {
+                                upper_critical: Some(1.8),
+                                ..empty_context("chassis", "Sensor0", "ok")
+                            }),
+                        ),
+                        ranges: Vec::new(),
+                    }),
+                },
+                Case {
                     scenario: "threshold exposition without sensor thresholds",
                     input: ProjectionInput {
                         sensor: sensor_json(),
@@ -1185,6 +1222,7 @@ mod tests {
                     vec![DiscoveredEntity::Chassis {
                         entity: chassis,
                         sensors: vec![sensor],
+                        shelf_power: None,
                         gpu: None,
                     }],
                 );
@@ -1195,10 +1233,7 @@ mod tests {
                     selector: Selector::OdataId(
                         "/redfish/v1/Chassis/*/PowerSubsystem/PowerSupplies/*".to_string(),
                     ),
-                    action: Action::JsonMerge(json!({
-                        "Model": "PSU-3KW",
-                        "PowerCapacityWatts": 3000.0
-                    })),
+                    action: Action::JsonMerge(json!({ "Model": "PSU-3KW" })),
                     remaining: None,
                 });
                 let chassis = first_chassis(&handle).await;
@@ -1217,6 +1252,9 @@ mod tests {
                         entity: power_supply,
                         chassis,
                         sensors: Vec::new(),
+                        oem_capacity_watts: Some(5500.0),
+                        oem_power_output: None,
+                        oem_fan_speed_target_percent: None,
                     }],
                 );
             }
@@ -1324,11 +1362,26 @@ mod tests {
                                 "hw",
                                 "powersupply_capacity",
                                 "watts",
-                                3000.0,
+                                5500.0,
                                 &[
                                     ("powersupply_id", "0"),
                                     ("chassis_id", "powershelf"),
                                     ("model", "PSU-3KW"),
+                                ],
+                                None,
+                            ))),
+                            ObservedEvent::Metric(Box::new(observed_metric(
+                                "/redfish/v1/Chassis/powershelf/PowerSubsystem/PowerSupplies/0/powersupply_status",
+                                "hw",
+                                "powersupply_status",
+                                "state",
+                                1.0,
+                                &[
+                                    ("powersupply_id", "0"),
+                                    ("chassis_id", "powershelf"),
+                                    ("model", "PSU-3KW"),
+                                    ("powersupply_state", "enabled"),
+                                    ("powersupply_health", "ok"),
                                 ],
                                 None,
                             ))),
@@ -1348,5 +1401,60 @@ mod tests {
             observe_collection,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn collection_counts_every_sensor_when_sensors_exceed_request_slots() {
+        let handle = liteon_powershelf_bmc().await;
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:55")));
+        let shared = Arc::new(ArcSwapOption::empty());
+        let mut collector = SensorCollector::<TestBmc> {
+            endpoint: endpoint.clone(),
+            event_context: EventContext::from_endpoint(endpoint.as_ref(), "sensor_collector"),
+            shared: shared.clone(),
+            data_sink: Some(Arc::new(CapturingSink::default())),
+            request_concurrency: 2,
+            include_sensor_thresholds: true,
+        };
+        handle.state.injection.upsert(Rule {
+            id: RuleId::from("sensor-fetch-failure"),
+            selector: Selector::OdataId(SENSOR_PATH.to_string()),
+            action: Action::Status(500),
+            remaining: None,
+        });
+        let chassis = first_chassis(&handle).await;
+        let sensors: Vec<_> = chassis
+            .sensor_links()
+            .await
+            .expect("sensor links")
+            .expect("fixture has sensors")
+            .into_iter()
+            .take(5)
+            .collect();
+        assert_eq!(sensors.len(), 5, "fixture has five sensors");
+        assert_eq!(sensors[0].odata_id().to_string(), SENSOR_PATH);
+        store_inventory(
+            &shared,
+            vec![DiscoveredEntity::Chassis {
+                entity: chassis,
+                sensors,
+                shelf_power: None,
+                gpu: None,
+            }],
+        );
+
+        let iteration = collector
+            .run_iteration()
+            .await
+            .expect("sensor collection succeeds");
+
+        assert_eq!(
+            ObservedIteration::from(iteration),
+            ObservedIteration {
+                refresh_triggered: false,
+                entity_count: Some(4),
+                fetch_failures: 1,
+            }
+        );
     }
 }

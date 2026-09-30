@@ -24,11 +24,35 @@ if [[ "$*" == *"get job/flow-vault-tokens serviceaccount/flow-vault-tokens-sa"* 
 elif [[ "$*" == *"get secret vaultroottoken"* ]]; then
     printf 'cm9vdC10b2tlbg=='
 elif [[ "$*" == *"exec -i vault-0"* ]]; then
-    IFS= read -r token
-    printf 'vault-stdin-bytes=%s\n' "${#token}" >> "${TEST_LOG}"
+    # Run the inline program the way the Vault pod would, against a fake vault
+    # CLI, so quoting mistakes and accessor parsing errors fail the test.
+    program="${@: -1}"
+    PATH="${FAKE_VAULT_DIR}:${PATH}" sh -ceu "${program}" >> "${TEST_LOG}" 2>&1
+    printf 'vault-program-rc=%s\n' "$?" >> "${TEST_LOG}"
 fi
 FAKE_KUBECTL
 chmod +x "${TEST_TMP_DIR}/bin/kubectl"
+
+FAKE_VAULT_DIR="${TEST_TMP_DIR}/vaultbin"
+export FAKE_VAULT_DIR
+mkdir -p "${FAKE_VAULT_DIR}"
+cat > "${FAKE_VAULT_DIR}/vault" <<'FAKE_VAULT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'vault %s\n' "$*" >> "${TEST_LOG}"
+case "$1 $2" in
+    "list -format=json")
+        printf '[\n  "acc-psm",\n  "acc-other",\n  "acc-nsm"\n]\n' ;;
+    "token lookup")
+        case "$*" in
+            *acc-psm*) printf '{"data": {"display_name": "token-psm-vault-token"}}\n' ;;
+            *acc-other*) printf '{"data": {"display_name": "some-other-token"}}\n' ;;
+            *acc-nsm*) printf '{"data": {"display_name": "nsm-vault-token"}}\n' ;;
+            *) exit 2 ;;
+        esac ;;
+esac
+FAKE_VAULT
+chmod +x "${FAKE_VAULT_DIR}/vault"
 
 PATH="${TEST_TMP_DIR}/bin:${PATH}" \
     "${SCRIPT_DIR}/../cleanup-legacy-flow-managers.sh"
@@ -53,7 +77,11 @@ assert_logged "delete job flow-vault-tokens -n nico-system --ignore-not-found"
 assert_logged "delete clusterrolebinding flow-vault-tokens-writer --ignore-not-found"
 assert_logged 'accessors_json="$(vault list -format=json auth/token/accessors)"'
 assert_logged "psm-vault-token|nsm-vault-token|token-psm-vault-token|token-nsm-vault-token"
-assert_logged "vault token revoke -accessor"
+assert_logged "vault-program-rc=0"
+assert_logged "vault token revoke -accessor acc-psm"
+assert_logged "vault token revoke -accessor acc-nsm"
+assert_not_logged "vault token revoke -accessor acc-other"
+assert_logged "vault policy delete nsm-vault-policy"
 assert_logged "vault policy delete psm-vault-policy"
 assert_logged "delete secret psm-vault-token nsm-vault-token -n flow --ignore-not-found"
 assert_logged "delete serviceaccount flow-vault-tokens-sa -n nico-system --ignore-not-found"
@@ -114,7 +142,6 @@ if [[ "$*" == *"get job/flow-vault-tokens serviceaccount/flow-vault-tokens-sa"* 
     printf 'job.batch/flow-vault-tokens\n'
 fi
 FAKE_EMPTY_ROOT_KUBECTL
-chmod +x "${TEST_TMP_DIR}/bin/kubectl"
 : > "${TEST_LOG}"
 if PATH="${TEST_TMP_DIR}/bin:${PATH}" \
     "${SCRIPT_DIR}/../cleanup-legacy-flow-managers.sh"; then

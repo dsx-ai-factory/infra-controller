@@ -37,19 +37,32 @@ const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturati
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
 const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
+/// Label names the Prometheus and OTLP sinks emit themselves; a custom label
+/// with one of these names would collide with the sink-owned value.
 const RESERVED_ENDPOINT_LABELS: &[&str] = &[
+    "bmc_endpoint",
+    "bmc_ip",
     "collector_type",
+    "component_type",
+    "driver_version",
     "endpoint_ip",
     "endpoint_key",
     "endpoint_mac",
     "machine_id",
+    "machine_serial",
     "machine_slot_number",
     "machine_tray_index",
     "nvlink_domain_uuid",
     "power_shelf_id",
+    "power_shelf_serial_number",
     "rack_id",
     "serial_number",
+    "switch_endpoint",
+    "switch_endpoint_role",
     "switch_id",
+    "switch_ip",
+    "switch_is_primary",
+    "switch_serial_number",
     "switch_slot_number",
     "switch_tray_index",
     "system_uuid",
@@ -64,6 +77,9 @@ pub struct Config {
 
     pub sinks: SinksConfig,
 
+    /// Global token bucket that every collector iteration waits on before it
+    /// runs. Disabled by default; a `[rate_limit]` table enables it, with
+    /// defaults for any omitted field.
     pub rate_limit: Configurable<RateLimitConfig>,
 
     pub collectors: CollectorsConfig,
@@ -105,7 +121,7 @@ impl Default for Config {
             endpoint_sources: EndpointSourcesConfig::default(),
             tls: TlsConfig::default(),
             sinks: SinksConfig::default(),
-            rate_limit: Configurable::Enabled(RateLimitConfig::default()),
+            rate_limit: Configurable::Disabled,
             collectors: CollectorsConfig::default(),
             attributes: AttributesConfig::default(),
             processors: ProcessorsConfig::default(),
@@ -303,6 +319,10 @@ pub struct StaticMachineEndpoint {
 pub struct StaticPowerShelfEndpoint {
     pub id: Option<String>,
     pub serial: Option<String>,
+
+    /// Optional non-nil NVLink domain UUID of the rack this shelf powers.
+    /// Invalid or nil values are omitted from telemetry.
+    pub nvlink_domain_uuid: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -652,6 +672,24 @@ pub struct OtlpTargetConfig {
     #[serde(default = "OtlpTargetConfig::default_queue_capacity")]
     pub queue_capacity: usize,
 
+    /// Maximum encoded size, in bytes, of one export request.
+    ///
+    /// A batch whose request would be larger is split and sent in parts, as is
+    /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
+    /// record or metric point is always sent on its own, so the target still
+    /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
+    /// receive limit of the OpenTelemetry Collector, and must be greater than
+    /// zero.
+    #[serde(default = "OtlpTargetConfig::default_max_request_bytes")]
+    pub max_request_bytes: usize,
+
+    /// Maximum number of export requests in flight to this target for each
+    /// signal. Batches are exported concurrently over one connection, so
+    /// their arrival order is not guaranteed. Defaults to 4 and must be
+    /// greater than zero.
+    #[serde(default = "OtlpTargetConfig::default_max_concurrent_exports")]
+    pub max_concurrent_exports: usize,
+
     /// Maximum time to wait before flushing a non-empty batch for either
     /// signal. Defaults to two seconds.
     #[serde(
@@ -681,6 +719,8 @@ pub struct OtlpTargetConfig {
 
 impl OtlpTargetConfig {
     pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 32_768;
+    pub(crate) const DEFAULT_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+    pub(crate) const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 4;
 
     fn default_batch_size() -> usize {
         512
@@ -688,6 +728,14 @@ impl OtlpTargetConfig {
 
     fn default_queue_capacity() -> usize {
         Self::DEFAULT_QUEUE_CAPACITY
+    }
+
+    fn default_max_request_bytes() -> usize {
+        Self::DEFAULT_MAX_REQUEST_BYTES
+    }
+
+    fn default_max_concurrent_exports() -> usize {
+        Self::DEFAULT_MAX_CONCURRENT_EXPORTS
     }
 
     fn default_flush_interval() -> std::time::Duration {
@@ -703,6 +751,16 @@ impl OtlpTargetConfig {
 
         if self.queue_capacity == 0 {
             return Err(format!("{path}.queue_capacity must be greater than 0"));
+        }
+
+        if self.max_request_bytes == 0 {
+            return Err(format!("{path}.max_request_bytes must be greater than 0"));
+        }
+
+        if self.max_concurrent_exports == 0 {
+            return Err(format!(
+                "{path}.max_concurrent_exports must be greater than 0"
+            ));
         }
 
         if self.flush_interval.is_zero() {
@@ -988,6 +1046,9 @@ pub struct CollectorsConfig {
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
 
+    /// Power shelf Manager collector configuration (if present, manager collector is enabled).
+    pub manager: Configurable<ManagerCollectorConfig>,
+
     /// Leak detector collector configuration (if present, leak detector collector is enabled)
     pub leak_detector: Configurable<LeakDetectorCollectorConfig>,
 
@@ -1021,6 +1082,7 @@ impl Default for CollectorsConfig {
             metrics: Configurable::Disabled,
             telemetry: Configurable::Disabled,
             firmware: Configurable::Disabled,
+            manager: Configurable::Enabled(ManagerCollectorConfig::default()),
             leak_detector: Configurable::Enabled(LeakDetectorCollectorConfig::default()),
             logs: Configurable::Disabled,
             nmxt: Configurable::Disabled,
@@ -1342,6 +1404,22 @@ impl Default for FirmwareCollectorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ManagerCollectorConfig {
+    /// Interval between power-shelf manager (PMC) status polls.
+    #[serde(with = "humantime_serde")]
+    pub poll_interval: Duration,
+}
+
+impl Default for ManagerCollectorConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LeakDetectorCollectorConfig {
     /// Interval between thermal subsystem leak detector polls.
     #[serde(with = "humantime_serde")]
@@ -1364,11 +1442,10 @@ impl Default for LeakDetectorCollectorConfig {
 /// How log events are collected from each BMC endpoint.
 ///
 /// - `Auto` (default): tries SSE first, downgrades to periodic per-endpoint
-///   when SSE is unsupported or keeps failing.
+///   when SSE is unsupported or keeps failing. Downgrades remain periodic
+///   unless `retry_sse_after_downgrade` is enabled.
 /// - `Sse`: SSE only, retries forever. Use when every BMC has `/EventService`.
 /// - `Periodic`: polling only, no SSE attempt.
-///
-/// Downgrades are in-memory; restart the health service to retry SSE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogCollectionMode {
@@ -1495,9 +1572,7 @@ fn default_excluded_log_services() -> Vec<String> {
     vec!["Journal".to_string()]
 }
 
-/// downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
-/// sse_not_available is terminal (defaults to 1), everything else goes
-/// through a rolling window.
+/// Downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoModeConfig {
@@ -1505,6 +1580,13 @@ pub struct AutoModeConfig {
     #[serde(with = "humantime_serde")]
     pub connect_failure_window: Duration,
     pub connect_failure_threshold: u32,
+
+    /// Whether periodic fallback stops after 30 minutes so the next discovery
+    /// pass can retry SSE. Transitions can duplicate records on downgrade or
+    /// miss records on upgrade because SSE and periodic cursors can cover
+    /// different Redfish LogService endpoints. Defaults to false.
+    pub retry_sse_after_downgrade: bool,
+
     #[serde(default, flatten)]
     pub periodic: PeriodicLogConfig,
 }
@@ -1515,6 +1597,7 @@ impl Default for AutoModeConfig {
             sse_not_available_threshold: 1,
             connect_failure_window: Duration::from_secs(300),
             connect_failure_threshold: 5,
+            retry_sse_after_downgrade: false,
             periodic: PeriodicLogConfig::default(),
         }
     }
@@ -1557,9 +1640,13 @@ impl LogsCollectorConfig {
             }
             LogCollectionMode::Periodic => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.auto] is set but ignored when mode = \"periodic\""
+                    );
+                }
+                if self.sse.is_some() {
+                    tracing::warn!(
+                        "[collectors.logs.sse] is set but ignored when mode = \"periodic\""
                     );
                 }
                 if self.periodic.is_none() {
@@ -1568,23 +1655,14 @@ impl LogsCollectorConfig {
                             .to_string(),
                     );
                 }
-                if self.sse.is_some() {
-                    return Err(
-                        "[collectors.logs.sse] should not be set when mode = \"periodic\""
-                            .to_string(),
-                    );
-                }
             }
             LogCollectionMode::Sse => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string(),
-                    );
+                    tracing::warn!("[collectors.logs.auto] is set but ignored when mode = \"sse\"");
                 }
                 if self.periodic.is_some() {
-                    return Err(
-                        "[collectors.logs.periodic] should not be set when mode = \"sse\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.periodic] is set but ignored when mode = \"sse\""
                     );
                 }
                 if let Some(sse) = &self.sse {
@@ -1890,6 +1968,36 @@ impl Default for NvueGnmiConfig {
 
 impl NvueGnmiConfig {
     fn validate(&self) -> Result<(), String> {
+        if let Some(interface_paths) = &self.paths.interface_paths {
+            let config_path = "collectors.nvue.gnmi.paths.interface_paths";
+
+            if !self.paths.interfaces_enabled {
+                return Err(format!("{config_path} requires interfaces_enabled = true"));
+            }
+
+            if interface_paths.is_empty()
+                || interface_paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+            {
+                return Err(format!(
+                    "{config_path} must contain non-empty paths and elements; use interfaces_enabled = false to disable interface telemetry"
+                ));
+            }
+
+            for (index, path) in interface_paths.iter().enumerate() {
+                if interface_paths
+                    .iter()
+                    .take(index)
+                    .any(|earlier| earlier == path)
+                {
+                    return Err(format!(
+                        "{config_path}[{index}] duplicates another selected interface path"
+                    ));
+                }
+            }
+        }
+
         let mut names = HashSet::new();
         let mut exported_metrics = HashMap::new();
 
@@ -2337,8 +2445,19 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
-    /// Collect leak sensor state from the NVOS platform-general gNMI tree.
+    /// Interface leaf paths relative to `/interfaces/interface` for every interface.
+    ///
+    /// Omission retains the full interface subtree. A nonempty list selects
+    /// only mapped built-in interface metrics; disable `interfaces_enabled` to
+    /// omit interface telemetry entirely.
+    pub interface_paths: Option<Vec<Vec<String>>>,
+
+    /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
+    ///
     /// Disabled by default because path support depends on the NVOS release.
+    /// When enabled, failures on the leak-sensor path do not interrupt the
+    /// primary component, interface, or platform-general SAMPLE stream; the
+    /// leak-sensor stream retries independently.
     pub leak_sensors_enabled: bool,
 }
 
@@ -2348,6 +2467,7 @@ impl Default for NvueGnmiPaths {
             components_enabled: true,
             interfaces_enabled: true,
             platform_general_enabled: true,
+            interface_paths: None,
             leak_sensors_enabled: false,
         }
     }
@@ -2426,7 +2546,8 @@ impl Default for NvueRestPaths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    /// Metrics listener.
+    /// Metrics listener (default `[::]:9009`).
+    /// The default listener falls back to IPv4 when IPv6 socket setup is unavailable.
     pub endpoint: String,
     /// Prefix for all metrics, defaults to carbide_hardware_health
     pub prefix: String,
@@ -2453,7 +2574,7 @@ impl Default for RateLimitConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            endpoint: "0.0.0.0:9009".to_string(),
+            endpoint: "[::]:9009".to_string(),
             prefix: "carbide_hardware_health".to_string(),
             enable_bmc_latency_metrics: false,
             bmc_latency_attributes: default_bmc_latency_attributes(),
@@ -2885,6 +3006,8 @@ mod tests {
             tls: None,
             batch_size: 512,
             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
             flush_interval: Duration::from_secs(2),
             include_diagnostics: false,
             include_alert_details: false,
@@ -3011,6 +3134,11 @@ mod tests {
 
         assert!(config.collectors.sensors.is_enabled());
         assert!(config.collectors.firmware.is_enabled());
+        if let Configurable::Enabled(ref manager) = config.collectors.manager {
+            assert_eq!(manager.poll_interval, Duration::from_secs(120));
+        } else {
+            panic!("manager collector is disabled")
+        }
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(config.collectors.logs.is_enabled());
         assert!(config.collectors.nvue.is_enabled());
@@ -3035,6 +3163,8 @@ mod tests {
             assert_eq!(auto.sse_not_available_threshold, 1);
             assert_eq!(auto.connect_failure_window, Duration::from_secs(300));
             assert_eq!(auto.connect_failure_threshold, 5);
+            assert!(!auto.retry_sse_after_downgrade);
+
             assert_eq!(
                 auto.periodic.logs_collection_interval,
                 Duration::from_secs(300)
@@ -3098,6 +3228,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_table_enables_the_limiter_with_defaults() {
+        let config: Config = Figment::new()
+            .merge(Toml::string("[rate_limit]\n"))
+            .extract()
+            .expect("failed to parse");
+
+        let Configurable::Enabled(rate_limit) = config.rate_limit else {
+            panic!("an empty [rate_limit] table enables the limiter");
+        };
+        assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
+        assert_eq!(rate_limit.bucket_burst, 100);
+        assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
+    }
+
+    #[test]
     fn test_static_only_config() {
         let toml_content = r#"
 endpoint_discovery_interval = "1m"
@@ -3151,13 +3296,7 @@ cache_size = 50
         assert_eq!(config.metrics.prefix, "carbide_hardware_new_health");
         assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(60));
 
-        if let Configurable::Enabled(ref rate_limit) = config.rate_limit {
-            assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
-            assert_eq!(rate_limit.bucket_burst, 100);
-            assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
-        } else {
-            panic!("rate limit empty")
-        }
+        assert!(!config.rate_limit.is_enabled());
 
         assert!(config.collectors.sensors.is_enabled());
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
@@ -3168,6 +3307,11 @@ cache_size = 50
         }
 
         assert!(!config.collectors.firmware.is_enabled());
+        if let Configurable::Enabled(ref manager) = config.collectors.manager {
+            assert_eq!(manager.poll_interval, Duration::from_secs(300));
+        } else {
+            panic!("manager collector should be enabled by default")
+        }
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.logs.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());
@@ -3257,6 +3401,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: None,
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },
@@ -3271,6 +3416,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: Some("power-shelf-id".to_string()),
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },
@@ -3762,6 +3908,26 @@ reload_interval = "30s"
                 IndexedOtlpTarget {
                     index: 2,
                     target: OtlpTargetConfig {
+                        max_request_bytes: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_request_bytes must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
+                        max_concurrent_exports: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_concurrent_exports must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
                         flush_interval: Duration::ZERO,
                         ..otlp_target("http://site.example:4317")
                     },
@@ -3932,6 +4098,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -3971,6 +4140,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: true,
                             include_alert_details: false,
@@ -3990,6 +4162,9 @@ reload_interval = "30s"
                                 endpoint: "http://site.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: false,
                                 include_alert_details: false,
@@ -3999,6 +4174,9 @@ reload_interval = "30s"
                                 endpoint: "http://central.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: true,
                                 include_alert_details: false,
@@ -4046,6 +4224,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -4080,7 +4261,7 @@ reload_interval = "30s"
         assert_eq!(config.shards_count, 1);
         assert_eq!(config.cache_size, 100);
         assert_eq!(config.bmc_request_concurrency.get(), 4);
-        assert_eq!(config.metrics.endpoint, "0.0.0.0:9009");
+        assert_eq!(config.metrics.endpoint, "[::]:9009");
         assert!(!config.metrics.enable_bmc_latency_metrics);
         assert_eq!(
             config.metrics.bmc_latency_attributes,
@@ -4090,7 +4271,7 @@ reload_interval = "30s"
             config.metrics.bmc_latency_attributes(),
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
         );
-        assert!(config.rate_limit.is_enabled());
+        assert!(!config.rate_limit.is_enabled());
         assert!(config.processors.leak_detection.is_enabled());
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());
@@ -4830,6 +5011,73 @@ events_enabled = false
     }
 
     #[test]
+    fn selective_interface_paths_parse_and_validate() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+[collectors.nvue.gnmi.paths]
+interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
+"#,
+            ))
+            .extract()
+            .expect("selective interface configuration should parse");
+
+        let Configurable::Enabled(nvue) = config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = nvue.gnmi else {
+            panic!("gNMI collector should be enabled");
+        };
+
+        assert_eq!(
+            gnmi.paths.interface_paths,
+            Some(vec![
+                vec!["state".to_string(), "oper-status".to_string()],
+                vec![
+                    "phy-diag".to_string(),
+                    "state".to_string(),
+                    "raw-ber".to_string()
+                ]
+            ])
+        );
+
+        assert!(gnmi.validate().is_ok());
+
+        for (description, paths, enabled, expected) in [
+            ("empty selection", vec![], true, "non-empty paths"),
+            (
+                "empty element",
+                vec![vec![String::new()]],
+                true,
+                "non-empty paths",
+            ),
+            (
+                "disabled interfaces",
+                vec![vec!["state".to_string(), "oper-status".to_string()]],
+                false,
+                "requires interfaces_enabled",
+            ),
+            (
+                "duplicate path",
+                vec![vec!["state".to_string(), "oper-status".to_string()]; 2],
+                true,
+                "duplicates",
+            ),
+        ] {
+            let mut invalid = NvueGnmiConfig::default();
+            invalid.paths.interface_paths = Some(paths);
+            invalid.paths.interfaces_enabled = enabled;
+
+            let error = invalid.validate().expect_err(description);
+
+            assert!(error.contains(expected), "{description}: {error}");
+        }
+    }
+
+    #[test]
     fn nvue_gnmi_additional_subscription_parses_complete_contract() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
@@ -4851,7 +5099,10 @@ heartbeat_interval = "1m"
 paths = [["interface"]]
 metrics = [
   { path = ["interface", "state", "health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["healthy", "attention"] } },
+  { path = ["interface", "state", "other-health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["offline"] } },
   { path = ["interface", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "state", "other-counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "lane", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }, { name = "lane_id", element = "lane", key = "id" }], output = { kind = "gauge", unit = "count" } },
 ]
 "#,
             ))
@@ -4882,7 +5133,7 @@ metrics = [
         assert_eq!(subscription.encoding, NvueGnmiEncoding::JsonIetf);
         assert!(subscription.updates_only);
         assert_eq!(subscription.paths.len(), 1);
-        assert_eq!(subscription.metrics.len(), 2);
+        assert_eq!(subscription.metrics.len(), 5);
 
         assert_eq!(subscription.mode, NvueGnmiSubscriptionMode::Sample);
         assert_eq!(subscription.sample_interval, Some(Duration::from_secs(10)));
@@ -5988,10 +6239,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                        .to_string()
-                ),
+                } => Yields(()), // auto is ignored in periodic mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Periodic,
@@ -6005,9 +6253,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     sse: Some(SseLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.sse] should not be set when mode = \"periodic\"".to_string()
-                ),
+                } => Yields(()), // sse is ignored in periodic mode (warn only)
             }
 
             "SSE mode" {
@@ -6026,17 +6272,13 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     mode: LogCollectionMode::Sse,
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // auto is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
                     periodic: Some(PeriodicLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.periodic] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // periodic is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
@@ -6050,6 +6292,179 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                         .to_string()
                 ),
             }
+        );
+    }
+
+    /// Capture tracing WARN events emitted during a closure.
+    /// Uses a per-call dispatcher so parallel tests don't interfere.
+    fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != Level::WARN {
+                    return;
+                }
+                struct Visitor(String);
+                impl tracing::field::Visit for Visitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}").trim_matches('"').to_string();
+                        }
+                    }
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.0 = value.to_string();
+                        }
+                    }
+                }
+                let mut v = Visitor(String::new());
+                event.record(&mut v);
+                self.0.lock().unwrap().push(v.0);
+            }
+        }
+
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
+            f,
+        );
+        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+    }
+
+    #[test]
+    fn logs_collector_ignored_subsection_warnings() {
+        // periodic mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + sse: warn about sse
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                sse: Some(SseLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + auto + sse: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                sse: Some(SseLogConfig::default()),
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto warning in periodic+auto+sse: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse warning in periodic+auto+sse: {warnings:?}"
+        );
+
+        // SSE mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + periodic: warn about periodic
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + auto + periodic: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto warning in sse+auto+periodic: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic warning in sse+auto+periodic: {warnings:?}"
         );
     }
 
@@ -6194,6 +6609,7 @@ logs_collection_interval = "5m"
 sse_not_available_threshold = 2
 connect_failure_window = "10m"
 connect_failure_threshold = 8
+retry_sse_after_downgrade = true
 "# => Yields(LogsConfigProjection {
                     mode: LogCollectionMode::Auto,
                     validation: Ok(()),
@@ -6203,6 +6619,7 @@ connect_failure_threshold = 8
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: true,
                         periodic: parsed_periodic_defaults(),
                     }),
                     effective_sse: SseLogConfig::default(),
@@ -6228,6 +6645,7 @@ logs_state_file = "/tmp/auto_{machine_id}.json"
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: false,
                         periodic: PeriodicLogConfig {
                             logs_collection_interval: Duration::from_secs(120),
                             state_refresh_interval: Duration::from_secs(1200),
@@ -6278,6 +6696,8 @@ max_backoff = "45s"
         assert_eq!(defaults.sse_not_available_threshold, 1);
         assert_eq!(defaults.connect_failure_window, Duration::from_secs(300));
         assert_eq!(defaults.connect_failure_threshold, 5);
+        assert!(!defaults.retry_sse_after_downgrade);
+
         assert_eq!(
             defaults.periodic.logs_collection_interval,
             Duration::from_secs(300)

@@ -298,6 +298,8 @@ type APIInterface struct {
 	MacAddress *string `json:"macAddress"`
 	// IPAddresses is the list of IP addresses assigned to the Interface
 	IPAddresses []string `json:"ipAddresses"`
+	// IPPrefixes lists reported IPv4 or IPv6 CIDRs, independently of IPAddresses.
+	IPPrefixes []string `json:"ipPrefixes"`
 	// RequestedIpAddress is the explicitly requested IP address for the Interface
 	RequestedIpAddress *string `json:"requestedIpAddress"`
 	// InlineRoutingProfile contains interface-local routing profile options.
@@ -312,12 +314,14 @@ type APIInterface struct {
 
 // NewAPIInterface creates a new APIInterface
 func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
+	// Unknown prefixes still serialize as an empty JSON array, not null.
 	apiInterface := &APIInterface{
 		ID:                 dbis.ID.String(),
 		InstanceID:         dbis.InstanceID.String(),
 		IsPhysical:         dbis.IsPhysical,
 		MacAddress:         dbis.MacAddress,
 		IPAddresses:        dbis.IPAddresses,
+		IPPrefixes:         append([]string{}, dbis.IPPrefixes...),
 		RequestedIpAddress: dbis.RequestedIpAddress,
 		Status:             dbis.Status,
 		Created:            dbis.Created,

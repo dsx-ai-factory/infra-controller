@@ -151,7 +151,12 @@ spec:
               set -e
 
               # Use env-var based API server address — avoids cluster DNS (broken on this cluster)
-              APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+              # Kubernetes supplies a bare service IP; IPv6 needs brackets in a URL.
+              APISERVER_HOST="${KUBERNETES_SERVICE_HOST}"
+              case "${APISERVER_HOST}" in
+                *:*) APISERVER_HOST="[${APISERVER_HOST}]" ;;
+              esac
+              APISERVER="https://${APISERVER_HOST}:${KUBERNETES_SERVICE_PORT}"
               SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
               OPERATORS_NS="{{ .Values.certManagerNamespace }}"
 
@@ -216,7 +221,7 @@ spec:
               echo "Configuring Kubernetes auth..."
               vault auth enable kubernetes 2>/dev/null || true
               vault write auth/kubernetes/config \
-                kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+                kubernetes_host="${APISERVER}"
 
               # ---- Policies ----
               echo "Writing cert-manager-nico-policy..."

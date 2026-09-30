@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use carbide_firmware::{FirmwareConfig, FirmwareConfigSnapshot};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use db::ConditionalWrite;
+use db::explored_endpoints::EndpointReportNotCurrent;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::expected_entity::ExpectedEntity;
@@ -29,7 +31,7 @@ use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport, 
 use sqlx::PgPool;
 
 use crate::endpoint_lock::{EndpointExplorationGuard, EndpointExplorationLocks};
-use crate::{EndpointExplorer, enrich_endpoint_exploration_report};
+use crate::{EndpointExplorer, attester_inventory, enrich_endpoint_exploration_report};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointExplorationServiceError {
@@ -231,7 +233,7 @@ impl EndpointExplorationService {
             report.last_exploration_latency = Some(probe.redfish_explore_duration);
 
             let mut txn = db::Transaction::begin(&service.database_connection).await?;
-            if !db::explored_endpoints::try_update(
+            match db::explored_endpoints::try_update(
                 bmc_ip,
                 baseline_version,
                 &report,
@@ -240,10 +242,15 @@ impl EndpointExplorationService {
             )
             .await?
             {
-                return Err(EndpointExplorationServiceError::ConcurrentModification {
-                    kind: "explored_endpoint",
-                    version: baseline_version.to_string(),
-                });
+                ConditionalWrite::Applied(()) => {
+                    attester_inventory::record(&report, &mut txn).await?;
+                }
+                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                    return Err(EndpointExplorationServiceError::ConcurrentModification {
+                        kind: "explored_endpoint",
+                        version: baseline_version.to_string(),
+                    });
+                }
             }
 
             let endpoint = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)

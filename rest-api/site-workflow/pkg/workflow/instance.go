@@ -14,6 +14,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // UpdateInstance is a workflow to update Instance data using then UpdateInstanceOnSite activity
@@ -22,16 +24,15 @@ func UpdateInstance(ctx workflow.Context, updateRequest *corev1.InstanceConfigUp
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -59,16 +60,15 @@ func CreateInstanceV2(ctx workflow.Context, request *corev1.InstanceAllocationRe
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -99,17 +99,19 @@ func CreateInstances(ctx workflow.Context, request *corev1.BatchInstanceAllocati
 
 	logger.Info().Msg("Starting batch instance allocation workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		// Batch operations may take longer, so we increase the timeout
-		StartToCloseTimeout: 5 * time.Minute,
+		// A batch takes longer on Site than a single allocation. It still shares the
+		// ladder, because the REST caller waits no longer for a batch. A batch that
+		// cannot finish inside the budget needs an async contract, not a budget that
+		// outlives its caller.
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -138,16 +140,15 @@ func DeleteInstanceV2(ctx workflow.Context, request *corev1.InstanceReleaseReque
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -173,16 +174,15 @@ func RebootInstance(ctx workflow.Context, request *corev1.InstancePowerRequest) 
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

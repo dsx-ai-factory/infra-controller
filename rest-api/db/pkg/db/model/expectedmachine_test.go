@@ -2160,3 +2160,40 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile(t *testing.T)
 	assert.Equal(t, Labels{"env": "test"}, gotC.Labels)
 	assert.Nil(t, gotC.HostLifecycleProfile.DisableLockdown, "omitted profile (unset) must stay unset")
 }
+
+func TestExpectedMachineSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	require.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedMachineCreateInput{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:11:ee:01", ChassisSerialNumber: "other-site", CreatedBy: user.ID})
+	require.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedMachineCreateInput{
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:01", ChassisSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedMachineID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:11:ff:02", ChassisSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "replacement-1", result[0].ChassisSerialNumber)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedMachineFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
+}

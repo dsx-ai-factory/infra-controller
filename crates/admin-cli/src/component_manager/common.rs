@@ -139,22 +139,43 @@ impl SwitchTargetArgs {
     }
 }
 
+/// Power shelf target: either power shelf ids or PMC MAC addresses, exactly one
+/// of which must be supplied. MACs let operators target power shelves before
+/// ingestion has assigned a power shelf id.
 #[derive(ClapArgs, Debug)]
+#[clap(group(
+    clap::ArgGroup::new("power_shelf_target")
+        .required(true)
+        .args(["power_shelf_ids", "mac_addresses"])
+))]
 pub(super) struct PowerShelfTargetArgs {
     #[clap(
         long = "power-shelf-id",
-        required = true,
         num_args = 1..,
         value_delimiter = ',',
         help = "Power shelf IDs to target"
     )]
     power_shelf_ids: Vec<PowerShelfId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
 }
 
-impl From<PowerShelfTargetArgs> for rpc::forge::PowerShelfIdList {
-    fn from(args: PowerShelfTargetArgs) -> Self {
-        Self {
-            ids: args.power_shelf_ids,
+/// The resolved power-shelf selection, mapped by each command into the proto
+/// oneof variant for its request type.
+pub(super) enum PowerShelfSelection {
+    PowerShelfIds(rpc::forge::PowerShelfIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl PowerShelfTargetArgs {
+    pub(super) fn into_selection(self) -> PowerShelfSelection {
+        if !self.macs.is_present() {
+            PowerShelfSelection::PowerShelfIds(rpc::forge::PowerShelfIdList {
+                ids: self.power_shelf_ids,
+            })
+        } else {
+            PowerShelfSelection::Macs(self.macs.into())
         }
     }
 }

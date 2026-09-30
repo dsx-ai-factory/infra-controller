@@ -127,7 +127,7 @@ nico-api's:
 ### nico-bmc-proxy tracing
 
 nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
-(`crates/bmc-proxy/src/bmc_proxy.rs`). It follows the same W3C propagation model as nico-api
+(`crates/bmc-proxy/src/proxy/`). It follows the same W3C propagation model as nico-api
 (issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
 DPS stays one trace across the proxy hop (issue
 [#2355](https://github.com/dsx-ai-factory/infra-controller/issues/2355)).
@@ -157,8 +157,9 @@ DPS stays one trace across the proxy hop (issue
   wraps the transport with `TraceInjectService`.
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
-  the BMC's — a request the proxy rejects never reaches one), and BMC target IP (span attribute, not
-  a Prometheus label). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
+  a Prometheus label), and, once the request passes its ACL, its request class
+  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
 
 Example config:
 

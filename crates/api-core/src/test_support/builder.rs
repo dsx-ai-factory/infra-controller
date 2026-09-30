@@ -33,6 +33,7 @@ use carbide_site_explorer::{
 };
 use carbide_utils::test_support::test_meter::TestMeter;
 use db::work_lock_manager::WorkLockManagerHandle;
+use ipnetwork::IpNetwork;
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
@@ -44,7 +45,7 @@ use super::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
-use crate::ethernet_virtualization::EthVirtData;
+use crate::ethernet_virtualization::{EthVirtData, SiteFabricPrefixList};
 use crate::logging::level_filter::ActiveLevel;
 use crate::logging::log_limiter::LogLimiter;
 use crate::scout_stream::ConnectionRegistry;
@@ -68,6 +69,7 @@ pub struct TestApiBuilder {
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
     endpoint_explorer: Option<MockEndpointExplorer>,
+    console_log_source: Option<Arc<dyn crate::console_logs::ConsoleLogSource>>,
 }
 
 impl TestApiBuilder {
@@ -92,6 +94,7 @@ impl TestApiBuilder {
             component_manager: None,
             secrets_context: None,
             endpoint_explorer: None,
+            console_log_source: None,
         }
     }
 
@@ -132,6 +135,14 @@ impl TestApiBuilder {
             eth_data: Some(eth_data),
             ..self
         }
+    }
+
+    /// Replaces the site fabric ranges used to validate VPC and tenant network
+    /// segment prefixes in tests.
+    pub fn with_site_fabric_prefixes(mut self, prefixes: Vec<IpNetwork>) -> Self {
+        let eth_data = self.eth_data.get_or_insert_with(default_test_eth_virt_data);
+        eth_data.site_fabric_prefixes = SiteFabricPrefixList::from_ipnetwork_vec(prefixes);
+        self
     }
 
     pub fn with_dpf_sdk(self, dpf_sdk: Arc<dyn DpfOperations>) -> Self {
@@ -186,6 +197,16 @@ impl TestApiBuilder {
     pub fn with_endpoint_explorer(self, endpoint_explorer: MockEndpointExplorer) -> Self {
         Self {
             endpoint_explorer: Some(endpoint_explorer),
+            ..self
+        }
+    }
+
+    pub fn with_console_log_source(
+        self,
+        console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    ) -> Self {
+        Self {
+            console_log_source: Some(console_log_source),
             ..self
         }
     }
@@ -315,6 +336,9 @@ impl TestApiBuilder {
             bms_client: std::sync::OnceLock::new(),
             secrets_context: self.secrets_context,
             node_jwt_validator: None,
+            console_log_source: self
+                .console_log_source
+                .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
         }
     }
 }

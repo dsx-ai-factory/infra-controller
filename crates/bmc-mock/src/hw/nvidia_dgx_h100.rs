@@ -103,12 +103,11 @@ impl NvidiaDgxH100<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "DGX";
-        let callbacks = Some(callbacks);
         let storage_nic0_ports = self.storage_nic0.ethernet_nics();
         let storage_nic1_ports = self.storage_nic1.ethernet_nics();
 
@@ -185,7 +184,7 @@ impl NvidiaDgxH100<'_> {
                     eth_interfaces,
                     serial_number: Some(self.dgx_system_serial_number.to_string().into()),
                     boot_order_mode: redfish::computer_system::BootOrderMode::ViaSettings,
-                    callbacks,
+                    callbacks: Some(callbacks),
                     chassis: vec!["BMC".into()],
                     boot_options: Some(boot_options),
                     bios_mode: redfish::computer_system::BiosMode::Generic,

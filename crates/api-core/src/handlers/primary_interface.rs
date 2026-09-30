@@ -18,6 +18,8 @@
 use carbide_uuid::machine::{
     DpuMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
 };
+use db::ConditionalWrite;
+use db::machine::MachineNetworkConfigNotCurrent;
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{Machine, MachineInterfaceSnapshot, MachineState, ManagedHostState};
@@ -477,13 +479,14 @@ async fn apply_primary_interface_update(
                 .take();
         // The Machine row was locked before this version was read, so another transaction cannot
         // change the version before this update. The update must therefore match one row.
-        if !db::machine::try_update_network_config(
-            txn,
-            &host_machine_id,
-            network_config_version,
-            &network_config,
-        )
-        .await?
+        if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+            db::machine::try_update_network_config(
+                txn,
+                &host_machine_id,
+                network_config_version,
+                &network_config,
+            )
+            .await?
         {
             return Err(CarbideError::Internal {
                 message: format!(

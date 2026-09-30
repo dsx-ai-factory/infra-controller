@@ -264,6 +264,13 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				if ipb.SiteID != site.ID {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("IP Block: %s in Allocation Constraint doesn't belong Site specified in request", ipb.ID.String()), nil)
 				}
+				serr = ipb.ValidateChildPrefixLength(ac.ConstraintValue)
+				if serr != nil {
+					if errors.Is(serr, cdbm.ErrChildPrefixLengthTooShort) {
+						return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("Could not create child IPAM entry for Allocation Constraint. Details: %s", serr.Error()), nil)
+					}
+					return cutil.NewAPIError(http.StatusBadRequest, serr.Error(), nil)
+				}
 
 				// Allocate a child prefix in ipam
 				childPrefix, serr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, cah.dbSession, ipamStorage, ipb, ac.ConstraintValue)

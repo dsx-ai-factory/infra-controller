@@ -30,7 +30,7 @@ use sqlx::PgConnection;
 use sqlx::types::Json;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 /// Explicit column list for [`TenantIdentityConfig`] queries. Avoid `SELECT *` so schema migrations
 /// (e.g. dropped columns) do not invalidate cached prepared statements on live connections.
@@ -460,7 +460,7 @@ where
 }
 
 /// Loads a row for update during master-key re-wrap.
-pub async fn find_for_update(
+async fn find_for_update(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
@@ -474,14 +474,45 @@ pub async fn find_for_update(
         .map_err(|e| DatabaseError::query("SELECT tenant_identity_config FOR UPDATE", e))
 }
 
-/// Updates encrypted signing-key and token-delegation ciphertext columns only.
+/// `ReencryptionNotApplied` explains why prepared ciphertext was not saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReencryptionNotApplied {
+    /// The source configuration was deleted before the write.
+    #[error("tenant identity configuration no longer exists")]
+    ConfigNotFound,
+    /// The signing keys or delegation changed after preparation began.
+    #[error("tenant identity signing keys or delegation changed; retry re-encryption")]
+    SourceChanged,
+}
+
+/// `update_encrypted_fields` saves prepared ciphertext only when all three
+/// ciphertext columns still match `expected`, including absent values.
+/// Returns `Applied(())`, or `NotApplied` with `ConfigNotFound` for a removed
+/// configuration and `SourceChanged` for changed ciphertext. Database failures
+/// remain errors. The row stays locked until the caller's transaction ends;
+/// remote key access belongs before it.
 pub async fn update_encrypted_fields(
-    org_id: &TenantOrganizationId,
+    expected: &TenantIdentityConfig,
     enc1: Option<EncryptedSigningPrivateKey>,
     enc2: Option<EncryptedSigningPrivateKey>,
     delegation: Option<EncryptedTokenDelegationAuthConfig>,
     txn: &mut PgConnection,
-) -> DatabaseResult<()> {
+) -> DatabaseResult<ConditionalWrite<(), ReencryptionNotApplied>> {
+    let Some(current) = find_for_update(&expected.organization_id, txn).await? else {
+        return Ok(ConditionalWrite::NotApplied(
+            ReencryptionNotApplied::ConfigNotFound,
+        ));
+    };
+    // The plan writes all three ciphertexts, including values already on the
+    // target key. Reject if any source changed while the plan was prepared.
+    if current.encrypted_signing_key_1 != expected.encrypted_signing_key_1
+        || current.encrypted_signing_key_2 != expected.encrypted_signing_key_2
+        || current.encrypted_auth_method_config != expected.encrypted_auth_method_config
+    {
+        return Ok(ConditionalWrite::NotApplied(
+            ReencryptionNotApplied::SourceChanged,
+        ));
+    }
     sqlx::query(
         r#"
         UPDATE tenant_identity_config
@@ -492,14 +523,14 @@ pub async fn update_encrypted_fields(
         WHERE organization_id = $1
         "#,
     )
-    .bind(org_id.as_str())
+    .bind(expected.organization_id.as_str())
     .bind(enc1)
     .bind(enc2)
     .bind(delegation)
     .execute(txn)
     .await
     .map_err(|e| DatabaseError::query("UPDATE tenant_identity_config encrypted fields", e))?;
-    Ok(())
+    Ok(ConditionalWrite::Applied(()))
 }
 
 #[cfg(test)]

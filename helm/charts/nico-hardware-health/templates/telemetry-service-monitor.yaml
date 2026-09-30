@@ -1,13 +1,19 @@
 {{- if .Values.telemetryServiceMonitor.enabled }}
+{{- $prometheusSinkEnabled := "true" }}
+{{- if and (kindIs "map" .Values.env) (hasKey .Values.env "CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED") }}
+{{- $prometheusSinkEnabled = lower (toString (index .Values.env "CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED")) }}
+{{- end }}
+{{- if eq $prometheusSinkEnabled "true" }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: nico-hardware-health-telemetry
+  name: {{ include "nico-hardware-health.name" . }}-telemetry
   namespace: {{ include "nico-hardware-health.namespace" . }}
   labels:
     {{- include "nico-hardware-health.labels" . | nindent 4 }}
-    app: nico-hardware-health
+    app: {{ include "nico-hardware-health.name" . }}
     prometheus: nico-monitoring
 spec:
-  {{- include "nico-hardware-health.telemetryServiceMonitorSpec" (dict "name" "nico-hardware-health" "port" "metrics" "monitor" .Values.telemetryServiceMonitor "namespace" (include "nico-hardware-health.namespace" .)) | nindent 2 }}
+  {{- include "nico-hardware-health.telemetryServiceMonitorSpec" (dict "name" (include "nico-hardware-health.name" .) "port" "metrics" "monitor" .Values.telemetryServiceMonitor "namespace" (include "nico-hardware-health.namespace" .)) | nindent 2 }}
+{{- end }}
 {{- end }}

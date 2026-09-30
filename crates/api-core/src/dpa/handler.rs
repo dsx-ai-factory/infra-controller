@@ -253,7 +253,7 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
     )
     .await
     {
-        Ok(_r) => {
+        Ok(db::ConditionalWrite::Applied(())) => {
             if let Err(error) = txn.commit().await {
                 tracing::error!(
                     dpa_message = ?message,
@@ -261,6 +261,13 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
                     "Failed to commit DPA message transaction",
                 );
             }
+        }
+        Ok(db::ConditionalWrite::NotApplied(reason)) => {
+            tracing::error!(
+                dpa_message = ?message,
+                error = ?db::DatabaseError::from(reason),
+                "Failed to update DPA network observation",
+            );
         }
         Err(e) => {
             tracing::error!(

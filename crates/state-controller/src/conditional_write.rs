@@ -18,15 +18,20 @@
 use std::panic::Location;
 
 use db::dpa_interface::DpaNetworkConfigNotCurrent;
+use db::instance::InstanceExtensionServicesNotCurrent;
+use db::machine::{
+    ExtensionServiceObservationNotCurrent, MachineNetworkConfigNotCurrent,
+    RebootVerificationNotCurrent,
+};
 use db::{ConditionalWrite, ControllerStateNotCurrent};
 
 use crate::state_handler::StateHandlerError;
 
 /// `CheckApplied` requires a conditional write to apply before a handler continues.
 ///
-/// For [`ControllerStateNotCurrent`] and [`DpaNetworkConfigNotCurrent`], a rejected
-/// write returns [`StateHandlerError::IterationInvalidated`]. Propagate this error
-/// unchanged with `?`. The processor discards the iteration's uncommitted database writes
+/// A rejected write returns [`StateHandlerError::IterationInvalidated`].
+/// Propagate this error unchanged with `?`.
+/// The processor discards the iteration's uncommitted database writes
 /// and queues another pass to read fresh state.
 ///
 /// This does not retry the write or undo external effects; those must remain
@@ -66,6 +71,70 @@ impl<T> CheckApplied for ConditionalWrite<T, DpaNetworkConfigNotCurrent> {
         match self {
             Self::Applied(value) => Ok(value),
             Self::NotApplied(DpaNetworkConfigNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, MachineNetworkConfigNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(MachineNetworkConfigNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, InstanceExtensionServicesNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(InstanceExtensionServicesNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, ExtensionServiceObservationNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(ExtensionServiceObservationNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, RebootVerificationNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(RebootVerificationNotCurrent) => {
                 Err(StateHandlerError::IterationInvalidated {
                     source_ref: Location::caller(),
                 })

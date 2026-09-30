@@ -119,6 +119,23 @@ pub async fn update(
     Ok(())
 }
 
+/// `lock_by_host_bmc_addr` locks every existing row for this address until
+/// the caller's transaction completes. The connection must be in a transaction.
+/// It returns whether any rows were locked; `false` does not prevent a later
+/// insert. Query failures propagate to the caller.
+pub async fn lock_by_host_bmc_addr(
+    txn: &mut PgConnection,
+    addr: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT host_bmc_ip FROM explored_managed_hosts WHERE host_bmc_ip = $1 FOR UPDATE";
+    let addresses: Vec<IpAddr> = sqlx::query_scalar(query)
+        .bind(addr)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(!addresses.is_empty())
+}
+
 pub async fn delete_by_host_bmc_addr(
     txn: &mut PgConnection,
     addr: IpAddr,

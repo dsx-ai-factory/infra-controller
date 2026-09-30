@@ -8,3 +8,6 @@
 [submodule "helm-prereqs/nv-rms"]
 	path = helm-prereqs/nv-rms
 	url = https://github.com/dsx-ai-factory/nv-rms.git
+[submodule "helm-prereqs/doca-platform"]
+	path = helm-prereqs/doca-platform
+	url = https://github.com/NVIDIA/doca-platform.git

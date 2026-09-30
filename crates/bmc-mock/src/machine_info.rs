@@ -24,7 +24,8 @@ use crate::infiniband::Guid;
 use crate::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use crate::redfish::update_service::UpdateServiceConfig;
 use crate::{
-    DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, HardwareType, RackPlacement, hw, redfish,
+    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, HardwareType, RackPlacement, hw,
+    redfish,
 };
 
 /// Represents static information we know ahead of time about a host or DPU (independent of any
@@ -334,10 +335,10 @@ impl DpuMachineInfo {
         }
     }
 
-    fn system_config(
+    fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self.dpu_type() {
             DpuType::Bluefield3 => self.bluefield3().system_config(callbacks),
             DpuType::Bluefield4 => self.bluefield4().system_config(callbacks),
@@ -606,10 +607,10 @@ impl HostMachineInfo {
         }
     }
 
-    fn system_config(
+    fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self.hw_type {
             HardwareType::DellPowerEdgeR750 => self.dell_poweredge_r750().system_config(callbacks),
             HardwareType::DellPowerEdgeR760Bf4 => {
@@ -1027,6 +1028,17 @@ impl HostMachineInfo {
         !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
     }
 
+    /// What this host says it can attest. `None` for every profile that does
+    /// not model the collection yet, which is how a BMC without one behaves.
+    fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self.hw_type {
+            HardwareType::NvidiaDgxGb300 => Some(self.dgx_gb300_nvl().component_integrity_config()),
+            _ => None,
+        }
+    }
+
     fn nvidia_switch_nd5200_ld(&self) -> hw::nvidia_switch_nd5200_ld::NvidiaSwitchNd5200Ld<'_> {
         let mut pool = MacAddressPool::new_pool(self.hw_mac_addr_pool);
         let mut next_mac = || pool.allocate().expect("MAC address must be allocated");
@@ -1208,10 +1220,10 @@ impl MachineInfo {
         }
     }
 
-    pub(super) fn system_config(
+    pub(super) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self {
             MachineInfo::Host(host) => host.system_config(callbacks),
             MachineInfo::Dpu(dpu) => dpu.system_config(callbacks),
@@ -1245,6 +1257,17 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.exposes_computer_systems(),
             Self::Dpu(_) => true,
+        }
+    }
+
+    /// What this machine says it can attest, or `None` for one that advertises
+    /// no `ComponentIntegrity` collection.
+    pub(super) fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self {
+            Self::Host(h) => h.component_integrity_config(),
+            Self::Dpu(_) => None,
         }
     }
 

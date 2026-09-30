@@ -5,6 +5,7 @@ package component
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -31,11 +32,36 @@ type Component struct {
 	// Status is the Flow-derived view of operability. Nil when no status
 	// has been computed yet (e.g. before the first inventory sync).
 	Status *types.ComponentOperationStatus `json:"status,omitempty"`
+	// Health is the most recent Core aggregate health snapshot mirrored by the
+	// inventory sync loop.
+	Health *types.HealthReport `json:"health,omitempty"`
 	// LeakStatus is the Flow-derived coolant leak detection status, owned by
 	// the leak-detection loop. LeakStatusUnknown until the loop evaluates it.
 	LeakStatus types.LeakStatus `json:"leak_status,omitempty"`
 
 	bmcMacToID map[string]bmcID
+}
+
+// ManagementMAC returns the component's deterministic host-controller MAC.
+// Flow models the compute BMC, switch BMC, and power-shelf PMC as Host BMCs;
+// DPU controller MACs are intentionally excluded from component operations.
+func (c *Component) ManagementMAC() string {
+	if c == nil {
+		return ""
+	}
+
+	macs := make([]string, 0, len(c.BmcsByType[devicetypes.BMCTypeHost]))
+	for _, controller := range c.BmcsByType[devicetypes.BMCTypeHost] {
+		if mac := controller.MAC.String(); mac != "" {
+			macs = append(macs, mac)
+		}
+	}
+	if len(macs) == 0 {
+		return ""
+	}
+
+	slices.Sort(macs)
+	return macs[0]
 }
 
 type bmcID struct {

@@ -190,7 +190,7 @@ pub(crate) async fn delete_interface(
     }
 
     for interface in &interfaces {
-        db::machine_interface::delete(&interface.id, &mut txn).await?;
+        db::machine_interface::delete(&interface.id, &mut txn, false).await?;
     }
 
     txn.commit().await?;

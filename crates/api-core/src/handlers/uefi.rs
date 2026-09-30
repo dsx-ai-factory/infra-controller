@@ -52,19 +52,18 @@ async fn host_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, 
     })
 }
 
-/// The host UEFI version a device currently carries, for authenticating against
-/// its existing password when clearing it. Returns the device's converged
-/// `current_version` (which can lag the site target mid-rotation, once the UEFI
-/// rotation engine exists), or the site target it was recorded against when
-/// `current_version` is NULL.
+/// Select the credential version to try when clearing a host's UEFI password.
+/// Prefer the device's `current_version`, which may lag the site target.
+/// When that version is unknown, the existing fallback tries the site target;
+/// it does not establish which password the device actually has.
 ///
 /// The caller must have already confirmed the host's UEFI password is set: a
 /// password-bearing host always has a `host_uefi` convergence row keyed by its
 /// BMC MAC, because NICo writes that row in the same transaction that stamps
 /// `bios_password_set_time` (see `set_host_uefi_password`), and the backfill
 /// seeded one for every pre-existing host with a password. A missing row is
-/// therefore a broken invariant -- error rather than guessing the site target
-/// and authenticating with the wrong password.
+/// therefore a broken invariant and returns an error. An existing row with an
+/// unknown version still uses the fallback above, which may fail authentication.
 async fn host_uefi_device_version(
     conn: &mut sqlx::PgConnection,
     bmc_mac: mac_address::MacAddress,
@@ -113,28 +112,11 @@ pub(super) async fn read_uefi_credentials(
         })
 }
 
-/// The `CredentialKey` for the site-wide host UEFI password to *set* on a
-/// device: the secret at the current `host_uefi` target version (table-driven;
-/// v0 = the legacy unversioned site-default).
-///
-/// This is the database half of resolving the credential -- it reads only the
-/// version and returns the key. The caller reads the secret with
-/// `read_uefi_credentials` after committing, so no connection is held across the
-/// remote reader (Vault) request.
-async fn host_uefi_set_credential_key(
-    conn: &mut sqlx::PgConnection,
-) -> Result<CredentialKey, CarbideError> {
-    let version = host_uefi_target_version(conn).await.map_err(|e| {
-        CarbideError::internal(format!("failed to read host UEFI target version: {e}"))
-    })?;
-    Ok(CredentialKey::host_uefi_site_default(version))
-}
-
 /// The `CredentialKey` for the host UEFI password a device currently holds, to
 /// authenticate a *clear* against its existing password (the device's converged
 /// version; see [`host_uefi_device_version`]).
 ///
-/// Like `host_uefi_set_credential_key`, this is only the database half: it reads
+/// This is only the database half: it reads
 /// the device version and returns the key. The caller reads the secret with
 /// `read_uefi_credentials` after committing, so no connection is held across the
 /// remote reader (Vault) request.
@@ -168,20 +150,6 @@ async fn dpu_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, d
     u32::try_from(version).map_err(|e| db::DatabaseError::Internal {
         message: format!("dpu UEFI target_version {version} is out of range for u32: {e}"),
     })
-}
-
-/// The `CredentialKey` for the site-wide DPU UEFI password to *set* on a device:
-/// the secret at the current `dpu_uefi` target version (table-driven; v0 = the
-/// legacy unversioned site-default). The DPU analogue of
-/// [`host_uefi_set_credential_key`]; only the database half (reads the version
-/// and returns the key), so no connection is held across the remote reader.
-async fn dpu_uefi_set_credential_key(
-    conn: &mut sqlx::PgConnection,
-) -> Result<CredentialKey, CarbideError> {
-    let version = dpu_uefi_target_version(conn).await.map_err(|e| {
-        CarbideError::internal(format!("failed to read dpu UEFI target version: {e}"))
-    })?;
-    Ok(CredentialKey::dpu_uefi_site_default(version))
 }
 
 pub(crate) async fn clear_host_uefi_password(
@@ -378,7 +346,8 @@ pub(crate) async fn set_host_uefi_password(
     // Resolve the site-wide host UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
     // txn is open.
-    let host_uefi_key = host_uefi_set_credential_key(&mut txn).await?;
+    let host_uefi_version = host_uefi_target_version(&mut txn).await?;
+    let host_uefi_key = CredentialKey::host_uefi_site_default(host_uefi_version);
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
@@ -417,10 +386,11 @@ pub(crate) async fn set_host_uefi_password(
     api.with_txn(|txn| {
         async move {
             db::machine::update_bios_password_set_time(&machine_id, txn).await?;
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 txn,
                 host_bmc_mac,
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                Some(host_uefi_version as i32),
             )
             .await?;
             Ok::<(), db::DatabaseError>(())
@@ -527,7 +497,8 @@ pub(crate) async fn set_dpu_uefi_password(
     // Resolve the site-wide DPU UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
     // txn is open.
-    let dpu_uefi_key = dpu_uefi_set_credential_key(&mut txn).await?;
+    let dpu_uefi_version = dpu_uefi_target_version(&mut txn).await?;
+    let dpu_uefi_key = CredentialKey::dpu_uefi_site_default(dpu_uefi_version);
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
@@ -561,10 +532,11 @@ pub(crate) async fn set_dpu_uefi_password(
     // optimism the host set path carries.
     api.with_txn(|txn| {
         async move {
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 txn,
                 dpu_bmc_mac,
                 db::credential_rotation::CredentialRotationType::DpuUefi,
+                Some(dpu_uefi_version as i32),
             )
             .await?;
             Ok::<(), db::DatabaseError>(())

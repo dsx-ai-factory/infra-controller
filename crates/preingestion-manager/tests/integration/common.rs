@@ -16,7 +16,7 @@
  */
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use carbide_uuid::machine::MachineId;
@@ -59,7 +59,8 @@ async fn insert_endpoint(
     bmc_version: &str,
     uefi_version: &str,
 ) -> Result<(), db::DatabaseError> {
-    let address = IpAddr::V4(Ipv4Addr::from_str(addr).unwrap());
+    let address = IpAddr::from_str(addr).unwrap();
+
     db::explored_endpoints::insert(
         address,
         &build_exploration_report(vendor, model, bmc_version, uefi_version, machine_id_str),
@@ -89,6 +90,9 @@ fn build_exploration_report(
     };
 
     let mut report = EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,

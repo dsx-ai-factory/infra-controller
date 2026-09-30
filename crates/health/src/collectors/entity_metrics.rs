@@ -20,11 +20,11 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use nv_redfish::core::Bmc;
 use nv_redfish::oem::nvidia::processor_metrics::NvidiaProcessorMetrics;
 use nv_redfish::oem::nvidia::schema::nvidia_memory_metrics::NvidiaMemoryMetrics;
-use nv_redfish::oem::nvidia::schema::nvidia_processor_metrics::v1_1_0::NvidiaProcessorMetrics as NvidiaCommonProcessorMetrics;
 use nv_redfish::schema::memory_metrics::MemoryMetrics;
 use nv_redfish::schema::pcie_device::PcieErrors;
 use nv_redfish::schema::power_supply_metrics::PowerSupplyMetrics;
@@ -326,193 +326,205 @@ fn memory_metric_fields(m: &MemoryMetrics) -> Vec<MetricField> {
 /// and `"NA"` is what several platforms send.
 const NO_THROTTLE_REASONS: [&str; 2] = ["None", "NA"];
 
-/// Properties every NVIDIA processor reports, whichever shape the OEM
-/// block used.
-fn nvidia_common_processor_fields(out: &mut Vec<MetricField>, m: &NvidiaCommonProcessorMetrics) {
-    scalar!(
-        out,
-        m,
-        graphics_engine_activity_percent,
-        "nvidia_graphics_engine_activity",
-        "percent"
-    );
-    scalar!(out, m, sm_activity_percent, "nvidia_sm_activity", "percent");
-    scalar!(
-        out,
-        m,
-        sm_occupancy_percent,
-        "nvidia_sm_occupancy",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        tensor_core_activity_percent,
-        "nvidia_tensor_core_activity",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        fp64activity_percent,
-        "nvidia_fp64_activity",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        fp32activity_percent,
-        "nvidia_fp32_activity",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        fp16activity_percent,
-        "nvidia_fp16_activity",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        dmma_utilization_percent,
-        "nvidia_dmma_utilization",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        hmma_utilization_percent,
-        "nvidia_hmma_utilization",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        imma_utilization_percent,
-        "nvidia_imma_utilization",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        nv_dec_utilization_percent,
-        "nvidia_nvdec_utilization",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        nv_jpg_utilization_percent,
-        "nvidia_nvjpg_utilization",
-        "percent"
-    );
-    scalar!(
-        out,
-        m,
-        nv_ofa_utilization_percent,
-        "nvidia_nvofa_utilization",
-        "percent"
-    );
-    scalar!(out, m, pcie_tx_bytes, "nvidia_pcie_tx", "bytes");
-    scalar!(out, m, pcie_rx_bytes, "nvidia_pcie_rx", "bytes");
-    scalar!(
-        out,
-        m,
-        pcie_raw_tx_bandwidth_gbps,
-        "nvidia_pcie_raw_tx_bandwidth",
-        "gbps"
-    );
-    scalar!(
-        out,
-        m,
-        pcie_raw_rx_bandwidth_gbps,
-        "nvidia_pcie_raw_rx_bandwidth",
-        "gbps"
-    );
-    scalar!(
-        out,
-        m,
-        nv_link_raw_tx_bandwidth_gbps,
-        "nvidia_nvlink_raw_tx_bandwidth",
-        "gbps"
-    );
-    scalar!(
-        out,
-        m,
-        nv_link_raw_rx_bandwidth_gbps,
-        "nvidia_nvlink_raw_rx_bandwidth",
-        "gbps"
-    );
-    scalar!(
-        out,
-        m,
-        nv_link_data_tx_bandwidth_gbps,
-        "nvidia_nvlink_data_tx_bandwidth",
-        "gbps"
-    );
-    scalar!(
-        out,
-        m,
-        nv_link_data_rx_bandwidth_gbps,
-        "nvidia_nvlink_data_rx_bandwidth",
-        "gbps"
-    );
-    duration_seconds!(
-        out,
-        m,
-        hardware_violation_throttle_duration,
-        "nvidia_hardware_violation_throttle"
-    );
-    duration_seconds!(
-        out,
-        m,
-        global_software_violation_throttle_duration,
-        "nvidia_global_software_violation_throttle"
-    );
-    duration_seconds!(
-        out,
-        m,
-        accumulated_gpu_context_utilization_duration,
-        "nvidia_accumulated_gpu_context_utilization"
-    );
-    duration_seconds!(
-        out,
-        m,
-        accumulated_sm_utilization_duration,
-        "nvidia_accumulated_sm_utilization"
-    );
+/// Project the properties inherited by every NVIDIA processor shape.
+macro_rules! nvidia_common_processor_fields {
+    ($out:expr, $m:expr) => {{
+        let out = &mut *$out;
+        let m = $m;
+        scalar!(
+            out,
+            m,
+            graphics_engine_activity_percent,
+            "nvidia_graphics_engine_activity",
+            "percent"
+        );
+        scalar!(out, m, sm_activity_percent, "nvidia_sm_activity", "percent");
+        scalar!(
+            out,
+            m,
+            sm_occupancy_percent,
+            "nvidia_sm_occupancy",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            tensor_core_activity_percent,
+            "nvidia_tensor_core_activity",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            fp64activity_percent,
+            "nvidia_fp64_activity",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            fp32activity_percent,
+            "nvidia_fp32_activity",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            fp16activity_percent,
+            "nvidia_fp16_activity",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            dmma_utilization_percent,
+            "nvidia_dmma_utilization",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            hmma_utilization_percent,
+            "nvidia_hmma_utilization",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            imma_utilization_percent,
+            "nvidia_imma_utilization",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            nv_dec_utilization_percent,
+            "nvidia_nvdec_utilization",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            nv_jpg_utilization_percent,
+            "nvidia_nvjpg_utilization",
+            "percent"
+        );
+        scalar!(
+            out,
+            m,
+            nv_ofa_utilization_percent,
+            "nvidia_nvofa_utilization",
+            "percent"
+        );
+        scalar!(out, m, pcie_tx_bytes, "nvidia_pcie_tx", "bytes");
+        scalar!(out, m, pcie_rx_bytes, "nvidia_pcie_rx", "bytes");
+        scalar!(
+            out,
+            m,
+            pcie_raw_tx_bandwidth_gbps,
+            "nvidia_pcie_raw_tx_bandwidth",
+            "gbps"
+        );
+        scalar!(
+            out,
+            m,
+            pcie_raw_rx_bandwidth_gbps,
+            "nvidia_pcie_raw_rx_bandwidth",
+            "gbps"
+        );
+        scalar!(
+            out,
+            m,
+            nv_link_raw_tx_bandwidth_gbps,
+            "nvidia_nvlink_raw_tx_bandwidth",
+            "gbps"
+        );
+        scalar!(
+            out,
+            m,
+            nv_link_raw_rx_bandwidth_gbps,
+            "nvidia_nvlink_raw_rx_bandwidth",
+            "gbps"
+        );
+        scalar!(
+            out,
+            m,
+            nv_link_data_tx_bandwidth_gbps,
+            "nvidia_nvlink_data_tx_bandwidth",
+            "gbps"
+        );
+        scalar!(
+            out,
+            m,
+            nv_link_data_rx_bandwidth_gbps,
+            "nvidia_nvlink_data_rx_bandwidth",
+            "gbps"
+        );
+        duration_seconds!(
+            out,
+            m,
+            hardware_violation_throttle_duration,
+            "nvidia_hardware_violation_throttle"
+        );
+        duration_seconds!(
+            out,
+            m,
+            global_software_violation_throttle_duration,
+            "nvidia_global_software_violation_throttle"
+        );
+        duration_seconds!(
+            out,
+            m,
+            accumulated_gpu_context_utilization_duration,
+            "nvidia_accumulated_gpu_context_utilization"
+        );
+        duration_seconds!(
+            out,
+            m,
+            accumulated_sm_utilization_duration,
+            "nvidia_accumulated_sm_utilization"
+        );
 
-    // `ThrottleReasons` is a list of strings; project only how many
-    // reasons are active so it can be alerted on as a scalar. The
-    // reasons themselves stay out of the series -- they are unbounded
-    // label cardinality on a gauge that is read per-GPU per-interval.
-    if let Some(Some(reasons)) = &m.throttle_reasons {
-        let active = reasons
-            .iter()
-            .filter(|reason| !NO_THROTTLE_REASONS.contains(&reason.as_str()))
-            .count();
-        out.push(MetricField {
-            metric_type: Cow::Borrowed("nvidia_throttle_reasons"),
-            unit: "count",
-            value: active as f64,
-        });
-    }
+        // `ThrottleReasons` is a list of strings; project only how many
+        // reasons are active so it can be alerted on as a scalar. The
+        // reasons themselves stay out of the series -- they are unbounded
+        // label cardinality on a gauge that is read per-GPU per-interval.
+        if let Some(Some(reasons)) = &m.throttle_reasons {
+            let active = reasons
+                .iter()
+                .filter(|reason| !NO_THROTTLE_REASONS.contains(&reason.as_str()))
+                .count();
+            out.push(MetricField {
+                metric_type: Cow::Borrowed("nvidia_throttle_reasons"),
+                unit: "count",
+                value: active as f64,
+            });
+        }
+    }};
 }
 
 fn nvidia_processor_metric_fields(m: &NvidiaProcessorMetrics) -> Vec<MetricField> {
     let mut out = Vec::new();
-    nvidia_common_processor_fields(&mut out, m.common());
+    match m {
+        NvidiaProcessorMetrics::Gpu(gpu) => nvidia_common_processor_fields!(&mut out, gpu),
+        NvidiaProcessorMetrics::Generic(generic) => {
+            nvidia_common_processor_fields!(&mut out, generic)
+        }
+    }
 
     // Integer activity is declared twice: the GPU shape spells it
     // correctly, the shared base kept the original `Interger` typo.
     // Firmware sends one or the other, so read both into one series,
     // preferring the correctly spelled one.
     let integer_activity = match m {
-        NvidiaProcessorMetrics::Gpu(gpu) => gpu.integer_activity_utilization_percent.flatten(),
-        NvidiaProcessorMetrics::Generic(_) => None,
-    }
-    .or_else(|| m.common().interger_activity_utilization_percent.flatten());
+        NvidiaProcessorMetrics::Gpu(gpu) => gpu
+            .integer_activity_utilization_percent
+            .flatten()
+            .or_else(|| gpu.interger_activity_utilization_percent.flatten()),
+        NvidiaProcessorMetrics::Generic(generic) => {
+            generic.interger_activity_utilization_percent.flatten()
+        }
+    };
     if let Some(value) = integer_activity {
         out.push(MetricField {
             metric_type: Cow::Borrowed("nvidia_integer_activity_utilization"),
@@ -824,20 +836,23 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for MetricsCollector<B> {
         let fetch_failures = AtomicUsize::new(0);
         self.emit_event(CollectorEvent::MetricCollectionStart);
 
-        let this = &*self;
-        let failures = &fetch_failures;
-        let futures: Vec<_> = inventory
-            .entities
-            .iter()
-            .map(|entity| this.collect_entity(entity, failures))
-            .collect();
-
-        let processed: usize = stream::iter(futures)
-            .buffer_unordered(self.request_concurrency)
-            .collect::<Vec<usize>>()
-            .await
-            .into_iter()
-            .sum();
+        // Create each fetch future only when a `request_concurrency` slot
+        // frees up: a fetch future is several KiB, so building one per entity
+        // up front multiplies sweep memory by the entity count. No closure is
+        // held across an await, which keeps this future `Send`.
+        let mut in_flight = FuturesUnordered::new();
+        let mut processed = 0;
+        for entity in &inventory.entities {
+            if in_flight.len() == self.request_concurrency
+                && let Some(count) = in_flight.next().await
+            {
+                processed += count;
+            }
+            in_flight.push(self.collect_entity(entity, &fetch_failures));
+        }
+        while let Some(count) = in_flight.next().await {
+            processed += count;
+        }
 
         self.emit_event(CollectorEvent::MetricCollectionEnd);
 
@@ -982,12 +997,14 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
 mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
 
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use serde_json::json;
 
     use super::*;
+    use crate::collectors::inventory::EntityInventory;
     use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
     use crate::endpoint::test_support::{mac, test_endpoint};
 
@@ -2008,5 +2025,45 @@ mod tests {
             collect,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn iteration_counts_every_entity_when_entities_exceed_request_slots() {
+        let fixture = ProjectionFixture::new().await;
+        let mut entities = Vec::new();
+        for entity in [
+            TestEntity::Processor,
+            TestEntity::Memory,
+            TestEntity::Drive,
+            TestEntity::PowerSupply,
+            TestEntity::ProcessorWithMalformedMetrics,
+        ] {
+            entities.push(fixture.entity(entity).await);
+        }
+        let shared = Arc::new(arc_swap::ArcSwapOption::from_pointee(EntityInventory {
+            entities,
+            discovered_at: Instant::now(),
+            generation: 1,
+        }));
+        let mut collector = MetricsCollector::new_runner(
+            fixture.bmc(),
+            Arc::new(test_endpoint(mac("00:11:22:33:44:55"))),
+            MetricsCollectorConfig {
+                data_sink: None,
+                shared,
+                request_concurrency: NonZeroUsize::new(2).unwrap(),
+            },
+        )
+        .expect("metrics collector should build");
+
+        let iteration = collector
+            .run_iteration()
+            .await
+            .expect("metrics collection succeeds");
+
+        assert_eq!(
+            (iteration.entity_count, iteration.fetch_failures),
+            (Some(4), 1)
+        );
     }
 }

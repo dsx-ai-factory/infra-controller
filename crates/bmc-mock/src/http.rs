@@ -39,6 +39,33 @@ pub(crate) fn redfish_error(status: StatusCode, message: &str) -> Response {
     json!({"error": {"code": "Base.1.0.GeneralError", "message": message}}).into_response(status)
 }
 
+/// A Base message registry entry as the Redfish error envelope, the
+/// `code` naming the message and `@Message.ExtendedInfo` carrying its
+/// record, so a client can act on the `MessageId` rather than the prose.
+pub(crate) fn registry_error(
+    status: StatusCode,
+    message_id: &str,
+    message: &str,
+    args: &[&str],
+    resolution: &str,
+) -> Response {
+    json!({
+        "error": {
+            "code": message_id,
+            "message": message,
+            "@Message.ExtendedInfo": [{
+                "@odata.type": "#Message.v1_1_2.Message",
+                "MessageId": message_id,
+                "Message": message,
+                "MessageArgs": args,
+                "Severity": "Warning",
+                "Resolution": resolution,
+            }],
+        }
+    })
+    .into_response(status)
+}
+
 /// Largest plain-text error body carried into the envelope's `message`.
 const ERROR_TEXT_LIMIT: usize = 16 * 1024;
 

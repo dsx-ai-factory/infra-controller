@@ -25,6 +25,7 @@ use arc_swap::ArcSwapOption;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use prometheus::{Histogram, HistogramOpts};
+use tokio::sync::Notify;
 
 use super::reachability::ReachabilitySpec;
 use crate::HealthError;
@@ -35,10 +36,11 @@ use crate::config::{
     AttributesConfig, Config, Configurable, DiscoveryConfig,
     FirmwareCollectorConfig as FirmwareCollectorOptions, GpuInventoryConfig,
     LeakDetectorCollectorConfig as LeakDetectorCollectorOptions,
-    LogsCollectorConfig as LogsCollectorOptions, MetricsCollectorConfig as MetricsCollectorOptions,
-    MtlsProfileConfig, NmxcCollectorConfig as NmxcCollectorOptions,
-    NmxtCollectorConfig as NmxtCollectorOptions, NvueCollectorConfig as NvueCollectorOptions,
-    ReachabilityCollectorConfig, SensorCollectorConfig as SensorCollectorOptions,
+    LogsCollectorConfig as LogsCollectorOptions, ManagerCollectorConfig as ManagerCollectorOptions,
+    MetricsCollectorConfig as MetricsCollectorOptions, MtlsProfileConfig,
+    NmxcCollectorConfig as NmxcCollectorOptions, NmxtCollectorConfig as NmxtCollectorOptions,
+    NvueCollectorConfig as NvueCollectorOptions, ReachabilityCollectorConfig,
+    SensorCollectorConfig as SensorCollectorOptions,
     TelemetryCollectorConfig as TelemetryCollectorOptions,
 };
 use crate::limiter::RateLimiter;
@@ -59,11 +61,12 @@ pub(super) enum CollectorKind {
     NvueRest,
     NvueGnmi,
     GpuInventory,
+    Manager,
     Reachability,
 }
 
 impl CollectorKind {
-    pub(super) const ALL: [CollectorKind; 12] = [
+    pub(super) const ALL: [CollectorKind; 13] = [
         CollectorKind::Discovery,
         CollectorKind::Sensor,
         CollectorKind::Metrics,
@@ -76,6 +79,7 @@ impl CollectorKind {
         CollectorKind::NvueRest,
         CollectorKind::NvueGnmi,
         CollectorKind::GpuInventory,
+        CollectorKind::Manager,
     ];
 }
 
@@ -92,6 +96,7 @@ pub(super) struct CollectorState {
     nvue_rest: HashMap<Cow<'static, str>, Collector>,
     nvue_gnmi: HashMap<Cow<'static, str>, Collector>,
     gpu_inventory: HashMap<Cow<'static, str>, Collector>,
+    manager: HashMap<Cow<'static, str>, Collector>,
     reachability: HashMap<Cow<'static, str>, Collector>,
     inventories: HashMap<Cow<'static, str>, SharedInventory<BmcClient>>,
     machine_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
@@ -134,6 +139,7 @@ impl CollectorState {
             nvue_rest: HashMap::new(),
             nvue_gnmi: HashMap::new(),
             gpu_inventory: HashMap::new(),
+            manager: HashMap::new(),
             reachability: HashMap::new(),
             inventories: HashMap::new(),
             machine_domain_uuids: HashMap::new(),
@@ -157,6 +163,7 @@ impl CollectorState {
             CollectorKind::NvueRest => &self.nvue_rest,
             CollectorKind::NvueGnmi => &self.nvue_gnmi,
             CollectorKind::GpuInventory => &self.gpu_inventory,
+            CollectorKind::Manager => &self.manager,
             CollectorKind::Reachability => &self.reachability,
         }
     }
@@ -178,6 +185,7 @@ impl CollectorState {
             CollectorKind::NvueRest => &mut self.nvue_rest,
             CollectorKind::NvueGnmi => &mut self.nvue_gnmi,
             CollectorKind::GpuInventory => &mut self.gpu_inventory,
+            CollectorKind::Manager => &mut self.manager,
             CollectorKind::Reachability => &mut self.reachability,
         }
     }
@@ -292,6 +300,7 @@ impl CollectorState {
             .chain(self.nvue_rest.keys())
             .chain(self.nvue_gnmi.keys())
             .chain(self.gpu_inventory.keys())
+            .chain(self.manager.keys())
             .filter(|key| !active_keys.contains(*key))
             .cloned()
             .collect()
@@ -325,6 +334,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
     pub(crate) nmxc_config: Configurable<NmxcCollectorOptions>,
@@ -347,6 +357,9 @@ pub struct DiscoveryLoopContext {
     pub(crate) gpu_inventory_config: Configurable<GpuInventoryConfig>,
     pub(crate) api_client: Option<Arc<ApiClientWrapper>>,
     pub(crate) log_downgrade_registry: Arc<LogDowngradeRegistry>,
+
+    /// Wakes endpoint discovery when an auto-mode log collector changes mode.
+    pub(crate) collector_transition_notify: Arc<Notify>,
 
     /// Whether log collectors should attach diagnostic payload carriers.
     pub(crate) logs_include_diagnostics: bool,
@@ -425,6 +438,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
             nmxc_config: config.collectors.nmxc.clone(),
@@ -449,6 +463,7 @@ impl DiscoveryLoopContext {
                 _ => None,
             },
             log_downgrade_registry: Arc::new(LogDowngradeRegistry::new()),
+            collector_transition_notify: Arc::new(Notify::new()),
             logs_include_diagnostics: config.sinks.includes_log_diagnostics(),
             attributes: config.attributes.clone(),
         })

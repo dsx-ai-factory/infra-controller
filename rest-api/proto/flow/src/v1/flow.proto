@@ -48,6 +48,7 @@ service Flow {
     rpc PowerOnRack(PowerOnRackRequest) returns (SubmitTaskResponse);
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
+    rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
 
     // Component CRUD
     rpc GetComponentInfoByID(GetComponentInfoByIDRequest) returns (GetComponentInfoResponse);
@@ -65,6 +66,8 @@ service Flow {
     rpc DetachRacksFromNVLDomain(DetachRacksFromNVLDomainRequest) returns (google.protobuf.Empty);
     rpc GetListOfNVLDomains(GetListOfNVLDomainsRequest) returns (GetListOfNVLDomainsResponse);
     rpc GetRacksForNVLDomain(GetRacksForNVLDomainRequest) returns (GetRacksForNVLDomainResponse);
+    rpc GetNVLinkDomain(GetNVLinkDomainRequest) returns (GetNVLinkDomainResponse);
+    rpc GetListOfNVLinkDomains(GetListOfNVLinkDomainsRequest) returns (GetListOfNVLinkDomainsResponse);
 
     // Tasks
     rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
@@ -78,6 +81,29 @@ service Flow {
     rpc GetOperationRule(GetOperationRuleRequest) returns (OperationRule);
     rpc ListOperationRules(ListOperationRulesRequest) returns (ListOperationRulesResponse);
     rpc SetRuleAsDefault(SetRuleAsDefaultRequest) returns (google.protobuf.Empty);
+
+    // Event rules
+
+    // Creates a persisted event rule in the disabled state. The returned rule
+    // always has enabled set to false and does not participate in effective-rule
+    // selection. Callers may create its bindings while it is disabled, but must
+    // call EnableEventRule before it can override a site or built-in rule.
+    rpc CreateEventRule(CreateEventRuleRequest) returns (EventRule);
+    rpc GetEventRule(GetEventRuleRequest) returns (EventRule);
+    rpc GetEffectiveEventRule(GetEffectiveEventRuleRequest) returns (EventRule);
+    // Returns matching persisted rules followed by built-in rules, with each
+    // group ordered by ascending rule ID. Filters are applied before pagination.
+    // When pagination is omitted, offset defaults to 0 and limit defaults to 100.
+    rpc ListEventRules(ListEventRulesRequest) returns (ListEventRulesResponse);
+    rpc UpdateEventRule(UpdateEventRuleRequest) returns (EventRule);
+    rpc EnableEventRule(EnableEventRuleRequest) returns (EventRule);
+    rpc DisableEventRule(DisableEventRuleRequest) returns (EventRule);
+    rpc DeleteEventRule(DeleteEventRuleRequest) returns (google.protobuf.Empty);
+
+    // Event-rule bindings
+    rpc CreateEventRuleBinding(CreateEventRuleBindingRequest) returns (EventRuleBinding);
+    rpc GetEventRuleBinding(GetEventRuleBindingRequest) returns (EventRuleBinding);
+    rpc DeleteEventRuleBinding(DeleteEventRuleBindingRequest) returns (google.protobuf.Empty);
 
     // Rack-rule associations
     rpc AssociateRuleWithRack(AssociateRuleWithRackRequest) returns (google.protobuf.Empty);
@@ -217,7 +243,9 @@ enum TaskExecutorType {
     TASK_EXECUTOR_TYPE_TEMPORAL = 1;
 }
 
-// Phase is Flow's coarse operability bucket.
+// Phase is Flow's coarse operability bucket. Component phases are derived from
+// Core's type-specific state machines; Rack.operation_status aggregates those
+// component phases.
 enum Phase {
     PHASE_UNKNOWN = 0;
     PHASE_INITIALIZING = 1;
@@ -235,6 +263,22 @@ enum LeakStatus {
     LEAK_STATUS_UNKNOWN = 0;
     LEAK_STATUS_DETECTED = 1;
     LEAK_STATUS_NOT_DETECTED = 2;
+}
+
+// LeakHandlingStatus describes Flow's handling of a leakage event for a
+// component. It describes handling progress, not the component's current leak
+// or power state.
+enum LeakHandlingStatus {
+    // Flow could not determine the status.
+    LEAK_HANDLING_STATUS_UNKNOWN = 0;
+    // No supported leakage-handling Task targets this component.
+    LEAK_HANDLING_STATUS_NONE = 1;
+    // A forced-shutdown Task is waiting, pending, or running.
+    LEAK_HANDLING_STATUS_SHUTTING_DOWN = 2;
+    // A forced-shutdown Task completed. This is not current power state.
+    LEAK_HANDLING_STATUS_DOWN = 3;
+    // The latest supported leakage-handling Task failed or was terminated.
+    LEAK_HANDLING_STATUS_FAILED = 4;
 }
 
 // ComponentOperationStatus is Flow's view of a component's operability.
@@ -268,6 +312,8 @@ message Component {
     UUID nvl_domain_id = 11;  // NVLink Domain containing this component's rack; omitted when unassigned
     TaskStats task_stats = 12;  // Active Tasks that explicitly target this component.
     string rack_external_id = 13;
+    LeakHandlingStatus leak_handling_status = 14;  // Flow's leakage-handling status for this component.
+    HealthReport health = 15;  // Latest Core aggregate health snapshot mirrored by inventory sync.
 }
 
 message Rack {
@@ -279,6 +325,8 @@ message Rack {
     string external_id = 6;
     // Operability phase aggregated from component phases.
     Phase operation_status = 7;
+    HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
+    optional string rack_profile_id = 9; // Core rack profile mirrored by expected inventory sync.
 }
 
 message Identifier {
@@ -464,7 +512,9 @@ message GetListOfRacksRequest {
     repeated Filter filters = 1;  // Filter conditions for rack queries
     bool with_components = 2;
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Rack UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
+    bool with_external_id_only = 5;
 }
 
 message GetListOfRacksResponse {
@@ -491,11 +541,42 @@ message DetachRacksFromNVLDomainRequest {
 
 message GetListOfNVLDomainsRequest {
     StringQueryInfo info = 1;
+    // Results are ordered by name ascending, then UUID ascending.
     optional Pagination pagination = 2;
 }
 
 message GetListOfNVLDomainsResponse {
     repeated NVLDomain nvl_domains = 1;
+    int32 total = 2;
+}
+
+message GetNVLinkDomainRequest {
+    string id = 1;
+    bool with_components = 2;
+}
+
+message NVLinkDomain {
+    string id = 1;
+    string name = 2;
+    optional string topology = 3;
+    Phase operation_status = 4;
+    repeated Component components = 5;
+}
+
+message GetNVLinkDomainResponse {
+    NVLinkDomain domain = 1;
+}
+
+message GetListOfNVLinkDomainsRequest {
+    StringQueryInfo info = 1;
+    bool with_components = 2;
+    optional Pagination pagination = 3;
+    // NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order.
+    string order_by = 4;
+}
+
+message GetListOfNVLinkDomainsResponse {
+    repeated NVLinkDomain domains = 1;
     int32 total = 2;
 }
 
@@ -527,8 +608,8 @@ message UpgradeFirmwareRequest {
     // When true, proceed with the firmware update even if one or more
     // target components (or, for rack-scoped components, any host on the
     // owning rack) are reported as not ready for the operation by their
-    // persisted ComponentOperationStatus. The flag is intended for operator-
-    // supervised maintenance windows where the tenant impact has been
+    // persisted ComponentOperationStatus. The flag is intended for
+    // operator-supervised maintenance windows where the tenant impact has been
     // acknowledged out-of-band; setting it bypasses the readiness gate
     // that would otherwise block disruptive operations against tenanted
     // hardware. The bypass is recorded in the server log.
@@ -537,6 +618,11 @@ message UpgradeFirmwareRequest {
     // not supported for DPU-only updates or by the legacy NICo compute
     // firmware controller.
     FirmwareAuthenticationData authentication_data = 10;
+    // Overrides firmware version-based checks when deciding whether to apply
+    // the update. This allows same-version reapplication and downgrade when
+    // the selected component backend supports those operations. It does not
+    // bypass readiness checks or state-controller routing.
+    bool override_version_check = 11;
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -562,6 +648,7 @@ message GetComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components.
     repeated Filter filters = 2;  // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Component UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
 }
 
@@ -574,6 +661,8 @@ message ValidateComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs.
     repeated Filter filters = 2;           // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending for targeted components. Stable component and
+    // drift identities break equal-field ties before drift pagination.
     optional OrderBy order_by = 4;
 }
 
@@ -659,6 +748,10 @@ message PatchComponentRequest {
     optional string description = 4;      // Update description (JSON string)
     optional UUID rack_id = 5;            // Re-assign to a different rack
     repeated BMCInfo bmcs = 6;            // Update BMCs (matched by MAC address; create if new)
+    // Optional for backward compatibility. When omitted, position replaces all
+    // three coordinates. When set, supported paths are position.slot_id,
+    // position.tray_idx, and position.host_id; only those coordinates change.
+    google.protobuf.FieldMask update_mask = 7;
 }
 
 message PatchComponentResponse {
@@ -736,6 +829,20 @@ message PowerResetRackRequest {
     bool override_readiness_check = 6;
 }
 
+message ACPowerCycleRackRequest {
+    OperationTargetSpec target_spec = 1;  // Target racks or NVLink domains with an optional type filter, or specific components
+    string description = 2;               // optional task description
+    optional QueueOptions queue_options = 3;
+    optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    // When true, proceed with the AC power cycle even if one or more target
+    // components (or, for rack-scoped components, any host on the owning
+    // rack) are reported as not ready for the operation by their
+    // persisted ComponentOperationStatus. Intended for operator-supervised
+    // maintenance where tenant impact has been acknowledged out-of-band;
+    // the bypass is recorded in the server log.
+    bool override_readiness_check = 5;
+}
+
 message BringUpRackRequest {
     OperationTargetSpec target_spec = 1;  // Target racks, NVLink domains, or components for bring-up
     string description = 2;               // optional task description
@@ -771,6 +878,7 @@ message DecommissionRackRequest {
 message ListTasksRequest {
     optional UUID rack_id = 1;                  // Restrict by rack identifier.
     bool active_only = 2;                       // Restrict to non-terminal Tasks (Waiting, Pending, Running).
+    // Results are ordered by creation time descending, then UUID descending.
     optional Pagination pagination = 3;
     // Restrict to Tasks that target this component identifier, regardless of
     // component type. A rack_id plus
@@ -824,6 +932,64 @@ enum OperationType {
     OPERATION_TYPE_FIRMWARE_CONTROL = 2;
 }
 
+// TaskOperation is the typed, target-independent operation definition used by
+// new APIs. Existing operation APIs retain their established request messages.
+message TaskOperation {
+    // Required. Exactly one typed operation must be selected.
+    oneof operation {
+        PowerControlTaskOperation power_control = 1;
+        FirmwareControlTaskOperation firmware_control = 2;
+    }
+}
+
+enum PowerControlOperation {
+    POWER_CONTROL_OPERATION_UNSPECIFIED = 0;
+    POWER_CONTROL_OPERATION_POWER_ON = 1;
+    POWER_CONTROL_OPERATION_FORCE_POWER_ON = 2;
+    POWER_CONTROL_OPERATION_POWER_OFF = 3;
+    POWER_CONTROL_OPERATION_FORCE_POWER_OFF = 4;
+    POWER_CONTROL_OPERATION_RESTART = 5;
+    POWER_CONTROL_OPERATION_FORCE_RESTART = 6;
+    POWER_CONTROL_OPERATION_WARM_RESET = 7;
+    POWER_CONTROL_OPERATION_COLD_RESET = 8;
+}
+
+message PowerControlTaskOperation {
+    // Required. UNSPECIFIED and unknown values are rejected.
+    PowerControlOperation operation = 1;
+    // Bypasses the component readiness gate when the task executes.
+    bool override_readiness_check = 2;
+}
+
+enum FirmwareControlOperation {
+    FIRMWARE_CONTROL_OPERATION_UNSPECIFIED = 0;
+    FIRMWARE_CONTROL_OPERATION_UPGRADE = 1;
+    FIRMWARE_CONTROL_OPERATION_DOWNGRADE = 2;
+    FIRMWARE_CONTROL_OPERATION_ROLLBACK = 3;
+}
+
+message FirmwareControlTaskOperation {
+    // Required. UNSPECIFIED and unknown values are rejected.
+    FirmwareControlOperation operation = 1;
+    // Optional target firmware version. Omission leaves version selection to
+    // the firmware operation implementation.
+    optional string target_version = 2;
+    // Optional execution window. Supplied values are converted to whole Unix
+    // seconds. A value that converts to Unix second zero is rejected because
+    // zero represents omission. When both are set, end_time must be after
+    // start_time after conversion.
+    optional google.protobuf.Timestamp start_time = 3;
+    optional google.protobuf.Timestamp end_time = 4;
+    // Optional firmware sub-parts within each selected component. Empty means
+    // every firmware sub-part supported by that component.
+    repeated string sub_targets = 5;
+    // Bypasses the component readiness gate when the task executes.
+    bool override_readiness_check = 6;
+    // Overrides firmware version-based checks when the selected component
+    // backend applies the update.
+    bool override_version_check = 7;
+}
+
 message OperationRule {
     UUID id = 1;
     string name = 2;
@@ -869,6 +1035,7 @@ message GetOperationRuleRequest {
     UUID rule_id = 1;
 }
 
+// Results are ordered by creation time descending, then UUID descending.
 message ListOperationRulesRequest {
     optional OperationType operation_type = 1;
     optional bool is_default = 2;
@@ -879,6 +1046,191 @@ message ListOperationRulesRequest {
 message ListOperationRulesResponse {
     repeated OperationRule rules = 1;
     int32 total_count = 2;
+}
+
+// Event Rules API messages
+
+enum EventRuleSeverity {
+    EVENT_RULE_SEVERITY_UNSPECIFIED = 0;
+    EVENT_RULE_SEVERITY_INFO = 1;
+    EVENT_RULE_SEVERITY_WARNING = 2;
+    EVENT_RULE_SEVERITY_CRITICAL = 3;
+}
+
+enum EventRuleTargetStrategy {
+    EVENT_RULE_TARGET_STRATEGY_UNSPECIFIED = 0;
+    EVENT_RULE_TARGET_STRATEGY_COMPONENT = 1;
+    EVENT_RULE_TARGET_STRATEGY_RACK = 2;
+    EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS = 3;
+}
+
+enum EventRuleConflictStrategy {
+    EVENT_RULE_CONFLICT_STRATEGY_UNSPECIFIED = 0;
+    EVENT_RULE_CONFLICT_STRATEGY_QUEUE = 1;
+    EVENT_RULE_CONFLICT_STRATEGY_REJECT = 2;
+}
+
+enum EventRuleScopeType {
+    EVENT_RULE_SCOPE_TYPE_UNSPECIFIED = 0;
+    EVENT_RULE_SCOPE_TYPE_SITE = 1;
+    EVENT_RULE_SCOPE_TYPE_RACK = 2;
+}
+
+message EventRuleActionCondition {
+    // Optional. Matches when the event severity equals any listed value (OR).
+    // Omitted or empty imposes no severity constraint. When component_types is
+    // also non-empty, both field conditions must match (AND).
+    repeated EventRuleSeverity severities = 1;
+    // Optional. Matches a component resource whose type equals any listed value
+    // (OR). Omitted or empty imposes no component-type constraint. When
+    // severities is also non-empty, both field conditions must match (AND).
+    repeated ComponentType component_types = 2;
+}
+
+message EventRuleSubmitTaskAction {
+    reserved 1, 2, 3;
+    reserved "operation_type", "operation_code", "operation_payload_json";
+    EventRuleTargetStrategy target_strategy = 4;
+    EventRuleConflictStrategy conflict_strategy = 5;
+    string description = 6;
+    // Required. The action must specify exactly one typed operation. Targets
+    // are derived from the event and target_strategy rather than embedded in
+    // this operation.
+    TaskOperation operation = 7;
+}
+
+message EventRuleSendAlertAction {
+    EventRuleSeverity severity = 1;
+    string message = 2;
+}
+
+message EventRuleNoopAction {
+    string reason = 1;
+}
+
+message EventRuleAction {
+    string name = 1;
+    EventRuleActionCondition condition = 2;
+    oneof spec {
+        EventRuleSubmitTaskAction submit_task = 3;
+        EventRuleSendAlertAction send_alert = 4;
+        EventRuleNoopAction noop = 5;
+    }
+}
+
+message EventRule {
+    UUID id = 1;
+    bool read_only = 2;
+    string name = 3;
+    string description = 4;
+    bool enabled = 5;
+    string event_type = 6;
+    repeated EventRuleAction actions = 7;
+    google.protobuf.Timestamp created_at = 8;
+    google.protobuf.Timestamp updated_at = 9;
+}
+
+message CreateEventRuleRequest {
+    string name = 1;
+    string description = 2;
+    // Required. Must be registered by Flow. Supported value:
+    // "hardware.leak.detected".
+    string event_type = 3;
+    repeated EventRuleAction actions = 4;
+}
+
+message GetEventRuleRequest {
+    UUID rule_id = 1;
+}
+
+message GetEffectiveEventRuleRequest {
+    // Required. Must be registered by Flow. Supported value:
+    // "hardware.leak.detected".
+    string event_type = 1;
+    oneof target {
+        UUID rack_id = 2;
+        UUID component_id = 3;
+    }
+}
+
+message ListEventRulesRequest {
+    // Optional. When set, must be registered by Flow. Supported value:
+    // "hardware.leak.detected". Omit to return every supported event type.
+    optional string event_type = 1;
+    optional bool enabled = 2;
+    // Optional. Omit for offset 0 and limit 100. When present, offset must be
+    // non-negative and limit must be greater than zero. Results are ordered by
+    // UUID ascending.
+    optional Pagination pagination = 3;
+}
+
+message ListEventRulesResponse {
+    repeated EventRule rules = 1;
+    // Number of rules matching the filters before pagination.
+    int64 total = 2;
+}
+
+message EventRuleMetadataUpdate {
+    string name = 1;
+    string description = 2;
+}
+
+message EventRuleActionsUpdate {
+    repeated EventRuleAction actions = 1;
+}
+
+message UpdateEventRuleRequest {
+    UUID rule_id = 1;
+    oneof update {
+        EventRuleMetadataUpdate metadata = 2;
+        EventRuleActionsUpdate actions = 3;
+    }
+}
+
+message EnableEventRuleRequest {
+    UUID rule_id = 1;
+}
+
+message DisableEventRuleRequest {
+    UUID rule_id = 1;
+}
+
+message DeleteEventRuleRequest {
+    UUID rule_id = 1;
+}
+
+message EventRuleScope {
+    EventRuleScopeType type = 1;
+    // Required for rack scope and omitted for site scope.
+    UUID id = 2;
+}
+
+message EventRuleBinding {
+    UUID id = 1;
+    UUID rule_id = 2;
+    string event_type = 3;
+    EventRuleScope scope = 4;
+}
+
+message CreateEventRuleBindingRequest {
+    UUID rule_id = 1;
+    // Required. A rack scope ID must identify an existing inventory rack.
+    EventRuleScope scope = 2;
+}
+
+message GetEventRuleBindingRequest {
+    // Required. Must be registered by Flow. Supported value:
+    // "hardware.leak.detected".
+    string event_type = 1;
+    EventRuleScope scope = 2;
+}
+
+message DeleteEventRuleBindingRequest {
+    // Required. Identifies the event-family resolution slot to clear. Must be
+    // registered by Flow. Supported value: "hardware.leak.detected".
+    string event_type = 1;
+    // Required. Must exactly match the site or rack scope of the binding.
+    EventRuleScope scope = 2;
 }
 
 // Rack-rule associations API messages
@@ -1009,7 +1361,7 @@ message GetTaskScheduleRequest {
 }
 
 // ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-// Results are ordered by creation time ascending.
+// Results are ordered by creation time ascending, then UUID ascending.
 message ListTaskSchedulesRequest {
     optional UUID       rack_id      = 1;  // if set, return only schedules with a scope on this rack
     optional Pagination pagination   = 2;
@@ -1203,7 +1555,8 @@ message GetOperationRunResponse {
     OperationRun operation_run = 1;
 }
 
-// ListOperationRunsRequest lists operation runs, newest first by default.
+// ListOperationRunsRequest lists operation runs by creation time descending,
+// then UUID descending.
 message ListOperationRunsRequest {
     OperationRunFilter filter = 1;
     optional Pagination pagination = 2;
@@ -1246,6 +1599,7 @@ enum OperationRunTargetPhaseScope {
 // ListOperationRunTargetsRequest lists materialized rack execution targets for
 // one operation run. status UNKNOWN means no target-status filter is applied.
 // phase_scope UNKNOWN defaults to CURRENT_PHASE.
+// Results are ordered by phase index, then the unique sequence index.
 message ListOperationRunTargetsRequest {
     UUID operation_run_id = 1;
     OperationRunTargetStatus status = 2;
@@ -1571,7 +1925,31 @@ message NVLDomainTarget {
     oneof identifier {
         UUID id = 1;        // NVLink domain UUID
         string name = 2;    // NVLink domain name
+        string external_id = 4;
     }
     // Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain.
     repeated ComponentType component_types = 3;
+}
+
+// HealthReport is Flow's latest synchronized snapshot of Core aggregate health.
+message HealthReport {
+    string source = 1;
+    optional string triggered_by = 2;
+    optional google.protobuf.Timestamp observed_at = 3;
+    repeated HealthProbeSuccess successes = 4;
+    repeated HealthProbeAlert alerts = 5;
+}
+
+message HealthProbeSuccess {
+    string id = 1;
+    optional string target = 2;
+}
+
+message HealthProbeAlert {
+    string id = 1;
+    optional string target = 2;
+    optional google.protobuf.Timestamp in_alert_since = 3;
+    string message = 4;
+    optional string tenant_message = 5;
+    repeated string classifications = 6;
 }

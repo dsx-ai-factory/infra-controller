@@ -5,6 +5,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	stderrors "errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -263,6 +265,7 @@ func (s *PostgresStore) GetRackByIdentifier(
 		&dbquery.Pagination{Limit: 2},
 		nil,
 		withComponents,
+		false,
 	)
 
 	if err != nil {
@@ -333,9 +336,10 @@ func (s *PostgresStore) GetListOfRacks(
 	pagination *dbquery.Pagination,
 	orderBy *dbquery.OrderBy,
 	withComponents bool,
+	withExternalIDOnly bool,
 ) ([]*rack.Rack, int32, error) {
 	racks, total, err := model.GetListOfRacks(
-		ctx, s.pg.DB, info, manufacturerFilter, modelFilter, pagination, orderBy, withComponents,
+		ctx, s.pg.DB, info, manufacturerFilter, modelFilter, pagination, orderBy, withComponents, withExternalIDOnly,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -429,6 +433,9 @@ func (s *PostgresStore) GetComponentByBMCMAC(
 	}
 
 	c, err := model.GetComponentByBMCMAC(ctx, s.pg.DB, macAddress)
+	if stderrors.Is(err, model.ErrAmbiguousBMCMAC) {
+		return nil, status.Errorf(codes.FailedPrecondition, "component with BMC MAC %q is ambiguous", macAddress)
+	}
 	if err != nil {
 		return nil, s.checkDBGetError(err, fmt.Sprintf("component with BMC MAC %s", macAddress))
 	}
@@ -663,10 +670,11 @@ func (s *PostgresStore) GetListOfNVLDomains(
 func (s *PostgresStore) GetRacksForNVLDomain(
 	ctx context.Context,
 	nvlDomainID identifier.Identifier,
+	withComponents bool,
 ) ([]*rack.Rack, error) {
 	if !nvlDomainID.ValidateAtLeastOne() {
 		return nil, errors.GRPCErrorInvalidArgument(
-			"nvl domain id and name both are not specfied",
+			"nvl domain id, external id, or name is required",
 		)
 	}
 
@@ -674,6 +682,35 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 
 	operation := func(ctx context.Context, tx bun.Tx) error {
 		domainUUID := nvlDomainID.ID
+		externalID := nvlDomainID.ExternalID
+		// External IDs prefer racks; typed UUIDs retain domain membership lookup.
+		if externalID != "" {
+			var rackDAO model.Rack
+			q := tx.NewSelect().Model(&rackDAO).Where("r.external_id = ?", externalID)
+			if withComponents {
+				q = q.Relation("Components").Relation("Components.BMCs")
+			}
+			err := q.Scan(ctx)
+			if err == nil {
+				resolved, err := s.rackFromDAO(ctx, tx, &rackDAO)
+				if err != nil {
+					return err
+				}
+				results = append(results, resolved)
+				return nil
+			}
+			if !stderrors.Is(err, sql.ErrNoRows) {
+				return s.checkDBGetError(err, "rack for NVLink domain")
+			}
+			domainUUID, err = uuid.Parse(externalID)
+			if err != nil || domainUUID == uuid.Nil {
+				return errors.GRPCErrorNotFound(fmt.Sprintf("nvl domain %s", externalID))
+			}
+			_, err = s.getNVLDomain(ctx, tx, identifier.Identifier{ID: domainUUID})
+			if err != nil {
+				return err
+			}
+		}
 		if domainUUID == uuid.Nil {
 			nvlDomain, err := s.getNVLDomain(ctx, tx, nvlDomainID)
 			if err != nil {
@@ -689,7 +726,7 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 			domainUUID = nvlDomain.ID
 		}
 
-		racks, err := model.GetRacksForNVLDomain(ctx, tx, domainUUID)
+		racks, err := model.GetRacksForNVLDomain(ctx, tx, domainUUID, withComponents)
 		if err != nil {
 			return err
 		}
@@ -1199,12 +1236,13 @@ func convertDriftsFromModel(drifts []model.ComponentDrift) []ComponentDrift {
 			})
 		}
 		result = append(result, ComponentDrift{
-			ID:          d.ID,
-			ComponentID: d.ComponentID,
-			ExternalID:  d.ExternalID,
-			DriftType:   string(d.DriftType),
-			Diffs:       fieldDiffs,
-			CheckedAt:   d.CheckedAt,
+			ID:            d.ID,
+			ComponentID:   d.ComponentID,
+			ExternalID:    d.ExternalID,
+			ComponentType: d.ComponentType,
+			DriftType:     string(d.DriftType),
+			Diffs:         fieldDiffs,
+			CheckedAt:     d.CheckedAt,
 		})
 	}
 	return result

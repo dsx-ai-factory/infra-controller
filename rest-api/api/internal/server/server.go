@@ -4,7 +4,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -83,7 +82,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	}
 
 	tOptions := tsdkClient.Options{
-		HostPort: fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
+		HostPort: tcfg.GetHostPort(),
 		// This client connects to `cloud` namespace
 		Namespace: tcfg.Namespace,
 		ConnectionOptions: tsdkClient.ConnectionOptions{

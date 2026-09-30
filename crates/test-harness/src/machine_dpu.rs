@@ -230,6 +230,7 @@ async fn record_dpu_network_status(api: &Api, dpu_machine_id: DpuMachineId) {
             .map(|instance| instance.dpu_extension_service_version),
         dpu_extension_services,
         astra_config_status: None,
+        lldp: None,
     }))
     .await
     .expect("DPU network status should be recorded");

@@ -164,13 +164,13 @@ func (h CreateTaskRuleHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("task-rule-create-%s", uuid.NewString())
 	var flowResponse flowv1.CreateOperationRuleResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_CreateOperationRule_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Flow's CreateTaskRule returns only the new rule's ID; echo the
@@ -256,13 +256,13 @@ func (h GetTaskRuleHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("task-rule-get-%s", ruleID)
 	var flowResponse flowv1.OperationRule
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetOperationRule_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	if flowResponse.GetId() == nil || flowResponse.GetId().GetId() == "" {
@@ -355,13 +355,13 @@ func (h GetAllTaskRuleHandler) Handle(c echo.Context) error {
 	workflowID := fmt.Sprintf("task-rule-get-all-%s", common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListOperationRulesResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListOperationRules_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	apiRules := make([]*model.APITaskRule, 0, len(flowResponse.GetRules()))
@@ -456,13 +456,13 @@ func (h UpdateTaskRuleHandler) Handle(c echo.Context) error {
 	// separate executions rather than the later one reading the earlier result.
 	workflowID := fmt.Sprintf("task-rule-update-%s-%s", ruleID, uuid.NewString())
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_UpdateOperationRule_FullMethodName,
 		flowRequest, nil,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("RuleID", ruleID).Msg("finishing API handler")
@@ -541,13 +541,13 @@ func (h DeleteTaskRuleHandler) Handle(c echo.Context) error {
 	}
 	workflowID := fmt.Sprintf("task-rule-delete-%s", ruleID)
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_DeleteOperationRule_FullMethodName,
 		flowRequest, nil,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("RuleID", ruleID).Msg("finishing API handler")

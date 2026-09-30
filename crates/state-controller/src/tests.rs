@@ -155,12 +155,12 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 }
 
 #[derive(Debug, Default)]
-struct TestStateControllerIO {
+pub(crate) struct TestStateControllerIO {
     history_writes: AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
-struct TestObject {
+pub(crate) struct TestObject {
     id: String,
     controller_state: Versioned<TestObjectControllerState>,
 }
@@ -182,13 +182,13 @@ impl<'r> FromRow<'r, PgRow> for TestObject {
 /// State of a IB subnet as tracked by the controller
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
-enum TestObjectControllerState {
+pub(crate) enum TestObjectControllerState {
     A,
     B,
     C,
 }
 
-struct TestStateControllerContextObjects {}
+pub(crate) struct TestStateControllerContextObjects {}
 
 impl StateHandlerContextObjects for TestStateControllerContextObjects {
     type Services = ();
@@ -198,7 +198,7 @@ impl StateHandlerContextObjects for TestStateControllerContextObjects {
 #[derive(Debug, Default)]
 struct PanicInListObjectsStateControllerIO;
 
-async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
+pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     let mut txn = pool.begin().await.unwrap();
 
     sqlx::query(
@@ -246,7 +246,7 @@ async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     txn.commit().await.unwrap();
 }
 
-async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
+pub(crate) async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
     let version: ConfigVersion = ConfigVersion::initial();
     let state = TestObjectControllerState::A;
 
@@ -323,7 +323,7 @@ impl StateControllerIO for TestStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         let query = "UPDATE test_objects SET controller_state_version=$1, controller_state=$2::json
             where id=$3 AND controller_state_version=$4 returning id";
         let result = sqlx::query_scalar::<_, String>(query)
@@ -335,7 +335,10 @@ impl StateControllerIO for TestStateControllerIO {
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
-        Ok(result.is_some())
+        Ok(match result {
+            Some(_) => ConditionalWrite::Applied(()),
+            None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+        })
     }
 
     async fn persist_state_history(
@@ -429,7 +432,7 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
         _old_version: ConfigVersion,
         _new_version: ConfigVersion,
         _new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         unreachable!("persist_controller_state should never be called in this test")
     }
 
@@ -1384,7 +1387,7 @@ impl StateControllerIO for SlaTestStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         self.inner
             .persist_controller_state(txn, object_id, old_version, new_version, new_state)
             .await

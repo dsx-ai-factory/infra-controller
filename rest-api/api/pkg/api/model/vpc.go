@@ -6,7 +6,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -349,9 +348,9 @@ func (ascr APIVpcCreateRequest) Validate() error {
 		}
 	}
 
-	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > math.MaxUint16) {
+	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > maxVpcRoutingVni) {
 		return validation.Errors{
-			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", math.MaxUint16),
+			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", maxVpcRoutingVni),
 		}
 	}
 
@@ -373,7 +372,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 // that the handler has performed any cross-context checks Validate
 // cannot see (e.g. resolved network-virtualization against site
 // config). Specifically, the VNI cast is safe because Validate
-// bounds `Vni` to `[0, MaxUint16]`.
+// bounds `Vni` to `[0, maxVpcRoutingVni]`.
 func (ascr APIVpcCreateRequest) ToProto(vpc *cdbm.Vpc) *corev1.VpcCreationRequest {
 	var vni *uint32
 	if ascr.Vni != nil {
@@ -533,7 +532,7 @@ type APIVpc struct {
 	// ControllerVpcID is the ID of the corresponding VPC in Site Controller
 	ControllerVpcID *string `json:"controllerVpcId"`
 	// Labels is VPC labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// NVLinkLogicalPartitionSummary is the summary of the NVLinkLogicalPartition
@@ -579,7 +578,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 		InfrastructureProviderID:               util.GetUUIDPtrToStrPtr(&dbVpc.InfrastructureProviderID),
 		TenantID:                               util.GetUUIDPtrToStrPtr(&dbVpc.TenantID),
 		SiteID:                                 util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
-		Labels:                                 dbVpc.Labels,
+		Labels:                                 APILabels(dbVpc.Labels),
 		Status:                                 dbVpc.Status,
 		NetworkSecurityGroupID:                 dbVpc.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbVpc.NetworkSecurityGroupPropagationDetails),

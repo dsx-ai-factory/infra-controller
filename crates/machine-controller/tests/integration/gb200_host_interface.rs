@@ -63,7 +63,7 @@ async fn waiting_for_discovery_only_returns_gb200_to_platform_configuration(
         .first_mut()
         .expect("host Site Explorer report should contain a system")
         .model = Some("GB200 NVL".to_string());
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             endpoint.address,
             endpoint.report_version,
@@ -72,6 +72,7 @@ async fn waiting_for_discovery_only_returns_gb200_to_platform_configuration(
             txn.as_mut(),
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "host Site Explorer report should still have the expected version"
     );
     txn.commit().await?;

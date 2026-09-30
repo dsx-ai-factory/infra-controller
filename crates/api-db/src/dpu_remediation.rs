@@ -275,11 +275,17 @@ pub async fn find_remediations_by_remediation_id_and_machine(
         .map_err(|e| DatabaseError::new(query, e))
 }
 
+/// Records the script's approver in `script_reviewed_by`. Locks the remediation
+/// until the transaction ends so another approval cannot change that field
+/// between the check and the write.
+///
+/// `FOR NO KEY UPDATE` permits the foreign-key checks used when inserting
+/// remediation results while preventing competing changes to this row.
 pub async fn persist_approve_remediation(
     value: ApproveRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseError> {
-    let existing_query = "SELECT * from dpu_remediations WHERE id=$1";
+    let existing_query = "SELECT * FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
     let existing_remediation: Remediation = sqlx::query_as(existing_query)
         .bind(value.id)
         .fetch_optional(txn.deref_mut())
@@ -327,11 +333,14 @@ pub async fn persist_revoke_remediation(
     Ok(())
 }
 
+/// Sets `enabled` after checking that `script_reviewed_by` records an approval.
+/// Locks the remediation until the transaction ends so revocation cannot clear
+/// that approval between the check and the write.
 pub async fn persist_enable_remediation(
     value: EnableRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseError> {
-    let existing_query = "SELECT * from dpu_remediations WHERE id=$1";
+    let existing_query = "SELECT * FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
     let existing_remediation: Remediation = sqlx::query_as(existing_query)
         .bind(value.id)
         .fetch_optional(txn.deref_mut())

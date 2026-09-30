@@ -60,7 +60,7 @@ pub(crate) struct List {
     #[clap(
         long = "machine-id",
         visible_alias = "id",
-        help = "Show this host's recorded history instead of the outstanding worklist"
+        help = "Show recorded history for this host instead of the outstanding worklist"
     )]
     pub(super) machine_id: Option<HostMachineId>,
 }

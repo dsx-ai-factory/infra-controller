@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,10 @@ type bodyField struct {
 	schema     *Schema
 	wrapInList bool
 	itemType   SchemaType
+}
+
+var exactlyOneBodyFieldsByOperation = map[string][]string{
+	"create-vpc-prefix": {"prefix", "prefixLength"},
 }
 
 // GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
@@ -159,7 +164,9 @@ var commandPathAliases = map[string][]string{
 	"bringup-racks":                                     {"rack", "bringup-all"},
 	"cancel-task":                                       {"task", "cancel"},
 	"create-or-update-host-firmware-config":             {"host-firmware-config", "update"},
-	"create-or-update-machine-health-report":            {"health-report", "update"},
+	"create-or-update-machine-health-report":            {"machine", "health-report", "update"},
+	"create-or-update-rack-health-report":               {"rack", "health-report", "update"},
+	"create-or-update-tray-health-report":               {"tray", "health-report", "update"},
 	"create-or-update-tenant-identity-config":           {"tenant-identity", "update"},
 	"create-or-update-tenant-identity-token-delegation": {"tenant-identity", "token-delegation", "update"},
 	"create-site-explorer-endpoint-action":              {"site-explorer", "create"},
@@ -185,9 +192,8 @@ var commandPathAliases = map[string][]string{
 	"power-control-racks":                               {"rack", "power-all"},
 	"power-control-tray":                                {"tray", "power"},
 	"power-control-trays":                               {"tray", "power-all"},
+	"release-vpc-inactive-vni":                          {"vpc", "routing-profile", "release-inactive-vni"},
 	"replace-all-expected-rack":                         {"expected-rack", "replace-all"},
-	"reprovision-machine-dpu":                           {"machine", "dpu", "reprovision"},
-	"reset-machine-bmc":                                 {"machine", "bmc", "reset"},
 	"create-measured-boot-trusted-machine":              {"measured-boot", "machine", "approve"},
 	"create-measured-boot-trusted-profile":              {"measured-boot", "profile", "approve"},
 	"delete-measured-boot-trusted-machine":              {"measured-boot", "machine", "remove"},
@@ -196,6 +202,18 @@ var commandPathAliases = map[string][]string{
 	"validate-racks":                                    {"rack", "validate-all"},
 	"validate-tray":                                     {"tray", "validate"},
 	"validate-trays":                                    {"tray", "validate-all"},
+}
+
+// commandPathReplacements moves operations to reviewed resource paths without
+// retaining the generated path. Use this when an operation changes tag so its
+// old top-level resource and the synthetic path under the new tag both need to
+// disappear.
+var commandPathReplacements = map[string][]string{
+	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
+	"get-all-machine-validation-runs":    {"machine", "validation", "runs", "list"},
+	"reprovision-machine-dpu":            {"machine", "dpu", "reprovision"},
+	"reset-machine-bmc":                  {"machine", "bmc", "reset"},
+	"start-machine-validation":           {"machine", "validation", "start"},
 }
 
 // additionalCommandPathAliases preserves established command paths when an
@@ -273,6 +291,10 @@ func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string)
 
 func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
 	ops := collectOperations(spec)
+	ops = slices.DeleteFunc(ops, func(op resolvedOp) bool {
+		_, replaced := commandPathReplacements[op.op.OperationID]
+		return replaced
+	})
 	grouped := groupByTag(ops)
 
 	tagDescriptions := make(map[string]string)
@@ -321,6 +343,9 @@ func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
 	for operationID, path := range commandPathAliases {
 		addAlias(operationID, path)
 	}
+	for operationID, path := range commandPathReplacements {
+		addAlias(operationID, path)
+	}
 	for operationID, paths := range additionalCommandPathAliases {
 		for _, path := range paths {
 			addAlias(operationID, path)
@@ -344,7 +369,7 @@ func collectOperations(spec *Spec) []resolvedOp {
 			{"DELETE", item.Delete},
 		}
 		for _, me := range methods {
-			if me.op == nil {
+			if me.op == nil || me.op.Deprecated {
 				continue
 			}
 			tag := "other"
@@ -688,6 +713,9 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				if reqSet[name] {
 					usage += " (required)"
 				}
+				if fields := exactlyOneBodyFieldsByOperation[ro.op.OperationID]; slices.Contains(fields, name) {
+					usage += fmt.Sprintf(" (exactly one of %s is required)", exactlyOneBodyFlags(fields))
+				}
 				bodyFields = append(bodyFields, bodyField{
 					jsonName:   name,
 					flagName:   flagName,
@@ -764,6 +792,10 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			var body []byte
 			if hasBody {
 				body, err = buildRequestBody(c, bodyFields)
+				if err != nil {
+					return err
+				}
+				err = validateExactlyOneBodyFields(ro.op.OperationID, body)
 				if err != nil {
 					return err
 				}
@@ -1046,6 +1078,41 @@ func readFlagValue(c *cli.Context, p Parameter) string {
 
 func schemaToFlag(flagName, usage string, schema *Schema) cli.Flag {
 	return &cli.StringFlag{Name: flagName, Usage: usage}
+}
+
+func exactlyOneBodyFlags(fields []string) string {
+	flags := make([]string, 0, len(fields))
+	for _, field := range fields {
+		flags = append(flags, "--"+toKebab(field))
+	}
+	return strings.Join(flags, " or ")
+}
+
+func validateExactlyOneBodyFields(operationID string, body []byte) error {
+	fields := exactlyOneBodyFieldsByOperation[operationID]
+	if len(fields) == 0 {
+		return nil
+	}
+
+	values := make(map[string]json.RawMessage)
+	if len(body) > 0 {
+		err := json.Unmarshal(body, &values)
+		if err != nil {
+			return fmt.Errorf("invalid request body for %s: %w", operationID, err)
+		}
+	}
+
+	selected := 0
+	for _, field := range fields {
+		value, ok := values[field]
+		if ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return fmt.Errorf("exactly one of %s must be specified", exactlyOneBodyFlags(fields))
+	}
+	return nil
 }
 
 func buildRequestBody(c *cli.Context, bodyFields []bodyField) ([]byte, error) {

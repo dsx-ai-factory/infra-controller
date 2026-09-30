@@ -64,6 +64,9 @@ spec:
             - name: ssh
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           livenessProbe:

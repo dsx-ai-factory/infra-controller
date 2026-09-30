@@ -384,12 +384,21 @@ where
 #[serde(rename_all = "kebab-case")]
 pub struct TelemetryConfig {
     pub metrics_address: String,
+    /// Serves `/metrics` and `/ready` on `metrics_address`. `/ready` is
+    /// bound to this endpoint, so disabling it also removes readiness.
+    #[serde(default = "default_prometheus_enabled")]
+    pub prometheus_enabled: bool,
+}
+
+fn default_prometheus_enabled() -> bool {
+    true
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             metrics_address: TELEMETRY_METRICS_SERVICE_ADDRESS.to_string(),
+            prometheus_enabled: default_prometheus_enabled(),
         }
     }
 }
@@ -969,6 +978,10 @@ addresses = ["168.254.169.254/30"]
 
             "telemetry metrics-address" {
                 c.telemetry.metrics_address == "0.0.0.0:8888" => true,
+            }
+
+            "telemetry prometheus-enabled defaults to true when omitted" {
+                c.telemetry.prometheus_enabled => true,
             }
 
             "hbn root-dir" {

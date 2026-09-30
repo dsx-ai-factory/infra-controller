@@ -24,7 +24,7 @@ type APIExpectedRackCreateRequest struct {
 	// RackID is the operator-supplied identifier for the rack (string, not UUID).
 	// Unique per Site.
 	RackID string `json:"rackId"`
-	// RackProfileID identifies the rack profile this rack conforms to
+	// RackProfileID is retained for older clients and ignored; Core derives the profile.
 	RackProfileID string `json:"rackProfileId"`
 	// Name is the optional human-readable name of the expected rack
 	Name *string `json:"name"`
@@ -44,9 +44,6 @@ func (ercr *APIExpectedRackCreateRequest) Validate() error {
 		validation.Field(&ercr.RackID,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("RackID consists only of whitespace")),
-		validation.Field(&ercr.RackProfileID,
-			validation.Required.Error(validationErrorValueRequired),
-			validation.Match(util.NotAllWhitespaceRegexp).Error("RackProfileID consists only of whitespace")),
 		validation.Field(&ercr.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&ercr.Description,
@@ -66,14 +63,15 @@ func (ercr *APIExpectedRackCreateRequest) Validate() error {
 
 // APIExpectedRackUpdateRequest is the data structure to capture user request to update an ExpectedRack
 type APIExpectedRackUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update).
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// RackID is the operator-supplied rack identifier. It is immutable on
 	// update: it may be omitted or set to the existing value, but a changed
 	// value is rejected by the handler before any database mutation because
 	// Core and Flow use rackId as the identity key.
 	RackID *string `json:"rackId"`
-	// RackProfileID is the optional new rack profile ID
+	// RackProfileID is retained for older clients and ignored; updates preserve the stored profile.
 	RackProfileID *string `json:"rackProfileId"`
 	// Name is the optional new human-readable name of the expected rack
 	Name *string `json:"name"`
@@ -101,7 +99,7 @@ func (erur *APIExpectedRackUpdateRequest) Validate() error {
 
 	// Reject empty updates: require at least one mutable field. An update with
 	// no fields would still bump the timestamp and trigger a workflow round-trip.
-	if erur.RackID == nil && erur.RackProfileID == nil && erur.Name == nil && erur.Description == nil && erur.Labels == nil {
+	if erur.RackID == nil && erur.Name == nil && erur.Description == nil && erur.Labels == nil {
 		return validation.Errors{
 			"body": errors.New("at least one mutable field must be provided"),
 		}
@@ -112,10 +110,6 @@ func (erur *APIExpectedRackUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("RackID cannot be empty"),
 			validation.When(erur.RackID != nil && *erur.RackID != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("RackID consists only of whitespace"))),
-		validation.Field(&erur.RackProfileID,
-			validation.NilOrNotEmpty.Error("RackProfileID cannot be empty"),
-			validation.When(erur.RackProfileID != nil && *erur.RackProfileID != "",
-				validation.Match(util.NotAllWhitespaceRegexp).Error("RackProfileID consists only of whitespace"))),
 		validation.Field(&erur.Name,
 			validation.NilOrNotEmpty.Error("Name cannot be empty")),
 		validation.Field(&erur.Description,
@@ -151,7 +145,7 @@ type APIExpectedRack struct {
 	Description string `json:"description"`
 	// Labels carries arbitrary key/value pairs. Well-known keys (chassis.*,
 	// location.*) are used to convey chassis identity and physical location.
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the ExpectedRack was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the ExpectedRack was last updated
@@ -171,7 +165,7 @@ func NewAPIExpectedRack(dbModel *cdbm.ExpectedRack) *APIExpectedRack {
 		RackProfileID: dbModel.RackProfileID,
 		Name:          dbModel.Name,
 		Description:   dbModel.Description,
-		Labels:        dbModel.Labels,
+		Labels:        APILabels(dbModel.Labels),
 		Created:       dbModel.Created,
 		Updated:       dbModel.Updated,
 	}

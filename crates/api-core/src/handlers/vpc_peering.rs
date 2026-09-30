@@ -26,6 +26,7 @@ use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::tenant_prefix_overlap::{prefixes_overlap_across_vpcs, receiver_sources};
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::VpcPeeringPolicy;
 use crate::{CarbideError, CarbideResult};
@@ -53,51 +54,63 @@ pub(crate) async fn create(
         peer_vpc_id.ok_or_else(|| CarbideError::MissingArgument("peer_vpc_id cannot be null"))?;
 
     let mut txn = api.txn_begin().await?;
-    if api.runtime_config.tenant_prefix_overlap_enabled {
-        ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let checks_required = super::tenant_prefix_overlap::checks_required(api, &mut txn).await?;
+
+    // Compatibility is an invariant, independent of whether peering is
+    // enabled at this site, so incompatible requests consistently report an
+    // invalid argument.
+    let vpc1 = vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+        .await?
+        .pop()
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "VPC",
+            id: vpc_id.to_string(),
+        })?;
+    let vpc2 = vpc::find_by(
+        &mut txn,
+        ObjectColumnFilter::One(vpc::IdColumn, &peer_vpc_id),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "VPC",
+        id: peer_vpc_id.to_string(),
+    })?;
+    vpc1.config
+        .network_virtualization_type
+        .ensure_can_peer_with(vpc2.config.network_virtualization_type)
+        .map_err(CarbideError::from)?;
+
+    if matches!(
+        api.runtime_config.vpc_peering_policy,
+        None | Some(VpcPeeringPolicy::None)
+    ) {
+        return Err(CarbideError::FailedPrecondition(
+            "VPC peering is disabled at this site".to_string(),
+        )
+        .into());
     }
 
-    // Check this VPC peering is permitted under current site vpc_peering_policy
-    match api.runtime_config.vpc_peering_policy {
-        None | Some(VpcPeeringPolicy::None) => {
-            return Err(CarbideError::internal("VPC peering feature disabled".to_string()).into());
-        }
-        Some(VpcPeeringPolicy::Exclusive) => {
-            let vpcs1 =
-                vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id)).await?;
-            let vpc1 = vpcs1.first().ok_or_else(|| CarbideError::NotFoundError {
-                kind: "VPC",
-                id: vpc_id.to_string(),
-            })?;
-            let vpcs2 = vpc::find_by(
-                &mut txn,
-                ObjectColumnFilter::One(vpc::IdColumn, &peer_vpc_id),
-            )
-            .await?;
-            let vpc2 = vpcs2.first().ok_or_else(|| CarbideError::NotFoundError {
-                kind: "VPC",
-                id: peer_vpc_id.to_string(),
-            })?;
-
-            // Make sure the VPCs are allowed to peer based on their
-            // virtualization types. Their capabilities will determine
-            // if they are allowed or not.
-            vpc1.config
-                .network_virtualization_type
-                .ensure_can_peer_with(vpc2.config.network_virtualization_type)
-                .map_err(CarbideError::from)?;
-        }
-        Some(VpcPeeringPolicy::Mixed) => {
-            // Any combination of network virtualization types allowed
-        }
-    }
-
+    let previous_sources = if checks_required && !api.runtime_config.tenant_prefix_overlap_enabled {
+        receiver_sources_before_change(api, &mut txn, &[vpc_id, peer_vpc_id]).await?
+    } else {
+        vec![]
+    };
     let vpc_peering = db::create(&mut txn, vpc_id, peer_vpc_id, id).await?;
 
-    if api.runtime_config.tenant_prefix_overlap_enabled {
+    if checks_required {
         // Only these two receivers gain a source. Peers do not re-export
         // imported prefixes, but each endpoint may already import siblings.
+        validate_gate_off_imports(api, &mut txn, &previous_sources).await?;
         validate_receiver_prefixes(api, &mut txn, &[vpc_id, peer_vpc_id], None).await?;
+        super::tenant_prefix_overlap::validate_affected_instances(
+            api,
+            &mut txn,
+            &[vpc_id, peer_vpc_id],
+            None,
+        )
+        .await?;
     }
 
     txn.commit().await?;
@@ -113,15 +126,19 @@ pub(super) async fn validate_prefix_attachment(
     vpc_id: VpcId,
     prefix: IpNetwork,
 ) -> CarbideResult<()> {
-    if !api.runtime_config.tenant_prefix_overlap_enabled {
+    if !super::tenant_prefix_overlap::checks_required(api, txn).await? {
         return Ok(());
     }
     let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
-    if receivers.is_empty() {
-        return Ok(());
-    }
     receivers.push(vpc_id);
-    validate_receiver_prefixes(api, txn, &receivers, Some((vpc_id, prefix))).await
+    validate_receiver_prefixes(api, txn, &receivers, Some((vpc_id, prefix))).await?;
+    super::tenant_prefix_overlap::validate_affected_instances(
+        api,
+        txn,
+        &receivers,
+        Some((vpc_id, prefix)),
+    )
+    .await
 }
 
 /// A VPC type change can alter its own imports and what direct peers import
@@ -131,10 +148,65 @@ pub(super) async fn validate_vpc_type_change(
     api: &Api,
     txn: &mut PgConnection,
     vpc_id: VpcId,
+    previous_sources: &[(VpcId, Vec<VpcId>)],
 ) -> CarbideResult<()> {
     let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
     receivers.push(vpc_id);
-    validate_receiver_prefixes(api, txn, &receivers, None).await
+    validate_gate_off_imports(api, txn, previous_sources).await?;
+    validate_receiver_prefixes(api, txn, &receivers, None).await?;
+    super::tenant_prefix_overlap::validate_affected_instances(api, txn, &receivers, None).await
+}
+
+/// Captures imports before a gate-off writer changes peering visibility.
+pub(super) async fn receiver_sources_before_change(
+    api: &Api,
+    txn: &mut PgConnection,
+    receiver_ids: &[VpcId],
+) -> CarbideResult<Vec<(VpcId, Vec<VpcId>)>> {
+    let mut previous = Vec::with_capacity(receiver_ids.len());
+    for receiver_id in receiver_ids {
+        let receiver = vpc::find_by(
+            &mut *txn,
+            ObjectColumnFilter::One(vpc::IdColumn, receiver_id),
+        )
+        .await?
+        .pop()
+        .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
+        previous.push((
+            *receiver_id,
+            receiver_sources(&api.runtime_config, txn, &receiver).await?,
+        ));
+    }
+    Ok(previous)
+}
+
+/// Existing imports remain usable with the gate off; new imports cannot gain
+/// duplicate address space, even if only one copy would reach this receiver.
+/// Callers capture prior sources only with the gate off; enabled writers pass
+/// an empty slice and rely on the receiver overlap checks.
+async fn validate_gate_off_imports(
+    api: &Api,
+    txn: &mut PgConnection,
+    previous_sources: &[(VpcId, Vec<VpcId>)],
+) -> CarbideResult<()> {
+    for (receiver_id, previous) in previous_sources {
+        let receiver = vpc::find_by(
+            &mut *txn,
+            ObjectColumnFilter::One(vpc::IdColumn, receiver_id),
+        )
+        .await?
+        .pop()
+        .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
+        let gained = receiver_sources(&api.runtime_config, txn, &receiver)
+            .await?
+            .into_iter()
+            .filter(|source| !previous.contains(source))
+            .collect::<Vec<_>>();
+        if ::db::tenant_prefix_overlap::vpcs_use_duplicate_space(&mut *txn, &gained).await? {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+    Ok(())
 }
 
 /// Only newly visible source VPCs can introduce a prefix collision. Gaining
@@ -151,14 +223,12 @@ pub(super) fn vpc_type_change_expands_receivers(
     else {
         return false;
     };
-    let imports = |receiver: VpcVirtualizationType, source: VpcVirtualizationType| {
-        let imports_prefixes = match policy {
-            VpcPeeringPolicy::Mixed => true,
-            VpcPeeringPolicy::Exclusive => receiver.capabilities().peers_with.contains(&source),
-            VpcPeeringPolicy::None => false,
-        };
-        imports_prefixes
-            || (receiver.imports_peer_vnis_into_overlay() && source.vni_advertised_to_peers())
+    let imports = |receiver: VpcVirtualizationType, source: VpcVirtualizationType| match policy {
+        VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
+            receiver.capabilities().peers_with.contains(&source)
+                || (receiver.imports_peer_vnis_into_overlay() && source.vni_advertised_to_peers())
+        }
+        VpcPeeringPolicy::None => false,
     };
     ALL_VPC_VIRTUALIZATION_TYPES.iter().copied().any(|peer| {
         (imports(new_type, peer) && !imports(old_type, peer))
@@ -172,13 +242,14 @@ async fn validate_receiver_prefixes(
     receiver_ids: &[VpcId],
     candidate: Option<(VpcId, IpNetwork)>,
 ) -> CarbideResult<()> {
-    let Some(policy) = api
+    if api
         .runtime_config
         .vpc_peering_policy_on_existing
         .or(api.runtime_config.vpc_peering_policy)
-    else {
+        .is_none()
+    {
         return Ok(());
-    };
+    }
     for receiver_id in receiver_ids {
         let receiver = vpc::find_by(
             &mut *txn,
@@ -187,38 +258,7 @@ async fn validate_receiver_prefixes(
         .await?
         .pop()
         .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
-        let receiver_type = receiver.config.network_virtualization_type;
-        let mut sources = match policy {
-            VpcPeeringPolicy::Exclusive => db::get_vpc_peer_vnis(
-                txn,
-                *receiver_id,
-                receiver_type.capabilities().peers_with.to_vec(),
-            )
-            .await?
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>(),
-            VpcPeeringPolicy::Mixed => db::get_vpc_peer_ids(txn, *receiver_id).await?,
-            VpcPeeringPolicy::None => Vec::new(),
-        };
-        // Match `ethernet_virtualization`: VNI imports are independent of
-        // prefix imports, including `Some(VpcPeeringPolicy::None)`.
-        if receiver_type.imports_peer_vnis_into_overlay() {
-            let peer_types = ALL_VPC_VIRTUALIZATION_TYPES
-                .iter()
-                .copied()
-                .filter(|peer_type| peer_type.vni_advertised_to_peers())
-                .collect();
-            sources.extend(
-                db::get_vpc_peer_vnis(txn, *receiver_id, peer_types)
-                    .await?
-                    .into_iter()
-                    .map(|(id, _)| id),
-            );
-        }
-        sources.push(*receiver_id);
-        sources.sort_unstable();
-        sources.dedup();
+        let sources = receiver_sources(&api.runtime_config, txn, &receiver).await?;
         let mut prefixes = db::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
         if let Some((vpc_id, prefix)) = candidate
             && sources.contains(&vpc_id)
@@ -230,19 +270,6 @@ async fn validate_receiver_prefixes(
         }
     }
     Ok(())
-}
-
-fn prefixes_overlap_across_vpcs(prefixes: &[(VpcId, IpNetwork)]) -> bool {
-    prefixes
-        .iter()
-        .enumerate()
-        .any(|(index, (vpc_id, prefix))| {
-            prefixes[index + 1..].iter().any(|(other_vpc_id, other)| {
-                vpc_id != other_vpc_id
-                    && (super::tenant_prefix_overlap::contains_prefix(*prefix, *other)
-                        || super::tenant_prefix_overlap::contains_prefix(*other, *prefix))
-            })
-        })
 }
 
 pub(crate) async fn find_ids(

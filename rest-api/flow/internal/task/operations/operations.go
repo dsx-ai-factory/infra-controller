@@ -4,6 +4,7 @@
 package operations
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -16,19 +17,35 @@ import (
 )
 
 // ExtractRuleID peeks at the "rule_id" field in a serialized operation info
-// JSON blob. Returns nil if absent, empty, or unparseable.
-func ExtractRuleID(info json.RawMessage) *uuid.UUID {
+// JSON blob. An absent or empty field means no override; malformed persisted
+// JSON or a malformed rule ID is rejected instead of selecting a default rule.
+func ExtractRuleID(info json.RawMessage) (*uuid.UUID, error) {
 	var peek struct {
-		RuleID string `json:"rule_id"`
+		RuleID json.RawMessage `json:"rule_id"`
 	}
-	if err := json.Unmarshal(info, &peek); err != nil || peek.RuleID == "" {
-		return nil
-	}
-	parsed, err := uuid.Parse(peek.RuleID)
+	err := json.Unmarshal(info, &peek)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("decode operation info: %w", err)
 	}
-	return &parsed
+	if len(peek.RuleID) == 0 {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(peek.RuleID), []byte("null")) {
+		return nil, fmt.Errorf("rule_id must not be null")
+	}
+
+	var ruleID string
+	if err := json.Unmarshal(peek.RuleID, &ruleID); err != nil {
+		return nil, fmt.Errorf("decode rule_id: %w", err)
+	}
+	if ruleID == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(ruleID)
+	if err != nil || parsed == uuid.Nil {
+		return nil, fmt.Errorf("rule_id %q must be a valid non-zero UUID", ruleID)
+	}
+	return &parsed, nil
 }
 
 type Operation interface {
@@ -290,6 +307,9 @@ type FirmwareControlTaskInfo struct {
 	// maintenance windows and recorded as a warning log on the worker
 	// that executes the task; authorisation lives upstream.
 	OverrideReadinessCheck bool `json:"override_readiness_check,omitempty"`
+	// OverrideVersionCheck asks the component backend to override version-based
+	// skip and downgrade decisions when it supports doing so.
+	OverrideVersionCheck bool `json:"override_version_check,omitempty"`
 	// AuthenticationData remains encrypted while this payload is persisted in
 	// Flow or carried by Temporal. The final FirmwareControl activity decrypts
 	// it and sets AccessToken only on its in-memory copy.

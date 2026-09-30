@@ -26,20 +26,38 @@ pub enum BmcSuppressionSubsystem {
     Dhcp,
 }
 
-/// An active suppression request for one BMC MAC address and subsystem.
+/// The code path that owns a suppression row.
+///
+/// Part of the primary key so two callers can suppress the same MAC and
+/// subsystem independently. A subsystem stays suppressed while any source's
+/// row remains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum BmcSuppressionSource {
+    /// Machine, switch, or power-shelf decommissioning.
+    Decommissioning,
+    /// BMC credential rotation.
+    BmcCredentialRotation,
+    /// Host BMC factory reset during tenant release.
+    FactoryResetBmc,
+}
+
+/// An active suppression request for one BMC MAC address, subsystem, and source.
 #[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
 pub struct BmcSuppression {
     pub bmc_mac_address: MacAddress,
     pub subsystem: BmcSuppressionSubsystem,
+    pub source: BmcSuppressionSource,
     pub reason: String,
     pub requested_at: DateTime<Utc>,
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
-/// A new suppression request for one BMC MAC address and subsystem.
+/// A new suppression request for one BMC MAC address, subsystem, and source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewBmcSuppression {
     pub bmc_mac_address: MacAddress,
     pub subsystem: BmcSuppressionSubsystem,
+    pub source: BmcSuppressionSource,
     pub reason: String,
 }

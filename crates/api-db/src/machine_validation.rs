@@ -27,7 +27,7 @@ use sqlx::PgConnection;
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::db_read::DbReader;
 use crate::machine::MachineRowLockItem;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 impl MachineRowLockItem for MachineValidation {
     fn machine_id(&self) -> MachineId {
@@ -132,11 +132,18 @@ pub fn is_active(validation: &MachineValidation) -> bool {
         })
 }
 
+/// `ValidationNotActive` means the run is missing, has an end time, or is no
+/// longer `Started` or `InProgress`. The write does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationNotActive;
+
+/// `update_end_time_if_active` completes an active run and returns the updated
+/// row. A missing or inactive run returns `NotApplied(ValidationNotActive)`.
 pub async fn update_end_time_if_active(
     txn: &mut PgConnection,
     id: &MachineValidationId,
     status: &MachineValidationStatus,
-) -> DatabaseResult<Option<MachineValidation>> {
+) -> DatabaseResult<ConditionalWrite<MachineValidation, ValidationNotActive>> {
     let query = "
         UPDATE machine_validation
         SET end_time=NOW(),state=$2
@@ -144,12 +151,16 @@ pub async fn update_end_time_if_active(
         AND end_time IS NULL
         AND state IN ('Started', 'InProgress')
         RETURNING *";
-    sqlx::query_as::<_, MachineValidation>(query)
+    let updated = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(match updated {
+        Some(validation) => ConditionalWrite::Applied(validation),
+        None => ConditionalWrite::NotApplied(ValidationNotActive),
+    })
 }
 
 pub async fn mark_stale_if_active(
@@ -380,14 +391,18 @@ pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineValid
     find_by(txn, ObjectColumnFilter::<IdColumn>::All).await
 }
 
+/// `mark_machine_validation_complete` completes an active run, clears the
+/// machine's validation request, and updates its validation timestamp.
+/// A missing or inactive run returns `NotApplied(ValidationNotActive)` without
+/// changing the machine.
 pub async fn mark_machine_validation_complete(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     id: &MachineValidationId,
     status: MachineValidationStatus,
-) -> DatabaseResult<bool> {
-    let Some(_updated) = update_end_time_if_active(txn, id, &status).await? else {
-        return Ok(false);
+) -> DatabaseResult<ConditionalWrite<(), ValidationNotActive>> {
+    let ConditionalWrite::Applied(_) = update_end_time_if_active(txn, id, &status).await? else {
+        return Ok(ConditionalWrite::NotApplied(ValidationNotActive));
     };
 
     //Mark machine validation request to false
@@ -395,7 +410,7 @@ pub async fn mark_machine_validation_complete(
 
     crate::machine::update_machine_validation_time(machine_id, txn).await?;
 
-    Ok(true)
+    Ok(ConditionalWrite::Applied(()))
 }
 
 #[cfg(test)]
@@ -445,6 +460,53 @@ mod tests {
             .map_err(|e| DatabaseError::query(QUERY, e))?;
 
         Ok(id)
+    }
+
+    #[crate::sqlx_test]
+    async fn completion_returns_the_updated_run_and_rejects_repeated_completion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let id = insert_active_validation(txn.as_mut(), chrono::Utc::now(), 60, None).await?;
+        let status = MachineValidationStatus {
+            state: MachineValidationState::Failed,
+            ..MachineValidationStatus::default()
+        };
+
+        let ConditionalWrite::Applied(updated) =
+            update_end_time_if_active(txn.as_mut(), &id, &status).await?
+        else {
+            panic!("active validation should complete");
+        };
+        assert_eq!(updated.id, id);
+        assert!(updated.end_time.is_some());
+        assert_eq!(
+            updated.status.as_ref().map(|status| &status.state),
+            Some(&MachineValidationState::Failed)
+        );
+        txn.commit().await?;
+
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            mark_machine_validation_complete(
+                txn.as_mut(),
+                &test_machine_id(),
+                &id,
+                MachineValidationStatus {
+                    state: MachineValidationState::Success,
+                    ..MachineValidationStatus::default()
+                },
+            )
+            .await?,
+            ConditionalWrite::NotApplied(ValidationNotActive)
+        );
+        txn.commit().await?;
+
+        let persisted = find_by_id(&pool, &id).await?;
+        assert_eq!(persisted.end_time, updated.end_time);
+        assert_eq!(persisted.status, updated.status);
+
+        Ok(())
     }
 
     #[crate::sqlx_test]

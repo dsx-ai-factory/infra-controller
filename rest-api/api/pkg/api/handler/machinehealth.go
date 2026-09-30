@@ -42,7 +42,7 @@ func NewGetAllMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientP
 // Handle godoc
 // @Summary Get all Machine Health Reports
 // @Description Get all health report overrides for a Machine.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -180,7 +180,7 @@ func NewCreateOrUpdateMachineHealthReportHandler(dbSession *cdb.Session, scp *sc
 // Handle godoc
 // @Summary Insert Machine Health Report
 // @Description Add or update a Machine health report override.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -326,7 +326,7 @@ func NewDeleteMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientP
 // Handle godoc
 // @Summary Remove Machine Health Report
 // @Description Remove a Machine health report override.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth

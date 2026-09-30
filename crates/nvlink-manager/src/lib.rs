@@ -1737,7 +1737,8 @@ impl NvlPartitionMonitor {
             .await;
     }
 
-    /// Persists a non-nil rack observation in a short, independent transaction.
+    /// Persists a non-nil rack observation on the rack's switches and power
+    /// shelves in one short, independent transaction.
     ///
     /// Nil observations and database failures leave the last valid value
     /// unchanged. Publication must not block partition reconciliation.
@@ -1752,20 +1753,26 @@ impl NvlPartitionMonitor {
             let changed_switches =
                 db::switch::update_nvlink_domain_uuid_for_rack(&mut txn, rack_id, domain_uuid)
                     .await?;
+            let changed_power_shelves =
+                db::power_shelf::update_nvlink_domain_uuid_for_rack(&mut txn, rack_id, domain_uuid)
+                    .await?;
 
             txn.commit().await?;
 
-            Ok(changed_switches)
+            Ok((changed_switches, changed_power_shelves))
         }
         .await;
 
         match update_result {
-            Ok(changed_switches) if !changed_switches.is_empty() => {
+            Ok((changed_switches, changed_power_shelves))
+                if !changed_switches.is_empty() || !changed_power_shelves.is_empty() =>
+            {
                 tracing::info!(
                     %rack_id,
                     %domain_uuid,
                     changed_switch_count = changed_switches.len(),
-                    "Recorded NMX-C NVLink domain for rack switches"
+                    changed_power_shelf_count = changed_power_shelves.len(),
+                    "Recorded NMX-C NVLink domain for rack switches and power shelves"
                 );
             }
             Ok(_) => {}
@@ -1774,7 +1781,7 @@ impl NvlPartitionMonitor {
                     %rack_id,
                     %domain_uuid,
                     %error,
-                    "Failed to record NMX-C NVLink domain for rack switches; continuing partition monitor work"
+                    "Failed to record NMX-C NVLink domain for rack switches and power shelves; continuing partition monitor work"
                 );
             }
         }
@@ -2549,8 +2556,16 @@ impl NvlPartitionMonitor {
             ))
         })?;
         for (machine_id, observations) in observations {
-            db::machine::update_nvlink_status_observation(&mut obs_txn, &machine_id, &observations)
-                .await?;
+            if let db::ConditionalWrite::NotApplied(reason) =
+                db::machine::update_nvlink_status_observation(
+                    &mut obs_txn,
+                    &machine_id,
+                    &observations,
+                )
+                .await?
+            {
+                return Err(db::DatabaseError::from(reason).into());
+            }
         }
         obs_txn.commit().await.map_err(|e| {
             NvLinkManagerError::internal(format!(
@@ -3387,6 +3402,7 @@ mod machine_group_tests {
     use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
     use carbide_uuid::rack::{RackId, RackProfileId};
+    use db::test_support::power_shelf::create_seeded;
     use db::test_support::switch::create_seeded_discovered;
     use model::hardware_info::MachineNvLinkInfo;
     use model::machine::{HostHealthConfig, ManagedHostStateSnapshot};
@@ -3619,6 +3635,13 @@ mod machine_group_tests {
                 .await?;
         }
 
+        let power_shelf = create_seeded(txn.as_mut(), 33, "rack power shelf").await?;
+        sqlx::query("UPDATE power_shelves SET rack_id = $1 WHERE id = $2")
+            .bind(&rack_id)
+            .bind(power_shelf.id)
+            .execute(txn.as_mut())
+            .await?;
+
         txn.commit().await?;
 
         let mut join_set = JoinSet::new();
@@ -3735,17 +3758,23 @@ mod machine_group_tests {
             .record_rack_switch_domain_uuid(&rack_id, NvLinkDomainId::nil())
             .await;
 
-        let matching_switch_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM switches WHERE rack_id = $1 AND nvlink_domain_uuid = $2",
+        let matching_counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM switches WHERE rack_id = $1 AND nvlink_domain_uuid = $2),
+                (SELECT COUNT(*) FROM power_shelves WHERE rack_id = $1 AND nvlink_domain_uuid = $2)",
         )
         .bind(&rack_id)
         .bind(domain_uuid)
         .fetch_one(&pool)
         .await?;
 
-        assert_eq!(matching_switch_count, 2);
+        assert_eq!(matching_counts, (2, 1));
 
         sqlx::query("UPDATE switches SET nvlink_domain_uuid = NULL WHERE rack_id = $1")
+            .bind(&rack_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE power_shelves SET nvlink_domain_uuid = NULL WHERE rack_id = $1")
             .bind(&rack_id)
             .execute(&pool)
             .await?;
@@ -3754,15 +3783,17 @@ mod machine_group_tests {
             .observe_and_record_rack_switch_domain_uuid(&rack_id, "http://nmxc.example:9370")
             .await;
 
-        let matching_switch_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM switches WHERE rack_id = $1 AND nvlink_domain_uuid = $2",
+        let matching_counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM switches WHERE rack_id = $1 AND nvlink_domain_uuid = $2),
+                (SELECT COUNT(*) FROM power_shelves WHERE rack_id = $1 AND nvlink_domain_uuid = $2)",
         )
         .bind(&rack_id)
         .bind(domain_uuid)
         .fetch_one(&pool)
         .await?;
 
-        assert_eq!(matching_switch_count, 2);
+        assert_eq!(matching_counts, (2, 1));
 
         drop(monitor);
         join_set.shutdown().await;

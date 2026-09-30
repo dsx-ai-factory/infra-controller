@@ -649,7 +649,31 @@ impl ExpectedMachine {
     pub fn normalize_host_bmc(
         &mut self,
         previous: Option<&ExpectedMachine>,
+        overrides: LegacyHostBmcOverrides,
+    ) -> Result<(), &'static str> {
+        self.normalize_host_bmc_inner(previous, overrides, true)
+    }
+
+    /// Normalize a Host BMC after applying explicitly selected PATCH fields.
+    ///
+    /// Selected top-level fields override the nested declaration even when
+    /// they equal stored values. Selecting only the address preserves the
+    /// merged allocation policy. Full-update callers use
+    /// [`Self::normalize_host_bmc`], which treats unchanged top-level values
+    /// copied from a previous read as implicit.
+    pub fn normalize_host_bmc_patch(
+        &mut self,
+        previous: &ExpectedMachine,
+        overrides: LegacyHostBmcOverrides,
+    ) -> Result<(), &'static str> {
+        self.normalize_host_bmc_inner(Some(previous), overrides, false)
+    }
+
+    fn normalize_host_bmc_inner(
+        &mut self,
+        previous: Option<&ExpectedMachine>,
         mut overrides: LegacyHostBmcOverrides,
+        is_legacy_update: bool,
     ) -> Result<(), &'static str> {
         let mut host_bmc_indexes = self
             .data
@@ -689,7 +713,7 @@ impl ExpectedMachine {
             })
             .unwrap_or_else(|| self.compatibility_host_bmc());
 
-        if let Some(previous_host_bmc) = previous_host_bmc.as_ref() {
+        if is_legacy_update && let Some(previous_host_bmc) = previous_host_bmc.as_ref() {
             // Full-update clients commonly echo the compatibility fields from
             // a read. Some also drop interface roles they do not understand.
             // Matching values are projections, not new overrides; ignoring
@@ -751,7 +775,7 @@ impl ExpectedMachine {
 
         if let Some(ip_address) = overrides.ip_address {
             host_bmc.fixed_ip = ip_address;
-            if overrides.ip_allocation.is_none() {
+            if is_legacy_update && overrides.ip_allocation.is_none() {
                 host_bmc.ip_allocation = None;
                 compatibility_allocation = BmcIpAllocationType::Auto;
             }

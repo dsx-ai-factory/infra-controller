@@ -77,11 +77,10 @@ impl DellPowerEdgeR760Bf4<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
-        let callbacks = Some(callbacks);
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let serial_number = Some(self.product_serial_number.to_string().into());
         let system_id = "System.Embedded.1";
 
@@ -119,7 +118,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                 eth_interfaces: Some(eth_interfaces),
                 serial_number,
                 boot_order_mode: redfish::computer_system::BootOrderMode::OrderedCollection,
-                callbacks,
+                callbacks: Some(callbacks),
                 chassis: vec!["System.Embedded.1".into()],
                 boot_options: Some(boot_options),
                 bios_mode: redfish::computer_system::BiosMode::DellOem,
