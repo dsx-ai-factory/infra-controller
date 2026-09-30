@@ -186,20 +186,20 @@ struct RackArgs {
 struct FirmwareSourceArgs {
     #[clap(
         long = "target-version",
-        help = "Firmware target version for legacy direct-update paths"
+        help = "Firmware target version for legacy direct-update paths; exactly one of --target-version and --sot-json-file is required"
     )]
     target_version: Option<String>,
 
     #[clap(
         long = "sot-json-file",
         value_name = "PATH",
-        help = "SOT JSON file for RMS ApplyFirmwareObject"
+        help = "SOT JSON file for RMS ApplyFirmwareObject; exactly one of --target-version and --sot-json-file is required"
     )]
     sot_json_file: Option<PathBuf>,
 
     #[clap(
         long = "access-token",
-        help = "Artifact access token for RMS SOT JSON downloads; omit or pass empty for NOAUTH"
+        help = "Artifact access token for RMS SOT JSON downloads; omit or pass empty for NOAUTH; only valid with --sot-json-file"
     )]
     access_token: Option<String>,
 }
@@ -363,13 +363,14 @@ mod tests {
     use super::*;
 
     fn temp_sot_file(contents: &str) -> PathBuf {
+        // Tests run in parallel and the clock may tick coarsely (microseconds
+        // on macOS), so a timestamp alone can collide; the counter keeps every
+        // file name unique within the process.
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "bmm-sot-{}-{}.json",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time before unix epoch")
-                .as_nanos()
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, contents).expect("write test SOT JSON");
         path
