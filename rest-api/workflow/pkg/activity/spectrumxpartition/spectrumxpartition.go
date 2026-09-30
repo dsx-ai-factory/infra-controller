@@ -5,6 +5,7 @@ package spectrumxpartition
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -101,11 +102,19 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 	for _, controllerSxp := range sxpInventory.SpxPartitions {
 		slogger := logger.With().Str("SpectrumX Partition ID", controllerSxp.GetId().GetValue()).Logger()
 
-		// TODO: Since Site is the source of truth, we must auto-create any Partitions that are in the Site inventory but not in the DB
 		sxp, ok := existingSxpIDMap[controllerSxp.GetId().GetValue()]
+
+		// No active REST row for this inventory Partition: create one or undelete a soft-deleted
+		// match, then fall through so the main loop applies Site-reported field updates.
 		if !ok {
-			slogger.Error().Msg("SpectrumX Partition does not have a record in DB, possibly created directly on Site")
-			continue
+			sxp = msxp.createOrUpdateSpectrumXPartitionFromSite(ctx, site, controllerSxp)
+			if sxp == nil {
+				continue
+			}
+
+			// Keep the in-memory map in sync so later inventory entries see this Partition.
+			existingSxpIDMap[sxp.ID.String()] = sxp
+			slogger.Info().Str("SpectrumX Partition ID", sxp.ID.String()).Msg("created or undeleted SpectrumX Partition from Site inventory")
 		}
 
 		reportedSxpIDMap[sxp.ID] = true
@@ -228,6 +237,156 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 	}
 
 	return nil
+}
+
+// createOrUpdateSpectrumXPartitionFromSite creates a REST SpectrumX Partition from Site
+// inventory, or undeletes a matching soft-deleted row. Field refresh after undelete is left
+// to UpdateSpectrumXPartitionsInDB. Returns nil when skipped or on failure.
+func (msxp ManageSpectrumXPartition) createOrUpdateSpectrumXPartitionFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	controllerSxp *corev1.SpxPartition,
+) *cdbm.SpectrumXPartition {
+	logger := log.With().
+		Str("Activity", "UpdateSpectrumXPartitionsInDB").
+		Str("Site ID", site.ID.String()).
+		Str("SpectrumX Partition ID", controllerSxp.GetId().GetValue()).
+		Logger()
+
+	sxpID, err := uuid.Parse(controllerSxp.GetId().GetValue())
+	if err != nil {
+		logger.Warn().Msgf("unable to create SpectrumX Partition found on Site: failed to parse ID, not a valid UUID %s", controllerSxp.GetId().GetValue())
+		return nil
+	}
+
+	org := controllerSxp.GetTenantOrganizationId()
+	if org == "" {
+		logger.Warn().Msg("unable to create SpectrumX Partition found on Site: Partition on Site is reporting empty Tenant organization ID")
+		return nil
+	}
+
+	name := controllerSxp.GetMetadata().GetName()
+	if name == "" {
+		name = fmt.Sprintf("recovered-%s", sxpID.String()[:8])
+	}
+
+	var description *string
+	desc := controllerSxp.GetMetadata().GetDescription()
+	if desc != "" {
+		description = &desc
+	}
+
+	var labels cdbm.Labels
+	labels.FromProto(controllerSxp.GetMetadata().GetLabels())
+
+	var vni *int
+	if controllerSxp.GetVni() != 0 {
+		vni = cwutil.GetPtr(int(controllerSxp.GetVni()))
+	}
+
+	readyStatus := cdbm.SpectrumXPartitionStatusReady
+	readyMsg := "SpectrumX Partition was found on Site, Ready for use"
+
+	// Create/undelete under one transaction so concurrent inventory pages cannot insert duplicates.
+	sxp, err := cdb.WithTxResult(ctx, msxp.dbSession, func(tx *cdb.Tx) (*cdbm.SpectrumXPartition, error) {
+		sxpDAO := cdbm.NewSpectrumXPartitionDAO(msxp.dbSession)
+
+		// Core creates each Partition under the ID this side supplied, so primary-key lookup is sufficient.
+		matches, _, reloadErr := sxpDAO.GetAll(ctx, tx, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: []uuid.UUID{sxpID}, SiteIDs: []uuid.UUID{site.ID}, IncludeDeleted: true,
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to retrieve Partition by ID, DB error: %w", reloadErr)
+		}
+
+		if len(matches) > 0 {
+			existingSxp := &matches[0]
+			if existingSxp.Deleted == nil {
+				return existingSxp, nil
+			}
+			if existingSxp.Org != org {
+				logger.Warn().Msgf("unable to create SpectrumX Partition found on Site: tenant organization differs in REST cache and Site record %s", org)
+				return nil, nil
+			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a Partition the snapshot never
+			// saw removed. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingSxp.Deleted) {
+				logger.Info().Msgf("not undeleting SpectrumX Partition %s yet because it was deleted more recently than the inventory interval", sxpID)
+				return nil, nil
+			}
+
+			restored, clearErr := sxpDAO.Clear(ctx, tx, cdbm.SpectrumXPartitionClearInput{SpectrumXPartitionID: existingSxp.ID, Deleted: true})
+			if clearErr != nil {
+				return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to clear soft-delete timestamp for Partition, DB error: %w", clearErr)
+			}
+
+			// A row only reaches soft-deletion from Deleting, and UpdateSpectrumXPartitionsInDB
+			// never promotes a Deleting row, so the undelete has to restore Ready itself or the
+			// Partition would sit in Deleting for as long as the Site keeps reporting it.
+			// Other Site-reported field updates are left to UpdateSpectrumXPartitionsInDB.
+			if restored.Status != readyStatus {
+				statusErr := msxp.updateSpectrumXPartitionStatusInDB(ctx, tx, restored.ID, &readyStatus, &readyMsg)
+				if statusErr != nil {
+					return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to restore status for undeleted Partition, DB error: %w", statusErr)
+				}
+				restored.Status = readyStatus
+			}
+			return restored, nil
+		}
+
+		tenants, _, tenantErr := cdbm.NewTenantDAO(msxp.dbSession).GetAll(
+			ctx, tx, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil,
+		)
+		if tenantErr != nil {
+			return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to retrieve Tenant by organization, DB error: %w", tenantErr)
+		}
+		if len(tenants) == 0 {
+			logger.Warn().Msgf("unable to create SpectrumX Partition found on Site: no Tenants were found for org: %s", org)
+			return nil, nil
+		}
+		tenant := &tenants[0]
+
+		// If an active Partition already uses this name for the Tenant/Site, append a recovered suffix.
+		nameConflicts, _, nameErr := sxpDAO.GetAll(ctx, tx, cdbm.SpectrumXPartitionFilterInput{
+			Names: []string{name}, TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{site.ID},
+		}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if nameErr != nil {
+			return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to retrieve Partition by name, DB error: %w", nameErr)
+		}
+		if len(nameConflicts) > 0 {
+			name = fmt.Sprintf("%s-recovered-%s", name, sxpID.String()[:8])
+		}
+
+		created, createErr := sxpDAO.Create(ctx, tx, cdbm.SpectrumXPartitionCreateInput{
+			SpectrumXPartitionID: &sxpID,
+			Name:                 name,
+			Description:          description,
+			TenantOrg:            org,
+			SiteID:               site.ID,
+			TenantID:             tenant.ID,
+			VNI:                  vni,
+			Labels:               labels,
+			Status:               readyStatus,
+			CreatedBy:            tenant.CreatedBy,
+		})
+		if createErr != nil {
+			return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to create Partition, DB error: %w", createErr)
+		}
+
+		_, statusErr := cdbm.NewStatusDetailDAO(msxp.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: created.ID.String(), Status: string(readyStatus), Message: &readyMsg,
+		})
+		if statusErr != nil {
+			return nil, fmt.Errorf("unable to create SpectrumX Partition found on Site: failed to create Status Detail, DB error: %w", statusErr)
+		}
+		return created, nil
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to create or undelete SpectrumX Partition from Site inventory")
+		return nil
+	}
+	return sxp
 }
 
 // updateSpectrumXPartitionStatusInDB is a helper function to write SpectrumXPartition status updates to DB

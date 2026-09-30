@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -27,6 +28,8 @@ use ufm_mock::{InventoryConfig, UfmAuthToken, UfmMock};
 
 use crate::config::{ControllerConfig, GatewayConfig};
 use crate::health;
+use crate::ownership::{Ownership, OwnershipHandle, OwnershipMap, RackStatusClient};
+use crate::rms_proxy::{self, RmsProxy};
 use crate::sources::{SourceList, SourceListCheck, SourceListClient, SourceSetChange};
 
 /// Process exit code used when the controller's source set moved away from the one this gateway
@@ -52,45 +55,76 @@ impl ExitReason {
     }
 }
 
-/// UFM mock plus gateway-owned routes, bound to one controller source set.
+/// UFM mock, RMS proxy and gateway-owned routes, bound to one controller source set.
 ///
 /// The HTTP router is available immediately so that liveness probes succeed while the gateway
-/// waits for the controller. Inventory reconciliation and readiness start in [`Self::bootstrap`].
+/// waits for the controller. Inventory reconciliation, rack ownership polling, RMS routing and
+/// readiness start in [`Self::bootstrap`]; until then routed RMS RPCs answer `UNAVAILABLE`.
 pub struct Gateway {
     config: GatewayConfig,
     ufm: UfmMock,
     metrics_setup: MetricsSetup,
     cancellation: CancellationToken,
     reconciliation: Option<JoinHandle<()>>,
+    /// Stands in for the ownership map until bootstrap has the source list to build it from.
+    ownership: OwnershipHandle,
+    ownership_poll: Option<JoinHandle<()>>,
+    rms: Arc<RmsProxy>,
 }
 
 impl Gateway {
-    /// Creates the UFM mock and metrics registry; nothing is served or polled yet.
+    /// Creates the UFM mock, the RMS proxy and the metrics registry; nothing is served or polled
+    /// yet. The CA file named by `sources.ca_cert_path` is read here.
     pub fn new(config: GatewayConfig, auth_token: &UfmAuthToken) -> eyre::Result<Self> {
         let metrics_setup = new_metrics_setup("carbide-mat-protocol-gateway", "carbide", false)?;
         // Not ready until `bootstrap` has a source list; the metrics endpoint shares the flag.
         metrics_setup.health_controller.set_ready(false);
         let ufm = UfmMock::new(&config.ufm, auth_token, &metrics_setup.meter)?;
+        let ownership = OwnershipHandle::new();
+        let rms = Arc::new(RmsProxy::new(
+            Arc::new(ownership.clone()),
+            &config.sources,
+            &config.rms,
+        )?);
         Ok(Self {
             config,
             ufm,
             metrics_setup,
             cancellation: CancellationToken::new(),
             reconciliation: None,
+            ownership,
+            ownership_poll: None,
+            rms,
         })
     }
 
-    /// UFM routes and probe routes on one router.
+    /// UFM routes, probe routes and both RMS gRPC services on one router.
     pub fn router(&self) -> Router {
         self.ufm
             .router()
-            .merge(health::router(self.metrics_setup.health_controller.clone()))
+            .merge(health::router(
+                self.metrics_setup.health_controller.clone(),
+                self.ownership.clone(),
+            ))
+            .merge(rms_proxy::router(self.rms.clone()))
     }
 
-    /// Waits for a usable source list, then starts UFM reconciliation against it and marks the
-    /// gateway ready. Returns the list the gateway is now bound to.
+    /// Waits for a usable source list, then binds the gateway to it: takes the first rack
+    /// ownership snapshot of every source and keeps polling, points the RMS proxy at the
+    /// instances, starts UFM reconciliation, and marks the gateway ready once every source has
+    /// answered and no rack is claimed twice. Returns the list the gateway is now bound to.
     pub async fn bootstrap(&mut self, client: &SourceListClient) -> eyre::Result<SourceList> {
         let source_list = wait_for_source_list(client, &self.config.controller).await?;
+
+        let ownership = OwnershipMap::new(&source_list, &self.config.ownership);
+        let status_client = RackStatusClient::new(&self.config.sources, &self.config.ownership)?;
+        ownership.poll_once(&status_client).await;
+        for blocker in ownership.blockers() {
+            tracing::warn!(%blocker, "Rack ownership is not ready after the initial poll");
+        }
+        self.rms.bind_sources(&source_list)?;
+        self.ownership.bind(Arc::new(ownership.clone()));
+
         let static_sources = source_list.inventory_sources(&self.config.sources);
         tracing::info!(
             generation = %source_list.generation,
@@ -107,7 +141,10 @@ impl Gateway {
             None,
             self.cancellation.child_token(),
         ));
-        self.metrics_setup.health_controller.set_ready(true);
+        let readiness = self.metrics_setup.health_controller.clone();
+        readiness.set_ready(ownership.is_ready());
+        self.ownership_poll =
+            Some(ownership.spawn(status_client, readiness, self.cancellation.child_token()));
         Ok(source_list)
     }
 
@@ -130,11 +167,15 @@ impl Gateway {
         }))
     }
 
-    /// Stops reconciliation and the metrics endpoint and waits for them to finish.
+    /// Stops reconciliation, ownership polling and the metrics endpoint and waits for them to
+    /// finish.
     pub async fn shutdown(self) -> eyre::Result<()> {
         self.cancellation.cancel();
         if let Some(reconciliation) = self.reconciliation {
             reconciliation.await?;
+        }
+        if let Some(ownership_poll) = self.ownership_poll {
+            ownership_poll.await?;
         }
         drop(self.metrics_setup);
         Ok(())

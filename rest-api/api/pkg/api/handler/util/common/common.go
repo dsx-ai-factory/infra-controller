@@ -432,12 +432,21 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  mc.ID,
 				IsAssigned: cutil.GetPtr(true),
+				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
 			}
 
 			// return the updated machine
 			mcu, err := mcDAO.Update(ctx, tx, updateInput)
 			if err != nil {
 				continue
+			}
+			_, err = cdbm.NewStatusDetailDAO(dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: mc.ID,
+				Status:   cdbm.MachineStatusInUse,
+				Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+			})
+			if err != nil {
+				return nil, err
 			}
 			return mcu, nil
 		}
@@ -732,7 +741,7 @@ func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
 func HandleTxError(c echo.Context, logger zerolog.Logger, err error, fallback string) error {
 	var apiErr *cutil.APIError
 	if errors.As(err, &apiErr) {
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		return apiErr.Send(c)
 	}
 	if errors.Is(err, cdb.ErrTransactionInitiation) {
 		logger.Error().Err(err).Msg("DB transaction initiation failed")
@@ -1218,6 +1227,12 @@ func GetAllocationResourceTypeMaps(ctx context.Context, logger zerolog.Logger, d
 }
 
 func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) error {
+	return TerminateWorkflowOnTimeOutError(logger, temporalClient, workflowID, originalError, objectType, workflowName).Send(echoCtx)
+}
+
+// TerminateWorkflowOnTimeOutError performs the existing timeout cleanup without
+// sending a response, so callers can classify recovery after the DB tx unwinds.
+func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) *cutil.APIError {
 	logger.Error().Err(originalError).Msg(fmt.Sprintf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType))
 
 	// Create a new context deadline
@@ -1228,12 +1243,12 @@ func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, tem
 	serr := temporalClient.TerminateWorkflow(newctx, workflowID, "", fmt.Sprintf("timeout occurred executing %s workflow for %s", workflowName, objectType))
 	if serr != nil {
 		logger.Error().Err(serr).Msg(fmt.Sprintf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName))
-		return cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
+		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
 	}
 
 	logger.Info().Str("Workflow ID", workflowID).Msg(fmt.Sprintf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType))
 
-	return cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
+	return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
 }
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
@@ -2100,7 +2115,6 @@ func QueryParamHash(params url.Values) string {
 // UUID; callers validate at the API model layer.
 func ExecutePowerControlWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2109,7 +2123,7 @@ func ExecutePowerControlWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	var fullMethod string
 	var flowRequest proto.Message
 	ruleUUID := GetFlowUUIDPtr(ruleID)
@@ -2157,8 +2171,16 @@ func ExecutePowerControlWorkflow(
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
 		}
+	case cam.PowerControlStateACCycle:
+		fullMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
+		flowRequest = &flowv1.ACPowerCycleRackRequest{
+			TargetSpec:             targetSpec,
+			Description:            fmt.Sprintf("API AC power cycle %s", entityName),
+			RuleId:                 ruleUUID,
+			OverrideReadinessCheck: overrideReadinessCheck,
+		}
 	default:
-		return nil, cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
+		return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse
@@ -2169,7 +2191,7 @@ func ExecutePowerControlWorkflow(
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+		return nil, proxyErr
 	}
 
 	return &flowResponse, nil
@@ -2182,7 +2204,6 @@ func ExecutePowerControlWorkflow(
 // Operation Rule.
 func ExecuteBringUpRackWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2191,7 +2212,7 @@ func ExecuteBringUpRackWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.BringUpRackRequest{
 		TargetSpec:             targetSpec,
 		Description:            description,
@@ -2207,7 +2228,7 @@ func ExecuteBringUpRackWorkflow(
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+		return nil, proxyErr
 	}
 
 	return &flowResponse, nil
@@ -2227,7 +2248,6 @@ func ExecuteBringUpRackWorkflow(
 // Operation Rule.
 func ExecuteFirmwareUpdateWorkflow(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	targetSpec *flowv1.OperationTargetSpec,
@@ -2240,7 +2260,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
-) (*flowv1.SubmitTaskResponse, error) {
+) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
 		TargetSpec:             targetSpec,
 		TargetVersion:          version,
@@ -2274,7 +2294,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		siteID, "authenticationData",
 	)
 	if proxyErr != nil {
-		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+		return nil, proxyErr
 	}
 
 	return &flowResponse, nil

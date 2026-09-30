@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -1100,7 +1103,16 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err == nil {
-				assert.NotNil(t, s)
+				require.NotNil(t, s)
+				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, s.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.True(t, persisted.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{s.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, persisted.Status, details[0].Status)
+				assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
 				if tc.request != nil {
 					assert.True(t, s.MatchesLabelSelector(tc.request.MachineLabelSelector))
 				}
@@ -3501,6 +3513,26 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 			got, err := TenantHasLegacyTargetedInstanceCreation(ctx, nil, dbSession, tc.tenant)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestHandleTxError(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		body string
+	}{
+		{"wrapped classification", fmt.Errorf("rollback: %w", cutil.NewAPIError(400, "unavailable", nil).WithRetryable(true)), `{"source":"nico","message":"unavailable","data":null,"retryable":true}`},
+		{"unclassified error unchanged", cutil.NewAPIError(400, "invalid", nil), `{"source":"nico","message":"invalid","data":null}`},
+		{"unknown outcome", cutil.NewAPIError(500, "Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.", nil).WithRetryable(false), `{"source":"nico","message":"Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.","data":null,"retryable":false}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			c.Set(cutil.APINameContextKey, "nico")
+			require.NoError(t, HandleTxError(c, zerolog.Nop(), tt.err, "fallback"))
+			assert.JSONEq(t, tt.body, rec.Body.String())
 		})
 	}
 }

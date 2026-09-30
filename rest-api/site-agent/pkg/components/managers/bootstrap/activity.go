@@ -46,33 +46,34 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 		return temporal.NewNonRetryableApplicationError(err.Error(), "ErrNilSecretInterface", err)
 	}
 
-	// Get the bootstrap-info secret, which contains the OTP to act on
-	bootstrapInfoSecret, err := o.SecretInterface.Get(ctx, "bootstrap-info", metav1.GetOptions{})
+	// Get the bootstrap secret, which contains the OTP to act on
+	bootstrapSecretName := ManagerAccess.Conf.EB.BootstrapSecretName
+	bootstrapSecret, err := o.SecretInterface.Get(ctx, bootstrapSecretName, metav1.GetOptions{})
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to read bootstrap-info secret")
+		logger.Error().Err(err).Str("Secret", bootstrapSecretName).Msg("Failed to read bootstrap secret")
 		return err
 	}
 
 	// Check if Data is nil and raise an error if true
-	if bootstrapInfoSecret.Data == nil {
-		err := errors.New("bootstrap-info secret data is nil")
-		logger.Error().Err(err).Msg(err.Error())
+	if bootstrapSecret.Data == nil {
+		err := errors.New("bootstrap secret data is nil")
+		logger.Error().Err(err).Str("Secret", bootstrapSecretName).Msg(err.Error())
 		return temporal.NewNonRetryableApplicationError(err.Error(), "ErrNilSecretData", err)
 	}
 
 	// Decrypt the new OTP using the siteID
 	decryptedOtp := cutils.DecryptData(encryptedOtpBytes, ManagerAccess.Conf.EB.Temporal.ClusterID)
 
-	// Update the OTP in the bootstrap-info secret without base64 encoding
-	bootstrapInfoSecret.Data["otp"] = []byte(decryptedOtp)
+	// Update the OTP in the bootstrap secret without base64 encoding
+	bootstrapSecret.Data["otp"] = []byte(decryptedOtp)
 
-	_, err = o.SecretInterface.Update(ctx, bootstrapInfoSecret, metav1.UpdateOptions{})
+	_, err = o.SecretInterface.Update(ctx, bootstrapSecret, metav1.UpdateOptions{})
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to update bootstrap-info secret")
+		logger.Error().Err(err).Str("Secret", bootstrapSecretName).Msg("Failed to update bootstrap secret")
 		return err
 	}
 
-	logger.Info().Msg("Successfully updated OTP in bootstrap-info secret")
+	logger.Info().Str("Secret", bootstrapSecretName).Msg("Successfully updated OTP in bootstrap secret")
 
 	// Proceed to download and store credentials, passing the decrypted OTP
 	err = ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(decryptedOtp)

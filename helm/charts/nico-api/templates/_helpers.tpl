@@ -254,10 +254,12 @@ enabled with a non-empty (and non-null) objectTypes list.
   "defaultCasbinPolicy" (.Files.Get "files/casbin-policy.csv")
   "global" .Values.global
   "hostname" .Values.hostname
+  "machineStateController" .Values.machineStateController
   "namespaceOverride" .Values.namespaceOverride
   "releaseNamespace" .Release.Namespace
   "rms" .Values.rms
   "service" .Values.service
+  "sshConsole" .Values.sshConsole
   "siteConfig" .Values.siteConfig
   "vaultClusterInfo" .Values.vaultClusterInfo
 -}}

@@ -197,9 +197,10 @@ pub(crate) async fn redfish_approve_action(
         ConditionalWrite::NotApplied(ApprovalNotRecorded) => {
             // Another request can record this user's approval or cancel the
             // action after our read.
-            return Err(
-                CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
-            );
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or user already approved it".to_owned(),
+            )
+            .into());
         }
     }
     txn.commit().await?;
@@ -238,9 +239,10 @@ pub(crate) async fn redfish_apply_action(
         ConditionalWrite::Applied(()) => {}
         ConditionalWrite::NotApplied(ActionNotClaimed) => {
             // Another request can apply or cancel the action after our read.
-            return Err(
-                CarbideError::InvalidArgument("request was already applied".to_owned()).into(),
-            );
+            return Err(CarbideError::InvalidArgument(
+                "request no longer exists or was already applied".to_owned(),
+            )
+            .into());
         }
     }
 
@@ -269,6 +271,10 @@ pub(crate) async fn redfish_apply_action(
             ));
         }
     }
+
+    // A failed claim commit must not leave requests running against the BMC.
+    // Commit the claim and serial-mismatch results before starting any POST task.
+    txn.commit().await?;
 
     for (uri, index) in uris {
         // Spawn off the task to send the request, open a transaction, and store the result.
@@ -308,8 +314,6 @@ pub(crate) async fn redfish_apply_action(
             }
         });
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishApplyActionResponse {},

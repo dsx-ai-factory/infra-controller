@@ -1,22 +1,20 @@
 {
   "id": "0c03ba01-d86b-4a57-a41e-cc359b380a6f",
   "name": "demo-ipv4-vpc-prefix",
-  "description": "Demo IPv4 Tenant VPC Prefix",
   "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
   "vpcId": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
-  "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
   "ipBlockId": "20d7dd4f-ae43-4245-a9d9-d093296009c4",
   "prefix": "10.217.98.208/28",
   "prefixLength": 28,
-  "status": "Ready",
+  "status": "Provisioning",
   "statusHistory": [
     {
-      "status": "Ready",
-      "message": "Received VPC prefix creation request, ready",
-      "created": "2023-07-06T16:25:20.717794Z",
-      "updated": "2023-07-06T16:25:20.717794Z"
+      "status": "Provisioning",
+      "message": "VPC Prefix is being provisioned on Site",
+      "created": "2023-07-06T16:21:34.916407Z",
+      "updated": "2023-07-06T16:21:34.916407Z"
     }
   ],
   "created": "2023-07-06T16:21:34.916407Z",
-  "updated": "2023-07-06T16:25:20.70757Z"
+  "updated": "2023-07-06T16:21:34.916407Z"
 }

@@ -16,6 +16,7 @@
  */
 use ::rpc::forge as rpc;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
+use db::spx_partition::SpxPartitionAlreadyDeleted;
 use db::{ConditionalWrite, ObjectColumnFilter, WithTransaction, spx_partition};
 use futures_util::FutureExt;
 use model::resource_pool;
@@ -138,31 +139,36 @@ pub(crate) async fn delete(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let resp = api
-        .with_txn(|txn| db::spx_partition::mark_as_deleted(id, txn).boxed())
-        .await?
-        .map_err(CarbideError::from)?;
+    let vni_pool = api.common_pools.ethernet.pool_dpa_vni.clone();
+    api.with_txn(|txn| {
+        async move {
+            let vni = match db::spx_partition::mark_as_deleted(id, txn).await? {
+                ConditionalWrite::Applied(partition) => partition.vni,
+                ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted { vni }) => vni,
+            };
 
-    if let Some(vni) = resp.vni {
-        let mut txn = api.txn_begin().await?;
-
-        // A free or reassigned VNI leaves this partition nothing to release.
-        match db::resource_pool::release(
-            &api.common_pools.ethernet.pool_dpa_vni,
-            &mut txn,
-            vni,
-            resource_pool::OwnerType::SpxPartition,
-            &id.to_string(),
-        )
-        .await
-        .map_err(CarbideError::from)?
-        {
-            ConditionalWrite::Applied(())
-            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+            // A persisted deletion may still have its VNI reservation. Retrying
+            // release finishes that cleanup; the owner check leaves any
+            // reservation assigned to another partition unchanged.
+            if let Some(vni) = vni {
+                match db::resource_pool::release(
+                    &vni_pool,
+                    txn,
+                    vni,
+                    resource_pool::OwnerType::SpxPartition,
+                    &id.to_string(),
+                )
+                .await?
+                {
+                    ConditionalWrite::Applied(())
+                    | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                }
+            }
+            Ok::<(), CarbideError>(())
         }
-
-        txn.commit().await?;
-    }
+        .boxed()
+    })
+    .await??;
 
     Ok(Response::new(rpc::SpxPartitionDeletionResult {}))
 }

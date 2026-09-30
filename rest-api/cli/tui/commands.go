@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -3003,6 +3004,67 @@ func cmdVPCPrefixList(s *Session, _ []string) error {
 	return tw.Flush()
 }
 
+const (
+	vpcPrefixAllocationAutomatic = "automatic"
+	vpcPrefixAllocationExplicit  = "explicit"
+)
+
+type vpcPrefixAllocation struct {
+	bodyField string
+	bodyValue any
+	logFlag   string
+	logValue  string
+}
+
+func parseVPCPrefixAllocation(mode, value string, family vpcprefix.IPFamily, maximumLength int) (*vpcPrefixAllocation, error) {
+	value = strings.TrimSpace(value)
+	switch mode {
+	case vpcPrefixAllocationAutomatic:
+		prefixLength, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix length must be an integer: %w", err)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefixLength)
+		if err != nil {
+			return nil, err
+		}
+		return &vpcPrefixAllocation{
+			bodyField: "prefixLength",
+			bodyValue: prefixLength,
+			logFlag:   "--prefix-length",
+			logValue:  value,
+		}, nil
+	case vpcPrefixAllocationExplicit:
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix must be a valid CIDR: %w", err)
+		}
+		if prefix.Addr().Is4In6() {
+			return nil, errors.New("prefix must not use an IPv4-mapped IPv6 address")
+		}
+		if prefix != prefix.Masked() {
+			return nil, errors.New("prefix must be network-aligned")
+		}
+		if (family == vpcprefix.IPFamilyIPv4 && !prefix.Addr().Is4()) ||
+			(family == vpcprefix.IPFamilyIPv6 && !prefix.Addr().Is6()) {
+			return nil, fmt.Errorf("prefix does not match the selected %s IP Block", family)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefix.Bits())
+		if err != nil {
+			return nil, err
+		}
+		canonicalPrefix := prefix.String()
+		return &vpcPrefixAllocation{
+			bodyField: "prefix",
+			bodyValue: canonicalPrefix,
+			logFlag:   "--prefix",
+			logValue:  canonicalPrefix,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown VPC prefix allocation mode %q", mode)
+	}
+}
+
 func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	vpc, err := s.Resolver.Resolve(context.Background(), "vpc", "VPC")
 	if err != nil {
@@ -3031,26 +3093,34 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	} else {
 		promptLabel = fmt.Sprintf("Prefix length (%d-%d; API validates the IP block and VPC limit)", vpcprefix.PrefixLengthMinimum, maximumLength)
 	}
-	prefixLenText, err := PromptText(promptLabel, true)
+
+	allocationMode, err := Select("Allocation mode:", []SelectItem{
+		{ID: vpcPrefixAllocationAutomatic, Label: "Automatic (select by prefix length)"},
+		{ID: vpcPrefixAllocationExplicit, Label: "Explicit CIDR"},
+	})
 	if err != nil {
 		return err
 	}
-	prefixLen, err := strconv.Atoi(strings.TrimSpace(prefixLenText))
-	if err != nil {
-		return fmt.Errorf("prefix length must be an integer: %w", err)
+	allocationPrompt := promptLabel
+	if allocationMode.ID == vpcPrefixAllocationExplicit {
+		allocationPrompt = "VPC prefix CIDR"
 	}
-	err = validateVPCPrefixLength(maximumLength, prefixLen)
+	allocationValue, err := PromptText(allocationPrompt, true)
+	if err != nil {
+		return err
+	}
+	allocation, err := parseVPCPrefixAllocation(allocationMode.ID, allocationValue, family, maximumLength)
 	if err != nil {
 		return err
 	}
 
 	body := map[string]interface{}{
-		"name":         name,
-		"vpcId":        vpc.ID,
-		"ipBlockId":    ipBlock.ID,
-		"prefixLength": prefixLen,
+		"name":      name,
+		"vpcId":     vpc.ID,
+		"ipBlockId": ipBlock.ID,
 	}
-	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlock.ID, "--prefix-length", prefixLenText)
+	body[allocation.bodyField] = allocation.bodyValue
+	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlock.ID, allocation.logFlag, allocation.logValue)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "vpc-prefix"), nil, nil, bodyJSON)
 	if err != nil {
@@ -3558,13 +3628,14 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if networkConfig.detectMultiDPU {
-		dpuCapability, capabilityErr := fetchInstanceMultiDPUCapability(s, machine.ID)
-		if capabilityErr != nil {
-			return capabilityErr
-		}
-		networkConfig.dpuCapability = dpuCapability
+	networkCapability, capabilityErr := fetchInstanceNetworkCapabilities(s, machine.ID)
+	if capabilityErr != nil {
+		return capabilityErr
 	}
+	if networkConfig.detectMultiDPU && networkCapability.hasMultiDPU() {
+		networkConfig.dpuCapability = networkCapability.multiDPU
+	}
+
 	name, err := PromptText("Instance name", true)
 	if err != nil {
 		return err
@@ -3600,6 +3671,13 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
+	var infiniBandInterfaces []map[string]interface{}
+	if networkCapability.hasActiveInfiniBand() {
+		infiniBandInterfaces, err = promptInstanceInfiniBandInterfaces(s, networkCapability.infiniBand)
+		if err != nil {
+			return err
+		}
+	}
 
 	sshKeyGroupIDs, err := promptOptionalResourceIDs(s, ctx, "ssh-key-group", "SSH key group")
 	if err != nil {
@@ -3616,6 +3694,9 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	}
 	if len(interfaces) > 0 {
 		body["interfaces"] = interfaces
+	}
+	if len(infiniBandInterfaces) > 0 {
+		body["infinibandInterfaces"] = infiniBandInterfaces
 	}
 	if networkConfig.autoNetwork {
 		body["autoNetwork"] = true
@@ -3695,7 +3776,44 @@ type instanceDPUDeviceNetworkCapability struct {
 	count int
 }
 
-func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPUDeviceNetworkCapability, error) {
+type instanceInfiniBandCapability struct {
+	name            string
+	count           int
+	inactiveDevices []int
+}
+
+func (c *instanceInfiniBandCapability) hasActiveDevice() bool {
+	inactiveDevices := make(map[int]bool, len(c.inactiveDevices))
+	for _, deviceInstance := range c.inactiveDevices {
+		inactiveDevices[deviceInstance] = true
+	}
+	for deviceInstance := range c.count {
+		if !inactiveDevices[deviceInstance] {
+			return true
+		}
+	}
+	return false
+}
+
+type instanceNetworkCapability struct {
+	multiDPU   *instanceDPUDeviceNetworkCapability
+	infiniBand []instanceInfiniBandCapability
+}
+
+func (c *instanceNetworkCapability) hasMultiDPU() bool {
+	return c.multiDPU != nil
+}
+
+func (c *instanceNetworkCapability) hasActiveInfiniBand() bool {
+	for i := range c.infiniBand {
+		if c.infiniBand[i].hasActiveDevice() {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchInstanceNetworkCapabilities(s *Session, machineID string) (*instanceNetworkCapability, error) {
 	body, _, err := s.Client.Do(
 		"GET",
 		apiPath(s, "machine/{id}"),
@@ -3711,10 +3829,11 @@ func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPU
 
 	var machine struct {
 		MachineCapabilities []struct {
-			Type       string `json:"type"`
-			Name       string `json:"name"`
-			Count      *int   `json:"count"`
-			DeviceType string `json:"deviceType"`
+			Type            string `json:"type"`
+			Name            string `json:"name"`
+			Count           *int   `json:"count"`
+			DeviceType      string `json:"deviceType"`
+			InactiveDevices []int  `json:"inactiveDevices"`
 		} `json:"machineCapabilities"`
 	}
 	err = json.Unmarshal(body, &machine)
@@ -3722,26 +3841,39 @@ func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPU
 		return nil, fmt.Errorf("parsing capabilities for machine %s: %w", machineID, err)
 	}
 
+	networkCapability := &instanceNetworkCapability{}
 	for _, capability := range machine.MachineCapabilities {
-		if !strings.EqualFold(capability.Type, "Network") {
-			continue
-		}
-		if !strings.EqualFold(capability.DeviceType, "DPU") {
-			continue
-		}
-		if capability.Count == nil || *capability.Count <= 1 {
-			continue
-		}
 		name := capability.Name
+		count := capability.Count
 		if name == "" {
 			continue
 		}
-		return &instanceDPUDeviceNetworkCapability{
-			name:  name,
-			count: *capability.Count,
-		}, nil
+		if count == nil || *count <= 0 {
+			continue
+		}
+		if strings.EqualFold(capability.Type, "Network") {
+			if !strings.EqualFold(capability.DeviceType, "DPU") || *count <= 1 {
+				continue
+			}
+			if networkCapability.multiDPU == nil {
+				networkCapability.multiDPU = &instanceDPUDeviceNetworkCapability{
+					name:  name,
+					count: *count,
+				}
+			}
+		} else if strings.EqualFold(capability.Type, "InfiniBand") {
+			infiniBandCapability := instanceInfiniBandCapability{
+				name:            name,
+				count:           *count,
+				inactiveDevices: capability.InactiveDevices,
+			}
+			if !infiniBandCapability.hasActiveDevice() {
+				continue
+			}
+			networkCapability.infiniBand = append(networkCapability.infiniBand, infiniBandCapability)
+		}
 	}
-	return nil, nil
+	return networkCapability, nil
 }
 
 // promptInstanceInterfaces builds the interfaces[] array for an instance
@@ -3767,12 +3899,12 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 	usedResourceIDs := make(map[string]bool)
 	usedVirtualFunctionIDs := make(map[int]bool)
 	for {
-		label := networkConfig.singular + " for interface"
+		label := networkConfig.singular + " for Ethernet interface"
 		if len(ifaces) > 0 {
 			if len(usedVirtualFunctionIDs) == virtualFunctionIDCount {
 				return ifaces, nil
 			}
-			confirmLabel := fmt.Sprintf("Add another interface (have %d)?", len(ifaces))
+			confirmLabel := fmt.Sprintf("Add another Ethernet interface (have %d)?", len(ifaces))
 			more, confirmErr := PromptConfirm(confirmLabel)
 			if confirmErr != nil {
 				return ifaces, confirmErr
@@ -3805,6 +3937,15 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 		iface := map[string]interface{}{
 			networkConfig.selectorKey: picked.ID,
 			"isPhysical":              isPhysical,
+		}
+		if networkConfig.selectorKey == "vpcPrefixId" {
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
 		}
 		if !isPhysical {
 			virtualFunctionID, promptErr := promptVirtualFunctionID(
@@ -3847,6 +3988,120 @@ func fetchReadyInstanceNetworkResources(s *Session, networkConfig instanceNetwor
 	return items, nil
 }
 
+type activeInfiniBandDevice struct {
+	capabilityName string
+	deviceInstance int
+}
+
+// promptInstanceInterfaces builds the infinibandInterfaces[] array for an instance
+// users are able to configure one interface for each active InfiniBand device, as
+// as determined by machine capabilities.
+func promptInstanceInfiniBandInterfaces(
+	s *Session,
+	capabilities []instanceInfiniBandCapability,
+) ([]map[string]interface{}, error) {
+	activeDevices := make([]activeInfiniBandDevice, 0)
+	for _, capability := range capabilities {
+		inactiveDevices := make(map[int]bool, len(capability.inactiveDevices))
+		for _, deviceInstance := range capability.inactiveDevices {
+			inactiveDevices[deviceInstance] = true
+		}
+		for deviceInstance := range capability.count {
+			if inactiveDevices[deviceInstance] {
+				continue
+			}
+			activeDevices = append(activeDevices, activeInfiniBandDevice{
+				capabilityName: capability.name,
+				deviceInstance: deviceInstance,
+			})
+		}
+	}
+	if len(activeDevices) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no active InfiniBand interfaces are available on the selected machine\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	configure, err := PromptConfirm("Configure an InfiniBand interface?")
+	if err != nil {
+		return nil, err
+	}
+	if !configure {
+		return nil, nil
+	}
+
+	readyPartitions, err := fetchReadyInstanceInfiniBandPartitions(s)
+	if err != nil {
+		return nil, fmt.Errorf("listing Ready InfiniBand partitions for selected site: %w", err)
+	}
+	if len(readyPartitions) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	interfaces := make([]map[string]interface{}, 0, len(activeDevices))
+	for activeDeviceIndex, activeDevice := range activeDevices {
+		if activeDeviceIndex > 0 {
+			more, confirmErr := PromptConfirm("Configure another InfiniBand interface?")
+			if confirmErr != nil {
+				return interfaces, confirmErr
+			}
+			if !more {
+				return interfaces, nil
+			}
+		}
+
+		label := fmt.Sprintf(
+			"InfiniBand partition for interface %s %d",
+			activeDevice.capabilityName,
+			activeDevice.deviceInstance,
+		)
+		partition, selectErr := s.Resolver.SelectFromItems(label, readyPartitions)
+		if selectErr != nil {
+			return interfaces, selectErr
+		}
+		interfaces = append(interfaces, map[string]interface{}{
+			"partitionId":    partition.ID,
+			"device":         activeDevice.capabilityName,
+			"deviceInstance": activeDevice.deviceInstance,
+			"isPhysical":     true,
+		})
+	}
+	return interfaces, nil
+}
+
+// only IB partitions in Ready state are suitable for interface configuration
+func fetchReadyInstanceInfiniBandPartitions(s *Session) ([]NamedItem, error) {
+	query := map[string]string{
+		"orderBy": "NAME_ASC",
+		"status":  "Ready",
+	}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+
+	resources, err := s.fetchAll(apiPath(s, "infiniband-partition"), query)
+	if err != nil {
+		return nil, err
+	}
+	partitions := make([]NamedItem, len(resources))
+	for i, resource := range resources {
+		partitions[i] = NamedItem{
+			Name: str(resource, "name"),
+			ID:   str(resource, "id"),
+			Raw:  resource,
+		}
+	}
+	return partitions, nil
+}
+
 const (
 	virtualFunctionIDMinimum = 0
 	virtualFunctionIDMaximum = 15
@@ -3886,12 +4141,20 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 		if err != nil {
 			return ifaces, err
 		}
-		ifaces = append(ifaces, map[string]interface{}{
+		iface := map[string]interface{}{
 			networkConfig.selectorKey: physical.ID,
 			"device":                  capability.name,
 			"deviceInstance":          deviceInstance,
 			"isPhysical":              true,
-		})
+		}
+		ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+		if promptErr != nil {
+			return ifaces, promptErr
+		}
+		if ipAddress != "" {
+			iface["ipAddress"] = ipAddress
+		}
+		ifaces = append(ifaces, iface)
 
 		vfIDs := deviceVirtualFunctionIDs{
 			used: make(map[int]bool),
@@ -3917,6 +4180,19 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if selectErr != nil {
 				return ifaces, selectErr
 			}
+			iface := map[string]interface{}{
+				networkConfig.selectorKey: virtual.ID,
+				"device":                  capability.name,
+				"deviceInstance":          deviceInstance,
+				"isPhysical":              false,
+			}
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
 			virtualFunctionID, promptErr := promptVirtualFunctionID(
 				fmt.Sprintf("Virtual function ID for DPU %d (0-15)", deviceInstance),
 				vfIDs.used,
@@ -3924,17 +4200,18 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if promptErr != nil {
 				return ifaces, promptErr
 			}
-			iface := map[string]interface{}{
-				networkConfig.selectorKey: virtual.ID,
-				"device":                  capability.name,
-				"deviceInstance":          deviceInstance,
-				"isPhysical":              false,
-				"virtualFunctionId":       virtualFunctionID,
-			}
+			iface["virtualFunctionId"] = virtualFunctionID
 			ifaces = append(ifaces, iface)
 		}
 	}
 	return ifaces, nil
+}
+
+func promptOptionalInstanceInterfaceIPAddress() (string, error) {
+	return PromptText(
+		"IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)",
+		false,
+	)
 }
 
 func selectDPUInterfaceResource(
@@ -4399,7 +4676,7 @@ func cmdTrayGet(s *Session, args []string) error {
 // powerStateChoices is the canonical list accepted by every power-control
 // endpoint (see UpdatePowerStateRequest in OpenAPI). Kept in one place so
 // rack and tray commands cannot drift from each other.
-var powerStateChoices = []string{"on", "off", "cycle", "forceoff", "forcecycle"}
+var powerStateChoices = []string{"On", "Off", "Cycle", "ForceOff", "ForceCycle", "ACPowerCycle"}
 
 // printTaskIDs renders the standard taskIds-bearing response from a
 // lifecycle action. Action endpoints return one task ID per affected

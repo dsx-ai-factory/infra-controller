@@ -205,6 +205,18 @@ pub async fn find_by_bmc_mac_address(
     Ok(power_shelves.into_iter().next())
 }
 
+/// BMC MAC address and configured name of every power shelf record, deleted
+/// ones included, so the result matches the per-shelf lookups for each value.
+pub async fn find_all_bmc_mac_addresses_and_names(
+    txn: impl DbReader<'_>,
+) -> DatabaseResult<Vec<(Option<mac_address::MacAddress>, String)>> {
+    let query = "SELECT bmc_mac_address, COALESCE(config->>'name', name) FROM power_shelves";
+    sqlx::query_as(query)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("power_shelf::find_all_bmc_mac_addresses_and_names", e))
+}
+
 pub async fn find_ids(
     txn: impl DbReader<'_>,
     filter: model::power_shelf::PowerShelfSearchFilter,
@@ -840,6 +852,12 @@ pub async fn remove_health_report(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use mac_address::MacAddress;
+    use model::expected_power_shelf::ExpectedPowerShelf;
+    use model::power_shelf::PowerShelfConfig;
+
     use super::*;
     use crate::test_support::power_shelf::{create_seeded, create_seeded_with_config, seeded_id};
 
@@ -1446,6 +1464,79 @@ mod tests {
             .expect("power shelf should still exist");
         assert!(reloaded.decommission_requested);
 
+        Ok(())
+    }
+
+    /// `create_power_shelves` skips a shelf when its BMC MAC or configured name
+    /// is in this result, so it must match `find_by_bmc_mac_address`, deleted
+    /// shelves included, and report `config.name` rather than the `name`
+    /// column that `create` fills from the metadata name.
+    #[crate::sqlx_test]
+    async fn find_all_bmc_mac_addresses_and_names_matches_single_lookup(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let live_mac: MacAddress = "02:00:00:00:0c:01".parse()?;
+        let deleted_mac: MacAddress = "02:00:00:00:0c:02".parse()?;
+        // `power_shelves.bmc_mac_address` references `expected_power_shelves`.
+        for mac in [live_mac, deleted_mac] {
+            crate::expected_power_shelf::create(
+                txn.as_mut(),
+                ExpectedPowerShelf {
+                    bmc_mac_address: mac,
+                    bmc_username: "admin".to_string(),
+                    bmc_password: "pw".to_string(),
+                    serial_number: format!("PS-SN-{mac}"),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        let mut shelves = Vec::new();
+        for (seed, bmc_mac_address) in [(31, Some(live_mac)), (32, Some(deleted_mac)), (33, None)] {
+            shelves.push(
+                create(
+                    txn.as_mut(),
+                    &NewPowerShelf {
+                        id: seeded_id(seed),
+                        config: PowerShelfConfig {
+                            name: format!("configured shelf {seed}"),
+                            capacity: None,
+                            voltage: None,
+                        },
+                        bmc_mac_address,
+                        metadata: Some(Metadata {
+                            name: format!("metadata shelf {seed}"),
+                            ..Default::default()
+                        }),
+                        rack_id: None,
+                    },
+                )
+                .await?,
+            );
+        }
+        mark_as_deleted(&mut shelves[1], txn.as_mut()).await?;
+
+        let batch = find_all_bmc_mac_addresses_and_names(txn.as_mut()).await?;
+
+        for mac in [live_mac, deleted_mac] {
+            let single = find_by_bmc_mac_address(txn.as_mut(), mac).await?;
+            assert_eq!(
+                batch.iter().any(|(batch_mac, _)| *batch_mac == Some(mac)),
+                single.is_some(),
+                "batch and single lookup disagree for {mac}"
+            );
+        }
+        assert_eq!(batch.len(), shelves.len());
+        assert_eq!(
+            batch.into_iter().collect::<HashSet<_>>(),
+            shelves
+                .iter()
+                .map(|shelf| (shelf.bmc_mac_address, shelf.config.name.clone()))
+                .collect::<HashSet<_>>()
+        );
+
+        txn.rollback().await?;
         Ok(())
     }
 }

@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -290,10 +291,16 @@ func (es *ExpectedSwitch) BeforeCreateTable(ctx context.Context, query *bun.Crea
 type ExpectedSwitchDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (*ExpectedSwitch, error)
+	// CreateMultiple creates multiple rows in input order
+	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
 	// Update used to update row
 	Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
@@ -358,6 +365,60 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 	}
 
 	return &result, nil
+}
+
+// CreateMultiple creates ExpectedSwitches in input order in the caller's
+// transaction.
+func (essd ExpectedSwitchSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error) {
+	ctx, span := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.CreateMultiple")
+	if span != nil {
+		defer span.End()
+		essd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+
+	expectedSwitches := make([]ExpectedSwitch, 0, len(inputs))
+	ids := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		expectedSwitches = append(expectedSwitches, ExpectedSwitch{
+			ID: input.ExpectedSwitchID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
+			SwitchSerialNumber: input.SwitchSerialNumber, BmcIpAddress: input.BmcIpAddress,
+			NvosMacAddresses: input.NvosMacAddresses, RackID: input.RackID, Name: input.Name,
+			Manufacturer: input.Manufacturer, Model: input.Model, Description: input.Description,
+			SlotID: input.SlotID, TrayIdx: input.TrayIdx, HostID: input.HostID,
+			Labels: input.Labels, CreatedBy: input.CreatedBy,
+		})
+		ids = append(ids, input.ExpectedSwitchID)
+	}
+	_, err := db.GetIDB(tx, essd.dbSession).NewInsert().Model(&expectedSwitches).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []ExpectedSwitch
+	err = db.GetIDB(tx, essd.dbSession).NewSelect().Model(&result).Where("es.id IN (?)", bun.In(ids)).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(ids) {
+		return nil, fmt.Errorf("unexpected result count: got %d, expected %d", len(result), len(ids))
+	}
+	idToIndex := make(map[uuid.UUID]int, len(ids))
+	for i, id := range ids {
+		idToIndex[id] = i
+	}
+	sorted := make([]ExpectedSwitch, len(result))
+	for _, item := range result {
+		index, ok := idToIndex[item.ID]
+		if !ok {
+			return nil, fmt.Errorf("unexpected ExpectedSwitch ID returned: %s", item.ID)
+		}
+		sorted[index] = item
+	}
+	return sorted, nil
 }
 
 // Get returns an ExpectedSwitch by ID
@@ -710,6 +771,59 @@ func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expected
 	}
 
 	return nil
+}
+
+// DeleteAll deletes all ExpectedSwitches matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (essd ExpectedSwitchSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) error {
+	ctx, span := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.DeleteAll")
+	if span != nil {
+		defer span.End()
+	}
+
+	query := db.GetIDB(tx, essd.dbSession).NewDelete().Model((*ExpectedSwitch)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedSwitchIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedSwitchIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.SwitchSerialNumbers != nil {
+		query = query.Where("switch_serial_number IN (?)", bun.In(filter.SwitchSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedSwitches and creates the
+// supplied replacement set in the caller's transaction.
+func (essd ExpectedSwitchSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error) {
+	ctx, span := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.ReplaceAll")
+	if span != nil {
+		defer span.End()
+		essd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	err := essd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+	return essd.CreateMultiple(ctx, tx, inputs)
 }
 
 // NewExpectedSwitchDAO returns a new ExpectedSwitchDAO

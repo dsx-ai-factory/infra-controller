@@ -48,6 +48,13 @@ impl TryFrom<rpc::forge::NetworkPrefix> for NewNetworkPrefix {
             ));
         }
 
+        if value.reserve_first < 0 {
+            return Err(RpcDataConversionError::InvalidArgument(format!(
+                "reserve_first must be non-negative, got {}",
+                value.reserve_first
+            )));
+        }
+
         Ok(NewNetworkPrefix {
             prefix: value.prefix.parse()?,
             gateway: match value.gateway {
@@ -85,6 +92,21 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    #[test]
+    fn network_prefix_rejects_negative_reservations() {
+        let prefix = rpc::forge::NetworkPrefix {
+            prefix: "2001:db8::/64".to_string(),
+            reserve_first: -1,
+            ..Default::default()
+        };
+        let error = NewNetworkPrefix::try_from(prefix).unwrap_err();
+        assert!(matches!(
+            error,
+            RpcDataConversionError::InvalidArgument(message)
+                if message.contains("reserve_first") && message.contains("-1")
+        ));
+    }
 
     #[test]
     fn free_ip_count_encoding_is_explicit_about_presence_and_saturation() {

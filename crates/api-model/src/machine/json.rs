@@ -35,12 +35,13 @@ use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::status::MlxDeviceObservation;
 use crate::machine::topology::MachineTopology;
 use crate::machine::{
     AnyMachine, Dpf, DpuMachine, FailureDetails, HostMachine, HostProfile, HostReprovisionRequest,
     MachineConfig, MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest,
-    MachineStatus, ManagedHostState, PredictedHostMachine, ReprovisionRequest, StableHostMachine,
-    UpgradeDecision,
+    MachineStatus, ManagedHostState, PredictedHostMachine, ReprovisionRequest, ResetRequest,
+    StableHostMachine, UpgradeDecision,
 };
 use crate::machine_boot_interface::{
     BootInterfaceSelection, BootInterfaceSelectionSource, BootInterfaceStatusObservation,
@@ -70,6 +71,8 @@ pub struct MachineSnapshotPgJson {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest complete MLX collection stored on the machine, if one exists.
+    pub mlx_device_observation: Option<MlxDeviceObservation>,
     #[serde(default)]
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub controller_state_version: String,
@@ -83,6 +86,7 @@ pub struct MachineSnapshotPgJson {
     pub failure_details: FailureDetails,
     pub reprovisioning_requested: Option<ReprovisionRequest>,
     pub host_reprovisioning_requested: Option<HostReprovisionRequest>,
+    pub reset_requested: Option<ResetRequest>,
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
     #[serde(default)]
     pub decommission_requested: bool,
@@ -370,6 +374,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 infiniband_status_observation: value.infiniband_status_observation,
                 nvlink_status_observation: value.nvlink_status_observation,
                 spx_status_observation: value.spx_status_observation,
+                mlx_device_observation: value.mlx_device_observation,
                 extension_service_status_observations: value.extension_service_status_observations,
                 slot_number: value.slot_number,
                 tray_index: value.tray_index,
@@ -378,6 +383,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             health_reports,
             reprovision_requested: value.reprovisioning_requested,
             host_reprovision_requested: value.host_reprovisioning_requested,
+            reset_requested: value.reset_requested,
             dpu_agent_upgrade_requested: value.dpu_agent_upgrade_requested,
             controller_state_outcome: value.controller_state_outcome,
             bios_password_set_time: value.bios_password_set_time,

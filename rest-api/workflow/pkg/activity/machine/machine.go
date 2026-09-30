@@ -39,7 +39,6 @@ const (
 	controllerMachineStatePrefixPostAssignedMeasuring = "PostAssignedMeasuring"
 	controllerMachineStatePrefixHostReprovisioning    = "HostReprovisioning"
 	controllerMachineStatePrefixReprovisioning        = "Reprovisioning"
-	controllerMachineStatePrefixReady                 = "Ready"
 	controllerMachineStatePrefixFailed                = "Failed"
 	controllerMachineStatePrefixCreated               = "Created"
 	controllerMachineStatePrefixForceDeletion         = "ForceDeletion"
@@ -487,6 +486,17 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				slogger.Warn().Msg("machine updated more recently than inventory received time, skipping processing")
 				txn.Rollback()
 				continue
+			}
+
+			// Use the assignment re-read under the row lock, not the initial inventory
+			// lookup: creation and release may have committed while inventory ran.
+			reportedMachine := cdbm.Machine{Status: machineStatus}
+			effectiveStatus := reportedMachine.StatusForAssignment(existingCloudMachine.IsAssigned)
+			if effectiveStatus != machineStatus {
+				machineStatus = effectiveStatus
+				// Keep this message equal to Core's Assigned message to avoid
+				// flip-flopping messages in status history.
+				statusMessage = cdbm.MachineStatusInUseMessage
 			}
 
 			// Update existing Machine record
@@ -1153,10 +1163,10 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is undergoing machine validation"
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
-			statusMessage = "Machine is being used by an Instance"
-		case controllerMachineStatePrefixReady:
+			statusMessage = cdbm.MachineStatusInUseMessage
+		case cdbm.ControllerMachineStateReady:
 			machineStatus = cdbm.MachineStatusReady
-			statusMessage = "Machine is ready for assignment"
+			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is being force deleted"

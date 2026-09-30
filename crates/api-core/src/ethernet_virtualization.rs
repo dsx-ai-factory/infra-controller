@@ -300,7 +300,9 @@ fn tenant_vrf_loopback_for_legacy_ipv4_field(loopback_ip: Option<IpAddr>) -> Opt
 ///
 /// Values are emitted in V4/V6 order. The tenant VRF loopback is placed on the
 /// entry matching its address family, creating a loopback-only entry when that
-/// family has no interface address data.
+/// family has no interface address data. Routed tenant IPv6 keeps `gateway`
+/// absent: its segment `prefix` is the single source used to derive the DPU
+/// address and RA PIO, while `interface_prefix` remains the tenant allocation.
 #[allow(deprecated)]
 fn interface_address_configs(
     config: &rpc::FlatInterfaceConfig,
@@ -354,9 +356,10 @@ fn interface_address_configs(
 /// Builds the legacy IPv6 projection used by DPU agents.
 ///
 /// Existing non-SLAAC configurations still require a concrete host address.
-/// SLAAC instead sends the selected interface prefix with an intentionally
-/// empty host address so the agent can configure the IPv6 prefix in the DPU.
-/// Router advertisement (RA) support is tracked by
+/// Stateful FNN sends its tenant `/128`; the family-neutral segment prefix
+/// separately carries the containing `/127`. SLAAC instead sends the
+/// VPC-selected `/64` with an intentionally empty host address. Routed tenant
+/// interfaces use this distinction to render RA. Tenant IPv6 support is tracked by
 /// https://github.com/NVIDIA/infra-controller/issues/2398.
 fn build_ipv6_interface_config(
     address: Option<IpAddr>,
@@ -992,7 +995,7 @@ mod test {
     fn ipv6_interface_config() -> rpc::FlatInterfaceIpv6Config {
         rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::2/64".to_string()),
         }
     }
@@ -1001,7 +1004,7 @@ mod test {
         rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V6.into(),
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             prefix: "2001:db8::/64".to_string(),
             gateway: None,
             svi_ip: Some("2001:db8::2/64".to_string()),

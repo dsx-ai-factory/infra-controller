@@ -22,30 +22,39 @@ MAT_MODE=scale HOST_COUNT=1000 helm-prereqs/setup-machine-a-tron.sh -y
    from-scratch runs are reproducible.
 1. **`MAT_MODE=scale`** — a scale profile
    (`helm-prereqs/values/machine-a-tron-scale.yaml`) using Controller Mode
-   with the `mat-k8s-controller` for dynamic per-BMC ClusterIP Services.
+   with the `mat-k8s-controller` for dynamic per-BMC Services.
 
 ## Architecture: Controller Mode
 
-The `mat-k8s-controller` dynamically creates one ClusterIP Service per BMC:
+The `mat-k8s-controller` dynamically creates one Service per BMC:
+
 - Discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true` label
 - Polls `/machines/status` from each pod
-- Creates Services with ClusterIP = BMC IP (assigned by NICo DHCP)
+- Creates Services with the BMC IP (assigned by NICo DHCP) as `externalIPs`
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
 
 **Requirements:**
-- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+
+- The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+  node network, and networks that nodes or pods must otherwise reach
+  (BMC IPs are Service externalIPs, for which kube-proxy programs forwarding
+  rules on every node). `setup-machine-a-tron.sh` checks every BMC network in
+  the values file against the ServiceCIDR and stops when it cannot determine
+  the ServiceCIDR (`SCALE_SERVICE_CIDRS`, `SCALE_BMC_PREFIXES`, and
+  `SCALE_ALLOW_UNKNOWN_SERVICE_CIDR` in the script header)
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
-- Leave `site_explorer.bmc_proxy` unset — NICo dials each BMC's ClusterIP directly
+- Leave `site_explorer.bmc_proxy` unset - NICo dials each BMC IP directly
 
 **Example NICo siteConfig:**
+
 ```toml
 allow_insecure_discovery = true
 
 [networks.MAT-BMC-SERVICES]
 type = "underlay"
-prefix = "10.96.64.0/18"
-gateway = "10.96.64.1"
+prefix = "10.200.0.0/18"
+gateway = "10.200.0.1"
 mtu = 1500
 ```
 
@@ -78,7 +87,7 @@ in the scripts/charts with explanatory comments.
 | 13 | DHCP fails: `No network segment defined for relay addresses` | Config-driven segment creation is **bootstrap-once** — skipped entirely on multi-domain sites ("Multiple domains, skipping initial network creation") | Script clone-inserts the simulated segments from same-type templates; `allocation_strategy` forced to `dynamic` (templates may be `reserved`, which rejects all dynamic DHCP) |
 | 14 | AvoidLockout storm on all DPU endpoints; preingestion pinned at exactly `hostCount` | The rotation dance is racy at scale: preingestion's initial BMC reset reboots the mock, which returns at the **factory** password while its per-MAC Vault entry says "rotated" | Pin mock passwords to the site root (`hostBmcPassword`/`dpuBmcPassword`) — site-explorer's documented fallback ("factory failed → sitewide root, no rotation") logs straight in; resets become harmless |
 | 15 | Pipeline stalls at preingestion `initial`; manager idle | `waiting_for_explorer_refresh` (set when errors are cleared) gates endpoints out of preingestion and can linger after a healthy report lands (273/300 were parked) | Verification loop unparks endpoints whose reports are clean |
-| 16 | Managed hosts identified but machines never created; cycles never finish | `explorations_per_run` was raised to 400 "for throughput" — but identification and creation only run **at the end of a completed explore cycle**, and 400 deep scans per cycle meant cycles stopped completing | Default lowered to 120: cycles complete in ~1–2 min and creation runs every cycle |
+| 16 | Managed hosts identified but machines never created, and cycles never finish | `explorations_per_run` was raised to 400 "for throughput". Identification and creation only run **at the end of a completed explore cycle**, so 400 deep scans per cycle meant cycles stopped completing | Default lowered to 120 at the time: cycles complete in about 1 to 2 min and creation runs every cycle. The default has since been raised to 360. Refer to [Large Site Sizing and Settings](large-site-sizing-and-settings.md) for details. |
 | 17 | `Resource pool lo-ip is empty` on the 3rd machine | Machine creation allocates one loopback IP per machine; pool **definitions are seed-once** ("Declaration has drifted since seed … not re-applying") so config widening is ignored; dev6 ships **3** lo-ip addresses | Script inserts free `resource_pool` rows directly for a simulated range (16k) when the pool is smaller than the machine target |
 
 ### A note on the verification loop

@@ -570,7 +570,8 @@ GetAllTaskRun Retrieve all Task Runs
 
 List Task Runs on a Site. Filters compose with AND; results are paginated
 and the `X-Pagination` response header reports the total count over the
-post-filter set.
+post-filter set. Results are ordered by creation time descending, then
+Task Run UUID descending.
 
 Org must have an Infrastructure Provider entity. User must have
 authorization role with `PROVIDER_ADMIN` suffix.
@@ -767,7 +768,8 @@ references the Task the Task Run submitted for that Rack via `taskId`
 `GET /task/{taskId}`.
 
 Filters compose with AND. Results are paginated; the `X-Pagination`
-response header reports the total count over the post-filter set.
+response header reports the total count over the post-filter set. Results
+are ordered by phase index, then the unique sequence index.
 
 Task Runs are site-scoped; `siteId` must be the Site that owns the
 Task Run. Org must have an Infrastructure Provider entity. User must have

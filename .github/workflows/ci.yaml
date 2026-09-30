@@ -77,6 +77,12 @@ jobs:
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
+      - name: Test HBN management startup patches
+        run: python3 -B pxe/tests/test_hbn_management.py
+
+      - name: Test Scout interface readiness
+        run: python3 -B pxe/tests/test_scout_network.py
+
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
@@ -166,6 +172,7 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      machine_lifecycle_changed: ${{ steps.base-container-gate.outputs.machine_lifecycle_changed }}
       kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
@@ -218,10 +225,14 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'Makefile.toml'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+            machine_lifecycle:
+              - 'tests/machine-lifecycle/**'
+              - '.github/workflows/ci.yaml'
       - name: Calculate version
         id: version
         run: |
@@ -409,6 +420,7 @@ jobs:
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
+          MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
         run: |
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
@@ -419,6 +431,7 @@ jobs:
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
+          machine_lifecycle_changed=false
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-rebuild-base-containers ]]; then
             build_container_x86_64_run=true
@@ -441,6 +454,10 @@ jobs:
 
           if [[ "${SOURCE_FILES_CHANGED}" == "true" ]]; then
              source_files_changed=true
+          fi
+
+          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
+             machine_lifecycle_changed=true
           fi
 
           if [[ "${RUNTIME_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
@@ -472,6 +489,7 @@ jobs:
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
+          echo "machine_lifecycle_changed=${machine_lifecycle_changed}" >> "$GITHUB_OUTPUT"
 
           MAJOR_MINOR=$(echo "${VERSION}" | cut -d. -f1,2)
           echo "major_minor_version=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
@@ -906,7 +924,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       dockerfile_path: dev/k8s/machine-a-tron-controller/Dockerfile
-      context_path: dev/k8s/machine-a-tron-controller
+      context_path: .
       image_name: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -956,6 +974,35 @@ jobs:
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
+  test-mat-k8s-controller:
+    name: test-mat-k8s-controller
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dev/k8s/machine-a-tron-controller/go.mod
+          cache: true
+          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+
+      - name: Run the mat-k8s-controller unit tests
+        run: make -C dev/k8s/machine-a-tron-controller test
+
   test-release-container-services:
     if: >-
       ${{
@@ -1484,6 +1531,89 @@ jobs:
       scan: true
     secrets: inherit
 
+  build-release-machine-validation-basic-plugin-x86:
+    needs:
+      - prepare
+      - build-artifacts-container-x86_64
+      - build-runtime-container-x86_64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-x86_64.result) && contains('success,skipped', needs.build-runtime-container-x86_64.result) }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      target_prebuild_login: ${{ needs.prepare.outputs.bases_rebuilt == 'true' && needs.prepare.outputs.publish_images == 'true' }}
+      dockerfile_path: dev/docker/Dockerfile.machine-validation-default-plugin
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest
+      build_args: '{"CONTAINER_BUILD":"${{ needs.prepare.outputs.build_artifacts_container_x86_64_ref }}","CONTAINER_RUNTIME_X86_64":"${{ needs.prepare.outputs.runtime_container_x86_64_ref }}"}'
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+    secrets: inherit
+
+  build-release-machine-validation-basic-plugin-arm:
+    needs:
+      - prepare
+      - build-artifacts-container-aarch64
+      - build-runtime-container-aarch64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-artifacts-container-aarch64.result) && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      target_prebuild_login: ${{ needs.prepare.outputs.bases_rebuilt == 'true' && needs.prepare.outputs.publish_images == 'true' }}
+      dockerfile_path: dev/docker/Dockerfile.machine-validation-default-plugin-aarch64
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
+      build_args: '{"CONTAINER_BUILD_AARCH64":"${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}","CONTAINER_RUNTIME_AARCH64":"${{ needs.prepare.outputs.runtime_container_aarch64_ref }}"}'
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+    secrets: inherit
+
+  merge-manifests-machine-validation-basic-plugin:
+    needs:
+      - prepare
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' && needs.build-release-machine-validation-basic-plugin-x86.result == 'success' && needs.build-release-machine-validation-basic-plugin-arm.result == 'success' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+
   build-release-machine-validation-artifacts-x86-host:
     needs:
       - prepare
@@ -1743,6 +1873,144 @@ jobs:
         run: bash scripts/check-repo-clean.sh "Core pre-build checks"
 
   # ============================================================================
+  # BUILD STAGE - Machine Lifecycle Test
+  # ============================================================================
+  # The hardware lifecycle test under tests/machine-lifecycle is a Python
+  # project with its own lockfile and runtime image. These jobs run only when
+  # that directory (or this workflow) changes; the image is published on the
+  # same terms as every other image here.
+  test-machine-lifecycle-unit:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests/machine-lifecycle
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same uv release the runtime image pins, so the lockfile resolves the
+      # same way in both places.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.32"
+          enable-cache: false
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests
+        run: uv run --frozen pytest tests/unit -p no:cacheprovider
+
+      - name: Lint
+        run: uv run --frozen ruff check lib tests tools
+
+  # The Dockerfile installs packages and syncs the lockfile inside the image,
+  # so each architecture builds natively rather than under emulation, and the
+  # two are joined into one manifest below.
+  build-machine-lifecycle-test-x86_64:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: tests/machine-lifecycle/docker/mlt_image.Dockerfile
+      context_path: tests/machine-lifecycle
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      scan: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
+  build-machine-lifecycle-test-aarch64:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.machine_lifecycle_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: tests/machine-lifecycle/docker/mlt_image.Dockerfile
+      context_path: tests/machine-lifecycle
+      image_name: ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64
+      image_tag: ${{ needs.prepare.outputs.version }}
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
+  merge-manifests-machine-lifecycle-test:
+    needs:
+      - prepare
+      - build-machine-lifecycle-test-x86_64
+      - build-machine-lifecycle-test-aarch64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' && needs.build-machine-lifecycle-test-x86_64.result == 'success' && needs.build-machine-lifecycle-test-aarch64.result == 'success' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+
+            docker buildx imagetools create -t \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.major_minor_version }}-latest \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
+              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+
+  # ============================================================================
   # BUILD STAGE - Helm Chart
   # ============================================================================
 
@@ -1790,6 +2058,10 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      # Uses python3-yaml installed by the configuration check above.
+      - name: Test DevSpace bootstrap manifests
+        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1806,11 +2078,12 @@ jobs:
             helm/charts/nico-dhcp
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
-            helm/charts/nico-flow
+            helm/nico-flow
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
             helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
+            helm/charts/nico-ntp
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
@@ -1819,6 +2092,7 @@ jobs:
             helm/rest/nico-rest/charts/nico-rest-api
             helm/rest/nico-rest/charts/nico-rest-common
             helm/rest/nico-rest/charts/nico-rest-site-manager
+            helm/rest/nico-rest/charts/nico-rest-workflow
 
   build-push-helm-chart:
     needs:
@@ -1884,11 +2158,17 @@ jobs:
       - name: Test legacy Flow manager cleanup
         run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
 
+      - name: Test REST postgres StatefulSet recreation
+        run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
       - name: Test health check namespaces
         run: bash helm-prereqs/tests/health-check-namespaces_test.sh
+
+      - name: Test health check external VIPs
+        run: bash helm-prereqs/tests/health-check-external-vips_test.sh
 
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
@@ -1901,6 +2181,12 @@ jobs:
 
       - name: Test DPF single Core deployment
         run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
+
+      - name: Test pinned submodule sync
+        run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
+
+      - name: Test doca-platform pin
+        run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
   build-push-helm-prereqs-chart:
     needs:
@@ -2162,6 +2448,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
+      - name: Test site-controller OTEL configuration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml jq
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_resolve_host.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
+          /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_otel_post_install.py
+
   build-push-bluefield-helm-charts:
     needs:
       - prepare
@@ -2238,6 +2533,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2248,6 +2544,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart
@@ -2274,7 +2573,7 @@ jobs:
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "$NEEDS" | jq -r '
             to_entries[]
-            | select((.key | startswith("build-")) or (.key | startswith("test-")))
+            | select((.key | startswith("build-")) or (.key | startswith("test-")) or (.key | startswith("merge-manifests-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
           ' >> "$GITHUB_STEP_SUMMARY"
 
@@ -2297,6 +2596,8 @@ jobs:
           IMAGES["build-forge-cli-x86_64"]="${{ needs.build-forge-cli-x86_64.outputs.image_ref }}"
           IMAGES["build-forge-cli-aarch64"]="${{ needs.build-forge-cli-aarch64.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-runner"]="${{ needs.build-release-machine-validation-runner.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}"
+          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}"
           IMAGES["build-release-machine-validation-artifacts-x86-host"]="${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
@@ -2357,6 +2658,9 @@ jobs:
       - build-forge-cli-aarch64
       - merge-manifests-forge-cli
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-validate-helm-chart
       - build-push-helm-chart
@@ -2425,6 +2729,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
 
       # CLI images
@@ -2447,9 +2752,18 @@ jobs:
 
       # Machine validation images
       - build-release-machine-validation-runner
+      - build-release-machine-validation-basic-plugin-x86
+      - build-release-machine-validation-basic-plugin-arm
+      - merge-manifests-machine-validation-basic-plugin
       - build-release-machine-validation-artifacts-x86-host
       - build-release-machine-validation-artifacts-arm-host
       - merge-manifests-machine-validation
+
+      # Machine lifecycle test
+      - test-machine-lifecycle-unit
+      - build-machine-lifecycle-test-x86_64
+      - build-machine-lifecycle-test-aarch64
+      - merge-manifests-machine-lifecycle-test
 
       # Source and repository policy checks
       - proto-police

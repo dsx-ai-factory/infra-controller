@@ -789,3 +789,41 @@ func TestExpectedSwitchSQLDAO_Delete(t *testing.T) {
 		})
 	}
 }
+
+func TestExpectedSwitchSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedSwitchSetupSchema(t, dbSession)
+
+	existing := testExpectedSwitchSQLDAOCreateExpectedSwitches(ctx, t, dbSession)
+	dao := NewExpectedSwitchDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	assert.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedSwitchCreateInput{ExpectedSwitchID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:22:ee:01", SwitchSerialNumber: "other-site", CreatedBy: user.ID})
+	assert.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedSwitchCreateInput{
+		{ExpectedSwitchID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:22:ff:01", SwitchSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedSwitchID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:22:ff:02", SwitchSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, result, 2) {
+		assert.Equal(t, "replacement-1", result[0].SwitchSerialNumber)
+	}
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	assert.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedSwitchFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
+}

@@ -546,6 +546,20 @@ pub fn emit<E: Event>(event: E) {
     }
 }
 
+/// Emits one counter event with an explicit delta.
+///
+/// Use this when one observed event represents several occurrences that must
+/// be reflected exactly. Non-counter declarations are ignored rather than
+/// panicking, matching [`emit`]'s failure behavior.
+pub fn emit_count<E: Event>(event: E, count: u64) {
+    if let LogAt::Level(level) = event.log_at() {
+        event.__log(level);
+    }
+    if let __private::CachedInstrument::Counter(counter) = event.__instrument() {
+        counter.add(count, event.labels().as_ref());
+    }
+}
+
 /// `initialize_counter_series` exposes one Event counter label set at zero
 /// without writing the Event's log line. It uses the same cached instrument as
 /// [`emit`], so the global meter provider must already be installed before this
@@ -755,12 +769,33 @@ mod tests {
         metric_name: carbide_instrument::Outcome,
     }
 
+    #[derive(carbide_instrument::Event)]
+    #[event(
+        event_name = "weighted_counter_test",
+        metric_name = "carbide_weighted_counter_test_total",
+        component = "instrument_test",
+        log = off,
+        metric = counter,
+        describe = "Number of weighted counter test occurrences",
+    )]
+    struct WeightedCounterTest;
+
     #[test]
     fn outcome_from_result() {
         let ok: Result<(), &str> = Ok(());
         let err: Result<(), &str> = Err("nope");
         assert_eq!(Outcome::from(&ok), Outcome::Ok);
         assert_eq!(Outcome::from(&err), Outcome::Error);
+    }
+
+    #[test]
+    fn emit_count_records_the_explicit_counter_delta() {
+        let metrics = carbide_instrument::testing::MetricsCapture::start();
+        carbide_instrument::emit_count(WeightedCounterTest, 7);
+        assert_eq!(
+            metrics.counter_delta("carbide_weighted_counter_test_total", &[]),
+            7.0
+        );
     }
 
     #[test]

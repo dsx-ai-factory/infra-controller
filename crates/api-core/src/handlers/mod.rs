@@ -18,6 +18,7 @@
 pub(super) mod api;
 mod astra;
 pub(super) mod attestation;
+pub(super) mod attestation_profile;
 pub(super) mod bmc_credential_rotation;
 pub(super) mod bmc_endpoint_explorer;
 pub(super) mod bmc_metadata;
@@ -64,8 +65,10 @@ pub(super) mod machine_quarantine;
 pub(super) mod machine_scout;
 pub(super) mod machine_validation;
 pub(super) mod managed_host;
+pub(super) mod managed_host_reset;
 pub(super) mod measured_boot;
 pub(super) mod mlx_admin;
+mod mlx_device_report;
 pub(super) mod network_devices;
 pub(super) mod network_security_group;
 pub(super) mod network_segment;

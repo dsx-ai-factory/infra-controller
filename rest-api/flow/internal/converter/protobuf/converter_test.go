@@ -548,10 +548,18 @@ func TestBMCFrom(t *testing.T) {
 
 func TestComponentConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "aggregate-host-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{{ID: "FanSpeed"}},
+		Alerts:     []types.HealthProbeAlert{},
+	}
 	shared := component.Component{
 		Type:            devicetypes.ComponentTypeCompute,
 		Info:            deviceinfo.NewRandom("TestComponent", 6),
 		FirmwareVersion: "1.0.0",
+		ComponentID:     "machine-123",
 		RackExternalID:  "rack-external-1",
 		Position: component.InRackPosition{
 			SlotID:    26,
@@ -560,6 +568,7 @@ func TestComponentConverter(t *testing.T) {
 		},
 		BmcsByType:  make(map[devicetypes.BMCType][]bmc.BMC),
 		NVLDomainID: domainID,
+		Health:      health,
 	}
 
 	sharedP := pb.Component{
@@ -579,8 +588,15 @@ func TestComponentConverter(t *testing.T) {
 			HostId:  int32(shared.Position.HostID),
 		},
 		Bmcs:           make([]*pb.BMCInfo, 0),
+		ComponentId:    shared.ComponentID,
 		NvlDomainId:    &pb.UUID{Id: domainID.String()},
 		RackExternalId: shared.RackExternalID,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{{Id: "FanSpeed"}},
+			Alerts:     []*pb.HealthProbeAlert{},
+		},
 	}
 
 	testCases := map[string]struct {
@@ -631,8 +647,40 @@ func TestComponentConverter(t *testing.T) {
 	}
 }
 
+func TestNVLinkDomainFromRack(t *testing.T) {
+	for _, tc := range []struct{ name, profile, topology string }{
+		{name: "qualified", profile: "GB200_NVL72R1_C2G4_WIWYNN", topology: "GB200_NVL72R1_C2G4"},
+		{name: "without power", profile: "GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF", topology: "GB300_NVL72R1_C2G4"},
+		{name: "legacy", profile: "NVL72"},
+		{name: "unavailable"},
+		{name: "unknown vendor", profile: "GB200_NVL72R1_C2G4_OTHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &pb.Rack{ExternalId: "rack-01", Info: &pb.DeviceInfo{Name: "domain-a"}, RackProfileId: &tc.profile,
+				OperationStatus: pb.Phase_PHASE_READY, Components: []*pb.Component{{ComponentId: "compute-01"}}}
+			d := NVLinkDomainFromRack(r)
+			assert.Equal(t, "rack-01", d.GetId())
+			assert.Equal(t, "domain-a", d.GetName())
+			assert.Equal(t, pb.Phase_PHASE_READY, d.GetOperationStatus())
+			assert.Equal(t, r.Components, d.GetComponents())
+			if tc.topology == "" {
+				assert.Nil(t, d.Topology)
+			} else {
+				assert.Equal(t, tc.topology, d.GetTopology())
+			}
+		})
+	}
+}
+
 func TestRackConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "rack-aggregate-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{},
+		Alerts:     []types.HealthProbeAlert{{ID: "RackAlert", Message: "fault"}},
+	}
 	shared := rack.Rack{
 		Info:       deviceinfo.NewRandom("TestRack", 12),
 		ExternalID: "rack-external-1",
@@ -645,6 +693,7 @@ func TestRackConverter(t *testing.T) {
 		Components:      make([]component.Component, 0),
 		NVLDomainID:     domainID,
 		OperationStatus: types.PhaseError,
+		Health:          health,
 	}
 
 	sharedP := pb.Rack{
@@ -666,6 +715,12 @@ func TestRackConverter(t *testing.T) {
 		NvlDomainIds:    []*pb.UUID{{Id: domainID.String()}},
 		ExternalId:      shared.ExternalID,
 		OperationStatus: pb.Phase_PHASE_ERROR,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{},
+			Alerts:     []*pb.HealthProbeAlert{{Id: "RackAlert", Message: "fault"}},
+		},
 	}
 	fromProto := shared
 	fromProto.OperationStatus = types.PhaseUnknown
@@ -1123,12 +1178,20 @@ func TestNVLDomainTargetFrom(t *testing.T) {
 		want    operation.NVLDomainTarget
 		wantErr string
 	}{
+		"external ID": {
+			input: &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: "Rack-01"}},
+			want:  operation.NVLDomainTarget{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+		},
+		"blank external ID": {
+			input:   &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: " "}},
+			wantErr: "must not be blank",
+		},
 		"nil input": {
 			wantErr: "NVLink domain target is nil",
 		},
 		"no identifier": {
 			input:   &pb.NVLDomainTarget{},
-			wantErr: "must have either id or name set",
+			wantErr: "must have id, external_id, or name set",
 		},
 		"ID with filter": {
 			input: &pb.NVLDomainTarget{
@@ -1245,6 +1308,19 @@ func TestTargetSpecTo(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		"NVLink domain target by external ID": {
+			input: operation.TargetSpec{NVLDomains: []operation.NVLDomainTarget{
+				{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+			}},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				require.Len(t, got.GetNvlDomains().GetTargets(), 1)
+				assert.Equal(t, "Rack-01", got.GetNvlDomains().GetTargets()[0].GetExternalId())
+				roundtrip, err := NVLDomainTargetFrom(got.GetNvlDomains().GetTargets()[0])
+				require.NoError(t, err)
+				assert.Equal(t, "Rack-01", roundtrip.Identifier.ExternalID)
 			},
 		},
 		"NVLink domain target with unmapped component type": {

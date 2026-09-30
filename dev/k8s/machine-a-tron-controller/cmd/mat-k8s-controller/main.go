@@ -340,6 +340,7 @@ func runReconcile(ctx context.Context, r reconciler, logger zerolog.Logger) {
 		Int("created", result.Created).
 		Int("updated", result.Updated).
 		Int("deleted", result.Deleted).
+		Int("recreated", result.Recreated).
 		Dur("elapsed", elapsed)
 
 	if len(result.Errors) > 0 {
@@ -347,6 +348,7 @@ func runReconcile(ctx context.Context, r reconciler, logger zerolog.Logger) {
 			Int("created", result.Created).
 			Int("updated", result.Updated).
 			Int("deleted", result.Deleted).
+			Int("recreated", result.Recreated).
 			Int("errors", len(result.Errors)).
 			Dur("elapsed", elapsed)
 

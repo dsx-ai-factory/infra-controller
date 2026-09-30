@@ -31,6 +31,9 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_vault_requests_succeeded_total</td><td>counter</td><td>Number of successful Vault requests</td></tr>
 <tr><td>carbide_api_vault_token_time_until_refresh_seconds</td><td>gauge</td><td>The amount of time, in seconds, until the Vault token is required to be refreshed</td></tr>
 <tr><td>carbide_api_version</td><td>gauge</td><td>Version (git sha, build date, etc) of this service</td></tr>
+<tr><td>carbide_attestation_attester_sets_total</td><td>counter</td><td>Number of previously unseen SPDM-capable attester sets recorded for a hardware class</td></tr>
+<tr><td>carbide_attestation_profile_changes_total</td><td>counter</td><td>Number of accepted attestation profile create, update, and delete operations, by operation.</td></tr>
+<tr><td>carbide_attestation_scheduling_total</td><td>counter</td><td>Number of SPDM attestation scheduling attempts, by outcome and which lookup supplied the profile</td></tr>
 <tr><td>carbide_attestation_total</td><td>counter</td><td>Number of device attestations performed, by device type and outcome.</td></tr>
 <tr><td>carbide_auth_context_missing_total</td><td>counter</td><td>Number of Forge authorization requests missing authentication context, by authorizer</td></tr>
 <tr><td>carbide_auth_denied_total</td><td>counter</td><td>Number of Forge calls denied by the authorizer</td></tr>
@@ -55,6 +58,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_client_tcp_connect_successes_total</td><td>counter</td><td>Number of successful outbound TCP connects across all HTTP connectors</td></tr>
 <tr><td>carbide_concurrent_machine_updates_available</td><td>gauge</td><td>Number of machines in the system that can be updated concurrently.</td></tr>
 <tr><td>carbide_config_drift_total</td><td>counter</td><td>Number of config-file seeded definitions that have drifted from their declaration, by resource_kind (resource_pool, network_definition) and drift_kind (changed, dropped).</td></tr>
+<tr><td>carbide_database_readiness_check_failures_total</td><td>counter</td><td>Number of periodic PostgreSQL readiness checks that failed, backing /ready</td></tr>
 <tr><td>carbide_database_transaction_rollback_failures_total</td><td>counter</td><td>Number of database transaction rollback failures, by trigger.</td></tr>
 <tr><td>carbide_db_pool_idle_conns</td><td>gauge</td><td>Number of idle connections in the carbide database pool</td></tr>
 <tr><td>carbide_db_pool_total_conns</td><td>gauge</td><td>Number of (active + idle) connections in the carbide database pool</td></tr>
@@ -275,6 +279,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_prefix_admission_total</td><td>counter</td><td>Number of completed tenant SitePrefix admission attempts, by result.</td></tr>
 <tr><td>carbide_site_prefix_retirements_total</td><td>counter</td><td>Number of tenant SitePrefix retirements, by previous lifecycle state.</td></tr>
 <tr><td>carbide_spdm_evidence_collection_unexpected_task_states_total</td><td>counter</td><td>Number of unexpected SPDM evidence collection task states, by task state and next action.</td></tr>
+<tr><td>carbide_ssh_console_stream_lines_dropped_total</td><td>counter</td><td>Number of console lines omitted from client-specific streams, by reason</td></tr>
 <tr><td>carbide_state_handler_wakeup_failures_total</td><td>counter</td><td>Number of times a machine&#39;s state handler could not be woken after an observed or desired state change</td></tr>
 <tr><td>carbide_static_address_assignments_total</td><td>counter</td><td>Number of static address assignment attempts, by outcome.</td></tr>
 <tr><td>carbide_static_address_preallocations_total</td><td>counter</td><td>Number of static address preallocation outcomes recorded, by outcome; successful outcomes are counted only after commit.</td></tr>

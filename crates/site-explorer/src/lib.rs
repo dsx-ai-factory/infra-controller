@@ -34,6 +34,7 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
+use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use db::{
@@ -42,7 +43,6 @@ use db::{
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
-use librms::RmsApi;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::errors::OperatorError;
@@ -67,6 +67,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use version_compare::Cmp;
+mod attester_inventory;
 mod endpoint_explorer;
 pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer};
 mod endpoint_exploration_service;
@@ -263,6 +264,157 @@ pub struct Endpoint<'a> {
     pause_ingestion_and_poweron: bool,
 }
 
+/// An explored endpoint and the underlay interface it is probed through.
+type Candidate<'a> = (IpAddr, &'a MachineInterfaceSnapshot, &'a ExploredEndpoint);
+
+/// What one iteration probes, in probe order. Operator requests sit outside
+/// the `explorations_per_run` budget; the other three tiers share it.
+#[derive(Debug, Default)]
+struct ExplorationPlan<'a> {
+    /// `exploration_requested` endpoints, by address.
+    priority: Vec<Candidate<'a>>,
+    /// Interfaces with no report yet, oldest interface first.
+    unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
+    /// Endpoints preingestion parked with `waiting_for_explorer_refresh`, oldest report first.
+    refresh_waits: Vec<Candidate<'a>>,
+    /// Everything else, oldest report first.
+    routine: Vec<Candidate<'a>>,
+    unexplored_candidates: usize,
+    refresh_wait_candidates: usize,
+    routine_candidates: usize,
+}
+
+impl ExplorationPlan<'_> {
+    fn selected_total(&self) -> usize {
+        self.priority.len() + self.unexplored.len() + self.refresh_waits.len() + self.routine.len()
+    }
+
+    /// Candidate and selected counts per tier, as recorded on the metrics.
+    fn counts(&self) -> [(&'static str, usize); 9] {
+        [
+            ("priority_update_candidates", self.priority.len()),
+            ("unexplored_candidates", self.unexplored_candidates),
+            ("refresh_wait_candidates", self.refresh_wait_candidates),
+            ("routine_update_candidates", self.routine_candidates),
+            ("selected_priority_updates", self.priority.len()),
+            ("selected_unexplored", self.unexplored.len()),
+            ("selected_refresh_waits", self.refresh_waits.len()),
+            ("selected_routine_updates", self.routine.len()),
+            ("selected_total", self.selected_total()),
+        ]
+    }
+}
+
+/// Shares of the `explorations_per_run` budget for the three tiers inside it.
+const UNEXPLORED_SHARE_PERCENT: usize = 70;
+const REFRESH_WAIT_SHARE_PERCENT: usize = 20;
+const ROUTINE_SHARE_PERCENT: usize = 10;
+const _: () =
+    assert!(UNEXPLORED_SHARE_PERCENT + REFRESH_WAIT_SHARE_PERCENT + ROUTINE_SHARE_PERCENT == 100);
+
+/// Endpoints per tier of the `explorations_per_run` budget: candidates or slots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TierCounts {
+    unexplored: usize,
+    refresh_waits: usize,
+    routine: usize,
+}
+
+impl TierCounts {
+    fn total(&self) -> usize {
+        self.unexplored + self.refresh_waits + self.routine
+    }
+}
+
+/// Sorts the candidates into tiers and spends `budget` on them. Each tier gets
+/// its share of the budget (the `*_SHARE_PERCENT` constants) oldest first:
+/// unexplored endpoints by interface creation, the other two by report time.
+/// Slots a tier cannot fill go to the other tiers in the same order, unexplored
+/// first, so no slot stays unused while any tier has candidates. From a budget
+/// of ten up every tier holds its share, so bring-up cannot starve parked BMCs
+/// and parked BMCs cannot starve the routine refresh. Below that the smaller
+/// shares round to zero and those tiers live on what the earlier tiers leave.
+fn plan_explorations<'a>(
+    candidates: Vec<Candidate<'a>>,
+    mut unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
+    budget: usize,
+) -> ExplorationPlan<'a> {
+    let mut priority = Vec::new();
+    let mut refresh_waits = Vec::new();
+    let mut routine = Vec::new();
+    for candidate in candidates {
+        let endpoint = candidate.2;
+        if endpoint.exploration_requested {
+            priority.push(candidate);
+        } else if endpoint.waiting_for_explorer_refresh
+            && endpoint.preingestion_state.parks_for_explorer_refresh()
+        {
+            refresh_waits.push(candidate);
+        } else {
+            routine.push(candidate);
+        }
+    }
+    let oldest_report_first =
+        |(address, _, endpoint): &Candidate<'a>| (endpoint.report_version.timestamp(), *address);
+    priority.sort_by_key(|(address, _, _)| *address);
+    unexplored.sort_by_key(|(address, iface)| (iface.created, *address));
+    refresh_waits.sort_by_key(oldest_report_first);
+    routine.sort_by_key(oldest_report_first);
+
+    let unexplored_candidates = unexplored.len();
+    let refresh_wait_candidates = refresh_waits.len();
+    let routine_candidates = routine.len();
+    let take = allocate(
+        budget,
+        TierCounts {
+            unexplored: unexplored_candidates,
+            refresh_waits: refresh_wait_candidates,
+            routine: routine_candidates,
+        },
+    );
+    unexplored.truncate(take.unexplored);
+    refresh_waits.truncate(take.refresh_waits);
+    routine.truncate(take.routine);
+    ExplorationPlan {
+        priority,
+        unexplored,
+        refresh_waits,
+        routine,
+        unexplored_candidates,
+        refresh_wait_candidates,
+        routine_candidates,
+    }
+}
+
+/// How many of `budget` each tier gets: its share, capped by its candidates,
+/// then the unused rest tier by tier in order. Rounding leftovers go to the
+/// first tier, so a budget below ten still reaches the tiers in order.
+fn allocate(budget: usize, candidates: TierCounts) -> TierCounts {
+    let budget = budget.min(candidates.total());
+    let mut quotas = TierCounts {
+        unexplored: budget * UNEXPLORED_SHARE_PERCENT / 100,
+        refresh_waits: budget * REFRESH_WAIT_SHARE_PERCENT / 100,
+        routine: budget * ROUTINE_SHARE_PERCENT / 100,
+    };
+    quotas.unexplored += budget - quotas.total();
+    let mut take = TierCounts {
+        unexplored: quotas.unexplored.min(candidates.unexplored),
+        refresh_waits: quotas.refresh_waits.min(candidates.refresh_waits),
+        routine: quotas.routine.min(candidates.routine),
+    };
+    let mut spare = budget - take.total();
+    for (taken, wanted) in [
+        (&mut take.unexplored, candidates.unexplored),
+        (&mut take.refresh_waits, candidates.refresh_waits),
+        (&mut take.routine, candidates.routine),
+    ] {
+        let more = (wanted - *taken).min(spare);
+        *taken += more;
+        spare -= more;
+    }
+    take
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct EndpointExplorationStepDurations {
     redfish_explore: Duration,
@@ -452,7 +604,6 @@ pub struct SiteExplorer {
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
     /// so a reset whose timestamp write failed still throttles the next reset.
     recent_bmc_resets: RecentBmcResets,
-    // rms_client: Option<Arc<dyn RmsApi>>,
 }
 
 /// State captured once and applied throughout a Site Explorer iteration.
@@ -478,7 +629,7 @@ impl SiteExplorer {
         common_pools: Arc<CommonPools>,
         work_lock_manager_handle: WorkLockManagerHandle,
         rack_profiles: RackProfileConfig,
-        rms_client: Option<Arc<dyn RmsApi>>,
+        machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
         dpf_enabled_at_site: bool,
     ) -> Self {
@@ -503,7 +654,7 @@ impl SiteExplorer {
                 explorer_config.clone(),
                 common_pools,
                 rack_profiles,
-                rms_client.clone(),
+                machine_info_provider,
                 credential_manager,
                 dpf_enabled_at_site,
             ),
@@ -1009,7 +1160,7 @@ impl SiteExplorer {
         self.check_preconditions(metrics).await?;
 
         let update_explored_endpoints_start = Instant::now();
-        let expected_endpoint_index = self
+        let (expected_endpoint_index, explored_this_run) = self
             .update_explored_endpoints(metrics, &run_context)
             .await?;
         metrics.record_phase_latency(
@@ -1025,7 +1176,7 @@ impl SiteExplorer {
         // 2b) If the endpoint is for a host: make sure that the host is on and that infinite boot is enabled. Otherwise, we will not be able to provision the DPU appropriately
         // once we create a managed host and add it to the state machine.
         let identify_machines_to_ingest_start = Instant::now();
-        let (explored_dpus, explored_hosts) = self
+        let (explored_dpus, explored_hosts, already_ingested_bmc_ips) = self
             .identify_machines_to_ingest(metrics, &expected_endpoint_index, &run_context)
             .await?;
         metrics.record_phase_latency(
@@ -1057,7 +1208,13 @@ impl SiteExplorer {
             let start_create_machines = Instant::now();
             let create_machines_res = self
                 .machine_creator
-                .create_machines(metrics, &mut identified_hosts, &expected_endpoint_index)
+                .create_machines(
+                    metrics,
+                    &mut identified_hosts,
+                    &expected_endpoint_index,
+                    &already_ingested_bmc_ips,
+                    &explored_this_run,
+                )
                 .await;
             let create_machines_latency = start_create_machines.elapsed();
             metrics.create_machines_latency = Some(create_machines_latency);
@@ -1203,6 +1360,20 @@ impl SiteExplorer {
         explored_power_shelves: Vec<(ExploredEndpoint, EndpointExplorationReport)>,
         expected_endpoint_index: &ExploredEndpointIndex,
     ) -> SiteExplorerResult<()> {
+        // One query replaces a per-shelf transaction for shelves that already
+        // exist; `create_power_shelf` keeps its own checks for the rest.
+        let mut existing_bmc_macs = HashSet::new();
+        let mut existing_names = HashSet::new();
+        for (bmc_mac_address, name) in
+            db_power_shelf::find_all_bmc_mac_addresses_and_names(&self.database_connection).await?
+        {
+            if let Some(bmc_mac_address) = bmc_mac_address {
+                existing_bmc_macs.insert(bmc_mac_address);
+            }
+            existing_names.insert(name);
+        }
+
+        let mut skipped_existing_power_shelves = 0usize;
         for (endpoint, _report) in explored_power_shelves {
             let address = endpoint.address;
             let Some(expected_power_shelf) =
@@ -1214,6 +1385,12 @@ impl SiteExplorer {
                 );
                 continue;
             };
+
+            if power_shelf_already_exists(expected_power_shelf, &existing_bmc_macs, &existing_names)
+            {
+                skipped_existing_power_shelves += 1;
+                continue;
+            }
 
             match self
                 .create_power_shelf(endpoint, expected_power_shelf, &self.database_connection)
@@ -1236,6 +1413,13 @@ impl SiteExplorer {
                     )
                 }
             }
+        }
+
+        if skipped_existing_power_shelves > 0 {
+            tracing::info!(
+                skipped_existing_power_shelves,
+                "Skipped power shelves that already exist"
+            );
         }
 
         Ok(())
@@ -1399,10 +1583,12 @@ impl SiteExplorer {
         Ok(true)
     }
 
-    /// identify_machines_to_ingest returns two maps.
+    /// identify_machines_to_ingest returns two maps and a set.
     /// The first map returned identifies all of the DPUs that site explorer will try to ingest.
     /// The latter identifies all of the hosts the the site explorer will try to ingest.
     /// Both map from machine BMC IP address to the corresponding explored endpoint.
+    /// The set holds the BMC IPs that already belong to an ingested machine, so
+    /// `create_machines` can skip existing hosts without reading it again.
     async fn identify_machines_to_ingest(
         &self,
         metrics: &mut SiteExplorationMetrics,
@@ -1411,6 +1597,7 @@ impl SiteExplorer {
     ) -> SiteExplorerResult<(
         HashMap<IpAddr, ExploredEndpoint>,
         HashMap<IpAddr, ExploredEndpoint>,
+        HashSet<IpAddr>,
     )> {
         let mut txn = self.txn_begin().await?;
 
@@ -1420,9 +1607,10 @@ impl SiteExplorer {
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
-        // Ingested BMC IPs are read once for the whole loop rather than per endpoint.
-        // The iteration work lock makes site-explorer the only writer that ingests
-        // machines, so nothing can become ingested while the loop below runs.
+        // Ingested BMC IPs are read once for the whole loop and for `create_machines`
+        // rather than per endpoint. The iteration work lock makes site-explorer the
+        // only writer that ingests machines, so the snapshot stays exact until
+        // `create_machines` starts creating.
         let already_ingested_bmc_ips =
             db::machine_topology::find_all_ingested_bmc_ips(&mut txn).await?;
 
@@ -1468,7 +1656,7 @@ impl SiteExplorer {
             }
         }
 
-        Ok((explored_dpus, explored_hosts))
+        Ok((explored_dpus, explored_hosts, already_ingested_bmc_ips))
     }
 
     async fn identify_managed_hosts(
@@ -2341,11 +2529,12 @@ impl SiteExplorer {
         Ok(suppressed_bmc_macs)
     }
 
+    /// Returns the endpoint index and the addresses explored in this run.
     async fn update_explored_endpoints(
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<ExploredEndpointIndex> {
+    ) -> SiteExplorerResult<(ExploredEndpointIndex, HashSet<IpAddr>)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
@@ -2629,8 +2818,8 @@ impl SiteExplorer {
         // information about the endpoint
         let plan_start = Instant::now();
         let mut delete_endpoints = Vec::new();
-        let mut priority_update_endpoints = Vec::new();
-        let mut update_endpoints = Vec::with_capacity(index.explored_endpoints().len());
+        let mut candidates: Vec<Candidate<'_>> =
+            Vec::with_capacity(index.explored_endpoints().len());
         for (address, endpoint) in index.explored_endpoints() {
             match index.underlay_interface(address) {
                 Some(iface) => {
@@ -2638,30 +2827,17 @@ impl SiteExplorer {
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                         continue;
                     }
-
-                    if endpoint.exploration_requested {
-                        priority_update_endpoints.push((*address, iface, endpoint));
-                    } else {
-                        update_endpoints.push((*address, iface, endpoint));
-                    }
+                    candidates.push((*address, iface, endpoint));
                 }
                 None => {
                     if endpoint.report.is_power_shelf() {
-                        tracing::info!(bmc_ip_address = %address, "Retaining power shelf endpoint with no underlay interface; power shelves are sourced from their expected static IP")
+                        tracing::info!(bmc_ip_address = %address, "Retaining power shelf endpoint with no underlay interface; power shelves are sourced from their expected static IP");
                     } else {
                         delete_endpoints.push(*address)
                     }
                 }
             }
         }
-        metrics.record_update_explored_endpoints_count(
-            "priority_update_candidates",
-            priority_update_endpoints.len(),
-        );
-        metrics.record_update_explored_endpoints_count(
-            "routine_update_candidates",
-            update_endpoints.len(),
-        );
         metrics.record_update_explored_endpoints_count(
             "stale_delete_candidates",
             delete_endpoints.len(),
@@ -2696,86 +2872,44 @@ impl SiteExplorer {
                 true
             })
             .collect::<Vec<_>>();
-        metrics.record_update_explored_endpoints_count(
-            "unexplored_candidates",
-            unexplored_endpoints.len(),
+        let plan = plan_explorations(
+            candidates,
+            unexplored_endpoints,
+            self.config.explorations_per_run as usize,
         );
-        // Now that we gathered the candidates for exploration, let's decide what
-        // we are actually going to explore. The config limits the amount of explorations
-        // per iteration.
-        let num_explore_endpoints = (self.config.explorations_per_run as usize)
-            .min(unexplored_endpoints.len() + update_endpoints.len());
-
-        let mut explore_endpoint_data =
-            Vec::with_capacity(priority_update_endpoints.len() + num_explore_endpoints);
-
-        // Existing endpoints with `exploration_requested` are enqueued
-        // unconditionally and sit outside the per-iteration count budget.
-        // Operators set this flag to request a guaranteed next-tick attempt, so
-        // we must not let the routine refresh budget delay them. Concurrency is
-        // still bounded by the `concurrent_explorations` semaphore below.
-        for (address, iface, endpoint) in priority_update_endpoints {
-            explore_endpoint_data.push(Endpoint {
-                address,
-                iface,
-                last_explored: Some(endpoint),
-                pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
-                expected: index.matched_expected(&address),
-            });
+        for (kind, count) in plan.counts() {
+            metrics.record_update_explored_endpoints_count(kind, count);
         }
 
-        let priority_selected_count = explore_endpoint_data.len();
-        metrics.record_update_explored_endpoints_count(
-            "selected_priority_updates",
-            priority_selected_count,
-        );
-
-        // Next priority are all endpoints that we've never looked at
-        let remaining_explore_endpoints = num_explore_endpoints;
-        for (address, iface) in unexplored_endpoints
-            .iter()
-            .take(remaining_explore_endpoints)
-        {
+        let mut explore_endpoint_data = Vec::with_capacity(plan.selected_total());
+        let ExplorationPlan {
+            priority,
+            unexplored,
+            refresh_waits,
+            routine,
+            ..
+        } = plan;
+        let explored = |(address, iface, endpoint)| Endpoint {
+            address,
+            iface,
+            last_explored: Some(endpoint),
+            pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
+            expected: index.matched_expected(&address),
+        };
+        explore_endpoint_data.extend(priority.into_iter().map(explored));
+        for (address, iface) in unexplored {
             let pause_ingestion_and_poweron =
                 pause_ingestion_and_poweron(index.expected(), &iface.mac_address);
             explore_endpoint_data.push(Endpoint {
-                address: *address,
+                address,
                 iface,
                 last_explored: None,
                 pause_ingestion_and_poweron,
-                expected: index.matched_expected(address),
+                expected: index.matched_expected(&address),
             });
         }
-        let selected_unexplored = explore_endpoint_data.len() - priority_selected_count;
-        metrics.record_update_explored_endpoints_count("selected_unexplored", selected_unexplored);
-
-        // If we have any capacity available, we update knowledge about endpoints we looked at earlier on
-        let remaining_explore_endpoints =
-            num_explore_endpoints - (explore_endpoint_data.len() - priority_selected_count);
-        if remaining_explore_endpoints != 0 {
-            // Sort endpoints so that we will replace the oldest report first
-            update_endpoints.sort_by_key(|(_address, _machine_interface, endpoint)| {
-                endpoint.report_version.timestamp()
-            });
-            for (address, iface, endpoint) in update_endpoints
-                .into_iter()
-                .take(remaining_explore_endpoints)
-            {
-                explore_endpoint_data.push(Endpoint {
-                    address,
-                    iface,
-                    last_explored: Some(endpoint),
-                    pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
-                    expected: index.matched_expected(&address),
-                });
-            }
-        }
-        metrics.record_update_explored_endpoints_count(
-            "selected_routine_updates",
-            explore_endpoint_data.len() - priority_selected_count - selected_unexplored,
-        );
-        metrics
-            .record_update_explored_endpoints_count("selected_total", explore_endpoint_data.len());
+        explore_endpoint_data.extend(refresh_waits.into_iter().map(explored));
+        explore_endpoint_data.extend(routine.into_iter().map(explored));
         metrics.record_phase_latency("update_explored_endpoints_plan", plan_start.elapsed());
 
         let task_set = FuturesUnordered::new();
@@ -2912,6 +3046,10 @@ impl SiteExplorer {
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);
+        let explored_this_run: HashSet<IpAddr> = exploration_results
+            .iter()
+            .map(|result| result.endpoint.address)
+            .collect();
         metrics.record_phase_latency("update_explored_endpoints_probe", probe_start.elapsed());
         for EndpointExplorationTaskResult { steps, .. } in &exploration_results {
             metrics
@@ -3027,7 +3165,9 @@ impl SiteExplorer {
                             .await?;
                             endpoint_report_update_attempts += 1;
                             match report_write {
-                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::Applied(()) => {
+                                    attester_inventory::record(&report, &mut txn).await?;
+                                }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                                     // Skip transient remediation: it would use
                                     // the rejected report's stale endpoint snapshot.
@@ -3079,6 +3219,7 @@ impl SiteExplorer {
                                 &mut txn,
                             )
                             .await?;
+                            attester_inventory::record(&report, &mut txn).await?;
                             insert_endpoint_attempts += 1;
                         }
                         Err(e) => {
@@ -3152,7 +3293,7 @@ impl SiteExplorer {
             remediate_start.elapsed(),
         );
 
-        Ok(index)
+        Ok((index, explored_this_run))
     }
 
     /// Records one terminal BMC-reset attempt. `bmc_reset_count` remains the
@@ -4813,16 +4954,76 @@ fn health_reports_equal_ignoring_observed_at(
     left == right
 }
 
+/// Whether `create_power_shelf` would refuse this shelf: its BMC MAC or its
+/// non-empty name matches an existing power shelf record.
+fn power_shelf_already_exists(
+    expected_power_shelf: &ExpectedPowerShelf,
+    existing_bmc_macs: &HashSet<MacAddress>,
+    existing_names: &HashSet<String>,
+) -> bool {
+    let name = &expected_power_shelf.metadata.name;
+    existing_bmc_macs.contains(&expected_power_shelf.bmc_mac_address)
+        || (!name.is_empty() && existing_names.contains(name))
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
     use config_version::ConfigVersion;
     use model::site_explorer::{
-        ComputerSystem, Inventory, NetworkAdapter, PreingestionState, Service,
+        ComputerSystem, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service,
     };
 
     use super::*;
+
+    #[test]
+    fn power_shelf_already_exists_cases() {
+        let existing_mac: MacAddress = "02:00:00:00:00:01".parse().unwrap();
+        let new_mac: MacAddress = "02:00:00:00:00:02".parse().unwrap();
+        let existing_bmc_macs = HashSet::from([existing_mac]);
+        let existing_names = HashSet::from(["shelf-1".to_string(), String::new()]);
+
+        check_values(
+            [
+                Check {
+                    scenario: "BMC MAC matches an existing shelf: exists",
+                    input: (existing_mac, "shelf-2"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "name matches an existing shelf: exists",
+                    input: (new_mac, "shelf-1"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "empty name does not match an existing empty name: new",
+                    input: (new_mac, ""),
+                    expect: false,
+                },
+                Check {
+                    scenario: "neither matches: new",
+                    input: (new_mac, "shelf-2"),
+                    expect: false,
+                },
+            ],
+            |(bmc_mac_address, name): (MacAddress, &str)| {
+                let expected_power_shelf = ExpectedPowerShelf {
+                    bmc_mac_address,
+                    metadata: model::metadata::Metadata {
+                        name: name.to_string(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                power_shelf_already_exists(
+                    &expected_power_shelf,
+                    &existing_bmc_macs,
+                    &existing_names,
+                )
+            },
+        );
+    }
 
     fn observed_firmware_report(
         bmc_version: Option<&str>,
@@ -5547,6 +5748,337 @@ mod tests {
             pause_remediation: false,
             boot_interface_mac: None,
             boot_interface_id: None,
+        }
+    }
+
+    /// A candidate for `plan_explorations`: an explored endpoint at `address`
+    /// whose report carries `version`, with the interface it is probed through.
+    fn planned(
+        address: &str,
+        state: PreingestionState,
+        waiting: bool,
+        requested: bool,
+        version: ConfigVersion,
+    ) -> (ExploredEndpoint, MachineInterfaceSnapshot) {
+        let mut endpoint = explored_endpoint(EndpointExplorationReport::default());
+        endpoint.address = address.parse().unwrap();
+        endpoint.preingestion_state = state;
+        endpoint.waiting_for_explorer_refresh = waiting;
+        endpoint.exploration_requested = requested;
+        endpoint.report_version = version;
+        let iface = MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([2, 0, 0, 0, 0, 1]));
+        (endpoint, iface)
+    }
+
+    /// A report version whose timestamp is `micros` after the epoch.
+    fn version_at(micros: i64) -> ConfigVersion {
+        format!("V1-T{micros}").parse().unwrap()
+    }
+
+    fn addresses<T>(selected: &[T], address: impl Fn(&T) -> IpAddr) -> Vec<IpAddr> {
+        selected.iter().map(address).collect()
+    }
+
+    #[test]
+    fn allocate_gives_each_tier_its_share_and_passes_unused_slots_on() {
+        let counts = |unexplored, refresh_waits, routine| TierCounts {
+            unexplored,
+            refresh_waits,
+            routine,
+        };
+        // input: (budget, candidates per tier); expect: slots per tier
+        check_values(
+            [
+                Check {
+                    scenario: "every tier full: 70/20/10",
+                    input: (10, counts(20, 20, 20)),
+                    expect: counts(7, 2, 1),
+                },
+                Check {
+                    scenario: "no unexplored: its share flows to refresh waits, then routine",
+                    input: (10, counts(0, 5, 20)),
+                    expect: counts(0, 5, 5),
+                },
+                Check {
+                    scenario: "no candidates for the later tiers: unexplored takes everything",
+                    input: (10, counts(20, 0, 0)),
+                    expect: counts(10, 0, 0),
+                },
+                Check {
+                    scenario: "the rounding leftover of a small budget goes to unexplored",
+                    input: (1, counts(1, 1, 1)),
+                    expect: counts(1, 0, 0),
+                },
+                Check {
+                    scenario: "fewer candidates than budget: all of them",
+                    input: (10, counts(1, 1, 1)),
+                    expect: counts(1, 1, 1),
+                },
+            ],
+            |(budget, candidates)| allocate(budget, candidates),
+        );
+    }
+
+    #[test]
+    fn plan_explorations_spends_the_budget_by_tier() {
+        let parked = || PreingestionState::InitialBMCReset {
+            phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+        };
+        struct Case {
+            name: &'static str,
+            // (address, state, waiting, requested, report timestamp in micros)
+            explored: Vec<(&'static str, PreingestionState, bool, bool, i64)>,
+            // (address, interface creation time in seconds)
+            unexplored: Vec<(&'static str, i64)>,
+            budget: usize,
+            priority: Vec<&'static str>,
+            selected_unexplored: Vec<&'static str>,
+            refresh_waits: Vec<&'static str>,
+            routine: Vec<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "an operator request is served outside the budget even when parked",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, true, 10),
+                    ("10.0.0.2", PreingestionState::Complete, false, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 0,
+                priority: vec!["10.0.0.1"],
+                selected_unexplored: vec![],
+                refresh_waits: vec![],
+                routine: vec![],
+            },
+            Case {
+                name: "during bring-up unexplored endpoints get 70 percent, oldest interface first, and the other tiers keep theirs",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
+                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                ],
+                unexplored: vec![
+                    ("10.0.1.1", 300),
+                    ("10.0.1.2", 100),
+                    ("10.0.1.3", 200),
+                    ("10.0.1.4", 400),
+                    ("10.0.1.5", 500),
+                    ("10.0.1.6", 600),
+                    ("10.0.1.7", 700),
+                    ("10.0.1.8", 800),
+                    ("10.0.1.9", 900),
+                ],
+                budget: 10,
+                priority: vec![],
+                selected_unexplored: vec![
+                    "10.0.1.2", "10.0.1.3", "10.0.1.1", "10.0.1.4", "10.0.1.5", "10.0.1.6",
+                    "10.0.1.7",
+                ],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2"],
+                routine: vec!["10.0.0.4"],
+            },
+            Case {
+                name: "slots unexplored endpoints cannot use flow to refresh waits, then routine",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
+                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                ],
+                unexplored: vec![("10.0.1.1", 100)],
+                budget: 5,
+                priority: vec![],
+                selected_unexplored: vec!["10.0.1.1"],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                routine: vec!["10.0.0.4"],
+            },
+            Case {
+                name: "a refresh wait is served before an older routine report when the budget is one",
+                explored: vec![
+                    ("10.0.0.1", PreingestionState::Complete, false, false, 10),
+                    ("10.0.0.2", parked(), true, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 1,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.2"],
+                routine: vec![],
+            },
+            Case {
+                name: "refresh waits are served oldest report first, so a failed probe rotates to the back",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 30),
+                    ("10.0.0.2", parked(), true, false, 10),
+                    ("10.0.0.3", parked(), true, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 2,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.2", "10.0.0.3"],
+                routine: vec![],
+            },
+            Case {
+                name: "a wave of parked BMCs leaves the routine refresh its 10 percent",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", parked(), true, false, 13),
+                    ("10.0.0.5", parked(), true, false, 14),
+                    ("10.0.0.6", parked(), true, false, 15),
+                    ("10.0.0.7", parked(), true, false, 16),
+                    ("10.0.0.8", parked(), true, false, 17),
+                    ("10.0.0.9", parked(), true, false, 18),
+                    ("10.0.0.10", parked(), true, false, 19),
+                    ("10.0.0.11", PreingestionState::Complete, false, false, 20),
+                    ("10.0.0.12", PreingestionState::Complete, false, false, 21),
+                ],
+                unexplored: vec![],
+                budget: 10,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec![
+                    "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+                    "10.0.0.7", "10.0.0.8", "10.0.0.9",
+                ],
+                routine: vec!["10.0.0.11"],
+            },
+            Case {
+                name: "only the states that read the next report are refresh waits",
+                explored: vec![
+                    (
+                        "10.0.0.1",
+                        PreingestionState::RecheckVersions,
+                        true,
+                        false,
+                        10,
+                    ),
+                    (
+                        "10.0.0.2",
+                        PreingestionState::NewFirmwareReportedWait {
+                            final_version: "1.0".to_string(),
+                            upgrade_type: FirmwareComponentType::Bmc,
+                            previous_reset_time: None,
+                        },
+                        true,
+                        false,
+                        11,
+                    ),
+                    (
+                        "10.0.0.3",
+                        PreingestionState::RecheckVersionsAfterFailure {
+                            reason: "job failed".to_string(),
+                        },
+                        true,
+                        false,
+                        12,
+                    ),
+                    (
+                        "10.0.0.4",
+                        PreingestionState::InitialBMCReset {
+                            phase: InitialBmcResetPhase::WaitForBmc,
+                        },
+                        true,
+                        false,
+                        13,
+                    ),
+                    ("10.0.0.5", PreingestionState::Initial, true, false, 14),
+                    ("10.0.0.6", PreingestionState::Complete, true, false, 15),
+                    (
+                        "10.0.0.7",
+                        PreingestionState::Failed {
+                            reason: "bmc never answered".to_string(),
+                        },
+                        true,
+                        false,
+                        16,
+                    ),
+                ],
+                unexplored: vec![],
+                budget: 7,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                routine: vec!["10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7"],
+            },
+        ];
+        for case in cases {
+            let explored: Vec<_> = case
+                .explored
+                .iter()
+                .map(|(address, state, waiting, requested, micros)| {
+                    planned(
+                        address,
+                        state.clone(),
+                        *waiting,
+                        *requested,
+                        version_at(*micros),
+                    )
+                })
+                .collect();
+            let unexplored_ifaces: Vec<(IpAddr, MachineInterfaceSnapshot)> = case
+                .unexplored
+                .iter()
+                .map(|(address, created)| {
+                    let mut iface = MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([
+                        2, 0, 0, 0, 0, 2,
+                    ]));
+                    iface.created = chrono::DateTime::from_timestamp(*created, 0).unwrap();
+                    (address.parse().unwrap(), iface)
+                })
+                .collect();
+            let plan = plan_explorations(
+                explored
+                    .iter()
+                    .map(|(endpoint, iface)| (endpoint.address, iface, endpoint))
+                    .collect(),
+                unexplored_ifaces
+                    .iter()
+                    .map(|(address, iface)| (*address, iface))
+                    .collect(),
+                case.budget,
+            );
+            let ips = |list: &[&str]| -> Vec<IpAddr> {
+                list.iter().map(|a| a.parse().unwrap()).collect()
+            };
+            assert_eq!(
+                addresses(&plan.priority, |c| c.0),
+                ips(&case.priority),
+                "{}: priority",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.unexplored, |c| c.0),
+                ips(&case.selected_unexplored),
+                "{}: unexplored",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.refresh_waits, |c| c.0),
+                ips(&case.refresh_waits),
+                "{}: refresh waits",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.routine, |c| c.0),
+                ips(&case.routine),
+                "{}: routine",
+                case.name
+            );
+            assert_eq!(
+                plan.selected_total(),
+                case.priority.len()
+                    + case.selected_unexplored.len()
+                    + case.refresh_waits.len()
+                    + case.routine.len(),
+                "{}: total",
+                case.name
+            );
         }
     }
 

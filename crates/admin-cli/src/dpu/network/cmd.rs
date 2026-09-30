@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use ::rpc::admin_cli::OutputFormat;
-use ::rpc::forge::ManagedHostNetworkConfigResponse;
+use ::rpc::forge::{AddressFamily, FlatInterfaceConfig, ManagedHostNetworkConfigResponse};
 use carbide_uuid::machine::{DpuMachineId, MachineId};
 use prettytable::{Table, format, row};
 
@@ -80,6 +80,14 @@ async fn show_dpu_network_config(
                     .map(|x| x.loopback_ip.as_str())
                     .unwrap_or_default()
             ]);
+            table.add_row(row![
+                "Config Loopback IPv6",
+                config
+                    .managed_host_config
+                    .as_ref()
+                    .and_then(|managed_host| managed_host.loopback_ip_v6.as_deref())
+                    .unwrap_or_default()
+            ]);
             table.add_row(row!["Config Version", config.managed_host_config_version]);
             table.add_row(row!["Use Admin Network", config.use_admin_network]);
             table.add_row(row![
@@ -133,6 +141,7 @@ async fn show_dpu_network_config(
                 table.add_row(row!["VPC VNI", aintf.vpc_vni]);
                 table.add_row(row!["SVI IP", aintf.svi_ip()]);
                 table.add_row(row!["Tenant VRF Loopback", aintf.tenant_vrf_loopback_ip()]);
+                add_ipv6_rows(&mut table, aintf);
                 table.add_row(row!["Boot URL", aintf.booturl()]);
 
                 async_write!(output_file, "{}", table)?;
@@ -179,6 +188,7 @@ async fn show_dpu_network_config(
                 table.add_row(row!["VPC VNI", tintf.vpc_vni]);
                 table.add_row(row!["SVI IP", tintf.svi_ip()]);
                 table.add_row(row!["Tenant VRF Loopback", tintf.tenant_vrf_loopback_ip()]);
+                add_ipv6_rows(&mut table, tintf);
                 table.add_row(row!["Boot URL", tintf.booturl()]);
 
                 async_write!(output_file, "{}", table)?;
@@ -190,6 +200,49 @@ async fn show_dpu_network_config(
     }
 
     Ok(())
+}
+
+// Read deprecated fields when displaying responses from older nico-api versions.
+#[allow(deprecated)]
+fn add_ipv6_rows(table: &mut Table, interface: &FlatInterfaceConfig) {
+    let ipv6 = interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(AddressFamily::V6));
+    // A prefixless sidecar may be omitted from a populated `addresses` list,
+    // but must not replace or fill empty fields in an actual IPv6 entry.
+    let legacy_ipv6 = interface.ipv6_interface_config.as_ref().filter(|config| {
+        ipv6.is_none() && (interface.addresses.is_empty() || config.interface_prefix.is_empty())
+    });
+
+    table.add_row(row![
+        "IPv6 IP",
+        ipv6.map(|address| address.ip.as_str())
+            .or_else(|| legacy_ipv6.map(|config| config.ip.as_str()))
+            .unwrap_or_default()
+    ]);
+    table.add_row(row![
+        "IPv6 Interface Prefix",
+        ipv6.map(|address| address.interface_prefix.as_str())
+            .or_else(|| legacy_ipv6.map(|config| config.interface_prefix.as_str()))
+            .unwrap_or_default()
+    ]);
+    table.add_row(row![
+        "IPv6 Prefix",
+        ipv6.map(|address| address.prefix.as_str())
+            .unwrap_or_default()
+    ]);
+    table.add_row(row![
+        "IPv6 SVI IP",
+        ipv6.and_then(|address| address.svi_ip.as_deref())
+            .or_else(|| legacy_ipv6.and_then(|config| config.svi_ip.as_deref()))
+            .unwrap_or_default()
+    ]);
+    table.add_row(row![
+        "IPv6 Tenant VRF Loopback",
+        ipv6.and_then(|address| address.tenant_vrf_loopback_ip.as_deref())
+            .unwrap_or_default()
+    ]);
 }
 
 #[allow(deprecated)]

@@ -60,8 +60,9 @@ async fn network_prefix_occupancy_by_vpc_prefix_id(
             ON network_prefix.prefix && vpc_prefix.prefix
         WHERE vpc_prefix.id = ANY($1)
           AND (
-              network_prefix.vpc_prefix_id = vpc_prefix.id
-              OR network_prefix.vpc_prefix_id IS NULL
+              network_prefix.overlap_vpc_id IS NULL
+              OR vpc_prefix.overlap_vpc_id IS NULL
+              OR network_prefix.overlap_vpc_id = vpc_prefix.overlap_vpc_id
           )
         ORDER BY vpc_prefix.id, network_prefix.id
     "#;
@@ -177,7 +178,7 @@ where
     let mut query = super::FilterableQueryBuilder::new(
         "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
             labels, description, controller_state, controller_state_outcome,
-            controller_state_version, deleted
+            controller_state_version, deleted, overlap_vpc_id
         FROM network_vpc_prefixes",
     )
     .filter(&filter);
@@ -213,7 +214,7 @@ pub async fn get_for_allocation_by_ids(
     let query = r#"
         SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
                labels, description, controller_state, controller_state_outcome,
-               controller_state_version, deleted
+               controller_state_version, deleted, overlap_vpc_id
         FROM network_vpc_prefixes
         -- Omit a deletion predicate so allocation validation can distinguish
         -- deleted prefixes from unknown IDs.
@@ -241,7 +242,7 @@ pub async fn find_allocation_candidates(
     let query = r#"
         SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
                labels, description, controller_state, controller_state_outcome,
-               controller_state_version, deleted
+               controller_state_version, deleted, overlap_vpc_id
         FROM network_vpc_prefixes
         WHERE vpc_id = ANY($1)
           -- Soft-deleted prefixes are not eligible automatic candidates.
@@ -269,7 +270,7 @@ pub async fn lock_for_allocation(
     let query = r#"
         SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
                labels, description, controller_state, controller_state_outcome,
-               controller_state_version, deleted
+               controller_state_version, deleted, overlap_vpc_id
         FROM network_vpc_prefixes
         WHERE id = $1
           -- Deletion can race discovery, so re-check it while taking the row lock.
@@ -291,7 +292,7 @@ pub async fn find_by_vpc(
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
             labels, description, controller_state, controller_state_outcome, \
-            controller_state_version, deleted \
+            controller_state_version, deleted, overlap_vpc_id \
             FROM network_vpc_prefixes WHERE vpc_id=$1 \
             AND deleted IS NULL \
             ORDER BY prefix";
@@ -312,7 +313,7 @@ pub async fn find_by_vpcs(
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
                 labels, description, controller_state, controller_state_outcome, \
-                controller_state_version, deleted \
+                controller_state_version, deleted, overlap_vpc_id \
                 FROM network_vpc_prefixes WHERE vpc_id=ANY($1) \
                 AND deleted IS NULL \
                 ORDER BY prefix";
@@ -333,7 +334,7 @@ pub async fn update_last_used_prefix(
         "UPDATE network_vpc_prefixes SET last_used_prefix=$1 WHERE id=$2 AND deleted IS NULL
         RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
             labels, description, controller_state, controller_state_outcome,
-            controller_state_version, deleted";
+            controller_state_version, deleted, overlap_vpc_id";
     sqlx::query_as::<_, VpcPrefix>(query)
         .bind(last_used_prefix)
         .bind(vpc_prefix_id)
@@ -443,7 +444,7 @@ pub async fn persist(
             VALUES ($1, $2, $3, $4::json, $5, $6, $7, $8::json, $9, $10)
             RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
                 labels, description, controller_state, controller_state_outcome,
-                controller_state_version, deleted";
+                controller_state_version, deleted, overlap_vpc_id";
     let vpc_prefix: VpcPrefix = match sqlx::query_as(insert_query)
         .bind(value.id)
         .bind(value.config.prefix)
@@ -496,10 +497,10 @@ pub async fn probe(
     network: IpNetwork,
     txn: &mut PgConnection,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
-    // Include soft-deleted rows because the global exclusion constraint still reserves them.
+    // Deleting prefixes keep their address space until final removal.
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
             labels, description, controller_state, controller_state_outcome,
-            controller_state_version, deleted
+            controller_state_version, deleted, overlap_vpc_id
         FROM network_vpc_prefixes WHERE prefix && $1";
     sqlx::query_as(query)
         .bind(network)
@@ -508,12 +509,11 @@ pub async fn probe(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// `AttachedSegmentPrefix` identifies a `NetworkPrefix` linked directly to a
-/// `NetworkSegment` that has a VPC.
+/// A global segment prefix that overlaps the queried address range.
 #[derive(Debug)]
-pub struct AttachedSegmentPrefix {
-    /// The `NetworkSegment` belongs to this VPC.
-    pub vpc_id: VpcId,
+pub struct OverlappingSegmentPrefix {
+    /// The segment's VPC, if it has been attached to one.
+    pub vpc_id: Option<VpcId>,
     /// `VpcPrefix` creation uses this `NetworkSegment` type to decide whether
     /// it may adopt the prefix.
     pub segment_type: NetworkSegmentType,
@@ -521,30 +521,28 @@ pub struct AttachedSegmentPrefix {
     pub prefix: NetworkPrefix,
 }
 
-/// `probe_segment_prefixes` finds direct `NetworkPrefix` records on attached
-/// `NetworkSegment` records that overlap `network`.
+/// `probe_segment_prefixes` finds global segment prefixes overlapping `network`.
 ///
 /// Soft-deleted segments remain visible because their `NetworkPrefix` rows stay
-/// in the database until final deletion. A `NetworkPrefix` linked to a
-/// `VpcPrefix` is checked through that `VpcPrefix` instead, so this query does
-/// not return it.
+/// in the database until final deletion. Include attached global children:
+/// their parent can be scoped without authorizing reuse of the child.
+/// Scoped children are checked through their exact VPC prefix instead.
 pub async fn probe_segment_prefixes(
     network: IpNetwork,
     txn: &mut PgConnection,
-) -> Result<Vec<AttachedSegmentPrefix>, DatabaseError> {
+) -> Result<Vec<OverlappingSegmentPrefix>, DatabaseError> {
     let query = "SELECT ns.vpc_id AS vpc_id, ns.network_segment_type, \
             np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
             np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip \
             FROM network_prefixes np \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
             WHERE np.prefix && $1 \
-              AND ns.vpc_id IS NOT NULL \
-              AND np.vpc_prefix_id IS NULL";
+              AND np.overlap_vpc_id IS NULL";
 
     sqlx::query(query)
         .bind(network)
         .try_map(|row| {
-            Ok(AttachedSegmentPrefix {
+            Ok(OverlappingSegmentPrefix {
                 vpc_id: row.try_get("vpc_id")?,
                 segment_type: row.try_get("network_segment_type")?,
                 prefix: NetworkPrefix::from_row(&row)?,
@@ -562,7 +560,7 @@ pub async fn update(
     let query = "UPDATE network_vpc_prefixes SET name=$1, labels=$2::json, description=$3 WHERE id=$4 AND deleted IS NULL
         RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
             labels, description, controller_state, controller_state_outcome,
-            controller_state_version, deleted";
+            controller_state_version, deleted, overlap_vpc_id";
     sqlx::query_as(query)
         .bind(&update.metadata.name)
         .bind(sqlx::types::Json(&update.metadata.labels))
@@ -585,7 +583,7 @@ pub async fn mark_as_deleted(
     let query = "UPDATE network_vpc_prefixes SET deleted=NOW() WHERE id=$1 AND deleted IS NULL
         RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
             labels, description, controller_state, controller_state_outcome,
-            controller_state_version, deleted";
+            controller_state_version, deleted, overlap_vpc_id";
     let deleted_prefix: VpcPrefix = sqlx::query_as(query)
         .bind(value.id)
         .fetch_one(&mut *txn)

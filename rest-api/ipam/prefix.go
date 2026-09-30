@@ -158,6 +158,9 @@ func (i *ipamer) DeletePrefix(ctx context.Context, cidr string) (*Prefix, error)
 	if p.hasIPs() {
 		return nil, fmt.Errorf("prefix %s has ips, delete prefix not possible", p.Cidr)
 	}
+	if p.acquiredPrefixes() > 0 {
+		return nil, fmt.Errorf("prefix %s has allocated child prefixes, delete prefix not possible", p.Cidr)
+	}
 	prefix, err := i.storage.DeletePrefix(ctx, *p, i.namespace)
 	if err != nil {
 		return nil, fmt.Errorf("delete prefix:%s %w", cidr, err)
@@ -468,6 +471,15 @@ func (i *ipamer) releaseIPFromPrefixInternal(ctx context.Context, prefixCidr, ip
 	_, ok := prefix.ips[key]
 	if !ok {
 		return fmt.Errorf("%w: unable to release ip:%s because it is not allocated in prefix:%s", ErrNotFound, ip, prefixCidr)
+	}
+	ipnet, err := netip.ParsePrefix(prefix.Cidr)
+	if err != nil {
+		return err
+	}
+	// Keep reservations stored so they cannot be reassigned and `hasIPs` stays accurate.
+	iprange := netipx.RangeOfPrefix(ipnet)
+	if address == iprange.From() || (address.Is4() && address == iprange.To()) {
+		return fmt.Errorf("unable to release ip:%s because it is reserved in prefix:%s", key, prefix.Cidr)
 	}
 	delete(prefix.ips, key)
 	_, err = i.storage.UpdatePrefix(ctx, *prefix, i.namespace)

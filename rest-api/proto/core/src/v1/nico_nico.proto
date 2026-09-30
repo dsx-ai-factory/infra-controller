@@ -6,6 +6,7 @@ syntax = "proto3";
 package forge;
 
 import "common_nico.proto";
+import "console_log_nico.proto";
 import "dns_nico.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
@@ -24,6 +25,10 @@ option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
 service Forge {
   // What version of NICo is this service running? Matches `--version` command line.
   rpc Version(VersionRequest) returns (BuildInfo);
+
+  // Stream recent and live machine console output.
+  rpc StreamConsoleLogs(console_log.StreamConsoleLogsRequest)
+      returns (stream console_log.ConsoleLogLine);
 
   // Domain
   rpc CreateDomain(dns.CreateDomainRequest) returns (dns.Domain);
@@ -369,6 +374,20 @@ service Forge {
   // appropriate customer-facing workflow available or where those workflows fail.
   rpc AdminForceDeleteMachine(AdminForceDeleteMachineRequest) returns (AdminForceDeleteMachineResponse);
 
+  // List the IP addresses of parked reservations that outlived their interface,
+  // optionally filtered by owning MAC or by address. The IP addresses are ids for
+  // AdminFindReservedAddressesByIds.
+  rpc AdminFindReservedAddressIds(AdminFindReservedAddressesRequest) returns (AdminReservedAddressIdList);
+
+  // Fetch parked address reservations by their IP-address ids, in bounded pages.
+  // A request may carry no more IDs than the server's max_find_by_ids limit.
+  rpc AdminFindReservedAddressesByIds(AdminReservedAddressesByIdsRequest) returns (AdminFindReservedAddressesResponse);
+
+  // Release parked address reservations, making their addresses available to
+  // allocators again. Only parked reservations are affected; active interface
+  // addresses are never released.
+  rpc AdminReleaseReservedAddresses(AdminReleaseReservedAddressesRequest) returns (AdminReleaseReservedAddressesResponse);
+
   // Starts the managed host decommissioning workflow. The host must be Ready.
   rpc DecommissionManagedHost(DecommissionManagedHostRequest) returns (DecommissionManagedHostResponse);
 
@@ -408,6 +427,13 @@ service Forge {
   rpc TriggerHostReprovisioning(HostReprovisioningRequest) returns (google.protobuf.Empty);
   // List hosts waiting for reprovisioning
   rpc ListHostsWaitingForReprovisioning(HostReprovisioningListRequest) returns (HostReprovisioningListResponse);
+
+  // Trigger a reset of a managed host: tear down its instance and DPF
+  // resources, then re-ingest it from DPU discovery.
+  rpc TriggerManagedHostReset(ManagedHostResetRequest) returns (google.protobuf.Empty);
+  // List managed hosts waiting for reset
+  rpc ListManagedHostsWaitingForReset(ManagedHostResetListRequest) returns (ManagedHostResetListResponse);
+
   // Operator "force-converge this BMC now" escape hatch for a single host/DPU
   // BMC. This is asynchronous: the handler only persists (Set) or removes
   // (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -594,6 +620,8 @@ service Forge {
   // Replace the full record, including both lists and metadata.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  // Return all declarations ordered by rack group ID; an empty site returns an empty list.
+  rpc GetAllExpectedRackGroups(google.protobuf.Empty) returns (ExpectedRackGroupList);
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
@@ -733,6 +761,9 @@ service Forge {
 
   // Machine-Validation attempt detail
   rpc GetMachineValidationAttempt(MachineValidationAttemptGetRequest) returns (MachineValidationAttempt);
+
+  // List attempts for one Machine-Validation run item, oldest first.
+  rpc FindMachineValidationAttempts(MachineValidationAttemptSearchFilter) returns (MachineValidationAttemptList);
 
   // Append the next ordered stdout or stderr chunk while an attempt is active.
   rpc AppendMachineValidationAttemptLog(MachineValidationAttemptLogAppendRequest) returns (MachineValidationAttemptLogAppendResponse);
@@ -964,6 +995,14 @@ service Forge {
 
   rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
   rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
+
+  // Attestation profiles APIs
+  rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
+  rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
+  rpc DeleteAttestationProfile(DeleteAttestationProfileRequest) returns (DeleteAttestationProfileResponse);
+  rpc GetAttestationProfile(GetAttestationProfileRequest) returns (AttestationProfile);
+  rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfilesResponse);
+  rpc GetAttestationCoverage(google.protobuf.Empty) returns (GetAttestationCoverageResponse);
   // SPDM attestation APIs end
 
   // SPIFFE Machine Identity APIs
@@ -1170,9 +1209,50 @@ message SpdmMachineAttestationStatus {
   SpdmAttestationStatus attestation_status = 2;
 }
 
+// Why one attestation scheduling attempt ended as it did.
+enum SpdmSchedulingOutcome {
+  // Unset sentinel. A successful response always carries a real outcome, so
+  // this only appears to a client newer than the server it is talking to.
+  SPDM_SCHEDULING_OUTCOME_UNSPECIFIED = 0;
+  // One work row was written per selected attester.
+  SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
+  // The profile's mode is NONE. The BMC is not contacted.
+  SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
+  // The BMC offered nothing eligible, under a policy that asserted nothing
+  // about what must be there. Points at the hardware, not the profile.
+  SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
+  // An operator-authored requirement went unsatisfied.
+  SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
+  // No exploration has recorded a hardware class for this machine's BMC, and
+  // no "any" profile covers it either.
+  SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
+  // Neither the machine's class nor `any` has a profile.
+  SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
+  // Work rows were written, but an allowlist pattern matched no eligible
+  // attester, so less than the profile asked for is being attested.
+  SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
+}
+
 message SpdmMachineAttestationTriggerResponse {
   common.MachineId machine_id = 1;
   int32 devices_under_attestation = 2;
+  // The hardware class recorded for the machine's BMC, empty when exploration
+  // has not recorded one.
+  string resolved_hardware_class = 3;
+  // Why nothing was scheduled, or that something was.
+  SpdmSchedulingOutcome outcome = 4;
+  // Whether the reserved "any" profile supplied the policy rather than one
+  // written for this machine's own class.
+  bool used_any_fallback = 5;
+  // Version of the profile that decided this call, absent when no profile
+  // applied. Scoped to this call: a later trigger replaces the machine's whole
+  // work set, so this is not a lasting claim about the attestation in flight.
+  optional string profile_version = 6;
+  // When the scheduled devices were written, absent unless something was
+  // scheduled. Every device row this call wrote carries it, so a caller can
+  // tell whether its scheduling is still the live one or was replaced. The same
+  // value is reported as SpdmAttestationDetails.started_at.
+  optional google.protobuf.Timestamp started_at = 7;
 }
 
 message SpdmAttestationDetails{
@@ -1208,6 +1288,146 @@ message SpdmListAttestationMachinesRequest {
 
 message SpdmListAttestationMachinesResponse {
   repeated SpdmMachineAttestationStatus statuses = 1;
+}
+
+// Attestation profiles: one policy per hardware class, naming which attesters
+// machines of that class require.
+// Ordered from attesting nothing to naming an exact set, after the unset
+// sentinel.
+enum AttesterSelectionMode {
+  // Unset sentinel. The server rejects this with InvalidArgument. Zero is not
+  // a real mode because an omitted one would otherwise read as NONE and
+  // silently disable attestation for the class.
+  ATTESTER_SELECTION_MODE_UNSPECIFIED = 0;
+  ATTESTER_SELECTION_MODE_NONE = 1;
+  ATTESTER_SELECTION_MODE_ALL = 2;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 3;
+  ATTESTER_SELECTION_MODE_DENYLIST = 4;
+}
+
+// One matcher against a ComponentIntegrity Id. Matching is case-sensitive,
+// because Redfish treats Id as opaque.
+message ComponentIdMatch {
+  oneof pattern {
+    // One ID, matched in full.
+    string exact = 1;
+    // Every ID starting with the given string.
+    string prefix = 2;
+  }
+}
+
+message AttesterSelection {
+  // Required. An omitted mode decodes to the unset sentinel and is rejected.
+  AttesterSelectionMode mode = 1;
+  // Required for ALLOWLIST and DENYLIST, and must be empty for ALL and NONE.
+  repeated ComponentIdMatch component_ids = 2;
+}
+
+message AttestationProfile {
+  string hardware_class = 1;
+  string version = 2;
+  AttesterSelection selection = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  // Derived by the server from the calling principal; ignored on requests.
+  string updated_by = 5;
+}
+
+message CreateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+}
+
+message UpdateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+  // If the field here is set, the update will only be applied if the version
+  // is equivalent to the current version on the NICo Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 3;
+}
+
+message DeleteAttestationProfileRequest {
+  string hardware_class = 1;
+  // If the field here is set, the delete will only be applied if the version
+  // is equivalent to the current version on the NICo Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 2;
+}
+
+message DeleteAttestationProfileResponse {
+}
+
+message GetAttestationProfileRequest {
+  string hardware_class = 1;
+}
+
+message ListAttestationProfilesResponse {
+  repeated AttestationProfile profiles = 1;
+}
+
+// Which profile would supply the policy for a hardware class, or why none
+// would. Reported by the server so a caller does not restate the resolution
+// rule, which is the same one scheduling applies to a single machine.
+enum AttestationCoverage {
+  // Unset sentinel. The server always reports a real value, so this only
+  // appears to a client newer than the server it is talking to.
+  ATTESTATION_COVERAGE_UNSPECIFIED = 0;
+  // A profile keyed to this class supplies the policy.
+  ATTESTATION_COVERAGE_OWN_PROFILE = 1;
+  // The reserved "any" profile supplies it, rather than one written for this
+  // hardware.
+  ATTESTATION_COVERAGE_ANY_FALLBACK = 2;
+  // Neither this class nor "any" has a profile.
+  ATTESTATION_COVERAGE_NO_PROFILE = 3;
+  // No exploration has recorded a class, and no "any" profile is stored, so
+  // nothing covers these endpoints.
+  ATTESTATION_COVERAGE_CLASS_NOT_RECORDED = 4;
+}
+
+message AttestationCoverageEntry {
+  // The class recorded on these endpoints, empty for the endpoints carrying
+  // none.
+  string hardware_class = 1;
+  // How many explored endpoints carry it.
+  int32 explored_endpoints = 2;
+  AttestationCoverage coverage = 3;
+  // The mode of the profile that would apply, absent when none would.
+  optional AttesterSelectionMode mode = 4;
+  // The distinct sets of SPDM-capable attesters recorded for this class, one
+  // entry per digest, ordered by digest. Empty until an exploration records
+  // one. More than one means the class has reported different attestable
+  // components, which a profile's patterns cannot show on their own; a set
+  // keeps its entry after the endpoints reporting it are gone, so read
+  // `reporting_endpoints` for which of them the class carries now.
+  repeated AttesterSet attester_sets = 5;
+}
+
+// One set of SPDM-capable attesters recorded for a hardware class.
+message AttesterSet {
+  // Identifies the set: a digest over the attester IDs, which moves with
+  // membership and not with whether a member's integrity reporting is on.
+  string digest = 1;
+  // Explored endpoints of this class last reporting this set. Sums to at most
+  // the entry's `explored_endpoints`, since an endpoint explored before this
+  // was recorded carries no digest yet.
+  int32 reporting_endpoints = 2;
+  // How many attesters the set holds. Zero where the BMC reported an SPDM
+  // collection with no SPDM members, which is a set in its own right and
+  // distinct from a class that has recorded none.
+  int32 attesters = 3;
+}
+
+message GetAttestationCoverageResponse {
+  // One entry per class recorded across explored endpoints, ordered by class,
+  // with the endpoints carrying no class last.
+  repeated AttestationCoverageEntry entries = 1;
+  // The mode of the reserved "any" profile, absent when none is stored. Kept
+  // apart from the entries because "any" is never a recorded class, and the
+  // site's posture for everything unprofiled should be visible rather than
+  // inferred from which classes are missing.
+  optional AttesterSelectionMode any_profile_mode = 2;
 }
 
 // Machine Identity - JWT-SVID token signing
@@ -1851,15 +2071,17 @@ message VpcConfig {
   // means that the VPC has no associated resource group; empty values are not
   // persisted.
   optional string power_resource_group = 9;
-  // Selects SLAAC allocation mode for instance IPv6 interfaces in this FNN
-  // VPC. When true, NICo allocates a /64 to each interface that includes IPv6
-  // and retains that prefix without assigning a concrete IPv6 host address.
+  // Selects SLAAC mode for instance IPv6 interfaces in this FNN VPC. When
+  // true, an interface selected from a VPC prefix receives an allocated /64
+  // without a concrete IPv6 host address. An explicit segment-backed interface
+  // retains the segment prefix. The DPU agent configures tenant router
+  // advertisement (RA) only when the resulting prefix is an exact /64 and the
+  // FNN interface is routed. Stretched L2 or SVI tenant interfaces and retained
+  // prefixes with another length remain outside that support boundary.
   // This policy is fixed when the VPC is created and cannot be changed through
-  // `VpcUpdateRequest`. NICo does not yet configure router advertisements;
-  // that support is tracked by
-  // https://github.com/NVIDIA/infra-controller/issues/2398. Core reports this
-  // field explicitly; an absent value indicates a response from a Core version
-  // that predates SLAAC support.
+  // `VpcUpdateRequest`. Other virtualization types remain outside that support
+  // boundary. Core reports this field explicitly. An absent value indicates a
+  // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
 }
 
@@ -1960,13 +2182,16 @@ message VpcCreationRequest {
   // Resource group managed by the external power provisioning service. During
   // creation, omission or an empty value creates no association.
   optional string power_resource_group = 19;
-  // Selects SLAAC allocation mode for instance IPv6 interfaces in this VPC.
-  // When true, this is supported only for FNN VPCs and Core allocates a /64 to
-  // each interface that includes IPv6 without assigning a concrete IPv6 host
-  // address. False or omission disables SLAAC. Core evaluates this value only
-  // during VPC creation; `VpcUpdateRequest` cannot change the resulting policy.
-  // NICo does not yet configure router advertisements; that support is tracked by
-  // https://github.com/NVIDIA/infra-controller/issues/2398.
+  // Selects SLAAC mode for instance IPv6 interfaces in this VPC. When true,
+  // this is supported only for FNN VPCs. An interface selected from a VPC prefix
+  // receives an allocated /64 without a concrete IPv6 host address. An explicit
+  // segment-backed interface retains the segment prefix. The DPU agent
+  // configures tenant router advertisement (RA) only when the resulting prefix
+  // is an exact /64 and the FNN interface is routed. Stretched L2 or SVI tenant
+  // interfaces, retained prefixes with another length, and other virtualization
+  // types remain outside that support boundary. False or omission disables
+  // SLAAC. Core evaluates this value only during VPC creation.
+  // `VpcUpdateRequest` cannot change the resulting policy.
   optional bool slaac_enabled = 20;
 }
 
@@ -2788,12 +3013,20 @@ message ExpectedRackGroup {
   optional common.RackGroupId rack_group_id = 1;
   // External group-level NVLink topology identifier, non-blank and at most 128 characters.
   string topology = 2;
-  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
-  repeated common.RackId rack_ids = 3;
+  reserved 3, 5;
+  reserved "rack_ids", "members";
   // Descriptive attributes such as name, manufacturer, and location labels.
   Metadata metadata = 4;
-  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
-  repeated ExpectedRackGroupMember members = 5;
+  // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
+  // May be empty; updates replace the complete list.
+  repeated ExpectedRackGroupRack racks = 6;
+}
+
+message ExpectedRackGroupRack {
+  // Required non-blank external rack identifier.
+  optional common.RackId rack_id = 1;
+  // Ordered devices belonging to this rack; may be empty.
+  repeated ExpectedRackGroupMember members = 2;
 }
 
 message ExpectedRackGroupMember {
@@ -2833,7 +3066,8 @@ message ExpectedRackGroupsByIdsRequest {
 message ExpectedRack {
   // The rack identifier. Same rack_id referenced by expected machines, switches, and power shelves.
   optional common.RackId rack_id = 1;
-  // The rack profile ID. Determines expected counts of compute trays, switches, and power shelves.
+  // Output: configured profile derived on creation from the matching group's topology and this rack's manufacturers.
+  // Ignored on writes. Metadata updates preserve the stored profile; replacement derives it again.
   common.RackProfileId rack_profile_id = 2;
   // Metadata that will be associated with the rack.
   // This includes things like chassis and location attributes,
@@ -4993,6 +5227,12 @@ message ManagedHostNetworkConfigResponse {
   // route. Unused roots and roots in Deleting still require coverage in that mode.
   optional common.StringList site_fabric_null_routes = 24;
 
+  // DHCPv6 Preference sent by the DPU server in ADVERTISE messages. The valid
+  // range is 0 through 255, and agents reject larger values. Core omits the
+  // field by default, preserving the DHCPv6 protocol preference of zero. An
+  // explicitly configured zero remains present.
+  optional uint32 dhcpv6_server_preference = 25;
+
   // Enable nico DHCP on HBN.
   // Deprecated: It is always enabled now.
   bool enable_dhcp = 100;
@@ -5285,11 +5525,11 @@ message FlatInterfaceRoutingProfile {
 // API to the DPU agent as part of FlatInterfaceConfig.
 message FlatInterfaceIpv6Config {
   // Host IPv6 address (e.g. "2001:db8::1"). Empty only when the owning VPC
-  // has SLAAC enabled; in that case interface_prefix still identifies the
-  // prefix configured on the DPU interface.
+  // has SLAAC enabled.
   string ip = 1;
-  // Interface-specific prefix allocation. Stateful FNN uses a /127; SLAAC
-  // uses the /64 allocated to this interface.
+  // Interface-specific tenant allocation. Like IPv4's concrete /32 host
+  // binding, stateful FNN uses a /128. SLAAC uses the /64 allocated to this
+  // interface.
   string interface_prefix = 2;
   // SVI IP for L2 FNN segments — the DPU's IPv6 gateway address on the VLAN.
   // Only set for L2 segments (can_stretch = true).
@@ -5368,6 +5608,60 @@ message AdminForceDeleteMachineRequest {
   // machine can recover its boot target; set this when a clean rediscovery
   // without prior boot-target memory is intended.
   bool delete_retained_boot_interfaces = 7;
+
+  // Release preserved address reservations for the deleted interfaces instead
+  // of parking them. By default, deleting an interface parks any address it
+  // marked for preservation so the same MAC can reclaim it on re-ingestion; set
+  // this when a permanent wipe should free those addresses immediately.
+  bool release_preserved_addresses = 8;
+}
+
+// A parked address reservation owned by its MAC with no active interface row.
+message ReservedAddress {
+  // The reserved IP address.
+  string ip_address = 1;
+  // The MAC address that owns the reservation.
+  string reserved_by_mac = 2;
+  // The runtime allocation type of the reserved address (e.g. "static").
+  string allocation_type = 3;
+}
+
+// Filter for listing or releasing parked address reservations. An empty filter
+// matches every parked reservation; setting both narrows to a single row.
+message AdminFindReservedAddressesRequest {
+  // Restrict to reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Restrict to the reservation for this exact IP address.
+  optional string ip_address = 2;
+}
+
+// The IP addresses of parked reservations matching a find filter. Each address
+// is an id for AdminFindReservedAddressesByIds.
+message AdminReservedAddressIdList {
+  repeated string ip_addresses = 1;
+}
+
+// Fetch parked reservations by their IP-address ids, bounded by max_find_by_ids.
+message AdminReservedAddressesByIdsRequest {
+  repeated string ip_addresses = 1;
+}
+
+message AdminFindReservedAddressesResponse {
+  repeated ReservedAddress reserved_addresses = 1;
+}
+
+// Release parked reservations matching the filter. At least one of the filter
+// fields must be set so a release cannot clear every reservation by accident.
+message AdminReleaseReservedAddressesRequest {
+  // Release reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Release the reservation for this exact IP address.
+  optional string ip_address = 2;
+}
+
+message AdminReleaseReservedAddressesResponse {
+  // The IP addresses that were released.
+  repeated string released_ip_addresses = 1;
 }
 
 message DecommissionManagedHostRequest {
@@ -7348,6 +7642,14 @@ message MachineValidationRunItem {
 
 message MachineValidationAttemptGetRequest {
   common.UUID attempt_id = 1;
+}
+
+message MachineValidationAttemptSearchFilter {
+  common.UUID run_item_id = 1;
+}
+
+message MachineValidationAttemptList {
+  repeated MachineValidationAttempt attempts = 1;
 }
 
 message MachineValidationAttempt {
@@ -10473,7 +10775,12 @@ enum SitePrefixRoutingScope {
 // Describes the current lifecycle state of a site prefix.
 enum SitePrefixLifecycleState {
   SITE_PREFIX_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  // The tenant-managed prefix is not yet usable for new VpcPrefixes. Under
+  // mutual isolation, readiness waits for every affected DPU to acknowledge
+  // the network configuration that includes its protection.
   SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING = 1;
+  // The prefix can be used for new VpcPrefixes. A tenant-managed prefix has
+  // completed the protection update required by the site's isolation policy.
   SITE_PREFIX_LIFECYCLE_STATE_READY = 2;
   SITE_PREFIX_LIFECYCLE_STATE_DELETING = 3;
   SITE_PREFIX_LIFECYCLE_STATE_ERROR = 4;
@@ -10579,8 +10886,11 @@ message InterfaceAddressConfig {
 
   // Family shared by every address and prefix in this entry. Must be V4 or V6.
   AddressFamily address_family = 1;
-  // IPv4 gateway CIDR. IPv6 entries omit this value; their DPU-side link
-  // prefix remains in interface_prefix, which the agent renders as gateway_cidr.
+  // IPv4 gateway CIDR. IPv6 entries omit this value. For routed tenant FNN,
+  // the agent derives the DPU address as the first address of prefix and uses
+  // that prefix as the RA PIO for supported /127 and /64 modes. As with IPv4's
+  // /32 host binding, stateful interface_prefix retains the tenant /128.
+  // SLAAC uses the matching /64 in prefix and interface_prefix.
   optional string gateway = 2;
   // Host address, without a prefix length. This may be empty for SLAAC or an
   // entry that contains only a loopback.
@@ -10598,6 +10908,41 @@ message InterfaceAddressConfig {
   // and debugging; the tenant is not expected to access this address. Writers
   // must set this value on at most one family entry.
   optional string tenant_vrf_loopback_ip = 7;
+}
+
+message ManagedHostResetRequest {
+  enum Mode {
+    // Zero value so an omitted mode is rejected, not defaulted to an action.
+    Unspecified = 0;
+    Set = 1;
+    Clear = 2;
+  }
+  // Host to reset. Not a DPU: a reset tears down every DPU attached to the
+  // host, so it is only expressible against the host.
+  common.MachineId machine_id = 1;
+  Mode mode = 2;
+  UpdateInitiator initiator = 3;
+
+  // Operator acknowledgment that resetting an assigned host destroys the live
+  // tenant instance and its data. The server rejects a Set on an assigned host
+  // unless this is set.
+  bool allow_reset_with_instance = 4;
+  // Skip host cleanup after the live instance is deleted.
+  bool ignore_cleanup = 5;
+}
+
+message ManagedHostResetListRequest {
+}
+
+message ManagedHostResetListResponse {
+  message ManagedHostResetListItem {
+    common.MachineId id = 1; // Host machine ID
+    string state = 2; // ManagedHost state
+    string initiator = 3; // Who requested this reset.
+    google.protobuf.Timestamp requested_at = 4; // When the reset was requested.
+    optional google.protobuf.Timestamp started_at = 5; // When the reset started.
+  }
+  repeated ManagedHostResetListItem hosts = 1;
 }
 
 // Selects a fixed, versioned mlxconfig profile for DPU provisioning.
@@ -10742,9 +11087,9 @@ message PatchExpectedPowerShelfRequest {
   // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
   // (clear). Nonempty IPs must parse as IPv4 or IPv6. A selected
   // `bmc_retain_credentials` must be present; false is an update.
-  // BMC username and password must be selected together and both be nonempty;
-  // clearing credentials is unsupported. Only the listed paths are accepted;
-  // duplicate paths have no additional effect.
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
   // Selected metadata leaves use empty values when metadata is absent.
   // Selected labels replace the collection; keys must be unique, and absent
   // label values become empty strings. Label order is not preserved.
@@ -10765,9 +11110,11 @@ message PatchExpectedSwitchRequest {
   // including empty collections, an absent `rack_id` (clear), and an empty BMC
   // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
   // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
-  // must be present; false is an update. Each username/password pair must be
-  // selected together with both values present and nonempty; clearing
-  // credentials is unsupported. BMC and NVOS pairs can change independently.
+  // must be present; false is an update. BMC and NVOS usernames and passwords
+  // can each be selected independently; unselected values stay unchanged.
+  // Selected credentials must be present and nonempty and cannot be cleared.
+  // If either NVOS credential is set after merging, both must be present and
+  // nonempty. Configuring them for the first time requires both values.
   // The merged NVOS IP, when set, requires exactly one NVOS MAC; both fields
   // can change in the same patch. Only the listed paths are accepted;
   // duplicate paths have no additional effect.
@@ -10823,9 +11170,9 @@ message PatchExpectedMachineRequest {
   // UTF-8 bytes. At most 16 labels are allowed. Label keys must contain
   // 1-255 ASCII bytes, and label values may contain up to 255 UTF-8 bytes.
   //
-  // BMC username and password must be selected together and both be nonempty;
-  // clearing credentials is unsupported. Only the listed paths are accepted;
-  // duplicate paths have no additional effect.
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
   google.protobuf.FieldMask update_mask = 2;
 }
 

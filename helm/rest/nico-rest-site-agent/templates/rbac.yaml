@@ -20,12 +20,12 @@ metadata:
     {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
 rules:
   # Secret volumes are mounted by the kubelet without pod RBAC. The Site Agent
-  # API client only gets and updates bootstrap-info and the configured
-  # Temporal Secret.
+  # API client only gets and updates the configured registration and Temporal
+  # Secrets.
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames:
-      - "bootstrap-info"
+      - {{ .Values.secrets.siteRegistration | quote }}
       - {{ .Values.secrets.temporalClientCerts | quote }}
     verbs: ["get", "update"]
 ---

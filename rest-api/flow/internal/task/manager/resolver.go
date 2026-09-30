@@ -20,7 +20,7 @@ import (
 // TargetFetcher provides the methods needed to fetch racks and components for target resolution.
 type TargetFetcher interface {
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
-	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier) ([]*rack.Rack, error)
+	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*component.Component, error)
 	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
