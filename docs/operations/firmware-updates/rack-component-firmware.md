@@ -298,8 +298,8 @@ rack operations because it provides readiness checks, ordering, task reports,
 and cancellation. Direct commands require the operator to provide those
 safeguards.
 
-For RMS-backed compute trays or switches, pass a SOT file rather than embedding
-it on the command line:
+For RMS-backed compute trays, switches, or power shelves, pass a SOT file rather
+than embedding it on the command line:
 
 ```sh
 nico-admin-cli component-manager update-firmware compute-tray \
@@ -313,7 +313,7 @@ nico-admin-cli component-manager update-firmware switch \
 
 nico-admin-cli component-manager update-firmware power-shelf \
   --power-shelf-id <power-shelf-id> \
-  --target-version <target-version> \
+  --sot-json-file ./power-shelf-firmware-object.json \
   --component pmc,psu
 ```
 

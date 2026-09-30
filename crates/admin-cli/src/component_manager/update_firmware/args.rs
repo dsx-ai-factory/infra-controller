@@ -58,6 +58,11 @@ Queue firmware on power shelves:
     $ nico-admin-cli component-manager update-firmware power-shelf \
     --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --target-version fw-1.2.3
 
+Queue firmware on power shelves from an RMS SOT JSON file:
+    $ nico-admin-cli component-manager update-firmware power-shelf \
+    --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --sot-json-file ./sot.json \
+    --access-token mytoken
+
 Queue firmware on a power shelf by PMC MAC (targets the power shelf before ingestion):
     $ nico-admin-cli component-manager update-firmware power-shelf \
     --mac-address 00:11:22:33:44:55 --target-version fw-1.2.3
@@ -118,8 +123,8 @@ struct PowerShelfArgs {
     #[clap(flatten)]
     ids: PowerShelfTargetArgs,
 
-    #[clap(long = "target-version", help = "Firmware target version")]
-    target_version: String,
+    #[clap(flatten)]
+    firmware_source: FirmwareSourceArgs,
 
     #[clap(long = "force-update", help = "Force firmware update when supported")]
     force_update: bool,
@@ -271,31 +276,35 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                     ),
                 })
             }
-            Target::PowerShelf(target) => Ok(Self {
-                target_version: target.target_version,
-                access_token: None,
-                force_update: target.force_update,
-                bypass_state_controller: target.bypass_state_controller,
-                target: Some(
-                    rpc::forge::update_component_firmware_request::Target::PowerShelves({
-                        let (power_shelf_ids, pmc_macs) = match target.ids.into_selection() {
-                            PowerShelfSelection::PowerShelfIds(list) => (Some(list), None),
-                            PowerShelfSelection::Macs(macs) => (None, Some(macs)),
-                        };
-                        rpc::forge::UpdatePowerShelfFirmwareTarget {
-                            power_shelf_ids,
-                            pmc_macs,
-                            components: target
-                                .components
-                                .into_iter()
-                                .map(|component| {
-                                    rpc::forge::PowerShelfComponent::from(component) as i32
-                                })
-                                .collect(),
-                        }
-                    }),
-                ),
-            }),
+            Target::PowerShelf(target) => {
+                let (target_version, access_token) =
+                    resolve_firmware_source(target.firmware_source)?;
+                Ok(Self {
+                    target_version,
+                    access_token,
+                    force_update: target.force_update,
+                    bypass_state_controller: target.bypass_state_controller,
+                    target: Some(
+                        rpc::forge::update_component_firmware_request::Target::PowerShelves({
+                            let (power_shelf_ids, pmc_macs) = match target.ids.into_selection() {
+                                PowerShelfSelection::PowerShelfIds(list) => (Some(list), None),
+                                PowerShelfSelection::Macs(macs) => (None, Some(macs)),
+                            };
+                            rpc::forge::UpdatePowerShelfFirmwareTarget {
+                                power_shelf_ids,
+                                pmc_macs,
+                                components: target
+                                    .components
+                                    .into_iter()
+                                    .map(|component| {
+                                        rpc::forge::PowerShelfComponent::from(component) as i32
+                                    })
+                                    .collect(),
+                            }
+                        }),
+                    ),
+                })
+            }
             Target::ComputeTray(target) => {
                 let (target_version, access_token) =
                     resolve_firmware_source(target.firmware_source)?;
@@ -705,6 +714,27 @@ mod tests {
             "MAC target must not also set power_shelf_ids",
         );
         assert_eq!(pmc_macs.mac_addresses, [MAC_ADDRESS]);
+
+        let power_shelf_sot_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
+            Args::try_parse_from([
+                "update-firmware",
+                "power-shelf",
+                "--power-shelf-id",
+                POWER_SHELF_ID,
+                "--sot-json-file",
+                sot_json,
+                "--access-token",
+                "token",
+            ])
+            .expect("power-shelf SOT command should parse"),
+        )
+        .expect("power-shelf SOT command should build a request");
+
+        assert_eq!(power_shelf_sot_request.target_version, CONFIG_JSON);
+        assert_eq!(
+            power_shelf_sot_request.access_token.as_deref(),
+            Some("token")
+        );
 
         let rack_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
             Args::try_parse_from([
