@@ -875,15 +875,42 @@ fn weave_ew_vpc_attachment_exists_in_astra_config(
 }
 
 // An exact NIC and VNI match can be reused with an in-place revision bump only
-// when its dataplane binding is unchanged. Today only OVS attachments carry a
-// mutable binding: the bridge and optional OVN network name. Weave cannot change
-// those on an existing attachment, so a bridge (or network) change has to retire
-// the stale attachment and create a replacement bound to the new value.
+// when its dataplane binding is unchanged. A changed attachment type (for
+// example OVS to Physical) tears down one binding and installs another, and even
+// within OVS the bridge and optional OVN network name cannot be changed on an
+// existing attachment. Any of those changes has to retire the stale attachment
+// and create a replacement bound to the new value.
 fn weave_ew_vpc_attachment_requires_recreate(
     existing_attachment: &VirtualNetworkAttachment,
     astra_attachment_status: &AstraAttachmentStatus,
 ) -> bool {
-    if astra_attachment_status.attachment_type != Some(SpxAttachmentType::Ovs as i32) {
+    // Map the desired Astra attachment type onto the Weave attachment type it
+    // installs, so it can be compared against what already exists.
+    let desired_type = match astra_attachment_status
+        .attachment_type
+        .and_then(|attachment_type| SpxAttachmentType::try_from(attachment_type).ok())
+    {
+        Some(SpxAttachmentType::Physical) => AttachmentType::Pf,
+        Some(SpxAttachmentType::Virtual) => AttachmentType::Vf,
+        Some(SpxAttachmentType::Ovs) => AttachmentType::Ovs,
+        None => AttachmentType::Unspecified,
+    };
+
+    let existing_type = existing_attachment
+        .spec
+        .as_ref()
+        .and_then(|spec| AttachmentType::try_from(spec.attachment_type).ok())
+        .unwrap_or(AttachmentType::Unspecified);
+
+    // A changed attachment type cannot be applied in place; the old binding has to
+    // be torn down and the new one installed.
+    if desired_type != existing_type {
+        return true;
+    }
+
+    // Beyond the type, only OVS carries a mutable binding (the bridge and optional
+    // OVN network name) that Weave cannot change on an existing attachment.
+    if desired_type != AttachmentType::Ovs {
         return false;
     }
 
@@ -2445,6 +2472,82 @@ mod tests {
                 .bridge_name,
             "br-new"
         );
+
+        // After a successful replacement the attachment is reported Ready.
+        assert_eq!(status.astra_attachments_status.len(), 1);
+        assert_eq!(
+            status.astra_attachments_status[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .phase,
+            AstraPhase::PhaseReady as i32
+        );
+
+        Ok(())
+    }
+
+    // Switching an existing OVS attachment to Physical on the same NIC and VNI
+    // changes the dataplane binding, so the stale OVS attachment must be deleted
+    // and a Physical replacement created rather than the revision bumped in place
+    // (which would leave the OVS bridge installed).
+    #[tokio::test]
+    async fn test_update_weave_ew_vpc_server_astra_config_recreates_attachment_on_ovs_to_physical()
+    -> eyre::Result<()> {
+        let (socket_path, calls) = start_recording_weave_ew_vpc_mock_server(
+            vec![weave_ew_vpc_virtual_network_with_revision(
+                "astra-weave-vni-100",
+                100,
+                "revision-1",
+            )],
+            vec![weave_ew_vpc_virtual_network_attachment_ovs(
+                "old-ovs-attachment",
+                "02:aa:bb:cc:dd:ee",
+                "astra-weave-vni-100",
+                "br-old",
+                "revision-1",
+            )],
+        )
+        .await;
+        let socket_path = socket_path.to_str().unwrap();
+        // Same NIC and VNI, new revision, attachment type changes OVS -> Physical.
+        let astra_config = rpc::AstraConfig {
+            astra_attachments: vec![astra_attachment_with_revision(
+                "02:aa:bb:cc:dd:ee",
+                100,
+                "revision-2",
+            )],
+        };
+
+        let status =
+            build_notify_weave_ew_vpc_astra_config_uds(socket_path, Some(&astra_config)).await?;
+        let calls = calls.lock().await;
+
+        // The VNI is unchanged, so the virtual network is reused, not recreated.
+        assert!(calls.create_virtual_networks.is_empty());
+        assert!(calls.delete_virtual_networks.is_empty());
+
+        // The stale OVS attachment is deleted and a Physical replacement created;
+        // the in-place update path must not run for a type change.
+        assert_eq!(calls.delete_virtual_network_attachments.len(), 1);
+        assert_eq!(
+            calls.delete_virtual_network_attachments[0].id,
+            "old-ovs-attachment"
+        );
+        assert!(calls.update_virtual_network_attachments.is_empty());
+        assert_eq!(calls.create_virtual_network_attachments.len(), 1);
+        let create_attachment_spec = calls.create_virtual_network_attachments[0]
+            .spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(create_attachment_spec.nic_id, "02:aa:bb:cc:dd:ee");
+        assert_eq!(create_attachment_spec.vnet_id, "astra-weave-vni-100");
+        assert_eq!(
+            create_attachment_spec.attachment_type,
+            proto::AttachmentType::Pf as i32
+        );
+        assert!(create_attachment_spec.attachment_pf.is_some());
+        assert!(create_attachment_spec.attachment_ovs.is_none());
 
         // After a successful replacement the attachment is reported Ready.
         assert_eq!(status.astra_attachments_status.len(), 1);

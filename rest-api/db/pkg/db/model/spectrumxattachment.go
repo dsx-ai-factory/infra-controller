@@ -248,6 +248,9 @@ type SpectrumXAttachmentClearInput struct {
 	VirtualFunctionID     bool
 	MacAddress            bool
 	IPAddress             bool
+	// OvnNetworkName clears the optional OVS OVN network name. The bridge name is
+	// required for an OVS attachment and so is never cleared this way.
+	OvnNetworkName bool
 	// Deleted clears the soft-delete timestamp (undelete).
 	Deleted bool
 }
@@ -640,6 +643,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 	if input.IPAddress {
 		sxa.IPAddress = nil
 		updatedFields = append(updatedFields, "ip_address")
+	}
+	if input.OvnNetworkName {
+		sxa.OvnNetworkName = nil
+		updatedFields = append(updatedFields, "ovn_network_name")
 	}
 	if input.Deleted {
 		sxa.Deleted = nil

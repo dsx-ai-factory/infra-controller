@@ -821,6 +821,29 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
+				// OVS metadata is client-owned config, so the Site status carries none of it;
+				// the reconciled value comes from the reported attachment config instead. Only
+				// a changed value is written, and only for an OVS attachment (attachment_ovs is
+				// nil otherwise), matching how the MAC, IP and VF fields are reconciled above.
+				var bridgeName *string
+				var ovnNetworkName *string
+				if ovs := attachmentConfig.GetAttachmentOvs(); ovs != nil {
+					reportedBridgeName := ovs.GetBridgeName()
+					if sxa.BridgeName == nil || *sxa.BridgeName != reportedBridgeName {
+						bridgeName = &reportedBridgeName
+					}
+
+					// ovn_network_name is optional on the wire, so only a value the Site
+					// actually reported is taken; an absent one leaves the persisted value
+					// untouched rather than clearing it.
+					if ovs.OvnNetworkName != nil {
+						reportedOvnNetworkName := ovs.GetOvnNetworkName()
+						if sxa.OvnNetworkName == nil || *sxa.OvnNetworkName != reportedOvnNetworkName {
+							ovnNetworkName = &reportedOvnNetworkName
+						}
+					}
+				}
+
 				var status *string
 				if controllerInstance.Status.SpxStatus.ConfigsSynced == corev1.SyncState_SYNCED {
 					isSpectrumXConfigSynced = true
@@ -829,7 +852,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
-				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && status == nil {
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && bridgeName == nil && ovnNetworkName == nil && status == nil {
 					continue
 				}
 
@@ -841,6 +864,8 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						MacAddress:            macAddress,
 						IPAddress:             ipAddress,
 						VirtualFunctionID:     virtualFunctionID,
+						BridgeName:            bridgeName,
+						OvnNetworkName:        ovnNetworkName,
 						Status:                status,
 					},
 				)

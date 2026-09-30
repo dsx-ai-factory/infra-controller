@@ -60,6 +60,15 @@ type CreateInstanceHandler struct {
 	tracerSpan *cutil.TracerSpan
 }
 
+// stringPtrEqual reports whether two optional strings hold the same value,
+// treating nil (absent) and a set value as distinct.
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // buildInstanceNetworkConfig assembles the workflow
 // InstanceNetworkConfig from the persisted auto flag and the
 // per-interface configs built earlier in the handler. When auto is
@@ -4089,6 +4098,41 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				existing, reusable := existingSxAByKey[requestedSxA.Key()]
 				if reusable {
 					retainedSxAIDs[existing.ID] = true
+
+					// The reuse key covers partition, device, device instance and attachment
+					// type but not the OVS metadata, so a request that changes only its bridge
+					// name or OVN network name still reuses this row. Persist the new metadata
+					// and carry the updated row forward; otherwise the Site keeps the stale
+					// bridge and the response reports it too.
+					if !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
+						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName) {
+						updated, uerr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+							SpectrumXAttachmentID: existing.ID,
+							BridgeName:            apiSxA.BridgeName,
+							OvnNetworkName:        apiSxA.OvnNetworkName,
+						})
+						if uerr != nil {
+							logger.Error().Err(uerr).Msg("failed to update SpectrumX Attachment metadata in DB")
+							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+						}
+
+						// Update only writes provided values, so a dropped OVN network name is
+						// cleared explicitly.
+						if apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil {
+							updated, uerr = sxaDAO.Clear(ctx, tx, cdbm.SpectrumXAttachmentClearInput{
+								SpectrumXAttachmentID: existing.ID,
+								OvnNetworkName:        true,
+							})
+							if uerr != nil {
+								logger.Error().Err(uerr).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+								return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+							}
+						}
+
+						newOrExistingSxAs = append(newOrExistingSxAs, *updated)
+						continue
+					}
+
 					newOrExistingSxAs = append(newOrExistingSxAs, existing)
 					continue
 				}
