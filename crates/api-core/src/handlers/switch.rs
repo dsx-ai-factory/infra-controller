@@ -78,10 +78,7 @@ async fn load_switch_nvos_info(
     let mut nvos_info_by_switch: HashMap<SwitchId, Vec<rpc::SwitchNvosPortInfo>> = HashMap::new();
 
     for row in rows {
-        let Some(mac) = row.nvos_mac.map(|mac| mac.to_string()) else {
-            continue;
-        };
-
+        let mac = row.nvos_mac.to_string();
         let nvos_ports = nvos_info_by_switch.entry(row.switch_id).or_default();
         let address = row.nvos_ip.map(switch_nvos_address);
         match nvos_ports.last_mut() {
@@ -746,7 +743,7 @@ async fn remove_switch_health_report_by_source(
 mod switch_nvos_info_tests {
     use ::rpc::forge as rpc;
 
-    use super::legacy_switch_nvos_info;
+    use super::{legacy_switch_nvos_info, populate_switch_nvos_info};
 
     fn address(address_family: rpc::AddressFamily, address: &str) -> rpc::IpAddress {
         rpc::IpAddress {
@@ -764,7 +761,7 @@ mod switch_nvos_info_tests {
     }
 
     #[test]
-    fn returns_none_without_declared_ports() {
+    fn returns_none_without_discovered_ports() {
         assert!(legacy_switch_nvos_info(&[]).is_none());
     }
 
@@ -814,14 +811,26 @@ mod switch_nvos_info_tests {
     }
 
     #[test]
-    fn falls_back_to_the_first_declared_port_when_all_are_unresolved() {
+    #[allow(deprecated)]
+    fn populates_mac_only_legacy_and_repeated_ports_without_ips() {
         let ports = vec![
             port("44:44:33:33:01:00", Vec::new()),
             port("44:44:33:33:01:01", Vec::new()),
         ];
+        let mut rpc_switch = rpc::Switch {
+            status: Some(rpc::SwitchStatus::default()),
+            ..Default::default()
+        };
 
-        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
+        populate_switch_nvos_info(&mut rpc_switch, ports);
+
+        let info = rpc_switch.nvos_info.expect("legacy NVOS info");
         assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:00"));
         assert!(info.ip.is_none());
+        let ports = rpc_switch.status.expect("switch status").nvos_ports;
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].mac.as_deref(), Some("44:44:33:33:01:00"));
+        assert_eq!(ports[1].mac.as_deref(), Some("44:44:33:33:01:01"));
+        assert!(ports.iter().all(|port| port.addresses.is_empty()));
     }
 }
