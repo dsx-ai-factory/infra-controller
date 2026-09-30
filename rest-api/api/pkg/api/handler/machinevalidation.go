@@ -694,7 +694,7 @@ func NewCreateMachineValidationRunHandler(dbSession *cdb.Session, scp *sc.Client
 // Handle godoc
 // @Summary Create an on-demand Machine validation run
 // @Description Create an on-demand validation run for a Machine.
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -838,7 +838,7 @@ func NewGetMachineValidationResultsHandler(dbSession *cdb.Session, tc tclient.Cl
 // Handle godoc
 // @Summary Get Machine validation results
 // @Description Get Machine validation results
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -964,7 +964,7 @@ func NewGetAllMachineValidationRunHandler(dbSession *cdb.Session, tc tclient.Cli
 // Handle godoc
 // @Summary Get Machine validation runs
 // @Description Get Machine validation runs
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth

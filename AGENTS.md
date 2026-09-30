@@ -13,6 +13,11 @@ bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
 > **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
+The canonical GitHub repository is
+[dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller/).
+Use this organization for links to the repository, its files, issues, and pull
+requests.
+
 ### Key Responsibilities
 
 - Hardware inventory management and orchestration
@@ -210,11 +215,21 @@ Published container artifacts must pin external base images by immutable
 digest. When architecture-specific targets share a base image, define one
 overridable variable so their versions cannot drift independently.
 
+## Agent Work Scope
+
+Agents may carry out user-requested work throughout the repository under the
+applicable guidelines. Agents may not change any `AGENTS.md` file or
+`STYLE_GUIDE.md` unless the user specifically requests changes to those files.
+
 ## Coding Conventions
 
 Follow the shared [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines)
 for scope control, reuse-before-new-code, evidence-backed assumptions, and
 verification expectations.
+
+Agents must never commit credentials, API keys, secrets, or local environment
+files. Keep local secrets in the gitignored `.local_envrc` file and follow the
+[secret-scanning guidance](CONTRIBUTING.md#secret-scanning).
 
 See [`STYLE_GUIDE.md`](STYLE_GUIDE.md) for detailed Rust coding conventions.
 Make sure to review it to ensure changes meet the expected style of the codebase.

@@ -52,6 +52,8 @@ mod bmc_proxy;
 pub mod bootstrap;
 pub mod cfg;
 mod compat;
+#[doc(hidden)]
+pub mod console_logs;
 mod credentials;
 mod db_init;
 mod dhcp;

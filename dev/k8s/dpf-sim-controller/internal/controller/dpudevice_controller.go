@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"net/netip"
+	"strings"
 	"time"
 
 	provisioningv1 "github.com/nvidia/doca-platform/api/provisioning/v1alpha1"
@@ -468,6 +470,19 @@ func (r *DPUDeviceReconciler) ensureDPU(
 ) (*provisioningv1.DPU, error) {
 	var dpu provisioningv1.DPU
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dpuName}, &dpu)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	var hostBMCIP netip.Addr
+	if label := device.Labels[carbide.LabelHostBMCIP]; label != "" {
+		// NICo writes IPv6 as eight hexadecimal groups separated by hyphens so
+		// the address is a valid Kubernetes label. IPv4 labels are unchanged.
+		parsed, parseErr := netip.ParseAddr(strings.ReplaceAll(label, "-", ":"))
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid %s label on %s: %w", carbide.LabelHostBMCIP, device.Name, parseErr)
+		}
+		hostBMCIP = parsed
+	}
 	if err == nil {
 		dep, ok, derr := r.selectDeployment(ctx, nodeName)
 		if derr != nil {
@@ -504,10 +519,14 @@ func (r *DPUDeviceReconciler) ensureDPU(
 				}
 			}
 		}
+		if hostBMCIP.IsValid() && dpu.Spec.BMCIP != hostBMCIP.String() {
+			patch := client.MergeFrom(dpu.DeepCopy())
+			dpu.Spec.BMCIP = hostBMCIP.String()
+			if err := r.Patch(ctx, &dpu, patch); err != nil {
+				return nil, err
+			}
+		}
 		return &dpu, nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return nil, err
 	}
 
 	// NICo maps DPU events back to a machine by the machine-id label, and its
@@ -522,7 +541,6 @@ func (r *DPUDeviceReconciler) ensureDPU(
 	if device.Labels[carbide.LabelHostBMCIP] == "" {
 		return nil, fmt.Errorf("%w: label %s is empty on %s", errDeviceNotReady, carbide.LabelHostBMCIP, device.Name)
 	}
-
 	// Fallback when no usable deployment selects the node: the CRD requires
 	// dpuFlavor and exactly one of bfb/blueFieldSoftware, none of which mean
 	// anything to the simulator, so placeholder values keep the create accepted.
@@ -561,7 +579,7 @@ func (r *DPUDeviceReconciler) ensureDPU(
 			// this into the RebootRequiredEvent that enqueues the host state
 			// machine when the DPU reaches Rebooting. NOT the DPU's own BMC
 			// (DPUDevice.spec.bmcIp) — NICo publishes the host's on this label.
-			BMCIP: device.Labels[carbide.LabelHostBMCIP],
+			BMCIP: hostBMCIP.String(),
 			// Inherited from the selecting deployment (see selectedDeployment)
 			// or the fallback above. The pinned doca-platform DPUSpec has no
 			// omitempty on bfb, so a blueFieldSoftware-only DPU is created

@@ -67,11 +67,11 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
-| host BMC IP label | `carbide.nvidia.com/host-bmc-ip` | on device+node |
+| host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
 | primary DPU label | `carbide.nvidia.com/is-primary-dpu` | on DPUDevice |
 | node-effect hold | `DPUNodeMaintenance` CR `{node}-hold` carrying annotation `provisioning.dpu.nvidia.com/wait-for-external-nodeeffect` | **sim creates**; NICo patches the annotation to `"false"` to release |
 | reboot signal | annotation `provisioning.dpu.nvidia.com/dpunode-external-reboot-required` on the DPUNode | **sim sets**; NICo clears once per node (removes the key) after the host powers back on |
-| host BMC IP on the DPU | `DPU.spec.bmcIP` = the **host** BMC IP (bare address), copied from the `host-bmc-ip` label | sim must populate it or NICo's watcher silently skips the Rebooting callback |
+| host BMC IP on the DPU | `DPU.spec.bmcIP` = the **host** BMC IP (bare address), decoded from the `host-bmc-ip` label | sim must populate it or NICo's watcher silently skips the Rebooting callback |
 
 **Phase sequence NICo tolerates** (it collapses intermediates to
 `Provisioning(detail)` and only acts on `NodeEffect`/`Rebooting`/`Ready`/`Error`):

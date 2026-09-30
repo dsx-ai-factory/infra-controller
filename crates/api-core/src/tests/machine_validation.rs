@@ -1595,6 +1595,25 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
             .await?;
     assert_eq!(pending_attempts.len(), 1);
     assert_eq!(pending_attempts[0].state.to_string(), "Pending");
+    let listed_attempts = env
+        .api
+        .find_machine_validation_attempts(tonic::Request::new(
+            rpc::forge::MachineValidationAttemptSearchFilter {
+                run_item_id: run_items[0].run_item_id.clone(),
+            },
+        ))
+        .await?
+        .into_inner()
+        .attempts;
+    assert_eq!(listed_attempts.len(), 1);
+    assert_eq!(listed_attempts[0].attempt_number, 1);
+    assert_eq!(
+        listed_attempts[0]
+            .attempt_id
+            .as_ref()
+            .map(|id| id.value.clone()),
+        Some(pending_attempts[0].id.to_string())
+    );
 
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,

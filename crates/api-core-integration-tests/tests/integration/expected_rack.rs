@@ -25,7 +25,7 @@ use model::rack_type::{
 };
 use rpc::forge::{ExpectedRackList, ExpectedRackRequest};
 
-const DERIVED_PROFILE: &str = "GB200_NVL72R1_C2G4_NVIDIA_NVIDIA_NO_POWERSHELF";
+const DERIVED_PROFILE: &str = "GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF";
 
 fn config_with_rack_profiles() -> CarbideConfig {
     let mut config = default_config::get();

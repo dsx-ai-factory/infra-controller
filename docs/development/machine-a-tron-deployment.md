@@ -435,7 +435,8 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
    (`NICO-SITEEXPLORER-141 Missing credential expected_machine`); on nico-api
    builds without the Machineatron `AddExpectedMachine` RBAC grant the
    auto-registration is 403'd and the rows must be inserted directly with the
-   **pinned** password (`hostBmcPassword`), not the factory default. DPU BMCs
+   **pinned** password (`hostBmcPassword`, or the site credentials Secret the
+   chart reads by default), not the factory default. DPU BMCs
    explore without expected rows.
 
 ## Verifying Startup

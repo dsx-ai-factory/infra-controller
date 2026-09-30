@@ -15,20 +15,22 @@
  * limitations under the License.
  */
 
-//! Operator-requested managed host reset: delete the tenant instance, delete the host's
-//! DPF CRs, then hand the host back to DPU discovery so DPF re-ingests it from scratch.
+//! Operator-requested managed host reset: delete the tenant instance, clean up the host,
+//! delete the host's DPF CRs, then hand the host back to DPU discovery so DPF re-ingests it.
 
 use eyre::eyre;
 use model::machine::{
-    DpuDiscoveringState, DpuDiscoveringStates, ManagedHostState, ManagedHostStateSnapshot,
-    ResetState,
+    CleanupContext, CleanupState, DpuDiscoveringState, DpuDiscoveringStates, ManagedHostState,
+    ManagedHostStateSnapshot, ResetState,
 };
 use model::resource_pool::common::CommonPools;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use super::{release_network_segments_with_vpc_prefix, release_vpc_dpu_loopback};
+use super::{
+    release_network_segments_with_vpc_prefix, release_vpc_dpu_loopback, waiting_for_cleanup_state,
+};
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
 
@@ -50,12 +52,10 @@ async fn handle_deleting_instance(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     common_pools: Option<&CommonPools>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let next = ManagedHostState::Reset {
-        reset_state: ResetState::DeletingCrs,
-    };
-
     let Some(instance) = state.instance.as_ref() else {
-        return Ok(StateHandlerOutcome::transition(next));
+        return Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        }));
     };
 
     // The delete and the segment release must commit together, as in the Assigned
@@ -69,6 +69,24 @@ async fn handle_deleting_instance(
 
     release_vpc_dpu_loopback(state, common_pools, &mut txn).await?;
 
+    // Cleanup is not exempt from failure parking, so an old failure record would stop the reset.
+    db::machine::clear_failure_details(&state.host_snapshot.id, &mut txn).await?;
+    for dpu in &state.dpu_snapshots {
+        db::machine::clear_failure_details(&dpu.id, &mut txn).await?;
+    }
+
+    let ignore_cleanup = state
+        .host_snapshot
+        .reset_requested
+        .as_ref()
+        .is_some_and(|request| request.ignore_cleanup);
+    let next = if ignore_cleanup {
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        }
+    } else {
+        waiting_for_cleanup_state(CleanupState::Init, CleanupContext::Reset)
+    };
     Ok(StateHandlerOutcome::transition(next).with_txn(txn))
 }
 

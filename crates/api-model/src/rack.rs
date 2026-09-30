@@ -539,15 +539,17 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` rotates every rack switch's NVUE certificate before submitting the
-/// asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForSwitchCertificateJob` polls the certificate batch, and
-/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
+/// `Start` rotates switch-local certificates before submitting the asynchronous
+/// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
+/// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
+/// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
+/// controller restarts.
 ///
-/// The remaining variants name sub-states of a workflow this version does not
-/// run. A `controller_state` row can still hold one, so they are decoded to
-/// keep that row from failing the batch queries that load every rack.
-/// Maintenance cannot resume from them.
+/// `ConfigureCertificates`, `DisableScaleUpFabricState`,
+/// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
+/// a workflow this version does not run. A `controller_state` row can still
+/// hold one, so they are decoded to keep that row from failing the batch queries
+/// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
@@ -560,6 +562,12 @@ pub enum ConfigureNmxClusterState {
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
+        job_id: String,
+    },
+
+    /// Waits for the configured primary nmx-telemetry binding to complete.
+    WaitForPrimarySwitchCertificateJob {
+        /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
 
@@ -586,6 +594,9 @@ impl Display for ConfigureNmxClusterState {
             }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")

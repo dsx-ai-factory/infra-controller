@@ -120,6 +120,8 @@ sudo crictl exec -ti <doca-hbn-container-id> vtysh -c 'show bgp summary'
 
 Restore the p0 session before retrying normal PXE provisioning. Setting the
 minimum healthy link count to `1` does not remove the p0 dependency.
+For cable, optical-power, carrier, and ToR-port diagnostics, use
+[Troubleshoot a `BgpPeeringTor` Health Alert](bgp_peering_tor_alert.md).
 
 ### `BgpPeeringRouteServer` and `BgpStats`
 

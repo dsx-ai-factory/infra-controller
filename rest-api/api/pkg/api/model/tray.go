@@ -119,7 +119,10 @@ func GetProtoTrayFilter(fieldName string, patterns []string) *flowv1.Filter {
 	}
 }
 
-// TrayOrderByFieldMap maps API field names to Flow protobuf ComponentOrderByField enum
+// TrayDefaultOrderBy is the deterministic REST ordering used when orderBy is omitted.
+const TrayDefaultOrderBy = "NAME_ASC"
+
+// TrayOrderByFieldMap maps API field names to Flow protobuf ComponentOrderByField enum.
 var TrayOrderByFieldMap = map[string]flowv1.ComponentOrderByField{
 	"name":         flowv1.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME,
 	"manufacturer": flowv1.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_MANUFACTURER,
@@ -624,6 +627,7 @@ type APITray struct {
 	RackID             string                `json:"rackId"`
 	NVLinkDomainID     *string               `json:"nvLinkDomainId"`
 	TaskStats          APITaskStats          `json:"taskStats"`
+	Health             *APIAggregateHealth   `json:"health"`
 }
 
 // FromProto converts an Flow protobuf Component to an APITray
@@ -644,6 +648,11 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	)
 	at.ID = comp.GetComponentId()
 	at.TaskStats.FromProto(comp.GetTaskStats())
+	at.Health = nil
+	if comp.GetHealth() != nil {
+		at.Health = &APIAggregateHealth{}
+		at.Health.FromFlowProto(comp.GetHealth())
+	}
 
 	// Get info from DeviceInfo
 	if comp.GetInfo() != nil {

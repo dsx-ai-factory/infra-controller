@@ -50,7 +50,7 @@ Only Infrastructure Providers can create a root IP Block. User must have authori
 
 Tenant IP Blocks are created via Allocation.
 
-A conflicting name or address range returns 409. `DatacenterOnly` creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another `DatacenterOnly` create or Site Config import. Retry the request.
+A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -192,6 +192,8 @@ DeleteIpblock Delete IP Block
 # Delete an IP block
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
+
+If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
 Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
 
@@ -944,7 +946,9 @@ UpdateIpblock Update IP Block
 
 # Update an existing IP Block
 
-Org must have an Infrastructure Provider. Specified IP Block must have been created by the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+
+Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
 Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
 

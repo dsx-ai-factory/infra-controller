@@ -109,6 +109,11 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "machine health-report delete", want: true},
 		{name: "machine health-report list", want: true},
 		{name: "machine health-report update", want: true},
+		{name: "machine bmc reset", want: true},
+		{name: "machine dpu reprovision", want: true},
+		{name: "machine validation results list", want: true},
+		{name: "machine validation runs list", want: true},
+		{name: "machine validation start", want: true},
 		{name: "rack health-report delete", want: true},
 		{name: "rack health-report list", want: true},
 		{name: "rack health-report update", want: true},
@@ -118,6 +123,15 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "health-report delete", want: false},
 		{name: "health-report list", want: false},
 		{name: "health-report update", want: false},
+		{name: "bmc-reset reset", want: false},
+		{name: "dpu-reprovision reprovision", want: false},
+		{name: "machine-validation results list", want: false},
+		{name: "machine-validation runs list", want: false},
+		{name: "machine-validation start", want: false},
+		{name: "machine reprovision-machine-dpu reprovision-machine-dpu", want: false},
+		{name: "machine reset-machine-bmc reset-machine-bmc", want: false},
+		{name: "machine validation-results list", want: false},
+		{name: "machine validation-runs list", want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.want {

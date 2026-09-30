@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,18 +102,27 @@ impl MachineCreator {
     }
 
     /// Creates a new ManagedHost (Host `Machine` and DPU `Machine` pair)
-    /// for each ManagedHost that was identified and that doesn't have a corresponding `Machine` yet
+    /// for each ManagedHost that was identified and that doesn't have a corresponding `Machine` yet.
+    ///
+    /// A host whose BMC and DPU BMCs are all in `ingested_bmc_ips` only enters the
+    /// per-host transaction when one of its endpoints is in `explored_this_run`, so
+    /// the steady-state repair in `create_managed_host` follows the exploration
+    /// rotation. A host with any BMC still missing a machine always enters it.
     pub(crate) async fn create_machines(
         &self,
         metrics: &mut SiteExplorationMetrics,
         explored_managed_hosts: &mut [IdentifiedManagedHost],
         expected_explored_endpoint_index: &ExploredEndpointIndex,
+        ingested_bmc_ips: &HashSet<IpAddr>,
+        explored_this_run: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<()> {
-        // TODO: Improve the efficiency of this method. Right now we perform 3 database transactions
-        // for every identified ManagedHost even if we don't create any objects.
-        // We can perform a single query upfront to identify which ManagedHosts don't yet have Machines
+        let mut skipped_existing_hosts = 0usize;
         for identified in explored_managed_hosts {
             let host = &identified.explored_host;
+            if !needs_managed_host_transaction(host, ingested_bmc_ips, explored_this_run) {
+                skipped_existing_hosts += 1;
+                continue;
+            }
             let expected_machine =
                 expected_explored_endpoint_index.matched_expected_machine(&host.host_bmc_ip);
 
@@ -140,6 +149,13 @@ impl MachineCreator {
                     "Failed to create managed host"
                 ),
             }
+        }
+
+        if skipped_existing_hosts > 0 {
+            tracing::info!(
+                skipped_existing_hosts,
+                "Skipped hosts that already have a machine and were not explored in this run"
+            );
         }
 
         Ok(())
@@ -448,14 +464,11 @@ impl MachineCreator {
             db::machine::lookup_host_machine_ids_by_dpu_ids(&mut txn, &dpu_ids).await?;
 
         if !existing_hosts_by_dpu_id.is_empty() {
-            // TODO: We run this code for every endpoint on every site explorer run, and it is slow.
-            // The call to reconcile_host_admin_addresses below is particularly slow and locks all
-            // network segments. We need to find a good way to know when to skip reconciliation in
-            // the common case when nothing has changed.
-
             // Steady state case: DPU's already exist, so site explorer must have already created
             // this managed host (since only site explorer would have created them.) Ensure they're
-            // associated with this machine, then return early.
+            // associated with this machine, then return early. `create_machines` gates this
+            // path with `needs_managed_host_transaction`, because
+            // reconcile_host_admin_addresses locks all admin segments.
 
             let existing_dpu_ids = existing_hosts_by_dpu_id
                 .keys()
@@ -1898,6 +1911,19 @@ fn host_mac_addresses_for_predicted_machine(
         .unwrap_or_default()
 }
 
+/// Whether `create_machines` must open the per-host transaction: always while
+/// the host BMC or any of its DPU BMCs has no machine yet, otherwise only when
+/// the host or one of its DPUs was explored in this run.
+fn needs_managed_host_transaction(
+    host: &ExploredManagedHost,
+    ingested_bmc_ips: &HashSet<IpAddr>,
+    explored_this_run: &HashSet<IpAddr>,
+) -> bool {
+    std::iter::once(&host.host_bmc_ip)
+        .chain(host.dpus.iter().map(|dpu| &dpu.bmc_ip))
+        .any(|bmc_ip| !ingested_bmc_ips.contains(bmc_ip) || explored_this_run.contains(bmc_ip))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -1907,6 +1933,69 @@ mod tests {
     use model::site_explorer::{Chassis, ComputerSystem, EthernetInterface, NetworkAdapter};
 
     use super::*;
+
+    #[test]
+    fn needs_managed_host_transaction_cases() {
+        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
+        let host = ExploredManagedHost {
+            host_bmc_ip,
+            dpus: vec![ExploredDpu {
+                bmc_ip: dpu_bmc_ip,
+                host_pf_mac_address: None,
+                host_chassis_id: None,
+                report: Arc::new(EndpointExplorationReport::default()),
+            }],
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "no machine yet: always runs",
+                    input: (vec![], vec![]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "no machine yet, unrelated endpoint explored: runs",
+                    input: (vec![other_ip], vec![other_ip]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "host machine exists, DPU has no machine yet: runs",
+                    input: (vec![host_bmc_ip], vec![]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, nothing explored: skipped",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![]),
+                    expect: false,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, unrelated endpoint explored: skipped",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![other_ip]),
+                    expect: false,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, host BMC explored: runs",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![host_bmc_ip]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, DPU BMC explored: runs",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![dpu_bmc_ip]),
+                    expect: true,
+                },
+            ],
+            |(ingested_bmc_ips, explored_this_run): (Vec<IpAddr>, Vec<IpAddr>)| {
+                needs_managed_host_transaction(
+                    &host,
+                    &ingested_bmc_ips.into_iter().collect(),
+                    &explored_this_run.into_iter().collect(),
+                )
+            },
+        );
+    }
 
     /// Redfish inventory stays authoritative, ExpectedMachine narrows
     /// supplemental Ports, and the zero-DPU fallback uses only Host

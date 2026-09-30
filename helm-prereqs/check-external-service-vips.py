@@ -86,22 +86,22 @@ def check_vips(stream, metallb_stream=None):
                 if not dhcp.get("v6Enabled"):
                     continue
 
-            api_families = None
-            api_family_policy = None
-            if component == "nico-api" and name == "externalService":
-                api_families = service.get("ipFamilies")
-                api_family_policy = service.get("ipFamilyPolicy")
-                if api_family_policy is None or api_family_policy == "":
-                    api_family_policy = "SingleStack"
-                if api_families is not None and not isinstance(api_families, list):
+            families = None
+            family_policy = None
+            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp") and name == "externalService":
+                families = service.get("ipFamilies")
+                family_policy = service.get("ipFamilyPolicy")
+                if family_policy is None or family_policy == "":
+                    family_policy = "SingleStack"
+                if families is not None and not isinstance(families, list):
                     raise ValueError(f"{component}.{name}.ipFamilies must be a list")
-                if api_family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
+                if family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
                     raise ValueError(f"{component}.{name}.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
-                if api_families:
-                    if (any(family not in ("IPv4", "IPv6") for family in api_families)
-                            or len(set(api_families)) != len(api_families)):
+                if families:
+                    if (any(family not in ("IPv4", "IPv6") for family in families)
+                            or len(set(families)) != len(families)):
                         raise ValueError(f"{component}.{name}.ipFamilies must contain unique IPv4 or IPv6 entries")
-                    if api_family_policy == "SingleStack" and len(api_families) != 1:
+                    if family_policy == "SingleStack" and len(families) != 1:
                         raise ValueError(f"{component}.{name}.ipFamilies must contain one family for SingleStack")
 
             # externalService honors type; the DHCPv6 template always renders LoadBalancer.
@@ -142,11 +142,11 @@ def check_vips(stream, metallb_stream=None):
                         if name == "externalService" and component in ("nico-dhcp", "unbound") and address.version != 4:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv4 address")
                             continue
-                        # The API chart can select a family explicitly. Dual-stack policies
+                        # These charts can select a family explicitly. Dual-stack policies
                         # may add the other family, and omitted families depend on the cluster.
-                        if (api_families and api_family_policy == "SingleStack"
-                                and f"IPv{address.version}" not in api_families):
-                            errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {api_families}")
+                        if (families and family_policy == "SingleStack"
+                                and f"IPv{address.version}" not in families):
+                            errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {families}")
                             continue
                         # Normalize addresses, but do not count annotation aliases as separate Services.
                         if seen_vips.get(address) == owner:

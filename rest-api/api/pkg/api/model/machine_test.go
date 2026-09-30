@@ -494,6 +494,17 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 	assert.Equal(t, map[string]string(apimi.Labels), dbm.Labels)
 	assert.Equal(t, dbm.HwSkuDeviceType, apimi.HwSkuDeviceType)
 	assert.Equal(t, dbm.IsUsableByTenant, apimi.IsUsableByTenant)
+	t.Run("assignment observed after Ready machine snapshot", func(t *testing.T) {
+		ready := *dbm
+		ready.Status = cdbm.MachineStatusReady
+		ready.IsAssigned = false
+		instance := &cdbm.Instance{ID: uuid.New()}
+		response := NewAPIMachine(&ready, dbmcs, dbmis, dbsds, instance, false, true)
+		assert.Equal(t, cdbm.MachineStatusInUse, response.Status)
+		require.NotNil(t, response.InstanceID)
+		assert.Equal(t, instance.ID.String(), *response.InstanceID)
+		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
+	})
 }
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {

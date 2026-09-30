@@ -57,7 +57,7 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "1.2.3",
-  "security.privileged": false,
+  "security": {"privileged": false, "spiffe": {}},
   "values": {"serviceDaemonSet": {"labels": {"chart-path": "preserved"}}},
   "serviceDaemonSet": {
     "labels": {"app.kubernetes.io/name": "tenant-service"},
@@ -70,7 +70,7 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "2.0.0",
-  "security.privileged": true,
+  "security": {"privileged": true},
   "values": {"replicas": 2, "serviceDaemonSet": {"labels": {"chart-path": "still-preserved"}}},
   "serviceDaemonSet": {
     "labels": {"app.kubernetes.io/name": "tenant-service-v2"},
@@ -191,7 +191,10 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
         dpu_cluster_selector_present: false,
         interfaces_present: false,
         paused: None,
-        security_privileged: Some(service.security_privileged),
+        security: Some(carbide_dpf::DpuServiceSecurityObservation {
+            privileged: Some(service.security.privileged),
+            spiffe: service.security.spiffe,
+        }),
         service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
             DpuServiceDaemonSetObservation {
                 node_selector: daemon_set.node_selector_labels.as_ref().map(|labels| {
@@ -489,7 +492,7 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
     // persist the parsed model's normalized representation, rather than this
     // caller-provided encoding.
     let data = r#"{
-        "security.privileged": false,
+        "security": {"privileged": false},
         "chartVersion": "1.2.3",
         "repoURL": "oci://registry.example.com/charts",
         "chartName": "tenant-service",
@@ -1190,7 +1193,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
             r#"{
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
-                "security.privileged":false
+                "security":{"privileged":false}
             }"#,
             "missing field `chartVersion`",
         ),
@@ -1200,7 +1203,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":false,
+                "security":{"privileged":false},
                 "unsupported":true
             }"#,
             "unknown field `unsupported`",
@@ -1211,7 +1214,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":false,
+                "security":{"privileged":false},
                 "values":{"serviceDaemonSet":{"nodeSelector":{"tenant":"value"}}}
             }"#,
             "tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector",
@@ -1222,7 +1225,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":false,
+                "security":{"privileged":false},
                 "serviceDaemonSet":{"nodeSelector":{}}
             }"#,
             "unknown field `nodeSelector`",
@@ -1233,7 +1236,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":false,
+                "security":{"privileged":false},
                 "serviceDaemonSet":{"upgradeStrategy":{"type":"RollingUpdate"}}
             }"#,
             "unknown field `upgradeStrategy`",

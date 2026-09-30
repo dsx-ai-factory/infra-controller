@@ -126,7 +126,7 @@ func WithTxResultOpts[T any](ctx context.Context, dbSession *Session, opts *sql.
 		return zero, err
 	}
 	if err := tx.Commit(); err != nil {
-		return zero, fmt.Errorf("commit tx: %w", err)
+		return zero, fmt.Errorf("%w: %w", ErrTransactionCommit, err)
 	}
 	return result, nil
 }

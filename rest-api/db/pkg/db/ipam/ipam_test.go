@@ -360,6 +360,35 @@ func TestGetIpamUsageForIPBlock(t *testing.T) {
 }
 
 func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "reject length before uint8 conversion", length: 336, wantErr: true},
+		{name: "preserve IPv6 maximum length", length: 128},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			storage := cipam.NewMemory(ctx)
+			parent := &cdbm.IPBlock{Prefix: "2001:db8::", PrefixLength: 64}
+			prefix, err := CreateIpamEntryForIPBlock(ctx, storage, parent.Prefix, parent.PrefixLength, parent.RoutingType, parent.InfrastructureProviderID.String(), parent.SiteID.String())
+			require.NoError(t, err)
+
+			child, err := CreateChildIpamEntryForIPBlock(ctx, nil, nil, storage, parent, tc.length)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "between 64 and 128")
+				stored, err := storage.ReadPrefix(ctx, prefix.Cidr, prefix.Namespace)
+				require.NoError(t, err)
+				assert.Equal(t, uint64(0), stored.Usage().AcquiredPrefixes)
+				assert.False(t, parent.FullGrant)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "2001:db8::/128", child.Cidr)
+			}
+		})
+	}
+
 	dbSession := cdbutil.GetTestDBSession(t, false)
 	defer dbSession.Close()
 	dbSession.DB.AddQueryHook(bundebug.NewQueryHook(
@@ -522,6 +551,7 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 			name:          "failure when parent is fully granted already",
 			parentIPBlock: ipBlock4,
 			expectedErr:   true,
+			expectedError: fmt.Sprintf("parent IPBlock %s already has a full grant", ipBlock4.ID),
 			childCount:    1,
 		},
 		{

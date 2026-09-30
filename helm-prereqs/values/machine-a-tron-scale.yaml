@@ -9,19 +9,16 @@
 #     BMC with the BMC IP assigned by NICo DHCP published as externalIP.
 #   - site_explorer.bmc_proxy MUST BE UNSET in nico-core - site-explorer dials
 #     each BMC IP directly.
-#   - Requires NICo siteConfig:
-#       allow_insecure_discovery = true
-#       [networks.MAT-BMC-SERVICES]
-#       type = "underlay"
-#       prefix = "10.200.0.0/18"
-#       gateway = "10.200.0.1"
-#       mtu = 1500
+#   - Requires the NICo siteConfig in values/nico-core-simulation.yaml
+#     (allow_insecure_discovery and the simulated-oob segment).
 #   - The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
 #     node network, and networks that nodes or pods must otherwise reach
 #     (BMC IPs are Service externalIPs, for which kube-proxy programs
 #     forwarding rules on every node)
 # =============================================================================
 
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
 image:
   repository: ""
   tag: ""
@@ -39,6 +36,9 @@ machineATron:
   nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
   configureBmcProxyHost: ""  # Not used in controller mode
   registerExpectedMachines: true
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
 
 # Enable auto-generated MAC pools (prevents collisions in multi-pod)
 macAddressPool:
@@ -61,8 +61,9 @@ mat-k8s-controller:
     # bare local name with no registry, which ImagePullBackOffs on any real
     # cluster -- and with no controller there are no per-BMC Services, so
     # exploration finds nothing and the run reports zeros with no obvious cause.
-    #   MAT_K8S_CONTROLLER_IMAGE=<registry>/mat-k8s-controller
-    #   MAT_K8S_CONTROLLER_TAG=<tag>
+    # Set it here or with
+    #   --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller
+    #   --set mat-k8s-controller.image.tag=<tag>
     repository: ""
     tag: ""
   imagePullSecrets:
@@ -79,7 +80,7 @@ mat-k8s-controller:
 #
 # Sizing rule: see the startupProbe comment in the chart values.yaml. Pods in
 # this file define hosts only (no racks, switches or power shelves) and DPUs
-# are not registered, so records = hosts per pod. Sized for HOST_COUNT=4500 in
+# are not registered, so records = hosts per pod. Sized for 4,500 hosts in
 # one pod: 4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps headroom.
 startupProbe:
   tcpSocket:
@@ -120,6 +121,8 @@ pods:
   default: null  # Disable default pod
   mat-0:
     machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
       compute:
         hwType: dell_poweredge_r750
         hostCount: 100
@@ -130,8 +133,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (SCALE_OOB_GW), outside the ServiceCIDR
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
+        bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (nico-core-simulation.yaml), outside the ServiceCIDR
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
         dpusInNicMode: false
 
 extraEnv:

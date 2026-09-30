@@ -1968,6 +1968,36 @@ impl Default for NvueGnmiConfig {
 
 impl NvueGnmiConfig {
     fn validate(&self) -> Result<(), String> {
+        if let Some(interface_paths) = &self.paths.interface_paths {
+            let config_path = "collectors.nvue.gnmi.paths.interface_paths";
+
+            if !self.paths.interfaces_enabled {
+                return Err(format!("{config_path} requires interfaces_enabled = true"));
+            }
+
+            if interface_paths.is_empty()
+                || interface_paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+            {
+                return Err(format!(
+                    "{config_path} must contain non-empty paths and elements; use interfaces_enabled = false to disable interface telemetry"
+                ));
+            }
+
+            for (index, path) in interface_paths.iter().enumerate() {
+                if interface_paths
+                    .iter()
+                    .take(index)
+                    .any(|earlier| earlier == path)
+                {
+                    return Err(format!(
+                        "{config_path}[{index}] duplicates another selected interface path"
+                    ));
+                }
+            }
+        }
+
         let mut names = HashSet::new();
         let mut exported_metrics = HashMap::new();
 
@@ -2415,6 +2445,13 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
+    /// Interface leaf paths relative to `/interfaces/interface` for every interface.
+    ///
+    /// Omission retains the full interface subtree. A nonempty list selects
+    /// only mapped built-in interface metrics; disable `interfaces_enabled` to
+    /// omit interface telemetry entirely.
+    pub interface_paths: Option<Vec<Vec<String>>>,
+
     /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
     ///
     /// Disabled by default because path support depends on the NVOS release.
@@ -2430,6 +2467,7 @@ impl Default for NvueGnmiPaths {
             components_enabled: true,
             interfaces_enabled: true,
             platform_general_enabled: true,
+            interface_paths: None,
             leak_sensors_enabled: false,
         }
     }
@@ -4970,6 +5008,73 @@ events_enabled = false
                 }
             },
         );
+    }
+
+    #[test]
+    fn selective_interface_paths_parse_and_validate() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+[collectors.nvue.gnmi.paths]
+interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
+"#,
+            ))
+            .extract()
+            .expect("selective interface configuration should parse");
+
+        let Configurable::Enabled(nvue) = config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = nvue.gnmi else {
+            panic!("gNMI collector should be enabled");
+        };
+
+        assert_eq!(
+            gnmi.paths.interface_paths,
+            Some(vec![
+                vec!["state".to_string(), "oper-status".to_string()],
+                vec![
+                    "phy-diag".to_string(),
+                    "state".to_string(),
+                    "raw-ber".to_string()
+                ]
+            ])
+        );
+
+        assert!(gnmi.validate().is_ok());
+
+        for (description, paths, enabled, expected) in [
+            ("empty selection", vec![], true, "non-empty paths"),
+            (
+                "empty element",
+                vec![vec![String::new()]],
+                true,
+                "non-empty paths",
+            ),
+            (
+                "disabled interfaces",
+                vec![vec!["state".to_string(), "oper-status".to_string()]],
+                false,
+                "requires interfaces_enabled",
+            ),
+            (
+                "duplicate path",
+                vec![vec!["state".to_string(), "oper-status".to_string()]; 2],
+                true,
+                "duplicates",
+            ),
+        ] {
+            let mut invalid = NvueGnmiConfig::default();
+            invalid.paths.interface_paths = Some(paths);
+            invalid.paths.interfaces_enabled = enabled;
+
+            let error = invalid.validate().expect_err(description);
+
+            assert!(error.contains(expected), "{description}: {error}");
+        }
     }
 
     #[test]

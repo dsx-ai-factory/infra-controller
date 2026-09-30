@@ -342,6 +342,10 @@ type ExpectedMachineDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
@@ -1081,6 +1085,59 @@ func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expecte
 	}
 
 	return nil
+}
+
+// DeleteAll deletes all ExpectedMachines matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (emsd ExpectedMachineSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error {
+	ctx, span := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.DeleteAll")
+	if span != nil {
+		defer span.End()
+	}
+
+	query := db.GetIDB(tx, emsd.dbSession).NewDelete().Model((*ExpectedMachine)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedMachineIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedMachineIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.ChassisSerialNumbers != nil {
+		query = query.Where("chassis_serial_number IN (?)", bun.In(filter.ChassisSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedMachines and creates the
+// supplied replacement set in the caller's transaction.
+func (emsd ExpectedMachineSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error) {
+	ctx, span := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.ReplaceAll")
+	if span != nil {
+		defer span.End()
+		emsd.tracerSpan.SetAttribute(span, "batch_size", len(inputs))
+	}
+
+	err := emsd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedMachine{}, nil
+	}
+	return emsd.CreateMultiple(ctx, tx, inputs)
 }
 
 // NewExpectedMachineDAO returns a new ExpectedMachineDAO

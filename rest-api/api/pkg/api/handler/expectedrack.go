@@ -828,7 +828,7 @@ func NewReplaceAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Param org path string true "Name of NGC organization"
 // @Param message body model.APIReplaceAllExpectedRacksRequest true "ExpectedRack replace-all request"
 // @Success 200 {object} []model.APIExpectedRack
-// @Router /v2/org/{org}/expected-rack [put]
+// @Router /v2/org/{org}/nico/expected-rack/all [put]
 func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "ReplaceAll", c, raerh.tracerSpan)
 	if handlerSpan != nil {
@@ -1020,7 +1020,7 @@ func NewDeleteAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site whose ExpectedRacks should be deleted"
 // @Success 204
-// @Router /v2/org/{org}/expected-rack/all [delete]
+// @Router /v2/org/{org}/nico/expected-rack/all [delete]
 func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "DeleteAll", c, daerh.tracerSpan)
 	if handlerSpan != nil {

@@ -29,7 +29,7 @@ type NVLinkInterface struct {
 	InstanceId *string `json:"instanceId,omitempty"`
 	// ID of the NVLink Logical Partition associated with this interface
 	NvLinkLogicalPartitionId *string `json:"nvLinkLogicalPartitionId,omitempty"`
-	// ID of the NVLink Domain associated with this Interface
+	// Core-reported NVLink domain UUID associated with this Interface, not the Rack external ID returned by the Domain API.
 	NvLinkDomainId NullableString `json:"nvLinkDomainId,omitempty"`
 	// Index of the device, used to identify the GPU associated with this Interface
 	DeviceInstance *int32 `json:"deviceInstance,omitempty"`

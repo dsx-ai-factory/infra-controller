@@ -22,7 +22,7 @@ import (
 // checks if the NetworkSecurityGroupRule type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &NetworkSecurityGroupRule{}
 
-// NetworkSecurityGroupRule Aggregation of Network Security Group rules
+// NetworkSecurityGroupRule A Network Security Group rule matching either IPv4 or IPv6 traffic. Each rule must use the same IP version for its source and destination prefixes. A group can contain both IPv4 and IPv6 rules.
 type NetworkSecurityGroupRule struct {
 	// Name of the Network Security Group rule
 	Name NullableString `json:"name,omitempty"`
@@ -32,15 +32,15 @@ type NetworkSecurityGroupRule struct {
 	SourcePortRange NullableString `json:"sourcePortRange,omitempty"`
 	// Destination port or port range matched by the rule
 	DestinationPortRange NullableString `json:"destinationPortRange,omitempty"`
-	// Network protocol matched by the rule
+	// Network protocol matched by the rule. ICMP requires IPv4 prefixes; ICMP6 requires IPv6 prefixes. TCP, UDP, and ANY support either IP version.
 	Protocol string `json:"protocol"`
 	// Action applied when traffic matches the rule
 	Action string `json:"action"`
 	// Rule priority used to order evaluation
 	Priority *int32 `json:"priority,omitempty"`
-	// Source CIDR prefix matched by the rule
+	// Source IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as destinationPrefix.
 	SourcePrefix string `json:"sourcePrefix"`
-	// Destination CIDR prefix matched by the rule
+	// Destination IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as sourcePrefix.
 	DestinationPrefix string `json:"destinationPrefix"`
 }
 

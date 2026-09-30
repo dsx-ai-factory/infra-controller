@@ -1715,3 +1715,153 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, apiExpectedMachines)
 }
+
+// ReplaceAllExpectedMachinesHandler replaces the complete ExpectedMachine set
+// for one Site.
+type ReplaceAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+
+// NewReplaceAllExpectedMachinesHandler creates a full-Site ExpectedMachine replacement handler.
+func NewReplaceAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedMachinesHandler {
+	return ReplaceAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Replace all ExpectedMachines for a Site
+// @Description Replace the full set of ExpectedMachines for a Site; an empty list clears the set
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIReplaceAllExpectedMachinesRequest true "ExpectedMachine replace-all request"
+// @Success 200 {object} []model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine/all [put]
+func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, span := common.SetupHandler("ExpectedMachine", "ReplaceAll", c, h.tracerSpan)
+	if span != nil {
+		defer span.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	request := model.APIReplaceAllExpectedMachinesRequest{}
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ReplaceAllExpectedMachines request data", err)
+	}
+	logger = logger.With().Str("SiteID", request.SiteID).Int("MachineCount", len(request.ExpectedMachines)).Logger()
+	h.tracerSpan.SetAttribute(span, attribute.String("site_id", request.SiteID), logger)
+
+	site, apiErr := h.resolveSite(ctx, logger, org, dbUser, request.SiteID, true)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+
+	requestedSKUs := make(map[string]bool)
+	for _, machine := range request.ExpectedMachines {
+		if machine.SkuID != nil {
+			requestedSKUs[*machine.SkuID] = true
+		}
+	}
+	if len(requestedSKUs) > 0 {
+		skuIDs := make([]string, 0, len(requestedSKUs))
+		for skuID := range requestedSKUs {
+			skuIDs = append(skuIDs, skuID)
+		}
+		skus, _, derr := cdbm.NewSkuDAO(h.dbSession).GetAll(ctx, nil, cdbm.SkuFilterInput{SiteIDs: []uuid.UUID{site.ID}, SkuIDs: skuIDs}, paginator.PageInput{Limit: cutil.GetPtr(len(skuIDs))})
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error retrieving SKUs for ExpectedMachine replacement")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SKUs due to DB error", nil)
+		}
+		existing := make(map[string]bool, len(skus))
+		for _, sku := range skus {
+			existing[sku.ID] = true
+		}
+		for skuID := range requestedSKUs {
+			if !existing[skuID] {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SkuID specified for an Expected Machine does not exist on the Site", nil)
+			}
+		}
+	}
+
+	inputs := make([]cdbm.ExpectedMachineCreateInput, 0, len(request.ExpectedMachines))
+	credentials := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(request.ExpectedMachines))
+	for _, machine := range request.ExpectedMachines {
+		id := uuid.New()
+		credentials[id] = cdbm.ExpectedMachineCredentials{Username: machine.DefaultBmcUsername, Password: machine.DefaultBmcPassword}
+		inputs = append(inputs, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID: id, SiteID: site.ID, BmcMacAddress: machine.BmcMacAddress,
+			BmcIpAddress: machine.BmcIpAddress, ChassisSerialNumber: machine.ChassisSerialNumber,
+			SkuID: machine.SkuID, FallbackDpuSerialNumbers: machine.FallbackDPUSerialNumbers,
+			RackID: machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
+			Model: machine.Model, Description: machine.Description, SlotID: machine.SlotID,
+			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
+			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
+		})
+	}
+
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	dao := cdbm.NewExpectedMachineDAO(h.dbSession)
+	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Machines due to DB error", nil)
+		}
+		protos := make([]*corev1.ExpectedMachine, 0, len(machines))
+		for i := range machines {
+			protos = append(protos, machines[i].ToProto(credentials[machines[i].ID]))
+		}
+		coreRequest := &corev1.ExpectedMachineList{ExpectedMachines: protos}
+		var secretFields []string
+		if slices.ContainsFunc(request.ExpectedMachines, func(machine *model.APIExpectedMachineCreateRequest) bool {
+			return machine.DefaultBmcUsername != nil || machine.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"expectedMachines"}
+		}
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		return machines, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to replace Expected Machines due to DB transaction error")
+	}
+
+	response := make([]*model.APIExpectedMachine, 0, len(replaced))
+	for i := range replaced {
+		response = append(response, model.NewAPIExpectedMachine(&replaced[i]))
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+// DeleteAllExpectedMachinesHandler deletes the complete ExpectedMachine set for one Site.
+type DeleteAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+
+// NewDeleteAllExpectedMachinesHandler creates a full-Site ExpectedMachine deletion handler.
+func NewDeleteAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedMachinesHandler {
+	return DeleteAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Delete all ExpectedMachines for a Site
+// @Tags ExpectedMachine
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site whose ExpectedMachines should be deleted"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-machine/all [delete]
+func (h DeleteAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	return h.deleteAll(c, "ExpectedMachine", corev1.Forge_DeleteAllExpectedMachines_FullMethodName, func(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID) error {
+		return cdbm.NewExpectedMachineDAO(h.dbSession).DeleteAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+	})
+}

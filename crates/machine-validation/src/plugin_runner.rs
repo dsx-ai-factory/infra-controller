@@ -17,9 +17,9 @@
 
 //! Private OCI runtime building blocks for Machine Validation plugins.
 //!
-//! This module deliberately has no control-plane integration. Existing Machine
-//! Validation tests do not construct or call this runner. A later change will
-//! supply approved plugin definitions and opt into this execution path.
+//! Existing Machine Validation tests do not construct or call this runner.
+//! Plugin output can be sent over a bounded channel, but persistence remains
+//! outside this module so the runner never depends on control-plane delivery.
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -31,6 +31,7 @@ use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, os::unix::fs::Perm
 use carbide_utils::cmd::TokioCmd;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -41,8 +42,10 @@ const MAX_ERROR_OUTPUT_SIZE: usize = 4096;
 const MAX_INPUT_SIZE: usize = 64 * 1024;
 const PLUGIN_UID: u32 = 65532;
 const PLUGIN_GID: u32 = 65532;
+const PLUGIN_CONTRACT_DIR_ENV: &str = "NICO_MV_CONTRACT_DIR";
 const CONTAINER_CLEANUP_TIMEOUT_SECONDS: u64 = 30;
 const CONTAINER_REMOVE_ATTEMPTS: u8 = 3;
+const MAX_LOG_CHUNK_BYTES: usize = 4096;
 
 const ATTEMPT_BASE_DIR: &str = "/run/nico/machine-validation";
 
@@ -72,9 +75,27 @@ pub(crate) struct PluginExecution {
     pub(crate) result: PluginResult,
 }
 
+/// One bounded, UTF-8 log record emitted while a plugin is running.
+///
+/// The runner uses a bounded channel and never waits for the control plane to
+/// consume it. A slow or unavailable API must not block the container's output
+/// pipes or affect validation execution.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PluginLogChunk {
+    pub(crate) stream: PluginLogStream,
+    pub(crate) content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PluginLogStream {
+    Stdout,
+    Stderr,
+}
+
 struct CapturedOutput {
     bytes: Vec<u8>,
     truncated: bool,
+    log_dropped: bool,
 }
 
 /// Ensures a cancelled execution still removes its named container.
@@ -147,6 +168,7 @@ pub(crate) async fn execute_plugin(
     input: &Value,
     timeout: std::time::Duration,
     contract_dir: &Path,
+    log_sender: Option<mpsc::Sender<PluginLogChunk>>,
 ) -> Result<PluginExecution, String> {
     validate_runtime_spec(spec)?;
     validate_contract_dir(contract_dir)?;
@@ -186,9 +208,10 @@ pub(crate) async fn execute_plugin(
         };
         let mut cleanup_guard =
             ContainerCleanupGuard::new(container_name.clone(), schedule_container_cleanup);
-        match tokio::time::timeout(timeout, collect_plugin_output(child)).await {
+        match tokio::time::timeout(timeout, collect_plugin_output(child, log_sender)).await {
             Ok(Ok((status, stdout, stderr))) if status.success() => {
                 cleanup_guard.disarm();
+                warn_if_log_chunks_dropped(&stdout, &stderr);
                 (
                     read_plugin_result(&output_dir.join("result.json")).map(|result| {
                         PluginExecution {
@@ -202,6 +225,7 @@ pub(crate) async fn execute_plugin(
             }
             Ok(Ok((status, stdout, stderr))) => {
                 cleanup_guard.disarm();
+                warn_if_log_chunks_dropped(&stdout, &stderr);
                 (
                     Err(format!(
                         "plugin exited unsuccessfully with status {:?}; ignoring result.json; stdout: {}; stderr: {}",
@@ -306,6 +330,7 @@ fn serialize_plugin_input(input: &Value) -> Result<Vec<u8>, String> {
 
 async fn collect_plugin_output(
     mut child: tokio::process::Child,
+    log_sender: Option<mpsc::Sender<PluginLogChunk>>,
 ) -> Result<(std::process::ExitStatus, CapturedOutput, CapturedOutput), String> {
     let stdout = child
         .stdout
@@ -315,19 +340,27 @@ async fn collect_plugin_output(
         .stderr
         .take()
         .ok_or_else(|| "plugin stderr was not captured".to_owned())?;
-    let (status, stdout, stderr) =
-        tokio::try_join!(child.wait(), read_limited(stdout), read_limited(stderr))
-            .map_err(|error| format!("failed to collect plugin output: {error}"))?;
+    let (status, stdout, stderr) = tokio::try_join!(
+        child.wait(),
+        read_limited(stdout, PluginLogStream::Stdout, log_sender.clone()),
+        read_limited(stderr, PluginLogStream::Stderr, log_sender)
+    )
+    .map_err(|error| format!("failed to collect plugin output: {error}"))?;
     Ok((status, stdout, stderr))
 }
 
-async fn read_limited<R>(mut reader: R) -> Result<CapturedOutput, std::io::Error>
+async fn read_limited<R>(
+    mut reader: R,
+    stream: PluginLogStream,
+    log_sender: Option<mpsc::Sender<PluginLogChunk>>,
+) -> Result<CapturedOutput, std::io::Error>
 where
     R: AsyncRead + Unpin,
 {
     let mut bytes = Vec::with_capacity(MAX_OUTPUT_SIZE);
     let mut buffer = [0; 8192];
     let mut truncated = false;
+    let mut log_dropped = false;
     loop {
         let bytes_read = reader.read(&mut buffer).await?;
         if bytes_read == 0 {
@@ -337,8 +370,43 @@ where
         let copied = bytes_read.min(remaining);
         bytes.extend_from_slice(&buffer[..copied]);
         truncated |= copied < bytes_read;
+        if let Some(sender) = &log_sender {
+            log_dropped |= !send_log_chunks(sender, stream, &buffer[..bytes_read]);
+        }
     }
-    Ok(CapturedOutput { bytes, truncated })
+    Ok(CapturedOutput {
+        bytes,
+        truncated,
+        log_dropped,
+    })
+}
+
+fn send_log_chunks(
+    sender: &mpsc::Sender<PluginLogChunk>,
+    stream: PluginLogStream,
+    bytes: &[u8],
+) -> bool {
+    // The public log contract is UTF-8. Preserve valid plugin text and replace
+    // malformed bytes rather than allowing binary output to stop execution.
+    let content = String::from_utf8_lossy(bytes);
+    let mut start = 0;
+    while start < content.len() {
+        let mut end = (start + MAX_LOG_CHUNK_BYTES).min(content.len());
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        if sender
+            .try_send(PluginLogChunk {
+                stream,
+                content: content[start..end].to_owned(),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        start = end;
+    }
+    true
 }
 
 fn output_to_string(output: CapturedOutput) -> String {
@@ -347,6 +415,14 @@ fn output_to_string(output: CapturedOutput) -> String {
         contents.push_str("\n[plugin output truncated at 1 MiB]");
     }
     contents
+}
+
+fn warn_if_log_chunks_dropped(stdout: &CapturedOutput, stderr: &CapturedOutput) {
+    if stdout.log_dropped || stderr.log_dropped {
+        warn!(
+            "Plugin output exceeded the live log buffer; some attempt log chunks were not stored"
+        );
+    }
 }
 
 fn output_error_summary(output: CapturedOutput) -> String {
@@ -380,6 +456,8 @@ fn plugin_runtime_args(
         "--rm".to_owned(),
         "--network".to_owned(),
         "none".to_owned(),
+        "--env".to_owned(),
+        format!("{PLUGIN_CONTRACT_DIR_ENV}={}", contract_dir.display()),
         "--mount".to_owned(),
         format!(
             "type=bind,src={},dst={},options=rbind:ro",
@@ -595,6 +673,10 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/input")));
         assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/output")));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--env", "NICO_MV_CONTRACT_DIR=/opt/forge/mv"])
+        );
         assert!(!args.iter().any(|arg| arg == "--privileged"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
@@ -618,6 +700,12 @@ mod tests {
             args.iter()
                 .any(|arg| arg.contains("dst=/var/lib/nico/plugin-contract/output"))
         );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--env",
+                "NICO_MV_CONTRACT_DIR=/var/lib/nico/plugin-contract",
+            ]
+        }));
     }
 
     #[test]
@@ -750,7 +838,9 @@ mod tests {
         let payload = vec![b'x'; MAX_OUTPUT_SIZE + 1];
         let writer = tokio::spawn(async move { writer.write_all(&payload).await });
 
-        let output = read_limited(reader).await.expect("read plugin output");
+        let output = read_limited(reader, PluginLogStream::Stdout, None)
+            .await
+            .expect("read plugin output");
         writer
             .await
             .expect("join writer")
@@ -761,11 +851,48 @@ mod tests {
         assert!(output_to_string(output).ends_with("[plugin output truncated at 1 MiB]"));
     }
 
+    #[tokio::test]
+    async fn log_chunks_are_utf8_bounded_and_do_not_wait_for_a_slow_consumer() {
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        assert!(send_log_chunks(
+            &sender,
+            PluginLogStream::Stdout,
+            "😀".as_bytes()
+        ));
+        assert!(!send_log_chunks(
+            &sender,
+            PluginLogStream::Stdout,
+            b"later output"
+        ));
+
+        let chunk = receiver.recv().await.expect("first log chunk");
+        assert_eq!(chunk.stream, PluginLogStream::Stdout);
+        assert!(chunk.content.len() <= MAX_LOG_CHUNK_BYTES);
+        assert!(chunk.content.is_char_boundary(chunk.content.len()));
+
+        let (sender, mut receiver) = mpsc::channel(8);
+        let content = "😀".repeat(MAX_LOG_CHUNK_BYTES);
+        assert!(send_log_chunks(
+            &sender,
+            PluginLogStream::Stdout,
+            content.as_bytes()
+        ));
+        while let Some(chunk) = receiver.recv().await {
+            assert!(chunk.content.len() <= MAX_LOG_CHUNK_BYTES);
+            assert!(chunk.content.is_char_boundary(chunk.content.len()));
+            if receiver.is_empty() {
+                break;
+            }
+        }
+    }
+
     #[test]
     fn failed_plugin_output_is_shortened_for_result_errors() {
         let output = CapturedOutput {
             bytes: vec![b'x'; MAX_ERROR_OUTPUT_SIZE + 1],
             truncated: false,
+            log_dropped: false,
         };
 
         let summary = output_error_summary(output);

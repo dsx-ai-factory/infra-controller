@@ -25,7 +25,9 @@ use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_uuid::machine::MachineId;
-use model::machine::{DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState};
+use model::machine::{
+    CleanupContext, CleanupState, DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState,
+};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
 use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateInitiator};
@@ -144,6 +146,7 @@ fn reset_request(machine_id: MachineId, mode: Mode) -> Request<ManagedHostResetR
         mode: mode.into(),
         initiator: UpdateInitiator::AdminCli.into(),
         allow_reset_with_instance: false,
+        ignore_cleanup: false,
     })
 }
 
@@ -609,5 +612,103 @@ async fn reset_completes_while_the_host_carries_a_failure_record(pool: sqlx::PgP
         matches!(state, ManagedHostState::DpuDiscoveringState { .. }),
         "a failure record must not park a reset that is already tearing the host down, \
          got {state:?}"
+    );
+}
+
+/// Allocates an instance on the host, then requests a reset that destroys it.
+async fn request_reset_with_live_instance(
+    env: &TestEnv,
+    managed_host: &TestManagedHost,
+    ignore_cleanup: bool,
+) {
+    // The required alert prevents allocation, so allocate before marking for updates.
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let _instance = managed_host
+        .instance_builer(env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    managed_host.mark_machine_for_updates().await;
+
+    let mut request = reset_request_allowing_instance(managed_host.id.into());
+    request.get_mut().ignore_cleanup = ignore_cleanup;
+    env.api.trigger_managed_host_reset(request).await.unwrap();
+}
+
+/// Deleting a live instance leaves the host as the tenant used it, so the reset cleans the
+/// host up before deleting its DPF CRs.
+#[crate::sqlx_test]
+async fn reset_cleans_up_the_host_after_deleting_a_live_instance(pool: sqlx::PgPool) {
+    let env = reset_controller_env(pool, DpfCrs::Present).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    let host_id: MachineId = managed_host.id.into();
+    request_reset_with_live_instance(&env, &managed_host, false).await;
+
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        5,
+        ManagedHostState::WaitingForCleanup {
+            cleanup_state: CleanupState::HostCleanup {
+                boss_controller_id: None,
+            },
+            cleanup_context: CleanupContext::Reset,
+        },
+    )
+    .await;
+
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the reset has to delete the instance before cleaning up the host"
+    );
+
+    // Stand in for scout reporting that it cleaned up the host.
+    let host = managed_host.host().db_machine(&mut txn).await;
+    db::machine::update_reboot_time(&host, &mut txn)
+        .await
+        .unwrap();
+    db::machine::update_cleanup_time(&host, &mut txn)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        3,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        },
+    )
+    .await;
+}
+
+/// `--ignore-cleanup` sends the reset straight from deleting the instance to deleting the
+/// DPF CRs. Without the skip, the host would wait in cleanup and never reach `DeletingCrs`.
+#[crate::sqlx_test]
+async fn reset_skips_cleanup_when_the_operator_ignores_it(pool: sqlx::PgPool) {
+    let env = reset_controller_env(pool, DpfCrs::Present).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    let host_id: MachineId = managed_host.id.into();
+    request_reset_with_live_instance(&env, &managed_host, true).await;
+
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        5,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        },
+    )
+    .await;
+
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the reset has to delete the instance even when cleanup is skipped"
     );
 }

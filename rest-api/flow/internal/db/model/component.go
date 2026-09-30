@@ -48,6 +48,7 @@ type Component struct {
 	ComponentID *string                         `bun:"external_id"`
 	PowerState  *nicoapi.PowerState             `bun:"power_state"`
 	Status      *types.ComponentOperationStatus `bun:"status,type:jsonb,nullzero"`
+	Health      *types.HealthReport             `bun:"health,type:jsonb,nullzero"`
 	// LeakStatus is owned by the leak-detection loop. nullzero so an
 	// insert that leaves it empty falls back to the DB default 'UNKNOWN'
 	// rather than writing an empty string.
@@ -92,6 +93,11 @@ var defaultComponentPagination = dbquery.Pagination{
 	Offset: 0,
 	Limit:  100,
 	Total:  0,
+}
+
+var defaultComponentOrderBy = []dbquery.OrderBy{
+	{Column: "c.name", Direction: dbquery.OrderAscending},
+	{Column: "c.id", Direction: dbquery.OrderAscending},
 }
 
 func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err error) {
@@ -166,10 +172,14 @@ func GetListOfComponents(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultComponentOrderBy
 	if orderBy != nil {
 		qualifiedOrderBy := *orderBy
 		qualifiedOrderBy.Column = "c." + qualifiedOrderBy.Column
-		conf.DefaultOrderBy = []dbquery.OrderBy{qualifiedOrderBy}
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			qualifiedOrderBy,
+			{Column: "c.id", Direction: dbquery.OrderAscending},
+		}
 	}
 
 	// Always include BMCs relation
@@ -335,6 +345,19 @@ func (cd *Component) SetStatusByComponentID(ctx context.Context, idb bun.IDB) er
 	}
 	_, err := idb.NewUpdate().Model(cd).
 		Set("status = ?", cd.Status).
+		Where("external_id = ?", *cd.ComponentID).
+		Exec(ctx)
+	return err
+}
+
+// SetHealthByComponentID writes the latest aggregate health snapshot for the
+// row identified by external_id.
+func (cd *Component) SetHealthByComponentID(ctx context.Context, idb bun.IDB) error {
+	if cd.ComponentID == nil || *cd.ComponentID == "" {
+		return errors.New("component ID not set")
+	}
+	_, err := idb.NewUpdate().Model(cd).
+		Set("health = ?", cd.Health).
 		Where("external_id = ?", *cd.ComponentID).
 		Exec(ctx)
 	return err
