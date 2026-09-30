@@ -22803,6 +22803,16 @@ components:
             - integer
             - 'null'
           description: 'Virtual function the attachment uses. Not currently supported'
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          description: 'OVS bridge the attachment uses. Set only for an `OVS` attachment'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          description: 'OVN network the OVS attachment maps onto. Set only for an `OVS` attachment, and optional even then'
         macAddress:
           type:
             - string
@@ -25535,6 +25545,8 @@ components:
           deviceInstance: 3
           attachmentType: OVS
           virtualFunctionId: null
+          bridgeName: br-spx0
+          ovnNetworkName: spx-net-a
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
         spectrumXPartitionId:
@@ -25560,6 +25572,22 @@ components:
             - integer
             - 'null'
           description: Must be omitted, as virtual functions are not currently supported
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9_.-]+$'
+          description: 'OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 256
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: 'OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type'
       required:
         - spectrumXPartitionId
         - device

@@ -64,6 +64,7 @@ NICo provides **health visibility and allocation protection** for leak-related c
 
 - `PreventAllocations`
 - `SensorCritical`
+- `Hardware`
 
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 

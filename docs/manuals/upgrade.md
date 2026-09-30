@@ -14,7 +14,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **1b — postgres-operator** | `helmfile sync` issues `helm upgrade --install` — upgrades the release in place. Existing `PostgreSQL` CRs (including `nico-pg-cluster`) are untouched. |
 | **1c — MetalLB** | CRDs are applied server-side with `--force-conflicts`. Any Helm-owned CRDs from a prior install have their ownership labels stripped before sync, preventing deletion. `helmfile sync` upgrades the release. Existing `IPAddressPool`, `BGPPeer`, and `BGPAdvertisement` instances are preserved and re-applied (idempotent `kubectl apply`). Refer to [MetalLB CRD ownership](#20--21-metallb-crd-ownership-migration). |
 | **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. |
-| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet rolling-update leaves Vault pods running. |
+| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. |
 | **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
@@ -292,7 +292,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phase | Typical duration |
 | ----- | ---------------- |
 | Phases 1–1c (storage, postgres-operator, MetalLB) | 2–5 min |
-| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized; only rolling update time) |
+| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized and its pods are not restarted) |
 | Phase 5 (ESO + nico-prereqs) | 1–3 min |
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
 | Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
@@ -421,6 +421,43 @@ kubectl patch pvc postgres-data-postgres-0 -n postgres \
 ### 2.2 → 2.3: Machine-a-Tron startupProbe Default
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
+
+### 2.2 → 2.3: Vault Probe Settings
+
+NICo 2.3 raises the Vault server probe `timeoutSeconds` from 3 to 10 and `failureThreshold` from 2 to 5 in `helm-prereqs/operators/values/vault.yaml`.
+
+For example, on a 250-rack site, the active node missed two 3-second liveness probes under load, was killed, came back sealed, and the standby nodes stayed leaderless.
+
+The Vault StatefulSet uses `updateStrategy: OnDelete`. This means that `helmfile sync` updates the pod template, but running pods keep the old probes until they are deleted. Phase 3 prints a warning naming the pods still running the previous revision. If the StatefulSet status cannot be read or has not caught up, the warning indicates that the revision could not be verified.
+
+After the upgrade finishes, find the active node, then roll the pods one at a time, standby nodes first, and the active node last. The active node is the pod whose `HA Mode` is `active`:
+
+```bash
+for pod in vault-0 vault-1 vault-2; do
+    echo -n "${pod}: "; kubectl exec -n vault "${pod}" -c vault -- vault status -tls-skip-verify | grep 'HA Mode'
+done
+```
+
+From the repository root, run the following commands for each standby in turn, and only then for the active node. Replace `<pod>` with the pod being rolled and `<active>` with the pod whose `HA Mode` is `active` at that point. A recreated pod starts sealed and is not Ready until it is unsealed, so the first wait is for `Running`:
+
+```bash
+kubectl delete pod -n vault <pod>
+kubectl wait pod/<pod> -n vault --for=jsonpath='{.status.phase}'=Running --timeout=300s
+helm-prereqs/unseal_vault.sh
+kubectl wait pod/<pod> -n vault --for=condition=Ready --timeout=300s
+kubectl -n vault get secret vaultroottoken -o jsonpath='{.data.token}' | base64 -d \
+    | kubectl exec -i -n vault <active> -c vault -- \
+        sh -c 'VAULT_TOKEN=$(cat) vault operator raft autopilot state -tls-skip-verify' \
+    | sed '/^Servers:/,$d'
+```
+
+The root token travels on standard input; it does not appear in the `kubectl exec` arguments that the API server records in audit events. The `sed` operation trims the output to the cluster summary: `Healthy`, `Failure Tolerance`, `Leader`, and `Voters`.
+
+`unseal_vault.sh` returns once `vault status` reports the pod unsealed. Unsealing only opens the pod's own storage, and does not show that the pod has rejoined the cluster as a healthy voter. Continue to the next pod only when `Healthy` is `true`, `Failure Tolerance` is `1` on a three-node cluster, and `<pod>` is listed under `Voters`.
+
+Right after the unseal, the summary can still show `Healthy` `false` and `Failure Tolerance` `0` until the leader hears from the pod. Rerun the check after a few seconds. A pod that comes back without its Raft data joins as a non-voter and appears under `Voters` only after autopilot promotes it. Deleting the next standby before the promotion can leave the three-node cluster below quorum. When the former active node is rolled, a standby has taken over; run the status loop again to find `<active>`.
+
+If `kubectl wait` reports the pod as not found, the StatefulSet has not recreated it yet. Run the wait again.
 
 ### 2.2 → 2.3: Kustomize deployment deprecated
 

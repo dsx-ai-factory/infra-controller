@@ -276,6 +276,7 @@ fn parse_prefixes(prefixes: &[String]) -> Vec<IpNet> {
 
 pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     let template = template_for(conf.vpc_virtualization_type)?;
+    let use_admin_network = conf.use_admin_network;
     let is_etv = matches!(
         conf.vpc_virtualization_type,
         VpcVirtualizationType::EthernetVirtualizer
@@ -483,6 +484,10 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             .ipv6_port_config
             .as_ref()
             .and_then(|ipv6| ipv6.router_advertisement.as_ref());
+        // A validated admin L2 RA proves this is the host-facing boundary for
+        // the stretched admin segment. Tenant ports do not inherit this ACL.
+        let has_admin_ipv6_overlay_containment =
+            use_admin_network && network.is_l2_segment && router_advertisement.is_some();
         // FRR accepts repeated RDNSS commands, so retain only the first
         // occurrence of each resolver while preserving discovery order.
         let mut rendered_rdnss_servers = HashSet::new();
@@ -520,6 +525,18 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 .into_iter()
                 .collect(),
             HasIpv6RouterAdvertisement: router_advertisement.is_some(),
+            HasAdminIpv6OverlayContainment: has_admin_ipv6_overlay_containment,
+            // Validated routed tenant RA uses the physical port, while
+            // validated admin L2 RA uses its already-rendered VLAN SVI.
+            Ipv6RouterAdvertisementInterface: router_advertisement
+                .map(|_| {
+                    if network.is_l2_segment {
+                        format!("vlan{}", network.vlan)
+                    } else {
+                        network.interface_name.clone()
+                    }
+                })
+                .unwrap_or_default(),
             Ipv6RouterAdvertisementPrefix: router_advertisement
                 .map(|ra| ra.prefix.clone())
                 .unwrap_or_default(),
@@ -564,6 +581,10 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             fmds_gateway_matched = true;
         }
         let port_has_neighbor = !port.HostIP.is_empty() || port.HostIPv6.is_some();
+        let port_has_ipv6_host_route = port
+            .HostIPv6Route
+            .as_deref()
+            .is_some_and(|route| !route.is_empty());
 
         has_any_vpc_vrf_loopback =
             has_any_vpc_vrf_loopback || network.tenant_vrf_loopback_ip.is_some();
@@ -584,6 +605,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                     v.RoutingProfile = routing_profile.clone();
                 }
                 v.HasNeighbors |= port_has_neighbor;
+                v.HasIpv6HostRoutes |= port_has_ipv6_host_route;
                 v.PortConfigs.push(port.clone());
             })
             .or_insert_with(|| TmplVpc {
@@ -592,6 +614,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 HasVrfLoopback: network.tenant_vrf_loopback_ip.is_some(),
                 VrfLoopback: network.tenant_vrf_loopback_ip.unwrap_or_default(),
                 HasNeighbors: port_has_neighbor,
+                HasIpv6HostRoutes: port_has_ipv6_host_route,
                 PortConfigs: vec![port.clone()],
                 VpcPeerVnis: network
                     .vpc_peer_vnis
@@ -706,11 +729,16 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         (Vec::new(), site_fabric_ipv4, site_fabric_ipv6)
     };
 
-    // Tenant RA must never survive a transition back to the admin network.
-    let has_ipv6_router_advertisements = !conf.use_admin_network
-        && port_configs
-            .iter()
-            .any(|port| port.HasIpv6RouterAdvertisement && !port.IsL2Segment);
+    // `update_nvue` constructs tenant and admin port models in mutually
+    // exclusive branches, so tenant RA cannot survive a transition to admin.
+    // Both modes validate RA before setting per-port desired state; the
+    // renderer therefore needs no separate `use_admin_network` exclusion.
+    let has_ipv6_router_advertisements = port_configs
+        .iter()
+        .any(|port| port.HasIpv6RouterAdvertisement);
+    let has_admin_ipv6_overlay_containment = port_configs
+        .iter()
+        .any(|port| port.HasAdminIpv6OverlayContainment);
 
     let params = TmplNvue {
         HasBgpLeafSessionPassword: conf.bgp_leaf_session_password.is_some(),
@@ -767,6 +795,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         VpcIsolationRouteDistance: FNN_VPC_ISOLATION_ROUTE_DISTANCE,
         StatefulAclsEnabled: conf.stateful_acls_enabled,
         HasIpv6RouterAdvertisements: has_ipv6_router_advertisements,
+        HasAdminIpv6OverlayContainment: has_admin_ipv6_overlay_containment,
         UseVpcIsolation: conf.use_vpc_isolation,
         HasIpv4IngressSecurityPolicyOverrideRules: !ingress_ipv4_override_rules.is_empty(),
         HasIpv4EgressSecurityPolicyOverrideRules: !egress_ipv4_override_rules.is_empty(),
@@ -1422,19 +1451,21 @@ pub struct L3Domain {
 /// IPv6 configuration for a port.
 #[derive(Clone, Deserialize, Debug)]
 pub struct Ipv6PortConfig {
-    /// IPv6 value configured on the DPU in CIDR notation (for example,
-    /// "2001:db8::0/127"). Stateful FNN uses the ::0 end of a /127 linknet
-    /// (RFC 6164). Routed tenant configuration derives it from the segment
-    /// prefix. SLAAC carries the selected /64 without a concrete host address.
+    /// IPv6 value configured on the DPU in CIDR notation. Routed tenants
+    /// derive it from the canonical segment prefix: the first address of a
+    /// stateful `/127` linknet (RFC 6164), or the selected `/64` for SLAAC.
+    /// Admin L2 uses its containing segment prefix on the VLAN VRR.
     pub gateway_cidr: String,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN.
     pub svi_ip: Option<String>,
-    /// Tenant router-advertisement behavior for an FNN routed interface.
+    /// Validated FNN router-advertisement behavior. Routed tenant stateful RA
+    /// requires a `/127`, tenant SLAAC requires a `/64`, and admin stateful RA
+    /// advertises the containing segment on its VLAN SVI.
     #[serde(default)]
     pub router_advertisement: Option<Ipv6RouterAdvertisementConfig>,
 }
 
-/// Address-assignment mode advertised to an IPv6 tenant.
+/// Address-assignment mode advertised to an IPv6 host.
 #[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
 pub enum Ipv6RouterAdvertisementMode {
     /// DHCPv6 assigns the address (M=1, O=1, A=0).
@@ -1446,7 +1477,8 @@ pub enum Ipv6RouterAdvertisementMode {
 /// Router-advertisement inputs retained separately from the interface linknet.
 #[derive(Clone, Deserialize, Debug)]
 pub struct Ipv6RouterAdvertisementConfig {
-    /// Allocated host-facing prefix (`/127` for stateful or `/64` for SLAAC).
+    /// Routed tenant segment (`/127` for stateful or `/64` for SLAAC), or the
+    /// containing admin segment advertised by the stateful VLAN SVI.
     pub prefix: String,
     /// Explicit address-assignment mode for this prefix.
     pub mode: Ipv6RouterAdvertisementMode,
@@ -1559,8 +1591,10 @@ struct TmplNvue {
     /// for them.
     StatefulAclsEnabled: bool,
 
-    /// Whether this desired configuration contains routed tenant RA.
+    /// Whether this desired configuration contains validated tenant or admin RA.
     HasIpv6RouterAdvertisements: bool,
+    /// Whether a validated admin L2 segment needs directional IPv6 containment.
+    HasAdminIpv6OverlayContainment: bool,
 
     /// Whether there are global policies that should be evaluated
     /// after deny prefixes but before any tenant-defined rules.
@@ -1745,6 +1779,8 @@ struct TmplVpc {
     VrfLoopback: String,
 
     HasNeighbors: bool,
+    /// Whether any port has an IPv6 host route, so IPv4-only VRFs omit the BGP network map.
+    HasIpv6HostRoutes: bool,
     PortConfigs: Vec<TmplConfigPort>,
 
     VpcPeerVnis: Vec<TmplVni>,
@@ -1789,6 +1825,8 @@ struct TmplConfigPort {
     /// DPU-side IPv6 addresses with their prefix lengths.
     IPsIpv6: Vec<String>,
     HasIpv6RouterAdvertisement: bool,
+    HasAdminIpv6OverlayContainment: bool,
+    Ipv6RouterAdvertisementInterface: String,
     Ipv6RouterAdvertisementPrefix: String,
     Ipv6RouterAdvertisementManagedConfig: bool,
     Ipv6RouterAdvertisementAutoconfig: bool,
@@ -2579,6 +2617,67 @@ mod tests {
         }
     }
 
+    /// Verifies the admin-only IPv6 containment policies deny only DHCPv6 and
+    /// router-discovery traffic that could cross the stretched VNI boundary.
+    #[test]
+    fn test_build_fnn_admin_ipv6_overlay_containment_acl_bodies() {
+        let mut conf = dual_stack_fnn_config();
+        conf.use_admin_network = true;
+        conf.ct_port_configs[0].is_l2_segment = true;
+
+        let output = build(conf).expect("admin IPv6 containment should render");
+        let documents: serde_yaml::Value =
+            serde_yaml::from_str(&output).expect("output should be valid YAML");
+        let acl = &documents.as_sequence().expect("two YAML documents")[1]["set"]["acl"];
+
+        assert_eq!(
+            acl["admin_ipv6_host_to_overlay_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                r#"rule:
+  '10':
+    action:
+      deny: {}
+    hw-offload: off
+    match:
+      ip:
+        dest-ip: ff02::1:2
+        dest-port:
+          '547': {}
+        protocol: udp
+        source-port:
+          '546': {}
+  '20':
+    action:
+      deny: {}
+    hw-offload: off
+    match:
+      ip:
+        icmpv6-type: router-solicitation
+        protocol: icmpv6
+type: ipv6
+"#,
+            )
+            .expect("expected inbound ACL should be valid YAML")
+        );
+        assert_eq!(
+            acl["admin_ipv6_overlay_to_host_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                r#"rule:
+  '20':
+    action:
+      deny: {}
+    hw-offload: off
+    match:
+      ip:
+        icmpv6-type: router-advertisement
+        protocol: icmpv6
+type: ipv6
+"#,
+            )
+            .expect("expected outbound ACL should be valid YAML")
+        );
+    }
+
     /// Verifies ETV advances site and deny rules only beyond permits in their respective
     /// tenant-wide ACL mappings, because those policies do not share their rule keys.
     #[test]
@@ -2753,6 +2852,8 @@ mod tests {
             .expect("fixture should have IPv6 port config");
         ipv6.gateway_cidr = "2001:db8::1/64".into();
         ipv6.svi_ip = Some("2001:db8::2".into());
+        // Tenant L2 construction never supplies validated RA desired state.
+        ipv6.router_advertisement = None;
 
         let output = build(conf).expect("build should succeed");
         let docs: serde_yaml::Value =
@@ -2768,24 +2869,6 @@ mod tests {
             yaml_mapping_keys(&vlan["ip"]["vrr"]["address"]),
             address_set(&["10.0.1.1/24", "2001:db8::1/64"]),
         );
-    }
-
-    /// Verifies an RA-capable tenant fixture cannot leak its stanza into admin
-    /// mode because this rendering contract covers tenant interfaces only.
-    #[test]
-    fn test_build_fnn_admin_mode_omits_tenant_ra() {
-        let mut conf = dual_stack_fnn_config();
-        conf.use_admin_network = true;
-
-        // Render the same port with the response switched to admin mode.
-        let output = build(conf).expect("build should succeed");
-        let docs: serde_yaml::Value =
-            serde_yaml::from_str(&output).expect("output should be valid YAML");
-
-        // The renderer is a final defense beyond production model construction.
-        assert!(docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]["config"]
-            ["snippet"]
-            .is_null());
     }
 
     /// Verifies complete desired-state rendering replaces an advertised prefix

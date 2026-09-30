@@ -5109,6 +5109,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedSiteSpectrumXAttachmentCount  *int
 		expectedRespSpectrumXAttachmentCount  *int
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
+		expectedSiteSpectrumXAttachmentBridge *string
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -5116,7 +5117,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// When true with nvlinkInterfacesToDelete, still assert those rows are Deleting but skip Pending-row count/order checks.
 		nvLinkSkipPendingDBAssertions bool
 		// Optional hook after building the echo context and before Handle (e.g. adjust DB timestamps for time-sensitive branches).
-		beforeHandle           func(t *testing.T)
+		beforeHandle func(t *testing.T)
+		// Optional hook after a successful Handle (e.g. assert persisted DB state).
+		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
 	}
 
@@ -5204,16 +5207,68 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 							DeviceInstance:       cutil.GetPtr(0),
 							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+							BridgeName:           cutil.GetPtr("br-spx0"),
 						},
 					},
 				},
-				reqInstance:                          inst1.ID.String(),
-				cleanInstanceToStatus:                inst1.Status,
-				reqOrg:                               tnOrg1,
-				reqUser:                              tnu1,
-				respCode:                             http.StatusOK,
-				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
-				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_Ovn),
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount:  cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:   cutil.GetPtr(corev1.SpxAttachmentType_OVS),
+				expectedSiteSpectrumXAttachmentBridge: cutil.GetPtr("br-spx0"),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			// The reuse key covers partition, device, device instance and attachment type
+			// but not the OVS bridge, so an OVS attachment whose bridge alone changes reuses
+			// the persisted row. Before the fix the row was carried forward untouched, so the
+			// Site kept the stale bridge and the request's new bridge was discarded. Runs
+			// directly after the OVS type-change case, which left inst1 with one OVS
+			// attachment on br-spx0.
+			name: "test Instance update rebinds a reused SpectrumX OVS Attachment to the requested bridge",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxp1.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+							BridgeName:           cutil.GetPtr("br-new"),
+						},
+					},
+				},
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount:  cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:   cutil.GetPtr(corev1.SpxAttachmentType_OVS),
+				expectedSiteSpectrumXAttachmentBridge: cutil.GetPtr("br-new"),
+				afterHandle: func(t *testing.T) {
+					sxaDAO := cdbm.NewSpectrumXAttachmentDAO(dbSession)
+					persisted, _, gerr := sxaDAO.GetAll(context.Background(), nil, cdbm.SpectrumXAttachmentFilterInput{
+						InstanceIDs: []uuid.UUID{inst1.ID},
+						Statuses:    []string{cdbm.SpectrumXAttachmentStatusPending},
+					}, cdbp.PageInput{}, nil)
+					require.NoError(t, gerr)
+					require.Len(t, persisted, 1, "the reused OVS row must be updated in place, not duplicated")
+					require.NotNil(t, persisted[0].BridgeName)
+					assert.Equal(t, "br-new", *persisted[0].BridgeName, "the reused row must persist the requested bridge")
+					assert.Nil(t, persisted[0].OvnNetworkName)
+				},
 			},
 			verifySiteControllerRequest: true,
 		},
@@ -7788,6 +7843,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				t.Fatal(serr)
 			}
 
+			if tt.args.afterHandle != nil {
+				tt.args.afterHandle(t)
+			}
+
 			if tt.args.reqData.Name != nil {
 				assert.Equal(t, rst.Name, *tt.args.reqData.Name)
 			}
@@ -8306,6 +8365,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						require.Len(t, siteReq.Config.Spxconfig.SpxAttachments, 1)
 						assert.Equal(t, *tt.args.expectedSiteSpectrumXAttachmentType, siteReq.Config.Spxconfig.SpxAttachments[0].AttachmentType,
 							"the Site must be sent the requested attachment type, not the retired row's")
+					}
+
+					if tt.args.expectedSiteSpectrumXAttachmentBridge != nil {
+						require.Len(t, siteReq.Config.Spxconfig.SpxAttachments, 1)
+						require.NotNil(t, siteReq.Config.Spxconfig.SpxAttachments[0].GetAttachmentOvs(),
+							"an OVS attachment must carry its OVS metadata to the Site")
+						assert.Equal(t, *tt.args.expectedSiteSpectrumXAttachmentBridge, siteReq.Config.Spxconfig.SpxAttachments[0].GetAttachmentOvs().GetBridgeName(),
+							"the Site must be sent the requested OVS bridge")
 					}
 
 					// Verify the SpectrumX Attachments are in the Site Controller request
