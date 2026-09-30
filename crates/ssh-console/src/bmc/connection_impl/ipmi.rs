@@ -35,8 +35,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::POWER_RESET_COMMAND;
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl::echo_connected_message;
 use crate::bmc::message_proxy::{ExecReply, ToBmcMessage, ToFrontendMessage};
@@ -46,6 +46,7 @@ use crate::config::Config;
 use crate::io_util::{
     self, PtyAllocError, set_controlling_terminal_on_exec, write_data_to_async_fd,
 };
+use crate::{POWER_RESET_COMMAND, fork_cancel_token};
 
 const IPMITOOL_PASSWORD_ENV_VAR: &str = "IPMITOOL_PASSWORD";
 const SOL_PAYLOAD_ALREADY_ACTIVE: &str = "SOL payload already active on another session";
@@ -68,8 +69,9 @@ pub(in crate::bmc) async fn spawn(
     to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     config: Arc<Config>,
     metrics: Arc<BmcPoolMetrics>,
+    cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let ready_tx = Some(ready_tx); // only send it once
 
@@ -129,7 +131,7 @@ pub(in crate::bmc) async fn spawn(
         ipmitool_process,
         output_buf: [0u8; 4096],
         captured_output: VecDeque::with_capacity(MAX_CAPTURED_IPMITOOL_OUTPUT_SIZE),
-        shutdown_rx,
+        cancel_token,
         pty_master,
         from_frontend_rx,
         to_frontend_tx,
@@ -193,16 +195,16 @@ pub(in crate::bmc) async fn spawn(
 
     Ok(Handle {
         to_bmc_msg_tx: from_frontend_tx,
-        shutdown_tx,
         join_handle,
+        drop_guard,
     })
 }
 
 /// A handle to a BMC connection, which will shut down when dropped.
 pub(in crate::bmc) struct Handle {
     pub(in crate::bmc) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
-    pub(in crate::bmc) shutdown_tx: oneshot::Sender<()>,
     pub(in crate::bmc) join_handle: JoinHandle<Result<(), SpawnError>>,
+    pub(in crate::bmc) drop_guard: DropGuard,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -408,7 +410,7 @@ struct IpmitoolMessageProxy {
     ipmitool_process: Child,
     output_buf: [u8; 4096],
     captured_output: VecDeque<u8>,
-    shutdown_rx: oneshot::Receiver<()>,
+    cancel_token: CancellationToken,
     pty_master: AsyncFd<OwnedFd>,
     from_frontend_rx: mpsc::Receiver<ToBmcMessage>,
     to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
@@ -449,7 +451,7 @@ impl IpmitoolMessageProxy {
         loop {
             tokio::select! {
                 // Break if we're shut down
-                _ = &mut self.shutdown_rx => {
+                _ = self.cancel_token.cancelled() => {
                     tracing::debug!("ipmitool_process_loop shutdown received");
                     break;
                 }
@@ -1015,7 +1017,7 @@ mod tests {
         drop(command);
         drop(pty_slave);
 
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let cancel_token = CancellationToken::new();
         let (_from_frontend_tx, from_frontend_rx) = mpsc::channel(1);
         let (to_frontend_tx, _to_frontend_rx) = broadcast::channel(8);
         let (ready_tx, mut ready_rx) = oneshot::channel();
@@ -1025,7 +1027,7 @@ mod tests {
             ipmitool_process,
             output_buf: [0; 4096],
             captured_output: VecDeque::with_capacity(MAX_CAPTURED_IPMITOOL_OUTPUT_SIZE),
-            shutdown_rx,
+            cancel_token: cancel_token.clone(),
             pty_master,
             from_frontend_rx,
             to_frontend_tx,

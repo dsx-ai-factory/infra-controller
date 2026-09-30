@@ -112,6 +112,9 @@ carbide-version = { path = "../version" }
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
+tonic-prost = { workspace = true }
 
 [lints]
 workspace = true

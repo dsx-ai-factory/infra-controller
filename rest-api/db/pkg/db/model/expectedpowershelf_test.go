@@ -757,3 +757,41 @@ func TestExpectedPowerShelfSQLDAO_Delete(t *testing.T) {
 		})
 	}
 }
+
+func TestExpectedPowerShelfSQLDAO_ReplaceAllAndDeleteAll(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedPowerShelfSetupSchema(t, dbSession)
+
+	existing := testExpectedPowerShelfSQLDAOCreateExpectedPowerShelves(ctx, t, dbSession)
+	dao := NewExpectedPowerShelfDAO(dbSession)
+	user, err := NewUserDAO(dbSession).Get(ctx, nil, existing[0].CreatedBy, nil)
+	assert.NoError(t, err)
+	otherProvider := TestBuildInfrastructureProvider(t, dbSession, "replacement-provider", "replacement-org", user)
+	otherSite := TestBuildSite(t, dbSession, otherProvider, "replacement-site", user)
+	other, err := dao.Create(ctx, nil, ExpectedPowerShelfCreateInput{ExpectedPowerShelfID: uuid.New(), SiteID: otherSite.ID, BmcMacAddress: "00:1b:44:33:ee:01", ShelfSerialNumber: "other-site", CreatedBy: user.ID})
+	assert.NoError(t, err)
+	result, err := dao.ReplaceAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, []ExpectedPowerShelfCreateInput{
+		{ExpectedPowerShelfID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:33:ff:01", ShelfSerialNumber: "replacement-1", CreatedBy: existing[0].CreatedBy},
+		{ExpectedPowerShelfID: uuid.New(), SiteID: existing[0].SiteID, BmcMacAddress: "00:1b:44:33:ff:02", ShelfSerialNumber: "replacement-2", CreatedBy: existing[0].CreatedBy},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, result, 2) {
+		assert.Equal(t, "replacement-1", result[0].ShelfSerialNumber)
+	}
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	result, err = dao.ReplaceAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, nil)
+	assert.NoError(t, err)
+	assert.Empty(t, result)
+	_, count, err := dao.GetAll(ctx, nil, ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{existing[0].SiteID}}, paginator.PageInput{}, nil)
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+	_, err = dao.Get(ctx, nil, other.ID, nil, false)
+	assert.NoError(t, err)
+
+	err = dao.DeleteAll(ctx, nil, ExpectedPowerShelfFilterInput{})
+	assert.ErrorIs(t, err, db.ErrInvalidParams)
+}

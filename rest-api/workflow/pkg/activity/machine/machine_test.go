@@ -375,7 +375,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo1 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:    &corev1.MachineId{Id: m.ControllerMachineID},
-			State: controllerMachineStatePrefixReady,
+			State: cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{
 				Interfaces:      []*corev1.MachineInterface{newMachineInterface1},
 				HwSkuDeviceType: cutil.GetPtr("CPU_HwSkuDeviceType"),
@@ -515,7 +515,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo2 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:    &corev1.MachineId{Id: newControllerMachineID},
-			State: controllerMachineStatePrefixReady,
+			State: cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{
 				Interfaces: []*corev1.MachineInterface{newMachineInterface2},
 			},
@@ -526,7 +526,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo3 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m4.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 		},
 	}
@@ -535,7 +535,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo4 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m5.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 		},
 	}
@@ -544,7 +544,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo5 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m6.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 			Config: &corev1.MachineConfig{
 				MaintenanceStartTime: &timestamppb.Timestamp{Seconds: refTime.Unix()},
@@ -593,7 +593,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo10 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:    &corev1.MachineId{Id: m11.ControllerMachineID},
-			State: controllerMachineStatePrefixReady,
+			State: cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{
 				Health: &corev1.HealthReport{
 					Source: "aggregate-host-health",
@@ -717,7 +717,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo13 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:    &corev1.MachineId{Id: m14.ControllerMachineID},
-			State: controllerMachineStatePrefixReady,
+			State: cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{
 				DiscoveryInfo: &corev1.DiscoveryInfo{},
 				Capabilities: &corev1.MachineCapabilitiesSet{
@@ -745,7 +745,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo15 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m16.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 			Config: &corev1.MachineConfig{InstanceTypeId: cutil.GetPtr(instanceTypeUpdated.ID.String())},
 		},
@@ -754,7 +754,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo16 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m17.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 		},
 	}
@@ -762,7 +762,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo17 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: m18.ControllerMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 			Config: &corev1.MachineConfig{InstanceTypeId: cutil.GetPtr(instanceTypeUnchanged.ID.String())},
 		},
@@ -772,7 +772,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	machineInfo18 := &corev1.MachineInfo{
 		Machine: &corev1.Machine{
 			Id:     &corev1.MachineId{Id: newWithInstanceTypeMachineID},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 			Config: &corev1.MachineConfig{InstanceTypeId: cutil.GetPtr(instanceTypeOriginal.ID.String())},
 		},
@@ -804,7 +804,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	for i := 0; i < 34; i++ {
 		mi := &corev1.Machine{
 			Id:     &corev1.MachineId{Id: pagedInvIds[i]},
-			State:  controllerMachineStatePrefixReady,
+			State:  cdbm.ControllerMachineStateReady,
 			Status: &corev1.MachineStatus{},
 		}
 		pagedInvMInfos = append(pagedInvMInfos, &corev1.MachineInfo{Machine: mi})
@@ -1415,7 +1415,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			Machines: []*corev1.MachineInfo{{
 				Machine: &corev1.Machine{
 					Id:     &corev1.MachineId{Id: recoveryMachine.ID},
-					State:  controllerMachineStatePrefixReady,
+					State:  cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{},
 				},
 			}},
@@ -1576,6 +1576,55 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		assert.Equal(t, statusDetailCountBefore, statusDetailCountAfter)
 		assert.NotContains(t, logOutput.String(), "failed to update missing on Site flag in DB")
 	})
+	t.Run("Ready inventory waits for REST assignment", func(t *testing.T) {
+		ctx := context.Background()
+		assignmentSite := testMachineBuildSite(t, dbSession, ip, "assignment-site", cdbm.SiteStatusRegistered)
+		machine := testMachineBuildMachine(t, dbSession, ip.ID, assignmentSite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusInUse))
+		testMachineBuildStatusDetail(t, dbSession, machine.ID, cdbm.MachineStatusInUse, cutil.GetPtr(cdbm.MachineStatusInUseMessage))
+		machineDAO := cdbm.NewMachineDAO(dbSession)
+		manager := ManageMachine{dbSession: dbSession, siteClientPool: tSiteClientPool}
+		inventory := &corev1.MachineInventory{
+			Machines:  []*corev1.MachineInfo{{Machine: &corev1.Machine{Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady, Status: &corev1.MachineStatus{}}}},
+			Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+		for _, phase := range []struct {
+			name         string
+			assigned     bool
+			coreState    string
+			want         string
+			historyCount int
+		}{
+			{"assignment remains", true, cdbm.ControllerMachineStateReady, cdbm.MachineStatusInUse, 1},
+			{"Core observes assignment", true, "Assigned", cdbm.MachineStatusInUse, 1},
+			{"Core returns Ready before release", true, cdbm.ControllerMachineStateReady, cdbm.MachineStatusInUse, 1},
+			{"assignment cleared", false, cdbm.ControllerMachineStateReady, cdbm.MachineStatusReady, 2},
+		} {
+			t.Run(phase.name, func(t *testing.T) {
+				inventory.Machines[0].Machine.State = phase.coreState
+				_, updateErr := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, IsAssigned: &phase.assigned})
+				require.NoError(t, updateErr)
+				_, updateErr = dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).Set("updated = ?", time.Now().Add(-2*time.Duration(cutil.DefaultInventoryReceiptInterval))).Where("id = ?", machine.ID).Exec(ctx)
+				require.NoError(t, updateErr)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, assignmentSite.ID.String(), inventory))
+				persisted, getErr := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.Equal(t, phase.want, persisted.Status)
+				assert.Equal(t, phase.assigned, persisted.IsAssigned)
+				_, readyCount, getErr := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: []string{machine.ID}, Statuses: []string{cdbm.MachineStatusReady}}, cdbp.PageInput{}, nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, !phase.assigned, readyCount == 1, "Ready filters use the persisted effective status")
+				assert.Equal(t, phase.coreState, persisted.Metadata.GetNormalizedState(), "Core lifecycle is retained")
+				details, historyCount, getErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(1)})
+				require.NoError(t, getErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, phase.want, details[0].Status)
+				assert.Equal(t, phase.historyCount, historyCount, "Core observations must not flip-flop the InUse history message")
+				if phase.assigned {
+					assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
+				}
+			})
+		}
+	})
 }
 
 func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
@@ -1593,7 +1642,7 @@ func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
 			{
 				Machine: &corev1.Machine{
 					Id:    &corev1.MachineId{Id: machineID},
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{
 						Interfaces: []*corev1.MachineInterface{
 							{
@@ -1698,7 +1747,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			args: args{
 				controllerMachine: &corev1.Machine{
 					Id:     &corev1.MachineId{Id: uuid.NewString()},
-					State:  controllerMachineStatePrefixReady,
+					State:  cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{},
 				},
 			},
@@ -1710,7 +1759,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			args: args{
 				controllerMachine: &corev1.Machine{
 					Id:     &corev1.MachineId{Id: uuid.NewString()},
-					State:  controllerMachineStatePrefixReady,
+					State:  cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{},
 					Config: &corev1.MachineConfig{
 						MaintenanceStartTime: &timestamppb.Timestamp{
@@ -1737,7 +1786,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test get NICo machine status - with health probe alerts prevent classification",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{Health: &corev1.HealthReport{
 						Alerts: []*corev1.HealthProbeAlert{
 							{
@@ -1756,7 +1805,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test get NICo machine status - with automatic DPU firmware update alert",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{Health: &corev1.HealthReport{
 						Alerts: []*corev1.HealthProbeAlert{
 							{
@@ -1802,7 +1851,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test get NICo machine status - non-DPU firmware prevent alert remains error",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{Health: &corev1.HealthReport{
 						Alerts: []*corev1.HealthProbeAlert{
 							{
@@ -1836,7 +1885,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test tenant not usable - Ready with Prevent alerts",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{Health: &corev1.HealthReport{
 						Alerts: []*corev1.HealthProbeAlert{
 							{
@@ -1898,7 +1947,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test tenant usable - Ready with Maintenance Degraded, no assignment",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{Health: &corev1.HealthReport{
 						Alerts: []*corev1.HealthProbeAlert{
 							{
@@ -1916,7 +1965,7 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			name: "test tenant not usable - maintenance without assignment",
 			args: args{
 				controllerMachine: &corev1.Machine{
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Config: &corev1.MachineConfig{
 						MaintenanceStartTime: &timestamppb.Timestamp{
 							Seconds: time.Now().Add(-time.Hour).Unix(),

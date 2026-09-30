@@ -25,8 +25,9 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use rpc::forge;
 use rpc::forge_api_client::ForgeApiClient;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl;
@@ -39,20 +40,25 @@ use crate::shutdown_handle::ShutdownHandle;
 pub(super) async fn spawn(
     connection_details: ConnectionDetails,
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
+    cancel_token: CancellationToken,
     metrics: Arc<BmcPoolMetrics>,
     config: Arc<Config>,
 ) -> Result<Handle, SpawnError> {
     let handle = match connection_details {
-        ConnectionDetails::Ssh(ssh_connection_details) => {
-            ssh::spawn(ssh_connection_details, broadcast_to_frontend_tx, metrics)
-                .await?
-                .into()
-        }
+        ConnectionDetails::Ssh(ssh_connection_details) => ssh::spawn(
+            ssh_connection_details,
+            broadcast_to_frontend_tx,
+            metrics,
+            cancel_token,
+        )
+        .await?
+        .into(),
         ConnectionDetails::Ipmi(ipmi_connection_details) => ipmi::spawn(
             ipmi_connection_details,
             broadcast_to_frontend_tx,
             config,
             metrics,
+            cancel_token,
         )
         .await?
         .into(),
@@ -277,7 +283,7 @@ pub(super) enum LookupError {
 /// A handle to a BMC connection, which will shut down when dropped.
 pub(super) struct Handle {
     pub(super) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
-    pub(super) shutdown_tx: oneshot::Sender<()>,
+    pub(super) drop_guard: DropGuard,
     pub(super) join_handle: JoinHandle<Result<(), SpawnError>>,
 }
 
@@ -285,7 +291,7 @@ impl From<ipmi::Handle> for Handle {
     fn from(handle: ipmi::Handle) -> Self {
         Self {
             to_bmc_msg_tx: handle.to_bmc_msg_tx,
-            shutdown_tx: handle.shutdown_tx,
+            drop_guard: handle.drop_guard,
             join_handle: tokio::spawn(async move {
                 handle
                     .join_handle
@@ -301,7 +307,7 @@ impl From<ssh::Handle> for Handle {
     fn from(handle: ssh::Handle) -> Self {
         Self {
             to_bmc_msg_tx: handle.to_bmc_msg_tx,
-            shutdown_tx: handle.shutdown_tx,
+            drop_guard: handle.drop_guard,
             join_handle: tokio::spawn(async move {
                 handle
                     .join_handle
@@ -314,8 +320,8 @@ impl From<ssh::Handle> for Handle {
 }
 
 impl ShutdownHandle<Result<(), SpawnError>> for Handle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<Result<(), SpawnError>>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<Result<(), SpawnError>>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 

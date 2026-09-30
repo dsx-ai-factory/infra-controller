@@ -97,6 +97,9 @@
     - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
     - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
     - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
+    - [HealthProbeAlert](#v1-HealthProbeAlert)
+    - [HealthProbeSuccess](#v1-HealthProbeSuccess)
+    - [HealthReport](#v1-HealthReport)
     - [Identifier](#v1-Identifier)
     - [IngestRackRequest](#v1-IngestRackRequest)
     - [ListEventRulesRequest](#v1-ListEventRulesRequest)
@@ -547,6 +550,7 @@ An empty list means no conflicts were detected.
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
 | leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 
 
 
@@ -1446,7 +1450,7 @@ GetComponents - retrieves components from local database
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Component UUID ascending breaks equal-field ties. |
 
 
 
@@ -1526,7 +1530,7 @@ GetComponents - retrieves components from local database
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by name ascending, then UUID ascending. |
 
 
 
@@ -1560,7 +1564,7 @@ GetComponents - retrieves components from local database
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for rack queries |
 | with_components | [bool](#bool) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Rack UUID ascending breaks equal-field ties. |
 
 
 
@@ -1783,6 +1787,61 @@ GetComponents - retrieves components from local database
 
 
 
+<a name="v1-HealthProbeAlert"></a>
+
+### HealthProbeAlert
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+| in_alert_since | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| message | [string](#string) |  |  |
+| tenant_message | [string](#string) | optional |  |
+| classifications | [string](#string) | repeated |  |
+
+
+
+
+
+
+<a name="v1-HealthProbeSuccess"></a>
+
+### HealthProbeSuccess
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| target | [string](#string) | optional |  |
+
+
+
+
+
+
+<a name="v1-HealthReport"></a>
+
+### HealthReport
+HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| source | [string](#string) |  |  |
+| triggered_by | [string](#string) | optional |  |
+| observed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
+| successes | [HealthProbeSuccess](#v1-HealthProbeSuccess) | repeated |  |
+| alerts | [HealthProbeAlert](#v1-HealthProbeAlert) | repeated |  |
+
+
+
+
+
+
 <a name="v1-Identifier"></a>
 
 ### Identifier
@@ -1827,7 +1886,7 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | event_type | [string](#string) | optional | Optional. When set, must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. Omit to return every supported event type. |
 | enabled | [bool](#bool) | optional |  |
-| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. |
+| pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. Results are ordered by UUID ascending. |
 
 
 
@@ -1853,7 +1912,7 @@ GetComponents - retrieves components from local database
 <a name="v1-ListOperationRulesRequest"></a>
 
 ### ListOperationRulesRequest
-
+Results are ordered by creation time descending, then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -1890,6 +1949,7 @@ GetComponents - retrieves components from local database
 ListOperationRunTargetsRequest lists materialized rack execution targets for
 one operation run. status UNKNOWN means no target-status filter is applied.
 phase_scope UNKNOWN defaults to CURRENT_PHASE.
+Results are ordered by phase index, then the unique sequence index.
 
 
 | Field | Type | Label | Description |
@@ -1923,7 +1983,8 @@ phase_scope UNKNOWN defaults to CURRENT_PHASE.
 <a name="v1-ListOperationRunsRequest"></a>
 
 ### ListOperationRunsRequest
-ListOperationRunsRequest lists operation runs, newest first by default.
+ListOperationRunsRequest lists operation runs by creation time descending,
+then UUID descending.
 
 
 | Field | Type | Label | Description |
@@ -2016,7 +2077,7 @@ ListTaskScheduleScopesRequest returns all scope entries for a given schedule.
 
 ### ListTaskSchedulesRequest
 ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-Results are ordered by creation time ascending.
+Results are ordered by creation time ascending, then UUID ascending.
 
 
 | Field | Type | Label | Description |
@@ -2060,7 +2121,7 @@ every Task is returned subject to pagination.
 | ----- | ---- | ----- | ----------- |
 | rack_id | [UUID](#v1-UUID) | optional | Restrict by rack identifier. |
 | active_only | [bool](#bool) |  | Restrict to non-terminal Tasks (Waiting, Pending, Running). |
-| pagination | [Pagination](#v1-Pagination) | optional |  |
+| pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by creation time descending, then UUID descending. |
 | component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component identifier, regardless of component type. A rack_id plus component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
 | with_report | [bool](#bool) |  | When true, populate Task.report on each returned task. Defaults to false because report bodies can be several KB and would otherwise be persisted in every Temporal activity / workflow result payload along the caller&#39;s path even when the caller never reads them. GetTasksByIDs and CancelTask always return the report and do not accept this flag. |
 
@@ -3005,6 +3066,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
 | external_id | [string](#string) |  |  |
 | operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
+| health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 
 
 
@@ -3522,7 +3584,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) | optional | Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs. |
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| order_by | [OrderBy](#v1-OrderBy) | optional |  |
+| order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending for targeted components. Stable component and drift identities break equal-field ties before drift pagination. |
 
 
 

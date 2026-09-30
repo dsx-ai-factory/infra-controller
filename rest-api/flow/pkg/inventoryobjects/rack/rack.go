@@ -37,6 +37,9 @@ type Rack struct {
 	// OperationStatus is derived from supported active components in the rack.
 	// It is an operability summary, not the Core rack controller lifecycle state.
 	OperationStatus types.Phase `json:"operation_status"`
+	// Health is the most recent Core aggregate health snapshot mirrored by the
+	// inventory sync loop.
+	Health *types.HealthReport `json:"health,omitempty"`
 
 	serialToCompIndex map[deviceinfo.SerialInfo]int
 	sealed            bool

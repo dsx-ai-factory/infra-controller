@@ -42,9 +42,11 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      To use a NICo Site, the Provider or Service Account holder must create IP Blocks for each network overlay defined in the Site configuration TOML file.
+      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
 
-      To create an IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock).
+      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. While a new prefix overlaps a remaining Site IP Block, NICo makes no IP Block changes for the Site. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+
+      To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
       > **Note:** From this point onwards, a brief outline is provided for the typical API call flows for various use cases.
 
@@ -52,6 +54,7 @@ tags:
 
       - Retrieve available Sites using the [Retrieve All Sites endpoint](#tag/Site/operation/get-all-site) and choose a Site to create resources in. For _Disconnected_ NICo installations where NICo
       REST is deployed alongside NICo Core, typically there will be a single Site available.
+      - Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](#tag/IP-Block/operation/get-all-ipblock).
       - For each Site IP Block, create a Network Allocation for the Tenant entity with the full prefix length using the [Create Allocation endpoint](#tag/Allocation/operation/create-allocation).
       This will create a Tenant IP Block for each Site IP Block.
         - Creating an Allocation will create the Tenant in NICo Core.
@@ -74,6 +77,7 @@ tags:
       [Create Instance Type/Machine Association endpoint](#tag/Instance-Type/operation/create-instance-type-machine-association)
       - Create a Compute Allocation for Tenant using the [Create Compute Allocation endpoint](#tag/Allocation/operation/create-allocation) referencing the Instance Type.
         - Creating any type of Allocation for a Tenant will create the Tenant in NICo Core.
+      - Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](#tag/IP-Block/operation/get-all-ipblock).
       - Create a Network Allocation for Tenant using the [Create Allocation endpoint](#tag/Allocation/operation/create-allocation) referencing a Site IP Block.
         - Creating a Network Allocation will create a Tenant IP Block.
 
@@ -236,25 +240,13 @@ tags:
   - name: Machine
     description: |-
       Machine is a physical server that contains CPUs, GPUs, memory, storage, and networking hardware. Machines are the physical building blocks of a Site.
+
+      Machine-scoped operations manage attached DPUs, health reports, validation runs and results, BMC and chassis resets, power, decommissioning, and status history.
   - name: DPU Machine
     description: |-
       A DPU (Data Processing Unit) is a programmable network device installed in a Machine that runs its own operating system, so NICo tracks each DPU as a Machine of its own alongside the host Machine it is attached to. NICo provisions the DPU and uses it to enforce network isolation and Machine trust for the host, including when that host moves between Tenants.
 
-      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, see the DPU Reprovision tag.
-  - name: Machine Validation
-    description: |-
-      Machine Validation is the mechanism through which a series of validation tests are executed against a Machine verify its integrity. The tests are run for each Machine on ingestion, they can also be run on-demand.
-  - name: BMC Reset
-    x-displayName: BMC Reset
-    description: |-
-      BMC Reset allows resetting a Machine's BMC
-  - name: DPU Reprovision
-    x-displayName: DPU Reprovision
-    description: |-
-      DPU Reprovision allows re-provisioning Machine's DPUs
-  - name: Machine Capability
-    description: |-
-      Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
+      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, use the DPU reprovision operation under Machine.
   - name: Rack
     description: |-
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
@@ -285,7 +277,7 @@ tags:
     description: |-
       IP Block is a contiguous block of IP addresses defined by a prefix and prefix length.
 
-      It can be used by the Provider to describe the overlay network of a particular Site. Providers can also use Allocations to delegate portions of these IP Blocks to Tenants.
+      It can be used by the Provider to describe the overlay network of a particular Site. NICo creates an IP Block for each fabric prefix the Site reports. Providers can also use Allocations to delegate portions of these IP Blocks to Tenants.
   - name: DPU Extension Service
     x-displayName: DPU Extension Service
     description: |-
@@ -2574,7 +2566,7 @@ paths:
 
         Tenant IP Blocks are created via Allocation.
 
-        A conflicting name or address range returns 409. `DatacenterOnly` creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another `DatacenterOnly` create or Site Config import. Retry the request.
+        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2722,6 +2714,8 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
+        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
@@ -2765,7 +2759,9 @@ paths:
       description: |-
         Update an existing IP Block
 
-        Org must have an Infrastructure Provider. Specified IP Block must have been created by the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+        Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+
+        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
       requestBody:
@@ -3934,6 +3930,8 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
         The VPC must be Ready and use FNN, and its Site must be Registered. `ipBlockId` must identify a Ready tenant IP Block at the VPC's Site. The selected IP Block determines whether the VPC Prefix uses IPv4 or IPv6.
+
+        Specify exactly one allocation selector. `prefixLength` lets NICo IPAM choose an available CIDR. `prefix` requests an exact, network-aligned CIDR contained by the selected IP Block. Both modes share the same allocation state; an unavailable explicit CIDR is rejected rather than replaced. A prefix equal to its IP Block reserves the whole block.
       requestBody:
         content:
           application/json:
@@ -4492,6 +4490,70 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Expected Machine
+  '/v2/org/{org}/nico/expected-machine/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Machines
+      operationId: replace-all-expected-machine
+      description: |-
+        Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
+
+        Org must have an Infrastructure Provider entity and the caller must have Provider Admin access, or the caller must be a Tenant Admin with effective `TargetedInstanceCreation` access to the Site.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedMachineList'
+      responses:
+        '200':
+          description: Expected Machines replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedMachine'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
+    delete:
+      summary: Delete all Expected Machines
+      operationId: delete-all-expected-machine
+      description: |-
+        Delete the complete Expected Machine set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Machines if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Machines should be deleted
+      responses:
+        '204':
+          description: All Expected Machines deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
     parameters:
       - schema:
@@ -5014,6 +5076,72 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Power Shelf
+  '/v2/org/{org}/nico/expected-power-shelf/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Power Shelves
+      operationId: replace-all-expected-power-shelf
+      description: |-
+        Replace the complete Expected Power Shelf set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedPowerShelves` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and shelf serial numbers must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedPowerShelfList'
+      responses:
+        '200':
+          description: Expected Power Shelves replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedPowerShelf'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Power Shelf
+    delete:
+      summary: Delete all Expected Power Shelves
+      operationId: delete-all-expected-power-shelf
+      description: |-
+        Delete the complete Expected Power Shelf set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Power Shelves should be deleted
+      responses:
+        '204':
+          description: All Expected Power Shelves deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -6027,6 +6155,72 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Switch
+  '/v2/org/{org}/nico/expected-switch/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Switches
+      operationId: replace-all-expected-switch
+      description: |-
+        Replace the complete Expected Switch set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedSwitches` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses, switch serial numbers, and NVOS MAC addresses must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Switches if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedSwitchList'
+      responses:
+        '200':
+          description: Expected Switches replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedSwitch'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Switch
+    delete:
+      summary: Delete all Expected Switches
+      operationId: delete-all-expected-switch
+      description: |-
+        Delete the complete Expected Switch set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Switches if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Switches should be deleted
+      responses:
+        '204':
+          description: All Expected Switches deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -10885,11 +11079,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11017,11 +11211,11 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11138,8 +11332,8 @@ paths:
                         message: Machine has one or more health alerts that prevent allocation
                         created: '2019-08-28T14:15:22Z'
                         updated: '2019-08-28T14:15:22Z'
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11245,11 +11439,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11342,7 +11536,7 @@ paths:
     patch:
       summary: Reset Machine BMC
       tags:
-        - BMC Reset
+        - Machine
       requestBody:
         required: true
         content:
@@ -11369,6 +11563,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reset-machine-bmc
+      x-fern-sdk-group-name:
+        - machine
+        - bmc
       description: |-
         Reset the BMC of a specific Machine. When an Instance is attached to the
         Machine, `acknowledgeAttachedInstance` must be `true`.
@@ -11457,7 +11654,7 @@ paths:
     patch:
       summary: Reprovision Machine DPUs
       tags:
-        - DPU Reprovision
+        - Machine
       requestBody:
         required: true
         content:
@@ -11484,6 +11681,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reprovision-machine-dpu
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
       description: |-
         Trigger DPU reprovisioning for a Machine. Before calling this operation,
         create a Machine health report containing an alert whose ID is
@@ -11528,6 +11728,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Get all health reports for a specific Machine.
 
@@ -11560,6 +11763,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: create-or-update-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Add or update health report override for a specific Machine.
         
@@ -11602,6 +11808,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: delete-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Remove a health report override for a specific Machine.
 
@@ -11746,7 +11955,7 @@ paths:
     get:
       summary: Retrieve Machine validation runs
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation runs
@@ -11765,6 +11974,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-runs
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation runs for a specific Machine.
 
@@ -11772,7 +11984,7 @@ paths:
     post:
       summary: Create an on-demand Machine validation run
       tags:
-        - Machine Validation
+        - Machine
       requestBody:
         content:
           application/json:
@@ -11794,6 +12006,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: start-machine-validation
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Create an on-demand Machine validation run. The Machine must be in a state accepted by NICo Core.
 
@@ -11815,7 +12030,7 @@ paths:
     get:
       summary: Retrieve Machine validation results
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation results
@@ -11834,6 +12049,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-results
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation results for a specific Machine.
 
@@ -12120,6 +12338,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-dpu-machines
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
   '/v2/org/{org}/nico/machine/gpu/stats':
     parameters:
       - schema:
@@ -12539,6 +12760,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
                       location:
                         region: us-east-1
                         datacenter: DC-01
@@ -12561,6 +12783,7 @@ paths:
                           powerState: 'on'
                           leakStatus: Leaking
                           leakHandlingStatus: ShuttingDown
+                          health: null
           headers:
             X-Pagination:
               schema:
@@ -12629,6 +12852,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
                     location:
                       region: us-east-1
                       datacenter: DC-01
@@ -12651,6 +12875,7 @@ paths:
                         powerState: 'on'
                         leakStatus: NoLeak
                         leakHandlingStatus: None
+                        health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12734,6 +12959,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -12953,6 +13179,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -13435,6 +13662,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
           headers:
             X-Pagination:
               schema:
@@ -15036,6 +15264,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -21690,7 +21919,11 @@ components:
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
           prefixLength: 20
-      description: Request data for creating VPC Prefix
+        - name: application-network
+          vpcId: 0b1c53a0-a27e-4714-98d7-0cd3bc579db2
+          ipBlockId: 20d7dd4f-ae43-4245-a9d9-d093296009c4
+          prefix: 10.217.98.0/25
+      description: Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
       properties:
         name:
           type: string
@@ -21705,22 +21938,80 @@ components:
           type: string
           format: uuid
           description: ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
+        prefix:
+          type: [string, 'null']
+          minLength: 1
+          description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise. The CIDR must be contained by the selected IP Block, match its address family, and not overlap an existing reservation. An IPv4-mapped IPv6 CIDR is not accepted. Mutually exclusive with `prefixLength`.
         prefixLength:
-          type: integer
+          type: [integer, 'null']
           minimum: 8
           maximum: 126
-          description: Prefix length for the VPC Prefix. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length.
+          description: Prefix length for automatic allocation. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length. Mutually exclusive with `prefix`.
+      oneOf:
+        - title: VpcPrefixAutomaticCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefixLength
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefixLength:
+              type: integer
+              minimum: 8
+              maximum: 126
+          not:
+            required:
+              - prefix
+            properties:
+              prefix:
+                type: string
+        - title: VpcPrefixExplicitCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefix
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefix:
+              type: string
+              minLength: 1
+              description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise.
+          not:
+            required:
+              - prefixLength
+            properties:
+              prefixLength:
+                type: integer
       required:
         - name
         - vpcId
         - ipBlockId
-        - prefixLength
     VpcPrefixUpdateRequest:
       title: VpcPrefixUpdateRequest
       type: object
       examples:
         - name: east-vpc-traffic-net
-      description: Request data for updating a VPC Prefix
+      description: Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
       properties:
         name:
           type: string
@@ -24720,10 +25011,14 @@ components:
           vpcId: bdd3d1af-b4a8-4675-a59c-56548716ef45
           ipFamilies:
             - IPv4
+            - IPv6
           isPhysical: true
           macAddress: 2F-FC-34-AE-9C-2D
           ipAddresses:
             - 200.32.11.196
+          ipPrefixes:
+            - 200.32.11.0/24
+            - 2001:db8::/64
           status: Ready
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
@@ -24815,6 +25110,14 @@ components:
           description: A list of IPv4 or IPv6 addresses
           items:
             type: string
+        ipPrefixes:
+          type: array
+          readOnly: true
+          description: Reported IPv4 or IPv6 prefixes in CIDR notation, ordered IPv4 before IPv6. This list is independent of `ipAddresses`; SLAAC can report an IPv6 prefix without a fixed host address. Match prefixes and addresses by address family, not list position. Empty when no prefixes are available.
+          items:
+            type: string
+          examples:
+            - ['192.0.2.0/24', '2001:db8::/64']
         requestedIpAddress:
           type:
             - string
@@ -25323,6 +25626,7 @@ components:
       type: object
       description: Rack represents a physical rack in the datacenter
       required:
+        - health
         - nvLinkDomainIds
         - operationStatus
         - taskStats
@@ -25339,6 +25643,11 @@ components:
           taskStats:
             pendingTaskCount: 0
             activeTaskCount: 0
+          health:
+            source: rack-aggregate-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
           location:
             region: us-east-1
             datacenter: DC-01
@@ -25361,6 +25670,11 @@ components:
               powerState: 'on'
               leakStatus: Leaking
               leakHandlingStatus: ShuttingDown
+              health:
+                source: aggregate-host-health
+                observedAt: '2026-09-28T12:00:00Z'
+                successes: []
+                alerts: []
       properties:
         id:
           type: string
@@ -25407,6 +25721,11 @@ components:
             $ref: '#/components/schemas/RackComponent'
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     RackLocation:
       title: RackLocation
       type: object
@@ -25509,6 +25828,8 @@ components:
       title: RackComponent
       type: object
       description: A component within a Rack (e.g. compute node, switch, PDU)
+      required:
+        - health
       properties:
         id:
           type: string
@@ -25576,6 +25897,11 @@ components:
           description: Whether the component is considered leaking coolant
         leakHandlingStatus:
           $ref: '#/components/schemas/LeakHandlingStatus'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     BMCInfo:
       title: BMCInfo
       type: object
@@ -25595,6 +25921,7 @@ components:
       type: object
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
+        - health
         - nvLinkDomainId
         - taskStats
       examples:
@@ -25622,6 +25949,11 @@ components:
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
+          health:
+            source: aggregate-host-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
       properties:
         id:
           type: string
@@ -25692,6 +26024,11 @@ components:
           description: ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     TrayPosition:
       title: TrayPosition
       type: object
@@ -27618,11 +27955,11 @@ components:
           labels:
             RackIdentifier: GVX11F01C02
             ServerName: SITE1-C03-Server-02
-          status: Ready
-          isUsableByTenant: true
+          status: Error
+          isUsableByTenant: false
           statusHistory:
-            - status: Ready
-              message: Machine is online and ready
+            - status: Error
+              message: Machine has one or more health probe alerts that prevents allocation
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
           created: '2019-08-24T14:15:22Z'
@@ -27652,7 +27989,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the Instance if this Machine is assigned to one
+          description: ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
         tenantId:
           type:
             - string
@@ -27728,7 +28065,6 @@ components:
           description: 'User-specified Machine labels'
         status:
           $ref: '#/components/schemas/MachineStatus'
-          description: 'Status represents the status of the machine'
           readOnly: true
         isUsableByTenant:
           type: boolean
@@ -27754,7 +28090,14 @@ components:
     MachineStatus:
       title: MachineStatus
       type: string
-      description: Status values for Machine objects
+      description: >-
+        Machine status combines the observed Core lifecycle with REST Instance assignment.
+        A Ready Machine becomes InUse when REST assigns it, and remains InUse if Core reports
+        Ready while the REST assignment still exists. Error, Maintenance, Initializing, and
+        other non-Ready states retain precedence. When Instance deletion clears the assignment,
+        InUse returns to Ready only if the retained Core snapshot reports Ready; otherwise
+        fresh Machine inventory establishes the next status. Ready is not a reservation and
+        does not guarantee that a subsequent Instance creation will succeed.
       enum:
         - Initializing
         - Ready
@@ -28281,6 +28624,106 @@ components:
             - string
             - 'null'
           description: 'PCI BusId of the Machine''s GPU'
+    AggregateHealth:
+      title: AggregateHealth
+      type: object
+      description: Describes an aggregate hardware health report and its probe results and alerts
+      required:
+        - source
+        - observedAt
+        - successes
+        - alerts
+      examples:
+        - source: aggregate-host-health
+          observedAt: null
+          successes:
+            - id: FanSpeed
+              target: System Board Fan1A
+            - id: PowerSupply
+              target: PS1 Status
+          alerts:
+            - id: FailedValidationTest
+              target: DcgmFullShort
+              inAlertSince: null
+              message: Failed validation test
+              tenantMessage: null
+              classifications:
+                - PreventAllocations
+      properties:
+        source:
+          type: string
+          description: Describes how the health report was generated
+        observedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time when health report was generated
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeSuccess'
+          description: Results from successful health probes for the resource
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeAlert'
+          description: Results from failed health probes for the resource
+    HealthProbeSuccess:
+      title: HealthProbeSuccess
+      type: object
+      description: Describes a successful health probe result
+      required:
+        - id
+        - target
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+    HealthProbeAlert:
+      title: HealthProbeAlert
+      type: object
+      description: Describes a failed health probe result
+      required:
+        - id
+        - target
+        - inAlertSince
+        - message
+        - tenantMessage
+        - classifications
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+        inAlertSince:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time since the alert has been in effect
+        message:
+          type: string
+          description: Details of the failed health probe result
+        tenantMessage:
+          type:
+            - string
+            - 'null'
+          description: 'Information provided by Tenant, if any'
+        classifications:
+          type: array
+          items:
+            type: string
+          description: 'Classifications for this alert, category or impact'
     MachineHealth:
       title: MachineHealth
       type: object
@@ -28849,6 +29292,34 @@ components:
         - siteId
         - bmcMacAddress
         - chassisSerialNumber
+    ExpectedMachineList:
+      title: ExpectedMachineList
+      type: object
+      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedMachines:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:5E'
+              chassisSerialNumber: CHASSIS-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Machines should be replaced
+        expectedMachines:
+          type: array
+          description: Full desired Expected Machine set; BMC MAC addresses and chassis serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedMachineCreateRequest'
+      required:
+        - siteId
+        - expectedMachines
     ExpectedMachineUpdateRequest:
       title: ExpectedMachineUpdateRequest
       type: object
@@ -29187,6 +29658,34 @@ components:
         - siteId
         - bmcMacAddress
         - shelfSerialNumber
+    ExpectedPowerShelfList:
+      title: ExpectedPowerShelfList
+      type: object
+      description: Complete replacement set of Expected Power Shelves for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedPowerShelves:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:70'
+              shelfSerialNumber: SHELF-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Power Shelves should be replaced
+        expectedPowerShelves:
+          type: array
+          description: Full desired Expected Power Shelf set; BMC MAC addresses and shelf serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedPowerShelfCreateRequest'
+      required:
+        - siteId
+        - expectedPowerShelves
     ExpectedPowerShelfUpdateRequest:
       title: ExpectedPowerShelfUpdateRequest
       type: object
@@ -29366,7 +29865,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId and derives the profile as UPPERCASE_TOPOLOGY_ComputeManufacturer_SwitchManufacturer_PowerShelfManufacturer. Manufacturer case is preserved; absent power shelves use NO_POWERSHELF. Compute and switch members are required, each type must have one manufacturer, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -30096,6 +30595,36 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+    ExpectedSwitchList:
+      title: ExpectedSwitchList
+      type: object
+      description: Complete replacement set of Expected Switches for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedSwitches:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:60'
+              switchSerialNumber: SWITCH-12345
+              nvosMacAddresses:
+                - '00:1A:2B:3C:4D:61'
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Switches should be replaced
+        expectedSwitches:
+          type: array
+          description: Full desired Expected Switch set; BMC MAC addresses, serial numbers, and NVOS MAC addresses must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedSwitchCreateRequest'
+      required:
+        - siteId
+        - expectedSwitches
     ExpectedSwitchUpdateRequest:
       title: ExpectedSwitchUpdateRequest
       type: object
@@ -31096,7 +31625,7 @@ components:
     NetworkSecurityGroupRule:
       title: NetworkSecurityGroupRule
       type: object
-      description: Aggregation of Network Security Group rules
+      description: A Network Security Group rule matching either IPv4 or IPv6 traffic. Each rule must use the same IP version for its source and destination prefixes. A group can contain both IPv4 and IPv6 rules.
       properties:
         name:
           type:
@@ -31124,7 +31653,7 @@ components:
           example: 80-81
         protocol:
           type: string
-          description: 'Network protocol matched by the rule'
+          description: 'Network protocol matched by the rule. ICMP requires IPv4 prefixes; ICMP6 requires IPv6 prefixes. TCP, UDP, and ANY support either IP version.'
           enum:
             - TCP
             - UDP
@@ -31146,11 +31675,11 @@ components:
           description: 'Rule priority used to order evaluation'
         sourcePrefix:
           type: string
-          description: 'Source CIDR prefix matched by the rule'
+          description: 'Source IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as destinationPrefix.'
           example: 10.5.44.0/24
         destinationPrefix:
           type: string
-          description: 'Destination CIDR prefix matched by the rule'
+          description: 'Destination IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as sourcePrefix.'
           example: 10.5.44.0/24
       required:
         - direction

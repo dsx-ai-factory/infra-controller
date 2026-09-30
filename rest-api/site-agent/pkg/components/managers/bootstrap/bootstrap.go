@@ -124,7 +124,7 @@ func initK8sClient(ns string) coreV1Types.SecretInterface {
 			)
 		}
 		if kubeconfig == "" {
-			err = fmt.Errorf("Bootstrap: could not find kubeconfig")
+			err = fmt.Errorf("bootstrap: could not find kubeconfig")
 			panic(err.Error())
 		}
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -230,7 +230,8 @@ func (bs *BoostrapAPI) watchSecretFiles(files map[string]bool, path *string) err
 				continue
 			}
 			log.Info().Msgf("Bootstrap: File updated %s", e.String())
-			bs.DownloadAndStoreCreds(nil)
+			// DownloadAndStoreCreds logs its own failures, and the next file event tries again.
+			_ = bs.DownloadAndStoreCreds(nil)
 			log.Info().Msgf("Bootstrap: back to Watching secret %s ", e.String())
 		}
 	}
@@ -246,7 +247,8 @@ func (bs *BoostrapAPI) Start() {
 	}
 
 	log.Info().Msgf("Bootstrap: trigger workflow")
-	bs.DownloadAndStoreCreds(nil)
+	// DownloadAndStoreCreds logs its own failures, and the Site Agent keeps its existing certificates.
+	_ = bs.DownloadAndStoreCreds(nil)
 	go bs.watchBootstrapFile()
 }
 
@@ -346,7 +348,10 @@ func saveToFile(credsResponse *bootstraptypes.SiteCredsResponse) error {
 	// Note: without this there is a 10-15% flakiness on tests...
 	otpFile, err := os.OpenFile(pathOTP, os.O_RDWR, 0644)
 	if err == nil {
-		otpFile.Sync()
+		err = otpFile.Sync()
+		if err != nil {
+			log.Warn().Err(err).Msg("Bootstrap: failed to sync OTP file to disk")
+		}
 		otpFile.Close()
 	}
 
@@ -372,7 +377,7 @@ func (bs *BoostrapAPI) storeCredentials(ctx context.Context, credsResponse *boot
 	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap-store")
 	defer span.End()
 	if credsResponse == nil {
-		return fmt.Errorf("Bootstrap: credsResponse is nil")
+		return fmt.Errorf("bootstrap: credsResponse is nil")
 	}
 	if ManagerAccess.Conf.EB.RunningIn != conftypes.RunningInK8s {
 		err := saveToFile(credsResponse)
@@ -383,7 +388,7 @@ func (bs *BoostrapAPI) storeCredentials(ctx context.Context, credsResponse *boot
 	}
 	secretIf := ManagerAccess.Data.EB.Managers.Bootstrap.Secret
 	if secretIf == nil {
-		return fmt.Errorf("Bootstrap: secretIf is nil")
+		return fmt.Errorf("bootstrap: secretIf is nil")
 	}
 	// Update a secret via Update
 	secret, err := secretIf.Get(ctx, ManagerAccess.Conf.EB.TemporalSecret, metav1.GetOptions{})

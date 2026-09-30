@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,12 @@ var defaultRackPagination = dbquery.Pagination{
 	Offset: 0,
 	Limit:  100,
 	Total:  0,
+}
+
+// GetAllRacks returns every non-deleted rack without relations.
+func GetAllRacks(ctx context.Context, idb bun.IDB) (ret []Rack, err error) {
+	err = idb.NewSelect().Model(&ret).Scan(ctx)
+	return ret, err
 }
 
 var defaultRackOrderBy = []dbquery.OrderBy{
@@ -46,14 +53,16 @@ type Rack struct {
 	// (ExpectedRack.rack_id, e.g. "a12") populated by the expected-inventory
 	// mirror. NULL on racks that the mirror has never adopted (e.g. legacy
 	// ingestion-gRPC rows on first run).
-	ExternalID *string     `bun:"external_id"`
-	Status     RackStatus  `bun:"status,type:varchar(16),default:'new'"`
-	CreatedAt  time.Time   `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt  time.Time   `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
-	IngestedAt *time.Time  `bun:"ingested_at"`
-	DeletedAt  *time.Time  `bun:"deleted_at,soft_delete"`
-	Components []Component `bun:"rel:has-many,join:id=rack_id"`
-	NVLDomain  *NVLDomain  `bun:"rel:belongs-to,join:nvldomain_id=id"`
+	ExternalID    *string             `bun:"external_id"`
+	RackProfileID *string             `bun:"rack_profile_id"`
+	Status        RackStatus          `bun:"status,type:varchar(16),default:'new'"`
+	Health        *types.HealthReport `bun:"health,type:jsonb,nullzero"`
+	CreatedAt     time.Time           `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt     time.Time           `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	IngestedAt    *time.Time          `bun:"ingested_at"`
+	DeletedAt     *time.Time          `bun:"deleted_at,soft_delete"`
+	Components    []Component         `bun:"rel:has-many,join:id=rack_id"`
+	NVLDomain     *NVLDomain          `bun:"rel:belongs-to,join:nvldomain_id=id"`
 }
 
 type RackStatus string
@@ -145,6 +154,19 @@ func (rd *Rack) ForceDelete(ctx context.Context, idb bun.IDB) error {
 
 func (rd *Rack) Patch(ctx context.Context, idb bun.IDB) error {
 	_, err := idb.NewUpdate().Model(rd).Where("id = ?", rd.ID).Exec(ctx)
+	return err
+}
+
+// SetHealthByExternalID writes the latest aggregate health snapshot for the
+// rack identified by Core's external ID.
+func (rd *Rack) SetHealthByExternalID(ctx context.Context, idb bun.IDB) error {
+	if rd.ExternalID == nil || *rd.ExternalID == "" {
+		return errors.New("rack external ID not set")
+	}
+	_, err := idb.NewUpdate().Model(rd).
+		Set("health = ?", rd.Health).
+		Where("external_id = ?", *rd.ExternalID).
+		Exec(ctx)
 	return err
 }
 

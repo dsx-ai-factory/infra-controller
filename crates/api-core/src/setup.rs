@@ -639,6 +639,14 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -670,6 +678,7 @@ pub(crate) async fn start_runtime(
         component_manager,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
     });
 
     if carbide_config.listen_only {
@@ -1952,9 +1961,10 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
-                nmx_cluster_switch_mtls_services: carbide_config
-                    .rack_state_controller
-                    .effective_nmx_cluster_switch_mtls_services_as_i32(),
+                switch_mtls_services: carbide_config
+                    .switch_state_controller
+                    .switch_mtls_services
+                    .clone(),
                 firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }

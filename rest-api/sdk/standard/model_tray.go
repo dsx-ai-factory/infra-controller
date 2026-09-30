@@ -56,6 +56,8 @@ type Tray struct {
 	// ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
 	NvLinkDomainId NullableString `json:"nvLinkDomainId"`
 	TaskStats      TaskStats      `json:"taskStats"`
+	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+	Health NullableAggregateHealth `json:"health"`
 }
 
 type _Tray Tray
@@ -64,10 +66,11 @@ type _Tray Tray
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTray(nvLinkDomainId NullableString, taskStats TaskStats) *Tray {
+func NewTray(nvLinkDomainId NullableString, taskStats TaskStats, health NullableAggregateHealth) *Tray {
 	this := Tray{}
 	this.NvLinkDomainId = nvLinkDomainId
 	this.TaskStats = taskStats
+	this.Health = health
 	return &this
 }
 
@@ -609,6 +612,32 @@ func (o *Tray) SetTaskStats(v TaskStats) {
 	o.TaskStats = v
 }
 
+// GetHealth returns the Health field value
+// If the value is explicit nil, the zero value for AggregateHealth will be returned
+func (o *Tray) GetHealth() AggregateHealth {
+	if o == nil || o.Health.Get() == nil {
+		var ret AggregateHealth
+		return ret
+	}
+
+	return *o.Health.Get()
+}
+
+// GetHealthOk returns a tuple with the Health field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Tray) GetHealthOk() (*AggregateHealth, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Health.Get(), o.Health.IsSet()
+}
+
+// SetHealth sets field value
+func (o *Tray) SetHealth(v AggregateHealth) {
+	o.Health.Set(&v)
+}
+
 func (o Tray) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -666,6 +695,7 @@ func (o Tray) ToMap() (map[string]interface{}, error) {
 	}
 	toSerialize["nvLinkDomainId"] = o.NvLinkDomainId.Get()
 	toSerialize["taskStats"] = o.TaskStats
+	toSerialize["health"] = o.Health.Get()
 	return toSerialize, nil
 }
 
@@ -676,6 +706,7 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"nvLinkDomainId",
 		"taskStats",
+		"health",
 	}
 
 	allProperties := make(map[string]interface{})

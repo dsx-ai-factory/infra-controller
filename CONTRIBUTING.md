@@ -15,13 +15,31 @@ All project participants are expected to follow the
 
 ## Table of Contents
 
+- [Contributions and Planning](#contributions-and-planning)
 - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
 - [Cryptographic Commit Signatures](#cryptographic-commit-signatures)
 - [Fork and Setup](#fork-and-setup)
 - [Secret Scanning](#secret-scanning)
-- [Contribution Process](#contribution-process)
+- [Pull Request Process](#pull-request-process)
 - [Engineering Guidelines](#engineering-guidelines)
 - [Pull Request Guidelines](#pull-request-guidelines)
+
+## Contributions and Planning
+
+For substantial changes:
+
+- If you've encountered a problem or limitation that isn't already tracked,
+  open an issue describing it, your proposed approach, and that you'd like to
+  implement a solution.
+- If you'd like to work on an existing, unassigned issue, comment there with
+  your proposed approach and say you'd like to take it on.
+
+In either case, wait for maintainer feedback on the scope before investing
+significant effort.
+
+Small, self-contained fixes (such as typos, documentation corrections, and
+simple bug fixes) can be submitted as pull requests without opening an issue
+first.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -233,7 +251,7 @@ When the hook reports a finding, treat the credential as compromised — remove 
 This check is advisory and skippable (`git commit --no-verify`).
 The authoritative check is the Pulse secret scan in [`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml), which runs server-side on pushes to `main` and to the `pull-request/[0-9]+` mirror of your pull request, and fails on verified secrets.
 
-## Contribution Process
+## Pull Request Process
 
 1. **Fork the repository** and create your branch from `main`.
 2. **Make your changes** following our coding guidelines.
@@ -343,11 +361,13 @@ in the pull request.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
 
+### Pull request review
+
+A maintainer should provide an initial review within five business days of a
+pull request being marked ready for review. If that time passes without a review
+or update, comment on the pull request to request an update from a maintainer.
+
 ## Build Guide
 
 For pinned dependency updates, image testing, and build optimization trade-offs, see the
 [Build Guide](docs/development/build-guide.md).
-
-## Questions?
-
-If you have questions about contributing, please open an issue for discussion.

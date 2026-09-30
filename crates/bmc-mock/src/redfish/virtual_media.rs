@@ -282,6 +282,7 @@ mod tests {
             MachineRouterOptions {
                 event_service: crate::EventServiceOverride::Profile,
                 bmc_reset_duration: None,
+                firmware_upgrade_duration: None,
                 virtual_media_devices: Some(vec![
                     DeviceConfig {
                         id: "Cd".into(),

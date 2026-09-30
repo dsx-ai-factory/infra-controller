@@ -548,6 +548,13 @@ func TestBMCFrom(t *testing.T) {
 
 func TestComponentConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "aggregate-host-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{{ID: "FanSpeed"}},
+		Alerts:     []types.HealthProbeAlert{},
+	}
 	shared := component.Component{
 		Type:            devicetypes.ComponentTypeCompute,
 		Info:            deviceinfo.NewRandom("TestComponent", 6),
@@ -561,6 +568,7 @@ func TestComponentConverter(t *testing.T) {
 		},
 		BmcsByType:  make(map[devicetypes.BMCType][]bmc.BMC),
 		NVLDomainID: domainID,
+		Health:      health,
 	}
 
 	sharedP := pb.Component{
@@ -583,6 +591,12 @@ func TestComponentConverter(t *testing.T) {
 		ComponentId:    shared.ComponentID,
 		NvlDomainId:    &pb.UUID{Id: domainID.String()},
 		RackExternalId: shared.RackExternalID,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{{Id: "FanSpeed"}},
+			Alerts:     []*pb.HealthProbeAlert{},
+		},
 	}
 
 	testCases := map[string]struct {
@@ -635,6 +649,13 @@ func TestComponentConverter(t *testing.T) {
 
 func TestRackConverter(t *testing.T) {
 	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "rack-aggregate-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{},
+		Alerts:     []types.HealthProbeAlert{{ID: "RackAlert", Message: "fault"}},
+	}
 	shared := rack.Rack{
 		Info:       deviceinfo.NewRandom("TestRack", 12),
 		ExternalID: "rack-external-1",
@@ -647,6 +668,7 @@ func TestRackConverter(t *testing.T) {
 		Components:      make([]component.Component, 0),
 		NVLDomainID:     domainID,
 		OperationStatus: types.PhaseError,
+		Health:          health,
 	}
 
 	sharedP := pb.Rack{
@@ -668,6 +690,12 @@ func TestRackConverter(t *testing.T) {
 		NvlDomainIds:    []*pb.UUID{{Id: domainID.String()}},
 		ExternalId:      shared.ExternalID,
 		OperationStatus: pb.Phase_PHASE_ERROR,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{},
+			Alerts:     []*pb.HealthProbeAlert{{Id: "RackAlert", Message: "fault"}},
+		},
 	}
 	fromProto := shared
 	fromProto.OperationStatus = types.PhaseUnknown

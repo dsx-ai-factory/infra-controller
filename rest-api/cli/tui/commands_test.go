@@ -2117,6 +2117,85 @@ func TestAllocationConstraintValueHint(t *testing.T) {
 
 // --- VPC prefix create IP block picker tests (NVBug 6105076) ---
 
+func TestParseVPCPrefixAllocation(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		value         string
+		family        vpcprefix.IPFamily
+		maximumLength int
+		wantField     string
+		wantValue     interface{}
+		wantError     string
+	}{
+		{
+			name:          "automatic allocation",
+			mode:          vpcPrefixAllocationAutomatic,
+			value:         "24",
+			family:        vpcprefix.IPFamilyIPv4,
+			maximumLength: vpcprefix.IPv4PrefixLengthMaximum,
+			wantField:     "prefixLength",
+			wantValue:     24,
+		},
+		{
+			name:          "explicit allocation canonicalizes IPv6",
+			mode:          vpcPrefixAllocationExplicit,
+			value:         "2001:0db8:0000:0000:0000:0000:0000:0000/63",
+			family:        vpcprefix.IPFamilyIPv6,
+			maximumLength: vpcprefix.IPv6SLAACPrefixLengthMaximum,
+			wantField:     "prefix",
+			wantValue:     "2001:db8::/63",
+		},
+		{
+			name:          "explicit allocation rejects host bits",
+			mode:          vpcPrefixAllocationExplicit,
+			value:         "10.20.30.7/24",
+			family:        vpcprefix.IPFamilyIPv4,
+			maximumLength: vpcprefix.IPv4PrefixLengthMaximum,
+			wantError:     "prefix must be network-aligned",
+		},
+		{
+			name:          "explicit allocation rejects mapped IPv6",
+			mode:          vpcPrefixAllocationExplicit,
+			value:         "::ffff:10.20.0.0/120",
+			family:        vpcprefix.IPFamilyIPv6,
+			maximumLength: vpcprefix.IPv6StatefulPrefixLengthMaximum,
+			wantError:     "prefix must not use an IPv4-mapped IPv6 address",
+		},
+		{
+			name:          "explicit allocation rejects family mismatch",
+			mode:          vpcPrefixAllocationExplicit,
+			value:         "10.20.0.0/24",
+			family:        vpcprefix.IPFamilyIPv6,
+			maximumLength: vpcprefix.IPv6StatefulPrefixLengthMaximum,
+			wantError:     "prefix does not match the selected IPv6 IP Block",
+		},
+		{
+			name:          "explicit allocation enforces VPC limit",
+			mode:          vpcPrefixAllocationExplicit,
+			value:         "2001:db8::/64",
+			family:        vpcprefix.IPFamilyIPv6,
+			maximumLength: vpcprefix.IPv6SLAACPrefixLengthMaximum,
+			wantError:     "prefix length must be between 8 and 63",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			allocation, err := parseVPCPrefixAllocation(test.mode, test.value, test.family, test.maximumLength)
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				assert.Nil(t, allocation)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, allocation)
+			assert.Equal(t, test.wantField, allocation.bodyField)
+			assert.Equal(t, test.wantValue, allocation.bodyValue)
+		})
+	}
+}
+
 // TestValidateVPCPrefixLength rejects values outside the shared minimum and
 // the maximum resolved by the caller.
 func TestValidateVPCPrefixLength(t *testing.T) {

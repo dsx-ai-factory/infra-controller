@@ -115,12 +115,21 @@ func syncSwitchStatuses(
 	if len(ids) == 0 {
 		return
 	}
-	statesByID, err := nicoClient.FindSwitchControllerStates(ctx, ids)
+	runtimeByID, err := nicoClient.FindSwitchRuntimeStatuses(ctx, ids)
 	if err != nil {
-		log.Error().Msgf("Unable to retrieve switch controller_states from NICo: %v", err)
+		log.Error().Msgf("Unable to retrieve switch runtime status from NICo: %v", err)
 		return
 	}
+	statesByID := make(map[string]string, len(runtimeByID))
+	healthByID := make(map[string]*types.HealthReport, len(runtimeByID))
+	for id, runtime := range runtimeByID {
+		if runtime.ControllerState != "" {
+			statesByID[id] = runtime.ControllerState
+		}
+		healthByID[id] = runtime.Health
+	}
 	persistComponentOperationStatuses(ctx, pool, types.ComponentTypeNVSwitch, statesByID, componentsBySwitchID)
+	persistComponentHealthSnapshots(ctx, pool, healthByID, componentsBySwitchID)
 }
 
 // syncSwitchNvosIPs records Core's resolved NVOS host IP for each matched

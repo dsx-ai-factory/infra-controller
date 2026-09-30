@@ -9598,6 +9598,39 @@ async fn handle_instance_network_config_update_request(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     common_pools: &Option<Arc<CommonPools>>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    if matches!(
+        network_config_update_state,
+        NetworkConfigUpdateState::WaitingForConfigSynced
+            | NetworkConfigUpdateState::ReleaseOldResources
+    ) {
+        // A failed Admin apply clears both receipts on a removed DPU. Its
+        // absent Instance observation must not make cleanup look safe.
+        // Recheck receipts and health in `ReleaseOldResources`: another report
+        // can arrive between the persisted transition and the next iteration.
+        if !mh_snapshot.managed_host_network_config_version_synced() {
+            return Ok(StateHandlerOutcome::wait(
+                "Waiting for DPU agent(s) to apply network config and report healthy network"
+                    .to_string(),
+            ));
+        }
+        match check_instance_network_synced_and_dpu_healthy(instance, mh_snapshot)? {
+            InstanceNetworkSyncStatus::InstanceNetworkObservationNotAvailable(missing_dpus) => {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "Waiting for DPU agents to apply initial network config for DPUs: {}",
+                    missing_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                )));
+            }
+            InstanceNetworkSyncStatus::InstanceNetworkNotSynced(outdated_dpus) => {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "Waiting for DPU agent to apply most recent network config for DPUs: {}",
+                    outdated_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                )));
+            }
+            InstanceNetworkSyncStatus::ZeroDpuNoObservationNeeded
+            | InstanceNetworkSyncStatus::InstanceNetworkSynced => {}
+        }
+    }
+
     match network_config_update_state {
         NetworkConfigUpdateState::WaitingForNetworkSegmentToBeReady => {
             let next_state = ManagedHostState::Assigned {
@@ -9654,26 +9687,7 @@ async fn handle_instance_network_config_update_request(
                 },
             };
 
-            Ok(
-                match check_instance_network_synced_and_dpu_healthy(instance, mh_snapshot)? {
-                    InstanceNetworkSyncStatus::InstanceNetworkObservationNotAvailable(
-                        missing_dpus,
-                    ) => StateHandlerOutcome::wait(format!(
-                        "Waiting for DPU agents to apply initial network config for DPUs: {}",
-                        missing_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
-                    )),
-                    InstanceNetworkSyncStatus::ZeroDpuNoObservationNeeded
-                    | InstanceNetworkSyncStatus::InstanceNetworkSynced => {
-                        StateHandlerOutcome::transition(next_state)
-                    }
-                    InstanceNetworkSyncStatus::InstanceNetworkNotSynced(outdated_dpus) => {
-                        StateHandlerOutcome::wait(format!(
-                            "Waiting for DPU agent to apply most recent network config for DPUs: {}",
-                            outdated_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
-                        ))
-                    }
-                },
-            )
+            Ok(StateHandlerOutcome::transition(next_state))
         }
         NetworkConfigUpdateState::ReleaseOldResources => {
             let mut txn = ctx.services.db_pool.begin().await?;

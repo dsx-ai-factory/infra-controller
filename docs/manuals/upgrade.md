@@ -437,7 +437,7 @@ for cert-manager, PostgreSQL, and Temporal are not affected.
 ## Rollback
 
 <Warning>
-Downgrades are **not a supported version move**. The [release and QA process](../development/release_and_qa_process.md) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
+Downgrades are **not a supported version move**. The [release policy](../../RELEASE.md#upgrade-and-downgrade-support) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
 </Warning>
 
 `setup.sh` does not have a built-in rollback mechanism. Rollback consists of:

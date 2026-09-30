@@ -29,6 +29,7 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
+use component_manager::config::SwitchMtlsService;
 use component_manager::mock::MockNvSwitchManager;
 use db::db_read::DbReader;
 use db::{
@@ -2743,8 +2744,34 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
 /// verifies that the rack keeps waiting while any tracked machine is still in
 /// WaitingForRackFirmwareUpgrade, then errors only after every machine has left
 /// that wait state and at least one failed.
-#[crate::sqlx_test]
-async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error(
+///
+/// Expanded by hand instead of using `#[crate::sqlx_test]` so the body runs on
+/// a thread with a larger stack. This is the widest future in the crate's
+/// suite and does not fit the default one. Same shape as the measurement test
+/// in `tests::instance`.
+#[test]
+fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(sqlx::PgPool) -> _ =
+        test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::TestFn::run_test(test_fn, args)
+                .expect("firmware upgrade wait-for-complete test failed")
+        })
+        .expect("failed to spawn the firmware upgrade test thread")
+        .join()
+        .expect("firmware upgrade test thread panicked");
+}
+
+async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error_body(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -4362,6 +4389,7 @@ async fn queue_configure_nmx_cluster_v2_success(
     secondary_switch_id: SwitchId,
     primary_switch_id: SwitchId,
     topology_type: &str,
+    primary_telemetry_configured: bool,
 ) {
     env.rms_sim
         .queue_configure_scale_up_fabric_manager_v2_response(Ok(
@@ -4382,6 +4410,21 @@ async fn queue_configure_nmx_cluster_v2_success(
         }))
         .await;
 
+    if primary_telemetry_configured {
+        env.rms_sim
+            .queue_configure_switch_certificate_response(Ok(
+                rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        job_id: "configure-primary-switch-certificate-job".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                },
+            ))
+            .await;
+    }
+
     env.rms_sim
         .queue_get_configure_switch_certificate_job_status_response(Ok(
             rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -4391,6 +4434,18 @@ async fn queue_configure_nmx_cluster_v2_success(
             },
         ))
         .await;
+
+    if primary_telemetry_configured {
+        env.rms_sim
+            .queue_get_configure_switch_certificate_job_status_response(Ok(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    state: "completed".to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await;
+    }
 
     env.rms_sim
         .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
@@ -4514,6 +4569,7 @@ async fn create_configure_nmx_cluster_test_rack(
 async fn run_configure_nmx_cluster_v2_workflow(
     env: &TestEnv,
     rack_id: &RackId,
+    primary_telemetry_configured: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     env.run_rack_controller_iteration().await;
 
@@ -4536,6 +4592,24 @@ async fn run_configure_nmx_cluster_v2_workflow(
     ));
 
     env.run_rack_controller_iteration().await;
+
+    if primary_telemetry_configured {
+        let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+
+        assert!(matches!(
+            rack.controller_state.value,
+            RackState::Maintenance {
+                maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                    configure_nmx_cluster:
+                        ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob {
+                            ref job_id,
+                        },
+                },
+            } if job_id == "configure-primary-switch-certificate-job"
+        ));
+
+        env.run_rack_controller_iteration().await;
+    }
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
 
@@ -4593,25 +4667,39 @@ async fn assert_configure_nmx_cluster_v2_results(
         .submitted_configure_switch_certificate_requests()
         .await;
 
-    let [certificate_request] = certificate_requests.as_slice() else {
-        return Err(eyre::eyre!("expected exactly one certificate request").into());
+    let [rack_certificate_request, primary_certificate_request] = certificate_requests.as_slice()
+    else {
+        return Err(eyre::eyre!("expected exactly two certificate requests").into());
     };
 
     assert_eq!(
-        certificate_request.services,
-        vec![rms::SwitchService::NvueApi as i32]
+        rack_certificate_request.services,
+        vec![
+            rms::SwitchService::NvueApi as i32,
+            rms::SwitchService::ScaleUpFabricTelemetryInterface as i32,
+        ]
     );
 
-    assert_node_set_contains_switches(certificate_request.nodes.as_ref(), switch_ids);
+    assert_node_set_contains_switches(rack_certificate_request.nodes.as_ref(), switch_ids);
 
     assert!(
-        certificate_request
+        rack_certificate_request
             .nodes
             .as_ref()
             .expect("certificate request should include nodes")
             .nodes
             .iter()
             .all(|node| node.bmc_endpoint.is_none())
+    );
+
+    assert_eq!(
+        primary_certificate_request.services,
+        vec![rms::SwitchService::ScaleUpFabricTelemetry as i32]
+    );
+
+    assert_node_set_contains_switches(
+        primary_certificate_request.nodes.as_ref(),
+        &[primary_switch_id],
     );
 
     assert!(
@@ -4721,6 +4809,7 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_with_nmx_cluster_profile();
     config.rms.scale_up_fabric_manager_api_version = ScaleUpFabricManagerApiVersion::V1;
+    config.switch_state_controller.switch_mtls_services = SwitchMtlsService::default_services();
 
     let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
         &pool,
@@ -4749,10 +4838,11 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
         secondary_switch_id,
         primary_switch_id,
         &topology_type,
+        true,
     )
     .await;
 
-    run_configure_nmx_cluster_v2_workflow(&env, &rack_id).await?;
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
 
     assert_configure_nmx_cluster_v2_results(
         &env,
@@ -4763,6 +4853,168 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
         &topology_type,
     )
     .await
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_telemetry_after_v2(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_nmx_cluster_profile();
+    config.switch_state_controller.switch_mtls_services =
+        vec![SwitchMtlsService::ScaleUpFabricTelemetry];
+
+    let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
+        &pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
+
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    env.run_rack_controller_iteration().await;
+    assert_persisted_switch_certificate_job(&env, &rack_id).await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { .. },
+            },
+        }
+    ));
+
+    let mut txn = pool.acquire().await?;
+
+    let primary_switch = db_switch::find_by_id(&mut txn, primary_switch_id)
+        .await?
+        .ok_or_else(|| eyre::eyre!("expected primary switch {}", primary_switch_id))?;
+
+    let bmc_mac_address = primary_switch.bmc_mac_address.ok_or_else(|| {
+        eyre::eyre!(
+            "expected primary switch {} to have a BMC MAC",
+            primary_switch_id
+        )
+    })?;
+
+    drop(txn);
+
+    env.api
+        .credential_manager
+        .delete_credentials(&CredentialKey::SwitchNvosAdmin { bmc_mac_address })
+        .await
+        .map_err(eyre::Report::from)?;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error { ref cause, .. }
+            if cause.contains(&format!("switch {primary_switch_id} is missing NVOS credentials"))
+    ));
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    assert_eq!(certificate_requests.len(), 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_default_binds_primary_telemetry_after_v2(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_nmx_cluster_profile();
+
+    config
+        .rack_state_controller
+        .nmx_cluster_switch_mtls_services = vec![
+        SwitchMtlsService::ScaleUpFabricTelemetry,
+        SwitchMtlsService::ScaleUpFabricTelemetryInterface,
+    ];
+
+    let (env, rack_id, switch_ids) = create_configure_nmx_cluster_test_rack(
+        &pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
+
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    let [rack_certificate_request, primary_certificate_request] = certificate_requests.as_slice()
+    else {
+        return Err(eyre::eyre!("expected exactly two certificate requests").into());
+    };
+
+    assert_eq!(
+        rack_certificate_request.services,
+        vec![rms::SwitchService::NvueApi as i32]
+    );
+
+    assert!(rack_certificate_request.test_hello);
+
+    assert_eq!(
+        primary_certificate_request.services,
+        vec![rms::SwitchService::ScaleUpFabricTelemetry as i32]
+    );
+
+    assert!(!primary_certificate_request.test_hello);
+
+    assert_node_set_contains_switches(
+        primary_certificate_request.nodes.as_ref(),
+        &[*primary_switch_id],
+    );
+
+    Ok(())
 }
 
 #[crate::sqlx_test]

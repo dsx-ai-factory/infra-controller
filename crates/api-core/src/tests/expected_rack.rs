@@ -15,7 +15,7 @@ use crate::tests::common::api_fixtures::{
 
 #[crate::sqlx_test()]
 async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
-    let profile = "GB200_NVL72R1_C2G4_WiWynn_NVIDIA_NO_POWERSHELF";
+    let profile = "GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF";
     let mut config = get_config();
     config
         .rack_profiles

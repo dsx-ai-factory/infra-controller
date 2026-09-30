@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -3003,6 +3004,67 @@ func cmdVPCPrefixList(s *Session, _ []string) error {
 	return tw.Flush()
 }
 
+const (
+	vpcPrefixAllocationAutomatic = "automatic"
+	vpcPrefixAllocationExplicit  = "explicit"
+)
+
+type vpcPrefixAllocation struct {
+	bodyField string
+	bodyValue any
+	logFlag   string
+	logValue  string
+}
+
+func parseVPCPrefixAllocation(mode, value string, family vpcprefix.IPFamily, maximumLength int) (*vpcPrefixAllocation, error) {
+	value = strings.TrimSpace(value)
+	switch mode {
+	case vpcPrefixAllocationAutomatic:
+		prefixLength, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix length must be an integer: %w", err)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefixLength)
+		if err != nil {
+			return nil, err
+		}
+		return &vpcPrefixAllocation{
+			bodyField: "prefixLength",
+			bodyValue: prefixLength,
+			logFlag:   "--prefix-length",
+			logValue:  value,
+		}, nil
+	case vpcPrefixAllocationExplicit:
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("prefix must be a valid CIDR: %w", err)
+		}
+		if prefix.Addr().Is4In6() {
+			return nil, errors.New("prefix must not use an IPv4-mapped IPv6 address")
+		}
+		if prefix != prefix.Masked() {
+			return nil, errors.New("prefix must be network-aligned")
+		}
+		if (family == vpcprefix.IPFamilyIPv4 && !prefix.Addr().Is4()) ||
+			(family == vpcprefix.IPFamilyIPv6 && !prefix.Addr().Is6()) {
+			return nil, fmt.Errorf("prefix does not match the selected %s IP Block", family)
+		}
+		err = validateVPCPrefixLength(maximumLength, prefix.Bits())
+		if err != nil {
+			return nil, err
+		}
+		canonicalPrefix := prefix.String()
+		return &vpcPrefixAllocation{
+			bodyField: "prefix",
+			bodyValue: canonicalPrefix,
+			logFlag:   "--prefix",
+			logValue:  canonicalPrefix,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown VPC prefix allocation mode %q", mode)
+	}
+}
+
 func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	vpc, err := s.Resolver.Resolve(context.Background(), "vpc", "VPC")
 	if err != nil {
@@ -3031,26 +3093,34 @@ func cmdVPCPrefixCreate(s *Session, _ []string) error {
 	} else {
 		promptLabel = fmt.Sprintf("Prefix length (%d-%d; API validates the IP block and VPC limit)", vpcprefix.PrefixLengthMinimum, maximumLength)
 	}
-	prefixLenText, err := PromptText(promptLabel, true)
+
+	allocationMode, err := Select("Allocation mode:", []SelectItem{
+		{ID: vpcPrefixAllocationAutomatic, Label: "Automatic (select by prefix length)"},
+		{ID: vpcPrefixAllocationExplicit, Label: "Explicit CIDR"},
+	})
 	if err != nil {
 		return err
 	}
-	prefixLen, err := strconv.Atoi(strings.TrimSpace(prefixLenText))
-	if err != nil {
-		return fmt.Errorf("prefix length must be an integer: %w", err)
+	allocationPrompt := promptLabel
+	if allocationMode.ID == vpcPrefixAllocationExplicit {
+		allocationPrompt = "VPC prefix CIDR"
 	}
-	err = validateVPCPrefixLength(maximumLength, prefixLen)
+	allocationValue, err := PromptText(allocationPrompt, true)
+	if err != nil {
+		return err
+	}
+	allocation, err := parseVPCPrefixAllocation(allocationMode.ID, allocationValue, family, maximumLength)
 	if err != nil {
 		return err
 	}
 
 	body := map[string]interface{}{
-		"name":         name,
-		"vpcId":        vpc.ID,
-		"ipBlockId":    ipBlock.ID,
-		"prefixLength": prefixLen,
+		"name":      name,
+		"vpcId":     vpc.ID,
+		"ipBlockId": ipBlock.ID,
 	}
-	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlock.ID, "--prefix-length", prefixLenText)
+	body[allocation.bodyField] = allocation.bodyValue
+	LogCmd(s, "vpc-prefix", "create", "--name", name, "--vpc-id", vpc.ID, "--ip-block-id", ipBlock.ID, allocation.logFlag, allocation.logValue)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "vpc-prefix"), nil, nil, bodyJSON)
 	if err != nil {
@@ -3868,6 +3938,15 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 			networkConfig.selectorKey: picked.ID,
 			"isPhysical":              isPhysical,
 		}
+		if networkConfig.selectorKey == "vpcPrefixId" {
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
+		}
 		if !isPhysical {
 			virtualFunctionID, promptErr := promptVirtualFunctionID(
 				"Virtual function ID (0-15)",
@@ -4062,12 +4141,20 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 		if err != nil {
 			return ifaces, err
 		}
-		ifaces = append(ifaces, map[string]interface{}{
+		iface := map[string]interface{}{
 			networkConfig.selectorKey: physical.ID,
 			"device":                  capability.name,
 			"deviceInstance":          deviceInstance,
 			"isPhysical":              true,
-		})
+		}
+		ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+		if promptErr != nil {
+			return ifaces, promptErr
+		}
+		if ipAddress != "" {
+			iface["ipAddress"] = ipAddress
+		}
+		ifaces = append(ifaces, iface)
 
 		vfIDs := deviceVirtualFunctionIDs{
 			used: make(map[int]bool),
@@ -4093,6 +4180,19 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if selectErr != nil {
 				return ifaces, selectErr
 			}
+			iface := map[string]interface{}{
+				networkConfig.selectorKey: virtual.ID,
+				"device":                  capability.name,
+				"deviceInstance":          deviceInstance,
+				"isPhysical":              false,
+			}
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
 			virtualFunctionID, promptErr := promptVirtualFunctionID(
 				fmt.Sprintf("Virtual function ID for DPU %d (0-15)", deviceInstance),
 				vfIDs.used,
@@ -4100,17 +4200,18 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if promptErr != nil {
 				return ifaces, promptErr
 			}
-			iface := map[string]interface{}{
-				networkConfig.selectorKey: virtual.ID,
-				"device":                  capability.name,
-				"deviceInstance":          deviceInstance,
-				"isPhysical":              false,
-				"virtualFunctionId":       virtualFunctionID,
-			}
+			iface["virtualFunctionId"] = virtualFunctionID
 			ifaces = append(ifaces, iface)
 		}
 	}
 	return ifaces, nil
+}
+
+func promptOptionalInstanceInterfaceIPAddress() (string, error) {
+	return PromptText(
+		"IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)",
+		false,
+	)
 }
 
 func selectDPUInterfaceResource(

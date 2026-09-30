@@ -47,6 +47,8 @@ type Interface struct {
 	MacAddress NullableString `json:"macAddress,omitempty"`
 	// A list of IPv4 or IPv6 addresses
 	IpAddresses []string `json:"ipAddresses,omitempty"`
+	// Reported IPv4 or IPv6 prefixes in CIDR notation, ordered IPv4 before IPv6. This list is independent of `ipAddresses`; SLAAC can report an IPv6 prefix without a fixed host address. Match prefixes and addresses by address family, not list position. Empty when no prefixes are available.
+	IpPrefixes []string `json:"ipPrefixes,omitempty"`
 	// Explicitly requested IP address for the interface. This is only used with an explicit `vpcPrefixId` and is not valid with `subnetId` or VPC-selected interfaces. The least-significant host bit must be 1.
 	RequestedIpAddress NullableString `json:"requestedIpAddress,omitempty"`
 	// Inline interface-local routing profile options. Only valid for VPC-backed interfaces.
@@ -526,6 +528,38 @@ func (o *Interface) SetIpAddresses(v []string) {
 	o.IpAddresses = v
 }
 
+// GetIpPrefixes returns the IpPrefixes field value if set, zero value otherwise.
+func (o *Interface) GetIpPrefixes() []string {
+	if o == nil || IsNil(o.IpPrefixes) {
+		var ret []string
+		return ret
+	}
+	return o.IpPrefixes
+}
+
+// GetIpPrefixesOk returns a tuple with the IpPrefixes field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Interface) GetIpPrefixesOk() ([]string, bool) {
+	if o == nil || IsNil(o.IpPrefixes) {
+		return nil, false
+	}
+	return o.IpPrefixes, true
+}
+
+// HasIpPrefixes returns a boolean if a field has been set.
+func (o *Interface) HasIpPrefixes() bool {
+	if o != nil && !IsNil(o.IpPrefixes) {
+		return true
+	}
+
+	return false
+}
+
+// SetIpPrefixes gets a reference to the given []string and assigns it to the IpPrefixes field.
+func (o *Interface) SetIpPrefixes(v []string) {
+	o.IpPrefixes = v
+}
+
 // GetRequestedIpAddress returns the RequestedIpAddress field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Interface) GetRequestedIpAddress() string {
 	if o == nil || IsNil(o.RequestedIpAddress.Get()) {
@@ -753,6 +787,9 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.IpAddresses) {
 		toSerialize["ipAddresses"] = o.IpAddresses
+	}
+	if !IsNil(o.IpPrefixes) {
+		toSerialize["ipPrefixes"] = o.IpPrefixes
 	}
 	if o.RequestedIpAddress.IsSet() {
 		toSerialize["requestedIpAddress"] = o.RequestedIpAddress.Get()

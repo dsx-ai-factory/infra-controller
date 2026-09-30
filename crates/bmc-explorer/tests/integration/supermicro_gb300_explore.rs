@@ -43,7 +43,7 @@ async fn explore_supermicro_gb300() {
         Some(HwType::SupermicroGb300),
     );
 
-    let report = nv_generate_exploration_report(h.service_root, &config)
+    let report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
         .await
         .unwrap();
     assert_eq!(report.endpoint_type, EndpointType::Bmc);

@@ -61,6 +61,7 @@ impl InternalRBACRules {
 
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
+        x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
         x.perm("CreateDomain", vec![]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
@@ -310,6 +311,9 @@ impl InternalRBACRules {
         x.perm("FindExploredMlxDeviceHostIds", vec![ForgeAdminCLI]);
         x.perm("FindExploredMlxDevicesByIds", vec![ForgeAdminCLI]);
         x.perm("AdminForceDeleteMachine", vec![ForgeAdminCLI, Machineatron]);
+        x.perm("AdminFindReservedAddressIds", vec![ForgeAdminCLI]);
+        x.perm("AdminFindReservedAddressesByIds", vec![ForgeAdminCLI]);
+        x.perm("AdminReleaseReservedAddresses", vec![ForgeAdminCLI]);
         x.perm(
             "DecommissionManagedHost",
             vec![ForgeAdminCLI, Machineatron, Flow],
@@ -377,8 +381,8 @@ impl InternalRBACRules {
             "GetAllExpectedMachines",
             vec![ForgeAdminCLI, SiteAgent, Flow],
         );
-        x.perm("ReplaceAllExpectedMachines", vec![ForgeAdminCLI]);
-        x.perm("DeleteAllExpectedMachines", vec![ForgeAdminCLI]);
+        x.perm("ReplaceAllExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteAllExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetAllExpectedMachinesLinked",
             vec![ForgeAdminCLI, SiteAgent, Flow],
@@ -756,6 +760,12 @@ impl InternalRBACRules {
         x.perm("CancelMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm("FindPowerShelfIds", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
@@ -794,11 +804,11 @@ impl InternalRBACRules {
         );
         x.perm(
             "ReplaceAllExpectedPowerShelves",
-            vec![ForgeAdminCLI, Machineatron],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
             "DeleteAllExpectedPowerShelves",
-            vec![ForgeAdminCLI, Machineatron],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
             "GetAllExpectedPowerShelvesLinked",
@@ -853,11 +863,11 @@ impl InternalRBACRules {
         );
         x.perm(
             "ReplaceAllExpectedSwitches",
-            vec![ForgeAdminCLI, Machineatron],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
             "DeleteAllExpectedSwitches",
-            vec![ForgeAdminCLI, Machineatron],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
             "GetAllExpectedSwitchesLinked",
@@ -1266,6 +1276,22 @@ mod rbac_rule_tests {
     }
 
     #[test]
+    fn console_logs_are_restricted_to_admin_cli() {
+        assert!(InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-admin-cli".to_string(),
+                None,
+            ))],
+        ));
+        assert!(!InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
+        ));
+    }
+
+    #[test]
     fn anonymous_rules_allow_certless_callers() {
         // Certless callers must be allowed when a rule lists Anonymous among other principals.
         for method in ["GetJWKS", "GetOpenIDConfiguration"] {
@@ -1345,6 +1371,12 @@ mod rbac_rule_tests {
             "AdminPowerControl",
             "TriggerDpuReprovisioning",
             "AdminChassisReset",
+            "ReplaceAllExpectedMachines",
+            "DeleteAllExpectedMachines",
+            "ReplaceAllExpectedSwitches",
+            "DeleteAllExpectedSwitches",
+            "ReplaceAllExpectedPowerShelves",
+            "DeleteAllExpectedPowerShelves",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(

@@ -37,6 +37,9 @@ data:
         disableHostVerification: false
       encryptionKeyPath: /var/secrets/temporal/encryption-key
 
+    siteManager:
+      svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+
     ngc:
       api:
         baseUrl: ""
