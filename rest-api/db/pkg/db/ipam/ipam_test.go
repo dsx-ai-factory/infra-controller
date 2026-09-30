@@ -371,7 +371,11 @@ func TestCreateChildIpamEntryForIPBlock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			storage := cipam.NewMemory(ctx)
-			parent := &cdbm.IPBlock{Prefix: "2001:db8::", PrefixLength: 64}
+			parent := &cdbm.IPBlock{
+				Prefix:       "2001:db8::",
+				PrefixLength: 64,
+				TenantID:     cutil.GetPtr(uuid.New()),
+			}
 			prefix, err := CreateIpamEntryForIPBlock(ctx, storage, parent.Prefix, parent.PrefixLength, parent.RoutingType, parent.InfrastructureProviderID.String(), parent.SiteID.String())
 			require.NoError(t, err)
 
