@@ -52,7 +52,13 @@ Ready), not a new Core Domain or an adoption by DNS name. After 202,
 poll GET on the returned Domain ID until status is Ready before using
 that REST ID as a Subnet subdomainId. Pending, Deleting and Error are
 not usable for Subnet creation; a 504 does not prove that a Core write
-was rolled back. Conflicting names or creation intents are rejected.
+was rolled back. A create timeout at the Core proxy normally returns
+202 Pending here, not 504. Tenant-managed DNS zones cannot claim a
+reverse DNS zone, or equal/contain/be contained by an existing Site
+forward zone at DNS-label boundaries (including another tenant's
+zone). Non-overlapping sibling zones are allowed. Names are not
+rewritten to make them unique; conflicting names or creation intents
+are rejected without exposing the other zone's owner.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
@@ -234,8 +240,15 @@ cannot be deleted. If Core deletion or its reserved-ID cancellation
 cannot be confirmed, the owned reservation remains Deleting. Retry
 DELETE with the same REST ID after an unconfirmed 504; 204 means Core
 deletion/cancellation and REST removal were both confirmed. Do not
-interpret a 504 as absence or rollback. Only the owning tenant with
-current Site access can read or retry the reservation.
+interpret a 504 as absence or rollback. The owning tenant with a
+current Site association may read the reservation. Explicit DELETE
+retries require that Site to be Registered; if it becomes unregistered
+or Site access is revoked, the durable Deleting reservation remains
+visible only to an authorized owner and is not considered deleted.
+Recovery also pauses Core writes until Site registration and tenant
+access are valid again. Reconcile intentionally revoked access through
+an authorized Site/operator workflow; do not grant access solely to
+force cleanup, or substitute a different Site or Core ID.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 

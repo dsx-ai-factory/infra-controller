@@ -6,6 +6,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -78,6 +79,16 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		resource := &corev1.Domain{}
 		req := &corev1.CreateDomainRequest{Name: d.Hostname, ReservedId: &corev1.DomainId{Value: d.ControllerDomainID.String()}}
 		if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, req, resource, d.SiteID.String()); apiErr != nil {
+			// Only a definitive Core validation/conflict response can terminate
+			// this intent. A proxy timeout or transport failure leaves the same
+			// reserved ID Pending for safe replay on a later sweep.
+			if apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusConflict || apiErr.Code == http.StatusPreconditionFailed {
+				changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusPending, cdbm.DomainStatusError, false)
+				if err != nil || !changed {
+					return fmt.Errorf("Domain rejection CAS failed: changed=%t err=%v", changed, err)
+				}
+				return nil
+			}
 			return fmt.Errorf("reserved Core create unconfirmed: %s", apiErr.Message)
 		}
 		if resource.GetId().GetValue() != d.ControllerDomainID.String() || cdbm.NormalizeForwardDomainName(resource.GetName()) != d.Hostname {

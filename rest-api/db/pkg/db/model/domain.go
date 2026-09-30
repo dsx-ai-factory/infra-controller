@@ -288,7 +288,7 @@ func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease ti
 // lease and only the immutable reserved Core identity from the claim.
 func (dsd DomainSQLDAO) CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error) {
 	if token == uuid.Nil || coreID == uuid.Nil || (from != DomainStatusPending && from != DomainStatusDeleting) ||
-		(!softDelete && to != DomainStatusReady) || (softDelete && from != DomainStatusDeleting) {
+		(!softDelete && to != DomainStatusReady && !(from == DomainStatusPending && to == DomainStatusError)) || (softDelete && from != DomainStatusDeleting) {
 		return false, fmt.Errorf("invalid Domain recovery completion")
 	}
 	q := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
