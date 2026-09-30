@@ -3,6 +3,41 @@
 This chart deploys `nico-bmc-proxy` and renders its main TOML config into the
 `nico-bmc-proxy-config-files` ConfigMap.
 
+## Redirect Handling
+
+`bmcProxy.redirectMode` controls how the proxy handles BMC redirects:
+
+- `follow_same_origin` is the default. Reqwest follows at most five redirects when every target
+  keeps the original scheme, host, and effective port. A `307` or `308` that would require replaying
+  a streamed request body is returned instead. When chaining, a redirect to the BMC's direct HTTPS
+  address on port 443 is also returned instead of followed.
+- `return_to_client` is experimental. The proxy returns safe redirects without following them;
+  unsafe targets return `502`.
+
+Automatically followed redirects do not re-run ACL authorization. Same-origin checks protect
+credential scope; they do not establish that the redirected path is allowed for the principal.
+
+For safe redirects returned to the client, the proxy removes the scheme and authority from
+`Location`, preserving the path, query, and fragment. The client must send the same `Forwarded`
+target on its follow-up request.
+
+In either mode, a cross-origin target other than the recognized direct address of the same BMC, a
+non-HTTP(S) target, or a malformed, credential-bearing, or otherwise unsafe target returns `502`
+without exposing its `Location` - never followed or returned to clients.
+
+Both modes rewrite a safe same-BMC `Location` on non-redirect responses, such as a Redfish session
+creation `201`, to a relative reference. An unsafe `Location` on a non-redirect response is omitted
+without changing the response status.
+
+The chart renders this value as `NICO_BMC_PROXY__REDIRECTS__MODE`. Environment configuration has
+higher precedence than TOML, so `bmcProxy.redirectMode` also overrides a `[redirects].mode` value in
+`configFiles.nicoBmcProxyConfig`. Changing the Helm value changes the Deployment pod template and
+rolls out the selected mode without rebuilding the image.
+
+`carbide_bmc_proxy_redirects_total` counts observed redirect responses by mode, status, bounded
+target classification, and disposition. It intentionally excludes BMC addresses and `Location`
+contents.
+
 ## Configuring ACLs
 
 The proxy authorizes requests with the `[auth.acls]` section in `nico-bmc-proxy.toml`.
@@ -20,6 +55,9 @@ configFiles:
     metrics_endpoint = "[::]:1080"
     database_url = "postgres://replaced-by-env-var"
     allowed_principals = ["spiffe-service-id/nico-api", "spiffe-service-id/nv-dps"]
+
+    [redirects]
+    mode = "follow_same_origin"
 
     [tls]
     identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"

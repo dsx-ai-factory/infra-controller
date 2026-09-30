@@ -366,19 +366,23 @@ fn root_password() -> BmcCredentials {
 /// whose ACL grants the anonymous caller `acl`, and which holds
 /// `credentials` for [`FAKE_BMC_IP`] so no nico-api call is made.
 async fn proxy_to(upstream: &str, acl: &str, credentials: BmcCredentials) -> BmcProxyState {
-    proxy_configured(upstream, acl, "", credentials).await
+    proxy_configured(upstream, acl, "", credentials, "follow_same_origin").await
 }
 
-/// [`proxy_to`], with the `[[class]]` tables `classes`.
+/// [`proxy_to`], with explicit `[[class]]` tables and a redirect mode.
 async fn proxy_configured(
     upstream: &str,
     acl: &str,
     classes: &str,
     credentials: BmcCredentials,
+    redirect_mode: &str,
 ) -> BmcProxyState {
     let state = test_state_with_config(&format!(
         r#"
         bmc_proxy = "{upstream}"
+
+        [redirects]
+        mode = "{redirect_mode}"
 
         [tls]
         identity_pemfile_path = ""
@@ -446,6 +450,9 @@ struct Answer {
 }
 
 async fn exchange(state: &BmcProxyState, request: Request<Body>) -> Answer {
+    // Proxy requests emit process-global metrics that other tests measure;
+    // keep the complete exchange inside their serialized capture window.
+    let _metrics = MetricsCapture::start();
     let response = match proxy_request(axum::extract::State(state.clone()), request).await {
         Ok(response) | Err(response) => response,
     };
@@ -756,6 +763,31 @@ async fn a_redirect_is_followed_to_the_final_answer() {
     assert_eq!(paths, [MOVED_PATH, SYSTEM_PATH]);
 }
 
+/// The experimental mode returns a safe same-BMC redirect as a relative
+/// reference, leaving the separately authorized follow-up to the caller.
+#[tokio::test]
+async fn return_to_client_mode_does_not_follow_the_redirect() {
+    let (addr, bmc) = spawn_fake_bmc();
+    let state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        root_password(),
+        "return_to_client",
+    )
+    .await;
+    let answer = exchange(&state, get(MOVED_PATH)).await;
+
+    assert_eq!(answer.status, 307);
+    assert_eq!(values(&answer.headers, "location"), [SYSTEM_PATH]);
+    let paths: Vec<String> = bmc
+        .received()
+        .into_iter()
+        .map(|received| received.path_and_query)
+        .collect();
+    assert_eq!(paths, [MOVED_PATH]);
+}
+
 /// A caller naming its BMC by MAC address reaches the BMC at the IP that
 /// address resolves to.
 #[tokio::test]
@@ -909,6 +941,7 @@ async fn under_the_quick_class(
         r#"["/**"]"#,
         QUICK_CLASS,
         root_password(),
+        "follow_same_origin",
     )
     .await;
     state.api_client = fake_nico_api().await;
@@ -981,7 +1014,14 @@ async fn class_on_the_span(method: Method) -> (u16, String) {
         tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
     );
-    let state = proxy_configured(":1", r#"["/**"]"#, QUICK_CLASS, root_password()).await;
+    let state = proxy_configured(
+        ":1",
+        r#"["/**"]"#,
+        QUICK_CLASS,
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
     let answer = exchange(&state, proxied(method, SLOW_PATH, None, &[], Body::empty())).await;
     let span = exporter
         .get_finished_spans()

@@ -58,10 +58,10 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::any;
 use carbide_instrument::emit;
 use forge_tls::client_config::ClientCert;
-use http::{Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode};
 use moka::future::Cache as MokaCache;
 use rpc::forge_api_client::ForgeApiClient;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
@@ -76,7 +76,7 @@ use crate::proxy::credentials::{
 };
 use crate::proxy::guard::{authorize_proxy_request, cert_description_layer};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
-use crate::proxy::response::{build_response, prepare_response_body};
+use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
 use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
@@ -173,17 +173,14 @@ pub(crate) async fn start(
     let api_client = ForgeApiClient::new(&api_config);
 
     let state = BmcProxyState {
+        http_client: build_http_client(config.redirects.mode)?,
         config,
         api_client,
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
-        http_client: build_http_client()?,
         ip_cache: bounded_cache(IP_CACHE_TTL),
     };
 
-    let app = Router::new()
-        .route("/", get(root_url))
-        .route("/{*path}", any(proxy_request))
-        .with_state(state.clone())
+    let app = proxy_routes(state.clone())
         .layer(from_fn_with_state(state.clone(), authorize_proxy_request))
         .layer(cert_description_layer::<()>(&state.config.auth)?);
 
@@ -206,7 +203,17 @@ pub(crate) async fn start(
     Ok(())
 }
 
-async fn root_url() -> &'static str {
+/// Builds the production route table before transport authorization layers are
+/// applied.
+fn proxy_routes(state: BmcProxyState) -> Router {
+    Router::new()
+        .route("/", any(root_or_proxy))
+        .route("/{*path}", any(proxy_request))
+        .with_state(state)
+}
+
+/// Returns the build banner served by an untargeted `GET /`.
+fn root_url() -> &'static str {
     const ROOT_CONTENTS: &str = if carbide_version::literal!(build_version).is_empty() {
         "Carbide BMC proxy development build\n"
     } else {
@@ -217,6 +224,35 @@ async fn root_url() -> &'static str {
         )
     };
     ROOT_CONTENTS
+}
+
+/// Serves the proxy banner only when `/` is not targeted at a BMC.
+///
+/// A returned same-BMC redirect can legitimately name `/`; a request carrying
+/// `Forwarded` must therefore enter the proxy path and receive normal ACL
+/// handling. Malformed `Forwarded` values also fail closed in that path.
+async fn root_or_proxy(
+    State(state): State<BmcProxyState>,
+    request: Request<Body>,
+) -> Result<Response<Body>, Response<Body>> {
+    if request.headers().contains_key("forwarded") {
+        return proxy_request(State(state), request).await;
+    }
+    if request.method() == Method::GET {
+        return Ok(root_url().into_response());
+    }
+    if request.method() == Method::HEAD {
+        let mut response = root_url().into_response();
+        *response.body_mut() = Body::empty();
+        return Ok(response);
+    }
+
+    let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+    response.headers_mut().insert(
+        http::header::ALLOW,
+        http::HeaderValue::from_static("GET,HEAD"),
+    );
+    Ok(response)
 }
 
 async fn proxy_request(
@@ -370,6 +406,7 @@ async fn proxy_request_inner(
     } = upstream_response;
     let status = response.status();
     let headers = response.headers().clone();
+    let origins = BmcOrigins::new(response.url().clone(), target_ip);
     let body = prepare_response_body(
         status,
         &headers,
@@ -382,7 +419,15 @@ async fn proxy_request_inner(
         evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
-    Ok(build_response(status, &headers, body))
+    Ok(build_response(
+        status,
+        &headers,
+        body,
+        &origins,
+        &parts.method,
+        state.config.redirects.mode,
+        &sensitive_values,
+    ))
 }
 
 fn error_response(error: ProxyError) -> Response<Body> {
@@ -412,10 +457,74 @@ impl From<(StatusCode, &'static str)> for ProxyError {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{Request, StatusCode};
+    use axum::body::Body;
+    use axum::http::{HeaderValue, Method, Request, StatusCode};
+    use carbide_authn::middleware::{AuthContext, Principal};
     use carbide_test_support::value_scenarios;
+    use tower::ServiceExt;
 
-    use super::{bmc_proxy_request_span, span_status};
+    use super::{bmc_proxy_request_span, proxy_routes, span_status};
+    use crate::proxy::test_support::test_state_with_config;
+
+    const ROOT_ROUTE_TEST_CONFIG: &str = r#"
+        allowed_principals = ["spiffe-service-id/forge-system/carbide-api"]
+
+        [tls]
+        identity_pemfile_path = ""
+        identity_keyfile_path = ""
+        root_cafile_path = ""
+        admin_root_cafile_path = ""
+
+        [auth]
+
+        [auth.acls]
+        "spiffe-service-id/forge-system/carbide-api" = ["GET /**"]
+    "#;
+
+    #[tokio::test]
+    async fn root_dispatches_targeted_requests_to_the_proxy() {
+        let state = test_state_with_config(ROOT_ROUTE_TEST_CONFIG);
+        let app = proxy_routes(state);
+
+        let banner = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .expect("banner request builds");
+        assert_eq!(
+            app.clone().oneshot(banner).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let mut targeted = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header("forwarded", "host=not-an-ip-address")
+            .body(Body::empty())
+            .expect("targeted request builds");
+        targeted.extensions_mut().insert(AuthContext::<()> {
+            principals: vec![Principal::SpiffeServiceIdentifier(
+                "forge-system/carbide-api".to_string(),
+            )],
+            authorization: None,
+        });
+        assert_eq!(
+            app.clone().oneshot(targeted).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let post = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(Body::empty())
+            .expect("POST request builds");
+        let post = app.oneshot(post).await.unwrap();
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            post.headers().get(http::header::ALLOW),
+            Some(&HeaderValue::from_static("GET,HEAD"))
+        );
+    }
 
     #[test]
     fn proxy_request_span_continues_inbound_trace_on_upstream_inject() {

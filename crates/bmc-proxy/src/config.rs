@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
+use carbide_instrument::LabelValue;
 use carbide_utils::HostPortPair;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
@@ -57,11 +58,34 @@ pub(crate) struct Config {
     pub(crate) carbide_api: CarbideApiConfig,
     pub(crate) bmc_proxy: Option<HostPortPair>,
     #[serde(default)]
+    pub(crate) redirects: RedirectConfig,
+    #[serde(default)]
     pub(crate) tracing: TracingConfig,
     /// Request classes, written as `[[class]]` tables. Absent keeps every
     /// request in the implicit default class.
     #[serde(rename = "class", default)]
     pub(crate) classes: ClassTable,
+}
+
+/// How the proxy handles redirect responses from a BMC.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, LabelValue, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RedirectMode {
+    /// Follow redirects only when the destination has the original request's
+    /// scheme, host, and effective port.
+    #[default]
+    FollowSameOrigin,
+    /// Return safe same-BMC redirects to the caller for a separately
+    /// authorized follow-up request.
+    ReturnToClient,
+}
+
+/// Redirect handling settings.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RedirectConfig {
+    /// Redirect behavior. Defaults to [`RedirectMode::FollowSameOrigin`].
+    pub(crate) mode: RedirectMode,
 }
 
 /// OpenTelemetry trace export settings for proxied BMC requests.
@@ -191,6 +215,7 @@ mod tests {
         ProxyPortOnly,
         ProxyHostAndPort,
         ExplicitCarbideApi,
+        RedirectsSection,
         TracingSection,
     }
 
@@ -205,6 +230,7 @@ mod tests {
         service_base_paths: Vec<String>,
         carbide_api_url: String,
         bmc_proxy: Option<String>,
+        redirect_mode: RedirectMode,
         tracing_enabled: bool,
         tracing_otlp_endpoint: Option<String>,
     }
@@ -247,6 +273,12 @@ mod tests {
                 api_url = "https://api.example.com:1079"
             "#
             }
+            ConfigCase::RedirectsSection => {
+                r#"
+                [redirects]
+                mode = "return_to_client"
+            "#
+            }
             ConfigCase::TracingSection => {
                 r#"
                 [tracing]
@@ -276,6 +308,7 @@ mod tests {
             service_base_paths: config.auth.trust.spiffe_service_base_paths,
             carbide_api_url: config.carbide_api.api_url.to_string(),
             bmc_proxy: config.bmc_proxy.map(|pair| pair.to_string()),
+            redirect_mode: config.redirects.mode,
             tracing_enabled: config.tracing.enabled,
             tracing_otlp_endpoint: config.tracing.otlp_endpoint,
         }
@@ -300,6 +333,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -320,6 +354,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -343,6 +378,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -363,6 +399,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -383,6 +420,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("8443".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -403,6 +441,7 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local:8443".to_string()),
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -422,6 +461,28 @@ mod tests {
                     ],
                     carbide_api_url: "https://api.example.com:1079/".to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
+                    tracing_enabled: false,
+                    tracing_otlp_endpoint: None,
+                },
+            }
+
+            "redirect handling mode" {
+                ConfigCase::RedirectsSection => ConfigSummary {
+                    listen: "[::]:1079".to_string(),
+                    metrics_endpoint: "[::]:1080".to_string(),
+                    allowed_principals: vec![],
+                    identity_pemfile_path: "/tls/cert.pem".to_string(),
+                    root_cafile_path: "/tls/ca.pem".to_string(),
+                    trust_domain: "nico.local".to_string(),
+                    service_base_paths: vec![
+                        "/forge-system/sa/".to_string(),
+                        "/default/sa/".to_string(),
+                    ],
+                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                        .to_string(),
+                    bmc_proxy: None,
+                    redirect_mode: RedirectMode::ReturnToClient,
                     tracing_enabled: false,
                     tracing_otlp_endpoint: None,
                 },
@@ -442,10 +503,31 @@ mod tests {
                     carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
+                    redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: true,
                     tracing_otlp_endpoint: Some("http://collector.example.com:4317".to_string()),
                 },
             }
         );
+    }
+
+    #[test]
+    fn rejects_unknown_redirect_mode() {
+        let source = format!(
+            r#"
+            [redirects]
+            mode = "follow_anywhere"
+
+            {MINIMAL_TLS}
+            "#
+        );
+
+        let error = Config::parse(&source)
+            .err()
+            .expect("unknown redirect mode must fail");
+        let message = error.to_string();
+        assert!(message.contains("follow_anywhere"));
+        assert!(message.contains("follow_same_origin"));
+        assert!(message.contains("return_to_client"));
     }
 }

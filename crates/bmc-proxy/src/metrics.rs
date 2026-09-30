@@ -26,8 +26,11 @@ use std::time::Duration;
 use carbide_instrument::{Event, LabelValue, MetricFamily};
 use http::Method;
 use metrics_endpoint::{MetricsEndpointConfig, MetricsSetup};
+use opentelemetry::StringValue;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use crate::config::RedirectMode;
 
 pub(crate) async fn start(
     address: SocketAddr,
@@ -279,13 +282,92 @@ pub(crate) struct UpstreamAuthRetried {
     pub(crate) bmc_ip_address: String,
 }
 
+/// The redirect response status, kept to the five statuses HTTP clients
+/// automatically follow and one bounded fallback for other 3xx responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedirectStatus {
+    MovedPermanently,
+    Found,
+    SeeOther,
+    TemporaryRedirect,
+    PermanentRedirect,
+    Other,
+}
+
+impl From<http::StatusCode> for RedirectStatus {
+    fn from(status: http::StatusCode) -> Self {
+        match status {
+            http::StatusCode::MOVED_PERMANENTLY => Self::MovedPermanently,
+            http::StatusCode::FOUND => Self::Found,
+            http::StatusCode::SEE_OTHER => Self::SeeOther,
+            http::StatusCode::TEMPORARY_REDIRECT => Self::TemporaryRedirect,
+            http::StatusCode::PERMANENT_REDIRECT => Self::PermanentRedirect,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl LabelValue for RedirectStatus {
+    fn label_value(&self) -> StringValue {
+        StringValue::from(match self {
+            Self::MovedPermanently => "301",
+            Self::Found => "302",
+            Self::SeeOther => "303",
+            Self::TemporaryRedirect => "307",
+            Self::PermanentRedirect => "308",
+            Self::Other => "other",
+        })
+    }
+}
+
+/// How a redirect target relates to the BMC request that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum RedirectTarget {
+    SameOrigin,
+    /// The BMC's direct address when the request traversed another proxy.
+    SameBmc,
+    CrossOrigin,
+    Invalid,
+}
+
+/// What the proxy did with a redirect response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum RedirectDisposition {
+    Followed,
+    Returned,
+    Rejected,
+    LimitExceeded,
+}
+
+/// One redirect response observed while forwarding a BMC request. Every label
+/// is bounded; no `Location`, BMC address, path, or query enters the metric.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_redirect_observed",
+    metric_name = "carbide_bmc_proxy_redirects_total",
+    component = "nico-bmc-proxy",
+    log = off,
+    metric = counter,
+    describe = "Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition"
+)]
+pub(crate) struct RedirectObserved {
+    #[label]
+    pub(crate) mode: RedirectMode,
+    #[label]
+    pub(crate) status: RedirectStatus,
+    #[label]
+    pub(crate) target: RedirectTarget,
+    #[label]
+    pub(crate) disposition: RedirectDisposition,
+}
+
 /// A request the proxy forwarded to a BMC completed, successfully or not.
 /// The duration covers the upstream leg through the response headers;
-/// response bodies stream back separately. One send may follow up to five
-/// redirects internally, so the status is the final hop's -- `http3xx`
-/// generally means a non-followed 3xx such as a 304. Metric-only: the
-/// forward has never logged per request in either direction, and a
-/// failure's detail already reaches the caller in the 502 response body.
+/// response bodies stream back separately. In `follow_same_origin` mode one
+/// send may follow up to five redirects, so the status is the final hop's; in
+/// `return_to_client` mode it is the first response. Metric-only: the forward
+/// has never logged per request in either direction, and a failure's detail
+/// already reaches the caller in the 502 response body.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_upstream_request_completed",
@@ -578,6 +660,45 @@ mod tests {
     }
 
     #[test]
+    fn redirect_status_maps_followed_codes_and_buckets_the_rest() {
+        check_values(
+            [
+                Check {
+                    scenario: "301 Moved Permanently",
+                    input: http::StatusCode::MOVED_PERMANENTLY,
+                    expect: RedirectStatus::MovedPermanently,
+                },
+                Check {
+                    scenario: "302 Found",
+                    input: http::StatusCode::FOUND,
+                    expect: RedirectStatus::Found,
+                },
+                Check {
+                    scenario: "303 See Other",
+                    input: http::StatusCode::SEE_OTHER,
+                    expect: RedirectStatus::SeeOther,
+                },
+                Check {
+                    scenario: "307 Temporary Redirect",
+                    input: http::StatusCode::TEMPORARY_REDIRECT,
+                    expect: RedirectStatus::TemporaryRedirect,
+                },
+                Check {
+                    scenario: "308 Permanent Redirect",
+                    input: http::StatusCode::PERMANENT_REDIRECT,
+                    expect: RedirectStatus::PermanentRedirect,
+                },
+                Check {
+                    scenario: "304 Not Modified",
+                    input: http::StatusCode::NOT_MODIFIED,
+                    expect: RedirectStatus::Other,
+                },
+            ],
+            RedirectStatus::from,
+        );
+    }
+
+    #[test]
     fn upstream_status_from_result_uses_the_response_or_error() {
         let response = reqwest::Response::from(
             http::Response::builder()
@@ -630,6 +751,61 @@ mod tests {
                 UpstreamStatus::Http5xx.label_value() => "http5xx".to_string(),
                 UpstreamStatus::Error.label_value() => "error".to_string(),
             }
+
+            "redirect mode" {
+                RedirectMode::FollowSameOrigin.label_value() => "follow_same_origin".to_string(),
+                RedirectMode::ReturnToClient.label_value() => "return_to_client".to_string(),
+            }
+
+            "redirect status" {
+                RedirectStatus::MovedPermanently.label_value() => "301".to_string(),
+                RedirectStatus::Found.label_value() => "302".to_string(),
+                RedirectStatus::SeeOther.label_value() => "303".to_string(),
+                RedirectStatus::TemporaryRedirect.label_value() => "307".to_string(),
+                RedirectStatus::PermanentRedirect.label_value() => "308".to_string(),
+                RedirectStatus::Other.label_value() => "other".to_string(),
+            }
+
+            "redirect target" {
+                RedirectTarget::SameOrigin.label_value() => "same_origin".to_string(),
+                RedirectTarget::SameBmc.label_value() => "same_bmc".to_string(),
+                RedirectTarget::CrossOrigin.label_value() => "cross_origin".to_string(),
+                RedirectTarget::Invalid.label_value() => "invalid".to_string(),
+            }
+
+            "redirect disposition" {
+                RedirectDisposition::Followed.label_value() => "followed".to_string(),
+                RedirectDisposition::Returned.label_value() => "returned".to_string(),
+                RedirectDisposition::Rejected.label_value() => "rejected".to_string(),
+                RedirectDisposition::LimitExceeded.label_value() => "limit_exceeded".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn redirect_event_counts_its_bounded_labels_without_logging() {
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            emit(RedirectObserved {
+                mode: RedirectMode::FollowSameOrigin,
+                status: RedirectStatus::TemporaryRedirect,
+                target: RedirectTarget::SameOrigin,
+                disposition: RedirectDisposition::Followed,
+            });
+        });
+
+        assert!(logs.is_empty(), "metric-only event logged: {logs:?}");
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_bmc_proxy_redirects_total",
+                &[
+                    ("mode", "follow_same_origin"),
+                    ("status", "307"),
+                    ("target", "same_origin"),
+                    ("disposition", "followed"),
+                ],
+            ),
+            1.0
         );
     }
 
