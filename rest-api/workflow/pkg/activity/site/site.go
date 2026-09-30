@@ -1134,8 +1134,9 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			}
 
 			// Lock the IP Block before counting Allocations, as the delete API
-			// does. An Allocation from a DatacenterOnly root locks it too, so it
-			// is either counted here or finds the IP Block removed.
+			// does. An Allocation locks its root too, so it is either counted
+			// here or finds the IP Block removed. A rename can commit before the
+			// lock, so the locked IP Block is checked again.
 			lockedIPBlock, derr := ipBlockDAO.GetByIDForUpdate(ctx, tx, ipBlock.ID)
 			if errors.Is(derr, cdb.ErrDoesNotExist) {
 				continue
@@ -1143,6 +1144,10 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			if derr != nil {
 				logger.Error().Err(derr).Str("IPBlockID", ipBlock.ID.String()).Msg("failed to lock Site fabric IP Block")
 				return derr
+			}
+			if lockedIPBlock.Name != getSiteFabricIPBlockName(prefix) || lockedIPBlock.SitePrefixID != nil {
+				rootPrefixes = append(rootPrefixes, rootPrefix{prefix: prefix, ipBlockID: lockedIPBlock.ID})
+				continue
 			}
 
 			_, allocationCount, derr := allocationConstraintDAO.GetAll(

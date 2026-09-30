@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -1990,6 +1991,102 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 					assert.Error(t, err, "IPAM entry for %s remains in %s", cidr, namespace)
 				}
 			}
+		})
+	}
+
+	// Each write holds the row of the IP Block for a prefix the Site no longer
+	// reports, then commits while the activity waits for that row.
+	concurrentTests := []struct {
+		name  string
+		write func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock)
+	}{
+		{
+			name: "keeps a Public IP Block whose Allocation commits while the activity waits",
+			write: func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock) {
+				tenant := util.TestBuildTenant(t, resources.dbSession, "test-tenant", "test-tenant-org", nil, resources.user)
+				allocation := util.TestBuildAllocation(t, resources.dbSession, resources.provider, tenant, resources.site, "test-allocation")
+				ipamStorage := ipam.NewIpamStorage(resources.dbSession.DB, tx.GetBunTx())
+				_, err := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, resources.dbSession, ipamStorage, ipBlock, 28)
+				require.NoError(t, err)
+				_, err = cdbm.NewAllocationConstraintDAO(resources.dbSession).Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
+					AllocationID:    allocation.ID,
+					ResourceType:    cdbm.AllocationResourceTypeIPBlock,
+					ResourceTypeID:  ipBlock.ID,
+					ConstraintType:  cdbm.AllocationConstraintTypeOnDemand,
+					ConstraintValue: 28,
+					CreatedBy:       resources.user.ID,
+				})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "keeps an IP Block whose rename commits while the activity waits",
+			write: func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock) {
+				_, err := cdbm.NewIPBlockDAO(resources.dbSession).Update(ctx, tx, cdbm.IPBlockUpdateInput{
+					IPBlockID: ipBlock.ID,
+					Name:      cutil.GetPtr("provider-kept-block"),
+				})
+				require.NoError(t, err)
+			},
+		},
+	}
+
+	for _, tt := range concurrentTests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			resources := setupSiteFabricIPBlockTest(t)
+			mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
+			ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
+
+			const droppedCIDR = "203.0.113.0/24"
+			require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{droppedCIDR}))
+			ipBlocks, _, err := ipBlockDAO.GetAll(ctx, nil, cdbm.IPBlockFilterInput{SiteIDs: []uuid.UUID{resources.site.ID}}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			require.Len(t, ipBlocks, 1)
+			ipBlock := ipBlocks[0]
+			require.Equal(t, cdbm.IPBlockRoutingTypePublic, ipBlock.RoutingType)
+
+			// Deferred before the rollback, so a failed assertion releases the
+			// activity before waiting for it.
+			var activity sync.WaitGroup
+			defer activity.Wait()
+			tx, err := cdb.BeginTx(ctx, resources.dbSession, nil)
+			require.NoError(t, err)
+			committed := false
+			defer func() {
+				if !committed {
+					assert.NoError(t, tx.Rollback())
+				}
+			}()
+			var writerPID int
+			require.NoError(t, tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &writerPID))
+			tt.write(t, ctx, tx, resources, &ipBlock)
+
+			var activityErr error
+			activity.Go(func() {
+				activityErr = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
+			})
+			require.Eventually(t, func() bool {
+				var waiters int
+				queryErr := resources.dbSession.DB.NewSelect().
+					ColumnExpr("count(*)").
+					TableExpr("pg_catalog.pg_stat_activity").
+					Where("? = ANY(pg_blocking_pids(pid))", writerPID).
+					Scan(ctx, &waiters)
+				return queryErr == nil && waiters > 0
+			}, 5*time.Second, 10*time.Millisecond, "activity did not wait for the concurrent write")
+
+			require.NoError(t, tx.Commit())
+			committed = true
+			activity.Wait()
+			require.NoError(t, activityErr)
+
+			_, err = ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+			require.NoError(t, err)
+			namespace := ipam.GetIpamNamespaceForIPBlock(ctx, ipBlock.RoutingType, resources.provider.ID.String(), resources.site.ID.String())
+			_, err = ipam.NewIpamStorage(resources.dbSession.DB, nil).ReadPrefix(ctx, droppedCIDR, namespace)
+			require.NoError(t, err)
 		})
 	}
 }

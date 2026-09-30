@@ -1168,9 +1168,8 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusConflict, coreLinkedDeleteMessage, nil)
 		}
 
-		// Check for allocations while holding the lock on a DatacenterOnly Site
-		// fabric root that can receive a Core link. A child that commits first is
-		// visible here; a later child must wait for deletion.
+		// Check for allocations while holding the root's lock. A child that
+		// commits first is visible here; a later child must wait for deletion.
 		acDAO := cdbm.NewAllocationConstraintDAO(dipbh.dbSession)
 		_, acCount, derr := acDAO.GetAll(ctx, tx, cdbm.AllocationConstraintFilterInput{
 			ResourceType:    cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock),
