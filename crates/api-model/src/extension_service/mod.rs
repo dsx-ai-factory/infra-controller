@@ -448,9 +448,6 @@ impl DpfHelmChartIdentity {
 /// This is intentionally the NICo API contract rather than a representation of
 /// the DPUService CR.  NICo owns the remaining DPUService fields, including
 /// the release name and placement selector.
-///
-/// @TODO(Felicity): check whether add deny_unknown_fields to DpfHelmChartData
-/// for backward compatibility concerns
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DpfHelmChartServiceData {
@@ -460,6 +457,14 @@ pub struct DpfHelmChartServiceData {
     pub chart_name: String,
     #[serde(rename = "chartVersion")]
     pub chart_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "serviceID")]
+    pub service_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deployInCluster"
+    )]
+    pub deploy_in_cluster: Option<bool>,
     pub security: DpfHelmChartServiceSecurity,
     /// Optional chart-specific values. When absent, no `helmChart.values`
     /// field is sent to DPF.
@@ -549,6 +554,10 @@ pub enum DpfHelmChartServiceDataError {
     MissingField(&'static str),
     #[error("repoURL must begin with oci:// or https://")]
     InvalidRepositoryUrl,
+    #[error(
+        "deployInCluster must be explicitly set to false for DPF helm chart extension services"
+    )]
+    InvalidDeployInCluster,
     #[error("tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector")]
     ReservedNodeSelector,
 }
@@ -587,6 +596,15 @@ impl DpfHelmChartServiceData {
         }
         if self.chart_version.is_empty() {
             return Err(DpfHelmChartServiceDataError::MissingField("chartVersion"));
+        }
+        // serviceID is required
+        if matches!(self.service_id.as_deref(), None | Some("")) {
+            return Err(DpfHelmChartServiceDataError::MissingField("serviceID"));
+        }
+        // Currently only allow deploy_in_cluster to be false so extension service
+        // only gets deployed in DPU clusters
+        if self.deploy_in_cluster != Some(false) {
+            return Err(DpfHelmChartServiceDataError::InvalidDeployInCluster);
         }
         if self.values.as_ref().is_some_and(|values| {
             values
@@ -667,6 +685,8 @@ mod tests {
     fn dpf_helm_chart_data_accepts_omitted_values() {
         let input = r#"{
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":false,
                 "security":{"privileged":false},
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service"
@@ -676,7 +696,7 @@ mod tests {
         assert_eq!(data.values, None);
         assert_eq!(
             data.normalized_json().unwrap(),
-            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","security":{"privileged":false}}"#
+            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","serviceID":"tenant-service-v1","deployInCluster":false,"security":{"privileged":false}}"#
         );
         assert_eq!(
             DpfHelmChartServiceData::parse_normalized(input).unwrap(),
@@ -690,6 +710,8 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
+            "serviceID":"tenant-service-v1",
+            "deployInCluster":false,
             "security":{"privileged":true},
             "values": %VALUES%
         }"#;
@@ -698,11 +720,38 @@ mod tests {
             DpfHelmChartServiceData::parse(&required.replace("%VALUES%", "[]")),
             Err(DpfHelmChartServiceDataError::Json(_))
         ));
+
+        // A missing workload identity is invalid even when every other required field is present.
+        let missing_service_id = required
+            .replace("            \"serviceID\":\"tenant-service-v1\",\n", "")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&missing_service_id),
+            Err(DpfHelmChartServiceDataError::MissingField("serviceID"))
+        );
         assert_eq!(
             DpfHelmChartServiceData::parse(
                 &required.replace("%VALUES%", r#"{"serviceDaemonSet":{"nodeSelector":{}}}"#)
             ),
             Err(DpfHelmChartServiceDataError::ReservedNodeSelector)
+        );
+
+        // The deployment location must be explicit
+        let missing_deploy_in_cluster = required
+            .replace("            \"deployInCluster\":false,\n", "")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&missing_deploy_in_cluster),
+            Err(DpfHelmChartServiceDataError::InvalidDeployInCluster)
+        );
+
+        // For now, only support deployInCluster=false
+        let host_cluster = required
+            .replace("\"deployInCluster\":false", "\"deployInCluster\":true")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&host_cluster),
+            Err(DpfHelmChartServiceDataError::InvalidDeployInCluster)
         );
     }
 
@@ -712,6 +761,8 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
+            "serviceID":"weka-dpu-client-v2",
+            "deployInCluster":false,
             "security":{"privileged":true,"spiffe":{}},
             "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
             "serviceDaemonSet":{
@@ -723,6 +774,10 @@ mod tests {
         }"#;
 
         let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+
+        // Preserve caller-selected DPUService service ID
+        assert_eq!(parsed.service_id.as_deref(), Some("weka-dpu-client-v2"));
+        assert_eq!(parsed.deploy_in_cluster, Some(false));
         assert_eq!(parsed.security.spiffe, Some(DpfHelmChartServiceSpiffe {}));
         let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
         assert_eq!(

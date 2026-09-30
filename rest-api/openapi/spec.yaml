@@ -32544,6 +32544,8 @@ components:
         - repoURL
         - chartName
         - chartVersion
+        - serviceID
+        - deployInCluster
         - security
       properties:
         repoURL:
@@ -32559,6 +32561,15 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
+        serviceID:
+          type: string
+          minLength: 1
+          description: Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+        deployInCluster:
+          type: boolean
+          enum:
+            - false
+          description: Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
@@ -32669,7 +32680,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string

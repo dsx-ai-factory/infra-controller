@@ -2583,7 +2583,7 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
         },
         spec: DpuServiceSpec {
             config_ports: None,
-            deploy_in_cluster: Some(service.deploy_in_cluster),
+            deploy_in_cluster: service.deploy_in_cluster,
             dpu_cluster_selector: None,
             helm_chart: DpuServiceHelmChart {
                 source: DpuServiceHelmChartSource {
@@ -2626,7 +2626,7 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                     }),
                 }
             }),
-            service_id: None,
+            service_id: service.service_id.clone(),
         },
         status: None,
     }
@@ -7091,7 +7091,8 @@ mod tests {
                 release_name: "extension-release".to_owned(),
                 values: Some(BTreeMap::from([("replicas".to_owned(), json!(1))])),
             },
-            deploy_in_cluster: false,
+            deploy_in_cluster: Some(false),
+            service_id: Some("extension-service-v1".to_owned()),
             security: DetachedDpuServiceSecurity {
                 privileged: false,
                 spiffe: true,
@@ -7140,7 +7141,8 @@ mod tests {
         let observed_daemon_set = observed.service_daemon_set.unwrap();
         let expected_daemon_set = service.service_daemon_set.unwrap();
 
-        // All caller-supplied security and DaemonSet fields must remain present.
+        // All caller-supplied fields must remain present.
+        assert_eq!(observed.service_id, service.service_id);
         assert_eq!(observed_security.privileged, Some(false));
         assert!(observed_security.spiffe);
         assert_eq!(
@@ -7200,6 +7202,7 @@ mod tests {
                         "values": {"replicas": 1},
                     },
                     "security": {"privileged": false, "spiffe": {}},
+                    "serviceID": "extension-service-v1",
                     "serviceDaemonSet": {
                         "nodeSelector": {
                             "nodeSelectorTerms": [{
