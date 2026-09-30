@@ -20,9 +20,11 @@ use std::io;
 use std::sync::Arc;
 
 mod acl;
+mod class;
 mod config;
 mod metrics;
 mod net;
+mod pattern;
 mod proxy;
 mod setup;
 mod span_isolation;

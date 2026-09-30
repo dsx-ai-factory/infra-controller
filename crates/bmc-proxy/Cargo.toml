@@ -54,6 +54,7 @@ futures-util = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }
+humantime-serde = { workspace = true }
 hyper-rustls = { workspace = true }
 hyper-timeout = { workspace = true }
 hyper-util = { workspace = true }

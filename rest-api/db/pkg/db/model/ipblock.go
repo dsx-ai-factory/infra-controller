@@ -53,6 +53,9 @@ const (
 )
 
 var (
+	// ErrChildPrefixLengthTooShort identifies a requested prefix larger than its source IP Block.
+	ErrChildPrefixLengthTooShort = errors.New("child prefix length must be at least the source prefix length")
+
 	// IPBlockOrderByFields is a list of valid order by fields for the IPBlock model
 	IPBlockOrderByFields = []string{"name", "prefix", "status", "created", "updated"}
 	// IPBlockRelatedEntities is a list of valid relation by fields for the IPBlock model
@@ -124,6 +127,22 @@ func (ipb *IPBlock) ContainsPrefix(prefix netip.Prefix) bool {
 		ipBlockPrefix.Addr().BitLen() == prefix.Addr().BitLen() &&
 		ipBlockPrefix.Bits() <= prefix.Bits() &&
 		ipBlockPrefix.Contains(prefix.Addr())
+}
+
+// ValidateChildPrefixLength accepts lengths from this IP Block's prefix length
+// through its address family maximum, including an equal-length full grant.
+func (ipb *IPBlock) ValidateChildPrefixLength(length int) error {
+	prefix, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", ipb.Prefix, ipb.PrefixLength))
+	if err != nil {
+		return err
+	}
+	if length < prefix.Bits() {
+		return fmt.Errorf("%w: got %d, minimum %d", ErrChildPrefixLengthTooShort, length, prefix.Bits())
+	}
+	if length > prefix.Addr().BitLen() {
+		return fmt.Errorf("prefix length must be between %d and %d", prefix.Bits(), prefix.Addr().BitLen())
+	}
+	return nil
 }
 
 // IPBlockCreateInput input parameters for Create method

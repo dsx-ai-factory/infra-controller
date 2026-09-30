@@ -202,6 +202,10 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 			if apiRequest.ConstraintValue < dbParentIPBlock.PrefixLength {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "New constraint value cannot be less than the source IP Block prefix length", nil)
 			}
+			err = dbParentIPBlock.ValidateChildPrefixLength(apiRequest.ConstraintValue)
+			if err != nil {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+			}
 
 			// get childIPBlock
 			existingChildIPBlock, err = ipbDAO.GetByID(ctx, nil, *ac.DerivedResourceID, nil)

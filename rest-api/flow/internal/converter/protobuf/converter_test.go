@@ -647,6 +647,31 @@ func TestComponentConverter(t *testing.T) {
 	}
 }
 
+func TestNVLinkDomainFromRack(t *testing.T) {
+	for _, tc := range []struct{ name, profile, topology string }{
+		{name: "qualified", profile: "GB200_NVL72R1_C2G4_WIWYNN", topology: "GB200_NVL72R1_C2G4"},
+		{name: "without power", profile: "GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF", topology: "GB300_NVL72R1_C2G4"},
+		{name: "legacy", profile: "NVL72"},
+		{name: "unavailable"},
+		{name: "unknown vendor", profile: "GB200_NVL72R1_C2G4_OTHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &pb.Rack{ExternalId: "rack-01", Info: &pb.DeviceInfo{Name: "domain-a"}, RackProfileId: &tc.profile,
+				OperationStatus: pb.Phase_PHASE_READY, Components: []*pb.Component{{ComponentId: "compute-01"}}}
+			d := NVLinkDomainFromRack(r)
+			assert.Equal(t, "rack-01", d.GetId())
+			assert.Equal(t, "domain-a", d.GetName())
+			assert.Equal(t, pb.Phase_PHASE_READY, d.GetOperationStatus())
+			assert.Equal(t, r.Components, d.GetComponents())
+			if tc.topology == "" {
+				assert.Nil(t, d.Topology)
+			} else {
+				assert.Equal(t, tc.topology, d.GetTopology())
+			}
+		})
+	}
+}
+
 func TestRackConverter(t *testing.T) {
 	domainID := uuid.New()
 	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
@@ -1153,12 +1178,20 @@ func TestNVLDomainTargetFrom(t *testing.T) {
 		want    operation.NVLDomainTarget
 		wantErr string
 	}{
+		"external ID": {
+			input: &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: "Rack-01"}},
+			want:  operation.NVLDomainTarget{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+		},
+		"blank external ID": {
+			input:   &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: " "}},
+			wantErr: "must not be blank",
+		},
 		"nil input": {
 			wantErr: "NVLink domain target is nil",
 		},
 		"no identifier": {
 			input:   &pb.NVLDomainTarget{},
-			wantErr: "must have either id or name set",
+			wantErr: "must have id, external_id, or name set",
 		},
 		"ID with filter": {
 			input: &pb.NVLDomainTarget{
@@ -1275,6 +1308,19 @@ func TestTargetSpecTo(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		"NVLink domain target by external ID": {
+			input: operation.TargetSpec{NVLDomains: []operation.NVLDomainTarget{
+				{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+			}},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				require.Len(t, got.GetNvlDomains().GetTargets(), 1)
+				assert.Equal(t, "Rack-01", got.GetNvlDomains().GetTargets()[0].GetExternalId())
+				roundtrip, err := NVLDomainTargetFrom(got.GetNvlDomains().GetTargets()[0])
+				require.NoError(t, err)
+				assert.Equal(t, "Rack-01", roundtrip.Identifier.ExternalID)
 			},
 		},
 		"NVLink domain target with unmapped component type": {

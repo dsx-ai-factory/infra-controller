@@ -97,6 +97,41 @@ func testIPBlockBuildTenant(t *testing.T, dbSession *db.Session, name string) *T
 	return tenant
 }
 
+func TestIPBlock_ValidateChildPrefixLength(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prefix   string
+		bits     int
+		length   int
+		wantErr  bool
+		tooShort bool
+	}{
+		{name: "IPv4 full grant", prefix: "192.0.2.0", bits: 24, length: 24},
+		{name: "IPv4 maximum", prefix: "192.0.2.0", bits: 24, length: 32},
+		{name: "IPv4 too long", prefix: "192.0.2.0", bits: 24, length: 33, wantErr: true},
+		{name: "IPv6 full grant", prefix: "2001:db8::", bits: 64, length: 64},
+		{name: "IPv6 maximum", prefix: "2001:db8::", bits: 64, length: 128},
+		{name: "IPv6 too long", prefix: "2001:db8::", bits: 64, length: 129, wantErr: true},
+		{name: "larger than source", prefix: "2001:db8::", bits: 64, length: 63, wantErr: true, tooShort: true},
+		{name: "negative length", prefix: "2001:db8::", bits: 64, length: -128, wantErr: true, tooShort: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ipBlock := IPBlock{Prefix: tc.prefix, PrefixLength: tc.bits}
+			err := ipBlock.ValidateChildPrefixLength(tc.length)
+			if tc.tooShort {
+				assert.ErrorIs(t, err, ErrChildPrefixLengthTooShort)
+			} else {
+				assert.NotErrorIs(t, err, ErrChildPrefixLengthTooShort)
+			}
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestIPBlock_ContainsPrefix(t *testing.T) {
 	tests := []struct {
 		name             string

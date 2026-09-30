@@ -2330,11 +2330,13 @@ pub async fn trigger_managed_host_reset_request(
     txn: &mut PgConnection,
     initiator: &str,
     machine_id: &MachineId,
+    ignore_cleanup: bool,
 ) -> Result<bool, DatabaseError> {
     let req = ResetRequest {
         requested_at: chrono::Utc::now(),
         initiator: initiator.to_string(),
         started_at: None,
+        ignore_cleanup,
     };
 
     let query = "UPDATE machines SET reset_requested=$2

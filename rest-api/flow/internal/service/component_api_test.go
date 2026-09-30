@@ -68,6 +68,7 @@ func (m *mockManager) GetRackByIdentifier(
 func (m *mockManager) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	return m.domainRacks[id.ID], nil
 }

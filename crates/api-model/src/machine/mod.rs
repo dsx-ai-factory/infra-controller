@@ -2562,6 +2562,7 @@ pub enum CleanupContext {
     #[default]
     Deprovision,
     InitialDiscovery,
+    Reset,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, EnumIter)]
 #[serde(rename_all = "lowercase")]
@@ -2786,6 +2787,8 @@ pub struct ResetRequest {
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ignore_cleanup: bool,
 }
 
 pub use crate::rack::RackFirmwareUpgradeStatus;

@@ -332,16 +332,93 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
         })
 }
 
-#[cfg(test)]
-#[test]
-fn test_generate_domain_serial_format() {
-    use chrono::Utc;
-    let now = Utc::now();
-    let expected_serial = now.format("%Y%m%d01").to_string().parse::<u32>().unwrap();
+// Records are derived from inventory, so no single write path owns a zone's
+// content. Each inventory writer that changes what a zone publishes calls one
+// of these helpers in its own transaction. `bump_serial` holds the rule; the
+// other helpers only resolve which zones an inventory row publishes into.
 
-    let serial = dns_record::SoaRecord::generate_new_serial();
+/// Advances the serial of every live zone in `domain_ids`.
+///
+/// `updated` advances as well, so `update` and `delete`, which compare it as
+/// an optimistic-lock token, fail with `ConcurrentModificationError` instead
+/// of writing a serial computed from the value they read before this bump.
+pub async fn bump_serial(txn: &mut PgConnection, domain_ids: &[DomainId]) -> DatabaseResult<()> {
+    if domain_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE domains
+                 SET soa = jsonb_set(soa, '{serial}', to_jsonb(GREATEST(
+                         (soa->>'serial')::bigint + 1,
+                         floor(extract(epoch FROM statement_timestamp()))::bigint))),
+                     updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
+                 WHERE id = ANY($1) AND deleted IS NULL AND soa ? 'serial'";
+    sqlx::query(query)
+        .bind(domain_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
 
-    assert_eq!(serial, expected_serial);
+/// Advances the serial of the zone each of the given machine interfaces
+/// publishes into.
+pub async fn bump_serial_for_interfaces(
+    txn: &mut PgConnection,
+    interface_ids: &[carbide_uuid::machine::MachineInterfaceId],
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "SELECT DISTINCT domain_id FROM machine_interfaces
+                 WHERE id = ANY($1) AND domain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(interface_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
+}
+
+/// Advances the serial of the zone a machine interface publishes into.
+pub async fn bump_serial_for_interface(
+    txn: &mut PgConnection,
+    interface_id: carbide_uuid::machine::MachineInterfaceId,
+) -> DatabaseResult<()> {
+    bump_serial_for_interfaces(txn, &[interface_id]).await
+}
+
+/// Advances the serial of the zone each interface of a machine publishes into.
+pub async fn bump_serial_for_machine_interfaces(
+    txn: &mut PgConnection,
+    machine_id: &carbide_uuid::machine::MachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT DISTINCT domain_id FROM machine_interfaces
+                 WHERE machine_id = $1 AND domain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
+}
+
+/// Advances the serial of each segment's subdomain, the zone that publishes
+/// instance addresses allocated on that segment.
+pub async fn bump_serial_for_segments(
+    txn: &mut PgConnection,
+    segment_ids: &[carbide_uuid::network::NetworkSegmentId],
+) -> DatabaseResult<()> {
+    if segment_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "SELECT DISTINCT subdomain_id FROM network_segments
+                 WHERE id = ANY($1) AND subdomain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(segment_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
 }
 
 #[cfg(test)]

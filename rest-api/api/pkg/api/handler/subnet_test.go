@@ -439,7 +439,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			reqBody:        string(errBodyIpamFail),
 			user:           tnu,
 			expectedErr:    true,
-			expectedErrMsg: "Could not create IPAM entry for Subnet. Details: given length:15 must be greater than prefix length:16",
+			expectedErrMsg: "Could not create IPAM entry for Subnet. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
 			expectedStatus: http.StatusBadRequest,
 		},
 		{

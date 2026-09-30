@@ -1283,7 +1283,12 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodPost,
 			Handler: apiHandler.NewCancelTaskRunHandler(dbSession, tc, scp, cfg),
 		},
-		// NVLink Domain operation endpoints (Flow).
+		// NVLink Domain endpoints (Flow).
+		{
+			Path:    apiPathPrefix + "/domain/nvlink",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllNVLinkDomainHandler(dbSession, tc, scp, cfg),
+		},
 		{
 			Path:    apiPathPrefix + "/domain/nvlink/power",
 			Method:  http.MethodPatch,
@@ -1303,6 +1308,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/domain/nvlink/:id/firmware",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateNVLinkDomainFirmwareHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/nvlink/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetNVLinkDomainHandler(dbSession, tc, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/rack",

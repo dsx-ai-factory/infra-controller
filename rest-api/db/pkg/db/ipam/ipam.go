@@ -152,6 +152,11 @@ func CreateChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, dbSession *
 	if parentIPBlock.FullGrant {
 		return nil, fmt.Errorf("parent IPBlock %s already has a full grant", parentIPBlock.ID)
 	}
+	// Check the loaded source prefix before narrowing the requested length to uint8.
+	err = parentIPBlock.ValidateChildPrefixLength(childBlockSize)
+	if err != nil {
+		return nil, err
+	}
 	ipamer := cipam.NewWithStorage(ipamDB)
 	namespace := GetIpamNamespaceForIPBlock(ctx, parentIPBlock.RoutingType, parentIPBlock.InfrastructureProviderID.String(), parentIPBlock.SiteID.String())
 	ipamer.SetNamespace(namespace)

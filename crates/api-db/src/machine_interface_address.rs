@@ -185,12 +185,16 @@ pub async fn delete(
 ) -> Result<(), DatabaseError> {
     lock_interface_for_deletion(&mut *txn, *interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    // The interface row still exists here; the caller deletes it afterwards.
+    if removed.rows_affected() > 0 {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(())
 }
 
 /// Lock the parent before touching its address rows. Unlike assignment,
@@ -259,6 +263,9 @@ pub async fn delete_by_interface_family(
         .await
         .map(|r| r.rows_affected() > 0)
         .map_err(|e| DatabaseError::query(query, e))?;
+    if removed {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
     if removed && allocation_type != AllocationType::Slaac {
         crate::machine_interface::record_allocation_removal(txn, interface_id, family).await?;
     }
@@ -285,6 +292,9 @@ pub async fn delete_by_interface_and_address(
         .await
         .map(|r| r.rows_affected() > 0)
         .map_err(|e| DatabaseError::query(query, e))?;
+    if removed {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
     if removed && allocation_type != AllocationType::Slaac {
         crate::machine_interface::record_allocation_removal(
             txn,
@@ -325,6 +335,7 @@ pub async fn insert(
         .map_err(|e| DatabaseError::query(query, e))?
         .is_some();
     if address_inserted {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
         return Ok(());
     }
 
@@ -820,6 +831,74 @@ mod tests {
     }
 
     /// Verifies the new SLAAC allocation type survives a database round trip.
+    /// The stored SOA serial of a zone.
+    async fn zone_serial(
+        txn: &mut PgConnection,
+        domain_id: carbide_uuid::domain::DomainId,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT (soa->>'serial')::bigint FROM domains WHERE id = $1")
+            .bind(domain_id)
+            .fetch_one(txn)
+            .await
+    }
+
+    // Address ownership is the inventory write that most often changes what a
+    // zone publishes. Prove the insert and delete paths advance the owning
+    // zone's serial; `bump_serial` itself is covered in `dns::domain`.
+    #[crate::sqlx_test]
+    async fn address_changes_advance_the_zone_serial(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let zone = crate::dns::domain::persist(
+            model::dns::NewDomain::new("serial-wiring.example"),
+            txn.as_mut(),
+        )
+        .await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, subdomain_id) VALUES ($1, 'V1-T0', $2)
+             RETURNING id",
+        )
+        .bind("serial-wiring")
+        .bind(zone.id)
+        .fetch_one(txn.as_mut())
+        .await?;
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                (segment_id, mac_address, primary_interface, hostname, domain_id)
+             VALUES ($1, '02:00:00:00:00:02'::macaddr, true, 'serial-wiring', $2)
+             RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(zone.id)
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        let created = zone_serial(txn.as_mut(), zone.id).await?;
+        insert(
+            txn.as_mut(),
+            interface_id,
+            "10.5.5.5".parse()?,
+            AllocationType::Dhcp,
+        )
+        .await?;
+        let after_insert = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(
+            after_insert > created,
+            "inserting an address advances the zone serial: {created} -> {after_insert}"
+        );
+
+        delete(txn.as_mut(), &interface_id).await?;
+        let after_delete = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(
+            after_delete > after_insert,
+            "deleting an address advances the zone serial: {after_insert} -> {after_delete}"
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn slaac_allocation_type_round_trips(
         pool: sqlx::PgPool,
