@@ -57,11 +57,18 @@ pub(in crate::domain) fn convert_domain_to_nice_format(
     let default_ttl = domain
         .default_ttl
         .map_or_else(|| "site default".to_string(), |secs| format!("{secs}s"));
+    // Label infrastructure domains explicitly because an empty owner could
+    // look like missing data.
+    let vpc = domain
+        .vpc_id
+        .map(|vpc_id| vpc_id.to_string())
+        .unwrap_or_else(|| "none (infrastructure)".to_string());
 
     let data = vec![
         ("ID", domain_id.as_str()),
         ("NAME", domain.name.as_str()),
         ("DEFAULT TTL", default_ttl.as_str()),
+        ("VPC", vpc.as_str()),
         ("CREATED", domain_created.as_str()),
         ("UPDATED", domain_updated.as_str()),
         ("DELETED", domain_deleted.as_str()),
@@ -76,12 +83,16 @@ pub(in crate::domain) fn convert_domain_to_nice_format(
 fn convert_domain_to_nice_table(domains: ::rpc::protos::dns::DomainList) -> Box<Table> {
     let mut table = Table::new();
 
-    table.set_titles(row!["Id", "Name", "Created",]);
+    table.set_titles(row!["Id", "Name", "Vpc", "Created",]);
 
     for domain in domains.domains {
         table.add_row(row![
             domain.id.unwrap_or_default(),
             domain.name,
+            domain
+                .vpc_id
+                .map(|vpc_id| vpc_id.to_string())
+                .unwrap_or_default(),
             domain.created.unwrap_or_default(),
         ]);
     }

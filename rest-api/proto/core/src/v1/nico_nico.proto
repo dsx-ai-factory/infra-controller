@@ -65,7 +65,8 @@ service Forge {
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
   // Deletion does not release a retained VNI implicitly. Call
   // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-  // Retained or inconsistent owned allocations cause FailedPrecondition.
+  // Retained or inconsistent owned allocations cause FailedPrecondition, as do
+  // live DNS domains owned by this VPC. Deleted domains do not block deletion.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);

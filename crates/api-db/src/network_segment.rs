@@ -113,6 +113,19 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
+    // The DNS views publish records under the segment's subdomain_id. VPC
+    // domains only record ownership, so reject them here even when the
+    // segment belongs to the same VPC.
+    if let Some(domain_id) = value.subdomain_id
+        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
+            .await?
+            .is_some_and(|domain| domain.vpc_id.is_some())
+    {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
+        )));
+    }
+
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -1118,6 +1131,47 @@ mod tests {
     use model::network_segment::NetworkDefinitionSegmentType;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
+        let domain = crate::dns::domain::persist(
+            model::dns::NewDomain {
+                vpc_id: Some(vpc_id),
+                ..model::dns::NewDomain::new("tenant.example")
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("create VPC-owned domain");
+        let segment = NewNetworkSegment {
+            subdomain_id: Some(domain.id),
+            vpc_id: Some(vpc_id),
+            segment_type: NetworkSegmentType::Tenant,
+            ..crate::test_support::network_segment::admin_segment(
+                "tenant-dns",
+                "192.0.2.0/24",
+                "192.0.2.1",
+                1,
+            )
+        };
+        let segment_id = segment.id;
+
+        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
+        assert!(
+            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
+            "{result:?}"
+        );
+        let segments = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .expect("the rejected creation leaves the transaction usable");
+        assert!(segments.is_empty(), "the rejected segment was not inserted");
+    }
 
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;

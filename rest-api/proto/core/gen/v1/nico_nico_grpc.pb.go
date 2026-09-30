@@ -582,7 +582,8 @@ type ForgeClient interface {
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// live DNS domains owned by this VPC. Deleted domains do not block deletion.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
@@ -6809,7 +6810,8 @@ type ForgeServer interface {
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// live DNS domains owned by this VPC. Deleted domains do not block deletion.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)

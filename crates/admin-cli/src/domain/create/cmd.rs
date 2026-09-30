@@ -15,13 +15,26 @@
  * limitations under the License.
  */
 
-/// DNS database helpers for tests in downstream crates.
-pub mod dns;
-#[cfg(test)]
-pub(crate) mod expected_host;
-#[cfg(test)]
-pub(crate) mod network_segment;
-pub mod power_shelf;
-pub mod switch;
-#[cfg(test)]
-pub(crate) mod vpc;
+use ::rpc::admin_cli::OutputFormat;
+
+use super::args::Args;
+use crate::domain::show::cmd::convert_domain_to_nice_format;
+use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
+
+pub(super) async fn create(
+    args: Args,
+    output_format: OutputFormat,
+    api_client: &ApiClient,
+) -> CarbideCliResult<()> {
+    let domain = api_client
+        .create_domain(args.name, args.vpc_id, args.default_ttl)
+        .await?;
+
+    match output_format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&domain)?),
+        _ => println!("{}", convert_domain_to_nice_format(&domain)?),
+    }
+
+    Ok(())
+}

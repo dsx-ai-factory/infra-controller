@@ -318,17 +318,32 @@ pub async fn find_by_segment(
 /// If the VPC was already deleted, this returns Ok(`None`), even if historical
 /// records still reference it.
 ///
-/// Callers that coordinate VPC-attached child mutations must acquire
-/// [`VpcRowLock::Mutation`] on this VPC before calling this function.
+/// Use an explicit transaction to keep the VPC row locked from the reference
+/// checks until the deletion is committed or rolled back.
 pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>, DatabaseError> {
-    let active_vpc_query = "SELECT EXISTS(SELECT 1 FROM vpcs WHERE id=$1 AND deleted IS NULL)";
-    let is_active: bool = sqlx::query_scalar(active_vpc_query)
+    // Domain creation takes the same lock, so it cannot add a reference
+    // between the checks below and the deletion.
+    let vpcs = find_by_with_lock(
+        &mut *txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        VpcRowLock::Mutation,
+    )
+    .await?;
+    if vpcs.is_empty() {
+        return Ok(None);
+    }
+
+    // A VPC cannot be deleted while it owns a live domain.
+    let domain_query = "SELECT EXISTS(SELECT 1 FROM domains WHERE vpc_id=$1 AND deleted IS NULL)";
+    let has_domains: bool = sqlx::query_scalar(domain_query)
         .bind(id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(active_vpc_query, e))?;
-    if !is_active {
-        return Ok(None);
+        .map_err(|error| DatabaseError::query(domain_query, error))?;
+    if has_domains {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "VPC {id} cannot be deleted while live DNS domains reference it"
+        )));
     }
 
     // Block deletion while any active or soft-deleted prefix row still
