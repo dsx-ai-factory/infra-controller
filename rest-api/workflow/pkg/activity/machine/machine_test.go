@@ -1700,7 +1700,7 @@ func TestManageMachine_UpdateMachinesInDB_ReconcilesEveryCycle(t *testing.T) {
 			machines = append(machines, &corev1.MachineInfo{
 				Machine: &corev1.Machine{
 					Id:    &corev1.MachineId{Id: id},
-					State: controllerMachineStatePrefixReady,
+					State: cdbm.ControllerMachineStateReady,
 					Status: &corev1.MachineStatus{
 						DiscoveryInfo: &corev1.DiscoveryInfo{
 							DmiData: &corev1.DmiData{SysVendor: vendor},
