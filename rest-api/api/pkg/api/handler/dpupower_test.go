@@ -41,6 +41,7 @@ func TestDpuPowerControlHandlerAcceptsGracefulRestart(t *testing.T) {
 
 	rec := f.request(t, model.APIDpuPowerControlRequest{
 		Action: model.MachinePowerActionGracefulRestart, AcknowledgeAttachedInstance: cutil.GetPtr(true),
+		ExpectedInstanceID: f.instanceID, ExpectedTenantID: f.tenantID,
 	})
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, f.requests, 3)
@@ -64,6 +65,22 @@ func TestDpuPowerControlHandlerRequiresAttachedInstanceAcknowledgement(t *testin
 	assert.Len(t, f.requests, 2)
 }
 
+func TestDpuPowerControlHandlerRejectsChangedAttachedInstance(t *testing.T) {
+	f := newDpuPowerFixture(t, true)
+	f.expect(&corev1.MachineIdList{MachineIds: []*corev1.MachineId{{Id: f.dpuID}}})
+	f.expect(&corev1.MachineList{Machines: []*corev1.Machine{{
+		Id: &corev1.MachineId{Id: f.dpuID}, MachineType: corev1.MachineType_DPU,
+		Status: &corev1.MachineStatus{AssociatedHostMachineId: &corev1.MachineId{Id: f.hostID}},
+	}}})
+
+	rec := f.request(t, model.APIDpuPowerControlRequest{
+		Action: model.MachinePowerActionGracefulRestart, AcknowledgeAttachedInstance: cutil.GetPtr(true),
+		ExpectedInstanceID: uuid.NewString(), ExpectedTenantID: f.tenantID,
+	})
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Len(t, f.requests, 2)
+}
+
 func TestDpuPowerControlHandlerRejectsOtherPowerActionsBeforeDispatch(t *testing.T) {
 	f := newDpuPowerFixture(t, false)
 	rec := f.request(t, model.APIDpuPowerControlRequest{Action: model.MachinePowerActionForceRestart})
@@ -72,11 +89,11 @@ func TestDpuPowerControlHandlerRejectsOtherPowerActionsBeforeDispatch(t *testing
 }
 
 type dpuPowerFixture struct {
-	org, siteID, hostID, dpuID string
-	user                       interface{}
-	handler                    DpuPowerControlHandler
-	tsc                        *tmocks.Client
-	requests                   []grpcproxy.Request
+	org, siteID, hostID, dpuID, instanceID, tenantID string
+	user                                             interface{}
+	handler                                          DpuPowerControlHandler
+	tsc                                              *tmocks.Client
+	requests                                         []grpcproxy.Request
 }
 
 func newDpuPowerFixture(t *testing.T, assigned bool) *dpuPowerFixture {
@@ -90,13 +107,24 @@ func newDpuPowerFixture(t *testing.T, assigned bool) *dpuPowerFixture {
 	_, err := cdbm.NewSiteDAO(dbSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(cdbm.SiteStatusRegistered)})
 	require.NoError(t, err)
 	host := common.TestBuildMachine(t, dbSession, provider, site, nil, cutil.GetPtr("host"), cdbm.MachineStatusReady)
+	var instanceID, tenantID string
+	if assigned {
+		tenant := common.TestBuildTenant(t, dbSession, "tenant", org, user)
+		instanceType := common.TestBuildInstanceType(t, dbSession, "instance-type", nil, site, nil, user)
+		vpc := common.TestBuildVPC(t, dbSession, "vpc", provider, tenant, site, nil, nil, nil, cdbm.VpcStatusReady, user)
+		operatingSystem := common.TestBuildOperatingSystem(t, dbSession, "os", tenant, cdbm.OperatingSystemStatusReady, user)
+		instance := common.TestBuildInstance(t, dbSession, "instance", tenant.ID, provider.ID, site.ID,
+			instanceType.ID, vpc.ID, &host.ID, operatingSystem.ID)
+		instanceID, tenantID = instance.ID.String(), tenant.ID.String()
+	}
 	_, err = cdbm.NewMachineDAO(dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{MachineID: host.ID, IsAssigned: &assigned})
 	require.NoError(t, err)
 	tsc := &tmocks.Client{}
 	pool := sc.NewClientPool(nil)
 	pool.IDClientMap[site.ID.String()] = tsc
 	return &dpuPowerFixture{
-		org: org, siteID: site.ID.String(), hostID: host.ID, dpuID: "dpu-" + uuid.NewString(), user: user,
+		org: org, siteID: site.ID.String(), hostID: host.ID, dpuID: "dpu-" + uuid.NewString(),
+		instanceID: instanceID, tenantID: tenantID, user: user,
 		handler: NewDpuPowerControlHandler(dbSession, pool), tsc: tsc,
 	}
 }

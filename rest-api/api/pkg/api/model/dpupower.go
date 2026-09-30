@@ -29,6 +29,8 @@ func (q *APIDpuPowerControlQuery) Validate() error {
 type APIDpuPowerControlRequest struct {
 	Action                      MachinePowerAction `json:"action"`
 	AcknowledgeAttachedInstance *bool              `json:"acknowledgeAttachedInstance"`
+	ExpectedInstanceID          string             `json:"expectedInstanceId,omitempty"`
+	ExpectedTenantID            string             `json:"expectedTenantId,omitempty"`
 }
 
 func (r *APIDpuPowerControlRequest) Validate() error {
@@ -37,6 +39,8 @@ func (r *APIDpuPowerControlRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(MachinePowerActionGracefulRestart).Error("must be GracefulRestart"),
 		),
+		validation.Field(&r.ExpectedInstanceID, validation.When(r.ExpectedInstanceID != "", validationis.UUID.Error(validationErrorInvalidUUID))),
+		validation.Field(&r.ExpectedTenantID, validation.When(r.ExpectedTenantID != "", validationis.UUID.Error(validationErrorInvalidUUID))),
 	)
 }
 

@@ -16,6 +16,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -125,10 +126,24 @@ func (h DpuPowerControlHandler) Handle(c echo.Context) error {
 	if host.SiteID.String() != siteID {
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "DPU Machine and associated host Machine are not in the same Site", nil)
 	}
-	if host.IsAssigned && (request.AcknowledgeAttachedInstance == nil || !*request.AcknowledgeAttachedInstance) {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "DPU Machine's host is currently in use by an Instance, set acknowledgeAttachedInstance to true to proceed", nil)
-	}
-	if !host.IsAssigned && request.AcknowledgeAttachedInstance != nil && *request.AcknowledgeAttachedInstance {
+	if host.IsAssigned {
+		if request.AcknowledgeAttachedInstance == nil || !*request.AcknowledgeAttachedInstance ||
+			request.ExpectedInstanceID == "" || request.ExpectedTenantID == "" {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "DPU Machine's host is currently in use by an Instance; acknowledgement and expected Instance and Tenant IDs are required", nil)
+		}
+		instances, _, err := cdbm.NewInstanceDAO(h.dbSession).GetAll(ctx, nil,
+			cdbm.InstanceFilterInput{MachineIDs: []string{hostMachineID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Str("host_machine_id", hostMachineID).Msg("failed to retrieve attached Instance")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve attached Instance", nil)
+		}
+		if len(instances) != 1 || instances[0].ID.String() != request.ExpectedInstanceID ||
+			instances[0].TenantID.String() != request.ExpectedTenantID {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "DPU Machine's attached Instance or Tenant changed", nil)
+		}
+	} else if (request.AcknowledgeAttachedInstance != nil && *request.AcknowledgeAttachedInstance) ||
+		request.ExpectedInstanceID != "" || request.ExpectedTenantID != "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "DPU Machine's host has no attached Instance to acknowledge", nil)
 	}
 

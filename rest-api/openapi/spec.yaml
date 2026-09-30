@@ -19442,9 +19442,19 @@ components:
         acknowledgeAttachedInstance:
           type: boolean
           description: Acknowledges that the associated host has an attached Instance and the DPU restart may disrupt Tenant workload.
+        expectedInstanceId:
+          type: string
+          format: uuid
+          description: Current attached Instance ID. Required when the associated host is assigned.
+        expectedTenantId:
+          type: string
+          format: uuid
+          description: Current owning Tenant ID. Required when the associated host is assigned.
       example:
         action: GracefulRestart
         acknowledgeAttachedInstance: true
+        expectedInstanceId: 93b60746-619e-4653-a7a3-17b543394a1c
+        expectedTenantId: 8e224100-c834-4f25-8cc2-b15d61b1cb3a
     MachineValidationRunCreateRequest:
       type: object
       title: MachineValidationRunCreateRequest
