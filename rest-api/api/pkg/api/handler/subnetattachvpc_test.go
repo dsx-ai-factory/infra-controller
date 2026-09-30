@@ -44,6 +44,7 @@ type subnetAttachVpcFixture struct {
 	subnet          *cdbm.Subnet
 	scp             *sc.ClientPool
 	proxiedRequest  *grpcproxy.Request
+	readRequest     *grpcproxy.Request
 	setCoreResponse func(*corev1.NetworkSegment)
 }
 
@@ -63,6 +64,7 @@ func newSubnetAttachVpcFixture(t *testing.T, workflowErr error) subnetAttachVpcF
 	site, err = cdbm.NewSiteDAO(dbSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(cdbm.SiteStatusRegistered)})
 	require.NoError(t, err)
 	tenant := common.TestBuildTenant(t, dbSession, "test-tenant", org, user)
+	common.TestBuildTenantSite(t, dbSession, tenant, site, providerUser)
 	sourceControllerVpcID := uuid.New()
 	targetControllerVpcID := uuid.New()
 	sourceVpc := common.TestBuildVPC(t, dbSession, "source-vpc", provider, tenant, site, &sourceControllerVpcID, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, user)
@@ -71,18 +73,39 @@ func newSubnetAttachVpcFixture(t *testing.T, workflowErr error) subnetAttachVpcF
 	subnet := common.TestBuildSubnet(t, dbSession, "test-subnet", tenant, sourceVpc, &controllerSegmentID, cdbm.SubnetStatusReady, user)
 
 	coreResponse := subnetAttachVpcCoreResponse(controllerSegmentID, targetControllerVpcID)
+	// Reading the current segment is a separate RPC; only attachment may
+	// time out. Preserve the requested method when asserting dispatch below.
+	readResponse := subnetAttachVpcCoreResponse(controllerSegmentID, sourceControllerVpcID)
+	readResponse.Status = &corev1.NetworkSegmentStatus{Lifecycle: &corev1.LifecycleStatus{Version: "V1-T1"}}
 	proxiedRequest := &grpcproxy.Request{}
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+	readRequest := &grpcproxy.Request{}
+	readRun := &tmocks.WorkflowRun{}
+	readRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		responseJSON, marshalErr := protojson.Marshal(&corev1.NetworkSegmentList{NetworkSegments: []*corev1.NetworkSegment{readResponse}})
+		require.NoError(t, marshalErr)
+		args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
+	}).Return(nil)
+	attachRun := &tmocks.WorkflowRun{}
+	attachRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		responseJSON, marshalErr := protojson.Marshal(coreResponse)
 		require.NoError(t, marshalErr)
 		args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
 	}).Return(workflowErr)
 	temporalClient := &tmocks.Client{}
 	temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.MatchedBy(func(request grpcproxy.Request) bool {
+		if request.FullMethod != corev1.Forge_FindNetworkSegmentsByIds_FullMethodName {
+			return false
+		}
+		*readRequest = request
+		return true
+	})).Return(readRun, nil)
+	temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.MatchedBy(func(request grpcproxy.Request) bool {
+		if request.FullMethod != corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName {
+			return false
+		}
 		*proxiedRequest = request
 		return true
-	})).Return(workflowRun, nil)
+	})).Return(attachRun, nil)
 	scp := sc.NewClientPool(nil)
 	scp.IDClientMap[site.ID.String()] = temporalClient
 
@@ -90,6 +113,7 @@ func newSubnetAttachVpcFixture(t *testing.T, workflowErr error) subnetAttachVpcF
 		dbSession: dbSession, org: org, user: user, tenant: tenant, provider: provider, site: site,
 		sourceVpc: sourceVpc, targetVpc: targetVpc, subnet: subnet, scp: scp,
 		proxiedRequest: proxiedRequest,
+		readRequest:    readRequest,
 		setCoreResponse: func(response *corev1.NetworkSegment) {
 			coreResponse = response
 		},
@@ -153,7 +177,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			},
 			expectedStatus:     http.StatusOK,
 			expectedVpc:        "source",
-			expectProxyRequest: true,
+			expectProxyRequest: false,
 		},
 		{
 			name: "reassigns between VPCs using the same NVUE mode",
@@ -345,7 +369,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				return fixture.subnet.ID.String(), string(body), fixture.user
 			},
-			expectedStatus:     http.StatusGatewayTimeout,
+			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
 		},
@@ -357,7 +381,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				return fixture.subnet.ID.String(), string(body), fixture.user
 			},
-			expectedStatus:     http.StatusInternalServerError,
+			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
 		},
@@ -371,7 +395,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				return fixture.subnet.ID.String(), string(body), fixture.user
 			},
-			expectedStatus:     http.StatusInternalServerError,
+			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
 		},
@@ -412,6 +436,11 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			}
 			assert.Equal(t, expectedVpcID, updatedSubnet.VpcID)
 
+			if test.expectProxyRequest || test.name == "keeps same-target retry idempotent without replacement acknowledgement" {
+				assert.Equal(t, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName, fixture.readRequest.FullMethod)
+			} else {
+				assert.Empty(t, fixture.readRequest.FullMethod)
+			}
 			if test.expectProxyRequest {
 				assert.Equal(t, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName, fixture.proxiedRequest.FullMethod)
 				var coreRequest corev1.AttachNetworkSegmentToVpcRequest
@@ -426,6 +455,8 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				var submittedRequest model.APISubnetAttachVpcRequest
 				require.NoError(t, json.Unmarshal([]byte(body), &submittedRequest))
 				assert.Equal(t, submittedRequest.AllowReplace, coreRequest.GetAllowReplace())
+				assert.Equal(t, fixture.sourceVpc.ControllerVpcID.String(), coreRequest.GetExpectedSourceVpcId().GetValue())
+				assert.Equal(t, "V1-T1", coreRequest.GetExpectedSegmentVersion())
 			} else {
 				assert.Empty(t, fixture.proxiedRequest.FullMethod)
 			}
