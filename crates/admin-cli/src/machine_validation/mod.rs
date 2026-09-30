@@ -16,6 +16,7 @@
  */
 
 mod external_config;
+mod logs;
 mod on_demand;
 mod plugins;
 mod results;
@@ -33,6 +34,8 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "External config", subcommand, visible_alias = "mve")]
     ExternalConfig(external_config::Args),
+    #[clap(about = "Show or follow Machine Validation attempt logs", subcommand)]
+    Logs(logs::Args),
     #[clap(about = "Ondemand Validation", subcommand, visible_alias = "mvo")]
     OnDemand(on_demand::Args),
     #[clap(

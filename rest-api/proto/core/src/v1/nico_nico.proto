@@ -762,6 +762,9 @@ service Forge {
   // Machine-Validation attempt detail
   rpc GetMachineValidationAttempt(MachineValidationAttemptGetRequest) returns (MachineValidationAttempt);
 
+  // List attempts for one Machine-Validation run item, oldest first.
+  rpc FindMachineValidationAttempts(MachineValidationAttemptSearchFilter) returns (MachineValidationAttemptList);
+
   // Append the next ordered stdout or stderr chunk while an attempt is active.
   rpc AppendMachineValidationAttemptLog(MachineValidationAttemptLogAppendRequest) returns (MachineValidationAttemptLogAppendResponse);
 
@@ -7639,6 +7642,14 @@ message MachineValidationRunItem {
 
 message MachineValidationAttemptGetRequest {
   common.UUID attempt_id = 1;
+}
+
+message MachineValidationAttemptSearchFilter {
+  common.UUID run_item_id = 1;
+}
+
+message MachineValidationAttemptList {
+  repeated MachineValidationAttempt attempts = 1;
 }
 
 message MachineValidationAttempt {
