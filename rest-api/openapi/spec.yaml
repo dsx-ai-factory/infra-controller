@@ -12285,7 +12285,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          $ref: '#/components/responses/ConflictError'
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/machine/{machineId}/dpu':
     parameters:
       - schema:
