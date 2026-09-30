@@ -9,6 +9,9 @@ metadata:
   labels:
     {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
 data:
-  {{- range $key, $value := .Values.envConfig }}
+  {{- /* The probes, containerPorts, and Service use these ports, so envConfig can't override them. */}}
+  ESA_PORT: {{ .Values.service.port | quote }}
+  METRICS_PORT: {{ .Values.service.metricsPort | quote }}
+  {{- range $key, $value := omit .Values.envConfig "ESA_PORT" "METRICS_PORT" }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

@@ -15,7 +15,7 @@ type OrchestratorInterface interface {
 	Start()
 	GetState() []string
 	CheckLiveness() error
-	CheckReadiness(ctx context.Context) error
+	CheckConnection(ctx context.Context)
 
 	OrchestratorExpansion
 }

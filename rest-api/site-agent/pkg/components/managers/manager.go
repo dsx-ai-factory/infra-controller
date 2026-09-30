@@ -193,6 +193,8 @@ func (Managers *Manager) Start() {
 	Managers.CoreGrpc().Start()
 	Managers.Bootstrap().Start()
 	Managers.Orchestrator().Start()
+	// Checks begin once Core gRPC and Temporal have made their first connection attempt.
+	go StartHealthChecker()
 	Managers.FlowGrpc().Start()
 }
 

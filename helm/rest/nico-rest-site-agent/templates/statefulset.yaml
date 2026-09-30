@@ -67,7 +67,6 @@ spec:
               path: /readyz
               port: {{ .Values.service.port }}
             periodSeconds: 10
-            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz

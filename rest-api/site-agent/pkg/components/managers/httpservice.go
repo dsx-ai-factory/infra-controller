@@ -31,48 +31,11 @@ func handleSiteStatusRequest(w http.ResponseWriter, r *http.Request) {
 		computils.CompStatus(ManagerAccess.Data.EB.HealthStatus.Load()).String()))
 }
 
-func handleVpcStatusRequest(w http.ResponseWriter, r *http.Request) {
-	// Get the status of VPC n write to the HTTP response body.
-	vpcStatus := ManagerAccess.API.VPC.GetState()
-	for _, v := range vpcStatus {
-		fmt.Fprint(w, v)
-	}
-}
-
-func handleSubnetStatusRequest(w http.ResponseWriter, r *http.Request) {
-	// Get the status of Subnet and write to the HTTP response body.
-	subnetStatus := ManagerAccess.API.Subnet.GetState()
-	for _, v := range subnetStatus {
-		fmt.Fprint(w, v)
-	}
-}
-
-func handleInstanceStatusRequest(w http.ResponseWriter, r *http.Request) {
-	// Get the status of Instance and write to the HTTP response body.
-	instanceStatus := ManagerAccess.API.Instance.GetState()
-	for _, v := range instanceStatus {
-		fmt.Fprint(w, v)
-	}
-}
-
-func handleMachineStatusRequest(w http.ResponseWriter, r *http.Request) {
-	// Get the status of Instance and write to the HTTP response body.
-	machineStatus := ManagerAccess.API.Machine.GetState()
-	for _, v := range machineStatus {
-		fmt.Fprint(w, v)
-	}
-}
-
 func newStatusServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc(computils.SiteStatus, handleSiteStatusRequest)
-	mux.HandleFunc(computils.VPCStatus, handleVpcStatusRequest)
-	mux.HandleFunc(computils.SubnetStatus, handleSubnetStatusRequest)
-	mux.HandleFunc(computils.InstanceStatus, handleInstanceStatusRequest)
-	mux.HandleFunc(computils.MachineStatus, handleMachineStatusRequest)
-	probes := newProbes()
-	mux.HandleFunc(computils.LivenessStatus, probes.handleLiveness)
-	mux.HandleFunc(computils.ReadinessStatus, probes.handleReadiness)
+	mux.HandleFunc(computils.LivenessStatus, handleLivenessRequest)
+	mux.HandleFunc(computils.ReadinessStatus, handleReadinessRequest)
 	return mux
 }
 

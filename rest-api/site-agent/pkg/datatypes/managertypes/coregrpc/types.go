@@ -4,6 +4,8 @@
 package coregrpctypes
 
 import (
+	"sync"
+
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"go.uber.org/atomic"
 )
@@ -16,10 +18,24 @@ type State struct {
 	GrpcSucc atomic.Uint64
 	// HealthStatus current health state
 	HealthStatus atomic.Uint64
-	// Err is error message
-	Err string
 	// WflowMetrics workflow metrics
 	WflowMetrics WorkflowMetrics
+	mu           sync.RWMutex
+	err          string
+}
+
+// SetErr records the last Core gRPC error.
+func (s *State) SetErr(err string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+// Err returns the last Core gRPC error.
+func (s *State) Err() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.err
 }
 
 // CoreGrpc represents the gRPC client for Core gRPC and state

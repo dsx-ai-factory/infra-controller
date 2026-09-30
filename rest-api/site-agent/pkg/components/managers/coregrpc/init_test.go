@@ -7,33 +7,46 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
-func TestAPI_CheckReadiness(t *testing.T) {
+func TestAPI_CheckConnection(t *testing.T) {
 	versionErr := status.Error(codes.Unavailable, "connection refused")
 	tests := []struct {
 		name       string
 		connected  bool
 		versionErr error
-		wantErr    error
+		wantHealth computils.CompStatus
+		wantErr    string
 	}{
-		{name: "no Core gRPC client yet", wantErr: client.ErrCoreGrpcClientNotConnected},
-		{name: "Version fails", connected: true, versionErr: versionErr, wantErr: versionErr},
-		{name: "Version succeeds", connected: true},
+		{
+			name:       "no Core gRPC client yet",
+			wantHealth: computils.CompUnhealthy,
+			wantErr:    client.ErrCoreGrpcClientNotConnected.Error(),
+		},
+		{
+			name:       "Version fails",
+			connected:  true,
+			versionErr: versionErr,
+			wantHealth: computils.CompUnhealthy,
+			wantErr:    versionErr.Error(),
+		},
+		{name: "Version succeeds", connected: true, wantHealth: computils.CompHealthy},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			previousAccess := ManagerAccess
 			t.Cleanup(func() { ManagerAccess = previousAccess })
-			data := &elektratypes.Elektra{Managers: managertypes.NewManagerType()}
+			data := &elektratypes.Elektra{Managers: managertypes.NewManagerType(), Log: zerolog.Nop()}
 			if tt.connected {
 				data.Managers.CoreGrpc.Client.SwapClient(client.NewMockCoreGrpcClient())
 			}
@@ -43,7 +56,11 @@ func TestAPI_CheckReadiness(t *testing.T) {
 			if tt.versionErr != nil {
 				ctx = client.WithMockSitePrefixVersionError(ctx, tt.versionErr)
 			}
-			assert.ErrorIs(t, (&API{}).CheckReadiness(ctx), tt.wantErr)
+			(&API{}).CheckConnection(ctx)
+
+			state := data.Managers.CoreGrpc.State
+			assert.Equal(t, tt.wantHealth, computils.CompStatus(state.HealthStatus.Load()))
+			assert.Equal(t, tt.wantErr, state.Err())
 		})
 	}
 }

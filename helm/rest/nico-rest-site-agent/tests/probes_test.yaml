@@ -3,21 +3,36 @@
 
 suite: Site Agent probes
 templates:
+  - configmap.yaml
   - statefulset.yaml
 release:
   namespace: nico-rest
 tests:
-  - it: probes liveness and readiness on the status server port
+  - it: probes the ports the Site Agent listens on
     set:
       service:
         port: 9080
+        metricsPort: 9112
+      envConfig:
+        ESA_PORT: "7080"
+        METRICS_PORT: "7112"
     asserts:
-      - equal:
+      - template: configmap.yaml
+        equal:
+          path: data.ESA_PORT
+          value: "9080"
+      - template: configmap.yaml
+        equal:
+          path: data.METRICS_PORT
+          value: "9112"
+      - template: statefulset.yaml
+        equal:
           path: spec.template.spec.containers[0].livenessProbe.httpGet
           value:
             path: /healthz
             port: 9080
-      - equal:
+      - template: statefulset.yaml
+        equal:
           path: spec.template.spec.containers[0].readinessProbe.httpGet
           value:
             path: /readyz

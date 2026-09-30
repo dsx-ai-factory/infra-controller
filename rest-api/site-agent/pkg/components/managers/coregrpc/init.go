@@ -70,20 +70,33 @@ func (coregrpc *API) GetState() []string {
 	strs = append(strs, fmt.Sprintln(" GRPC Succeeded:", state.GrpcSucc.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Failed:", state.GrpcFail.Load()))
 	strs = append(strs, fmt.Sprintln(" GRPC Status:", computils.CompStatus(state.HealthStatus.Load())))
-	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err))
+	strs = append(strs, fmt.Sprintln(" GRPC Last Error:", state.Err()))
 
 	return strs
 }
 
-// CheckReadiness calls Core's Version RPC to confirm the Core gRPC connection works.
-// Without DisplayConfig, Version only returns build information.
-func (coregrpc *API) CheckReadiness(ctx context.Context) error {
+// CheckConnection calls Core's Version RPC and records whether it succeeded in the
+// Core gRPC state. Without DisplayConfig, Version only returns build information.
+func (coregrpc *API) CheckConnection(ctx context.Context) {
+	err := client.ErrCoreGrpcClientNotConnected
 	grpcClient := ManagerAccess.Data.EB.Managers.CoreGrpc.GetClient()
-	if grpcClient == nil {
-		return client.ErrCoreGrpcClientNotConnected
+	if grpcClient != nil {
+		_, err = grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{})
 	}
-	_, err := grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{})
-	return err
+
+	state := ManagerAccess.Data.EB.Managers.CoreGrpc.State
+	if err != nil {
+		state.SetErr(err.Error())
+		previous := state.HealthStatus.Swap(uint64(computils.CompUnhealthy))
+		if computils.CompStatus(previous) == computils.CompHealthy {
+			ManagerAccess.Data.EB.Log.Warn().Err(err).Msg("Core gRPC: health check failed")
+		}
+		return
+	}
+	previous := state.HealthStatus.Swap(uint64(computils.CompHealthy))
+	if computils.CompStatus(previous) != computils.CompHealthy {
+		ManagerAccess.Data.EB.Log.Info().Msg("Core gRPC: health check passed")
+	}
 }
 
 // GetGrpcClientVersion returns the current version of the Core gRPC client

@@ -23,6 +23,6 @@ type CoreGrpcInterface interface {
 	UpdateGrpcClientState(err error)
 	GetState() []string
 	GetGrpcClientVersion() int64
-	CheckReadiness(ctx context.Context) error
+	CheckConnection(ctx context.Context)
 	CoreGrpcExpansion
 }

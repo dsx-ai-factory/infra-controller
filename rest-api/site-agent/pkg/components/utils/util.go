@@ -25,20 +25,6 @@ import (
 const (
 	// SiteStatus path is status
 	SiteStatus = "/status"
-	// VPCStatus path is status-vpc
-	VPCStatus = "/status-vpc"
-	// SubnetStatus path is status-subnet
-	SubnetStatus = "/status-subnet"
-	// InstanceStatus path is status-instance
-	InstanceStatus = "/status-instance"
-	// MachineStatus path is status-machine
-	MachineStatus = "/status-machine"
-	// DatastoreStatus path is status-datastore
-	DatastoreStatus = "/status-datastore"
-	// InfiniBandPartitionStatus path is status-infinibandpartition"
-	InfiniBandPartitionStatus = "/status-infinibandpartition"
-	// SSHKeyGroupStatus path is status-sshkeygroup"
-	SSHKeyGroupStatus = "/status-sshkeygroup"
 	// LivenessStatus path is healthz
 	LivenessStatus = "/healthz"
 	// ReadinessStatus path is readyz

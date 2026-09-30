@@ -89,7 +89,7 @@ func (coregrpc *API) UpdateGrpcClientState(err error) {
 		return
 	}
 	ManagerAccess.Data.EB.Managers.CoreGrpc.State.GrpcFail.Inc()
-	ManagerAccess.Data.EB.Managers.CoreGrpc.State.Err = err.Error()
+	ManagerAccess.Data.EB.Managers.CoreGrpc.State.SetErr(err.Error())
 	log.Error().Err(err).Msg("Core gRPC: Failed to send request to server")
 	st, ok := status.FromError(err)
 	if ok {

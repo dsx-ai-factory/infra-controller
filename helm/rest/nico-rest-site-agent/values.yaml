@@ -24,7 +24,9 @@ image:
 
 service:
   type: ClusterIP
+  # Also sets ESA_PORT, the port the Site Agent serves its status pages and probes on.
   port: 8080
+  # Also sets METRICS_PORT.
   metricsPort: 2112
 
 resources:
@@ -79,8 +81,6 @@ bootstrap:
     tlsSecret: site-manager-tls
 
 envConfig:
-  ESA_PORT: "8080"
-  METRICS_PORT: "2112"
   DEV_MODE: "true"
   ENABLE_DEBUG: "true"
   ENABLE_TLS: "true"

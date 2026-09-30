@@ -5,12 +5,11 @@ package workflow
 
 import (
 	"context"
-	"errors"
 
 	"go.temporal.io/sdk/client"
-)
 
-var errWorkerNotStarted = errors.New("no Temporal worker has started yet")
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+)
 
 // CheckLiveness returns why the Site Agent has no Temporal worker: its latest
 // connection attempt failed, or the Temporal SDK stopped the worker on an error it
@@ -26,19 +25,47 @@ func (wflow *API) CheckLiveness() error {
 	return status.Err()
 }
 
-// CheckReadiness returns nil once the Temporal worker is running and every Temporal
-// client it was started with reaches the Temporal frontend.
-func (wflow *API) CheckReadiness(ctx context.Context) error {
-	status := ManagerAccess.Data.EB.Managers.Workflow.State.Worker()
+// CheckConnection checks that the Temporal worker is running and that every Temporal
+// client it was started with reaches the Temporal frontend, and records the result in
+// the Temporal state. A connection attempt in progress records its own outcome.
+func (wflow *API) CheckConnection(ctx context.Context) {
+	state := ManagerAccess.Data.EB.Managers.Workflow.State
+	status := state.Worker()
 	if status == nil {
-		return errWorkerNotStarted
+		return
 	}
 	err := status.Err()
-	if err != nil {
-		return err
+	if err == nil {
+		err = checkHealth(ctx, status.Clients)
 	}
-	for _, temporalClient := range status.Clients {
-		_, err = temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
+	// A reconnect that finished during the check has recorded a newer outcome.
+	if state.Worker() != status {
+		return
+	}
+	// A worker that stopped during the check has failed, whatever the frontend says.
+	stopErr := status.Err()
+	if stopErr != nil {
+		err = stopErr
+	}
+
+	log := ManagerAccess.Data.EB.Log
+	if err != nil {
+		state.SetErr(err.Error())
+		previous := state.HealthStatus.Swap(uint64(computils.CompUnhealthy))
+		if computils.CompStatus(previous) == computils.CompHealthy {
+			log.Warn().Err(err).Msg("Workflow: Temporal health check failed")
+		}
+		return
+	}
+	previous := state.HealthStatus.Swap(uint64(computils.CompHealthy))
+	if computils.CompStatus(previous) != computils.CompHealthy {
+		log.Info().Msg("Workflow: Temporal health check passed")
+	}
+}
+
+func checkHealth(ctx context.Context, temporalClients []client.Client) error {
+	for _, temporalClient := range temporalClients {
+		_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
 		if err != nil {
 			return err
 		}
