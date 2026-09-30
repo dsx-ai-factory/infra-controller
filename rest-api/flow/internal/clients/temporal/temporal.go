@@ -77,6 +77,9 @@ func New(c Config) (*Client, error) {
 	}
 	options, err = ctemporal.ConfigureClientOptions(options)
 	if err != nil {
+		if dynamicConfig != nil {
+			dynamicConfig.Close()
+		}
 		return nil, err
 	}
 
