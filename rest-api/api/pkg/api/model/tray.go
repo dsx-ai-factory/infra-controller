@@ -627,6 +627,7 @@ type APITray struct {
 	RackID             string                `json:"rackId"`
 	NVLinkDomainID     *string               `json:"nvLinkDomainId"`
 	TaskStats          APITaskStats          `json:"taskStats"`
+	Health             *APIAggregateHealth   `json:"health"`
 }
 
 // FromProto converts an Flow protobuf Component to an APITray
@@ -647,6 +648,11 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	)
 	at.ID = comp.GetComponentId()
 	at.TaskStats.FromProto(comp.GetTaskStats())
+	at.Health = nil
+	if comp.GetHealth() != nil {
+		at.Health = &APIAggregateHealth{}
+		at.Health.FromFlowProto(comp.GetHealth())
+	}
 
 	// Get info from DeviceInfo
 	if comp.GetInfo() != nil {

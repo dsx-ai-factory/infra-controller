@@ -3975,6 +3975,17 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg: tnOrg7, reqUser: tnu7, respCode: responseCode,
 				checkRecovery: true, respRetryable: retryable, respRecoveryGuidance: !failure.knownRejection,
 				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					machineDAO := cdbm.NewMachineDAO(dbSession)
+					before, _, readErr := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{st7.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+					require.NoError(t, readErr)
+					t.Cleanup(func() {
+						for _, machine := range before {
+							after, getErr := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+							require.NoError(t, getErr)
+							assert.Equal(t, machine.IsAssigned, after.IsAssigned, "failed creation rolls back assignment")
+							assert.Equal(t, machine.Status, after.Status, "failed creation rolls back status")
+						}
+					})
 					original := scp.IDClientMap[st7.ID.String()]
 					t.Cleanup(func() { scp.IDClientMap[st7.ID.String()] = original })
 					client := &tmocks.Client{}
@@ -4027,6 +4038,17 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				tt.args.prepareReq(t, tt.args.reqData)
 			}
 
+			var targetedMachine *cdbm.Machine
+			var machineHistoryBefore int
+			if tt.args.reqData.MachineID != nil {
+				targetedMachine, _ = cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, *tt.args.reqData.MachineID, nil, false)
+				if targetedMachine != nil {
+					_, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+					require.NoError(t, historyErr)
+					machineHistoryBefore = count
+				}
+			}
+
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
@@ -4070,6 +4092,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 			if tt.args.respCode != http.StatusCreated {
+				if targetedMachine != nil {
+					_, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+					require.NoError(t, historyErr)
+					assert.Equal(t, machineHistoryBefore, count, "failed creation must not leave Machine history")
+				}
 				return
 			}
 			rst := &model.APIInstance{}
@@ -4077,6 +4104,24 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)
 			if serr != nil {
 				t.Fatal(serr)
+			}
+
+			require.NotNil(t, rst.MachineID)
+			assignedMachine, getMachineErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, *rst.MachineID, nil, false)
+			require.NoError(t, getMachineErr)
+			assert.True(t, assignedMachine.IsAssigned)
+			assert.NotEqual(t, cdbm.MachineStatusReady, assignedMachine.Status, "creation must persist assignment and status together")
+			if targetedMachine != nil {
+				details, count, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{targetedMachine.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				wantCount := machineHistoryBefore
+				if targetedMachine.Status != assignedMachine.Status {
+					wantCount++
+					require.NotEmpty(t, details)
+					assert.Equal(t, assignedMachine.Status, details[0].Status)
+					assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
+				}
+				assert.Equal(t, wantCount, count, "only a Machine status transition adds history")
 			}
 
 			assert.Equal(t, rst.Name, tt.args.reqData.Name)

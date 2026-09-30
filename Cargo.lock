@@ -804,6 +804,7 @@ dependencies = [
  "mac_address",
  "nv-redfish",
  "regex",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -1598,6 +1599,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
+ "axum-server",
  "bytes",
  "carbide-authn",
  "carbide-instrument",
@@ -1613,6 +1615,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
+ "humantime-serde",
  "hyper",
  "hyper-rustls",
  "hyper-timeout",
@@ -1628,6 +1631,7 @@ dependencies = [
  "opentelemetry-prometheus",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "rcgen",
  "reqwest 0.13.4",
  "reqwest-middleware",
  "reqwest-tracing",
@@ -1640,6 +1644,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tonic-prost",
  "tower",
  "tower-http 0.7.0",
  "trace-propagation",
@@ -3395,10 +3400,12 @@ dependencies = [
 name = "carbide-ssh-console"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bmc-mock",
  "bmc-vendor",
  "bytes",
  "carbide-api-test-helper",
+ "carbide-authn",
  "carbide-instrument",
  "carbide-machine-a-tron",
  "carbide-rpc",
@@ -3429,6 +3436,8 @@ dependencies = [
  "rand 0.10.1",
  "ringbuf",
  "russh",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "size",
  "strip-ansi-escapes",
@@ -3436,6 +3445,9 @@ dependencies = [
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -3461,6 +3473,7 @@ dependencies = [
  "carbide-uuid",
  "carbide-version",
  "eyre",
+ "futures",
  "prost",
  "prost-types",
  "rustls",
@@ -6934,7 +6947,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.6#f2ebed4d9ba048da3a8a959d8be5104e205abc03"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.7#a963e59d7106f62991a5c3abd6886fe62fb4cbe0"
 dependencies = [
  "chrono",
  "clap",
@@ -7611,6 +7624,14 @@ dependencies = [
  "uuid",
  "x509-parser",
  "zip",
+]
+
+[[package]]
+name = "nico-machine-validation-default-plugin"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

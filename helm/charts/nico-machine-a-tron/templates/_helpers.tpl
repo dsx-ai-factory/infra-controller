@@ -154,3 +154,24 @@ Returns: "<host>:<port>"
 {{- print "nico-dhcp.nico-system.svc.cluster.local:67" -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Site-wide BMC root password from the site credentials Secret, or "" when the
+lookup is disabled (empty name or namespace), the Secret or key is absent, or
+the credential file does not parse. Runs with the Helm caller's identity. helm
+template has no cluster and yields "".
+*/}}
+{{- define "nico-machine-a-tron.siteBmcRootPassword" -}}
+{{- $ref := .Values.machineATron.siteCredentialsSecret | default dict -}}
+{{- $password := "" -}}
+{{- if and $ref.namespace $ref.name $ref.key -}}
+{{- $secret := lookup "v1" "Secret" $ref.namespace $ref.name -}}
+{{- if and $secret $secret.data (hasKey $secret.data $ref.key) -}}
+{{- $entry := index (index $secret.data $ref.key | b64dec | fromYaml) "bmc_site_wide_root" -}}
+{{- if kindIs "map" $entry -}}
+{{- $password = $entry.password | default "" | toString -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $password -}}
+{{- end }}

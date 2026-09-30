@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use carbide_uuid::nvlink::NvLinkDomainId;
@@ -197,6 +198,19 @@ pub async fn find_by_bmc_mac_address(
     )
     .await?;
     Ok(switches.into_iter().next())
+}
+
+/// BMC MAC addresses of every switch record, deleted ones included, so the
+/// result matches `find_by_bmc_mac_address` for each address.
+pub async fn find_all_bmc_mac_addresses(
+    txn: impl DbReader<'_>,
+) -> DatabaseResult<HashSet<MacAddress>> {
+    let query = "SELECT bmc_mac_address FROM switches WHERE bmc_mac_address IS NOT NULL";
+    let mac_addresses: Vec<MacAddress> = sqlx::query_scalar(query)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("switch::find_all_bmc_mac_addresses", e))?;
+    Ok(mac_addresses.into_iter().collect())
 }
 
 pub async fn find_ids(
@@ -1164,11 +1178,12 @@ mod tests {
     use carbide_uuid::machine::MachineInterfaceId;
     use carbide_uuid::network::NetworkSegmentId;
     use carbide_uuid::rack::{RackId, RackProfileId};
+    use carbide_uuid::switch::{SwitchIdSource, SwitchType};
     use model::allocation_type::AllocationType;
     use model::rack::RackConfig;
     use model::switch::{
         CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus, NewSwitch,
-        SwitchConfig, SwitchControllerState,
+        SwitchConfig, SwitchControllerState, switch_id,
     };
 
     use super::*;
@@ -1728,6 +1743,61 @@ mod tests {
             endpoint.nvos_hostname.as_deref(),
             Some("nvos-a.example.com")
         );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// `create_switches` skips a switch only when its BMC MAC is in this set,
+    /// so membership must match `find_by_bmc_mac_address`, deleted switches
+    /// included, and a switch without a BMC MAC contributes nothing.
+    #[crate::sqlx_test]
+    async fn find_all_bmc_mac_addresses_matches_single_lookup(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let live = create_seeded_discovered(txn.as_mut(), 31, "live switch").await?;
+        let mut deleted = create_seeded_discovered(txn.as_mut(), 32, "deleted switch").await?;
+        mark_as_deleted(&mut deleted, txn.as_mut()).await?;
+        create(
+            txn.as_mut(),
+            &NewSwitch {
+                id: switch_id::from_hardware_info(
+                    "SW-SN-NO-BMC-MAC",
+                    "NVIDIA",
+                    "Switch",
+                    SwitchIdSource::ProductBoardChassisSerial,
+                    SwitchType::NvLink,
+                )?,
+                config: SwitchConfig {
+                    name: "switch without BMC MAC".to_string(),
+                    enable_nmxc: false,
+                    fabric_manager_config: None,
+                },
+                bmc_mac_address: None,
+                metadata: None,
+                rack_id: None,
+                slot_number: None,
+                tray_index: None,
+            },
+        )
+        .await?;
+
+        let batch = find_all_bmc_mac_addresses(txn.as_mut()).await?;
+
+        for switch in [&live, &deleted] {
+            let mac = switch
+                .bmc_mac_address
+                .expect("seeded switches carry a BMC MAC");
+            let single = find_by_bmc_mac_address(txn.as_mut(), mac).await?;
+            assert_eq!(
+                batch.contains(&mac),
+                single.is_some(),
+                "batch and single lookup disagree for {mac}"
+            );
+        }
+        // Guard against both sides agreeing only because both are empty.
+        assert_eq!(batch.len(), 2);
 
         txn.rollback().await?;
         Ok(())

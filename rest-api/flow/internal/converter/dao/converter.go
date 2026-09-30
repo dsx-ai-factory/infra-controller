@@ -126,6 +126,7 @@ func ComponentFrom(dao model.Component) *component.Component {
 		NVLDomainID:    nvlDomainID,
 		PowerState:     powerStateFromDAO(dao.PowerState),
 		Status:         dao.Status,
+		Health:         dao.Health,
 		LeakStatus:     dao.LeakStatus,
 	}
 }
@@ -156,12 +157,14 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 			SerialNumber: dao.SerialNumber,
 			Description:  description,
 		},
-		ExternalID: cutil.GetValueOrZero(dao.ExternalID),
+		ExternalID:    cutil.GetValueOrZero(dao.ExternalID),
+		RackProfileID: dao.RackProfileID,
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),
 		Components:  components,
 		NVLDomainID: dao.NVLDomainID,
+		Health:      dao.Health,
 	}
 }
 
@@ -312,6 +315,7 @@ func ComponentTo(c *component.Component, rackID uuid.UUID) *model.Component {
 		HostID:          c.Position.HostID,
 		RackID:          rackID,
 		ComponentID:     cutil.GetPtrIfNotZero(c.ComponentID),
+		Health:          c.Health,
 	}
 
 	for _, t := range devicetypes.BMCTypes() {
@@ -353,6 +357,7 @@ func RackTo(r *rack.Rack) *model.Rack {
 		Location:     r.Loc.ToMap(),
 		Components:   components,
 		NVLDomainID:  r.NVLDomainID,
+		Health:       r.Health,
 	}
 }
 

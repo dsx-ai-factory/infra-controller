@@ -378,6 +378,13 @@ and `failure_retry_time` knobs:
 Defaults are reasonable; touch these only when you have a specific timing
 constraint.
 
+`[machine_state_controller.controller] max_concurrency` (default 10) caps how
+many machine handlers run at the same time. Raise it for large sites, since time
+to `ready` scales with hosts divided by this value. Values of 80 to 120 suited a
+250-rack site, and higher values slowed ingestion because the handlers contend
+for the admin network segment lock. The nico-api chart exposes it as
+`machineStateController.maxConcurrency`.
+
 ### Host health thresholds
 
 `[host_health]` — `hardware_health_reports = "MonitorOnly"` or `"Enforce"`,
@@ -486,7 +493,9 @@ for the complete Helm guidance.
 (used by `nico-bmc-proxy` and other authenticating proxies). The example
 ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
-is the reference.
+is the reference. `nico-bmc-proxy` also takes `[[class]]` tables that set how
+long it waits on a BMC for groups of requests; see
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class).
 
 ### DPU configuration — `[dpu_config]`
 

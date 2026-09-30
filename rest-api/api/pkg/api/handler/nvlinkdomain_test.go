@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -35,6 +36,156 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
+
+func TestGetNVLinkDomainHandler_Handle(t *testing.T) {
+	testNVLinkDomainRead(t, false)
+}
+
+func TestGetAllNVLinkDomainHandler_Handle(t *testing.T) {
+	testNVLinkDomainRead(t, true)
+}
+
+func testNVLinkDomainRead(t *testing.T, list bool) {
+	t.Helper()
+	fixture := newNVLinkDomainHandlerTestFixture(t)
+	workflowIDs := map[bool]string{}
+	for _, tc := range []struct {
+		name                               string
+		tenant, empty                      bool
+		noUser, foreignSite, disabled      bool
+		status                             int
+		includeComponents, emptyComponents bool
+	}{
+		{name: "inventory", status: http.StatusOK},
+		{name: "include components", includeComponents: true, status: http.StatusOK},
+		{name: "no components", includeComponents: true, emptyComponents: true, status: http.StatusOK},
+		{name: "empty", empty: true, status: http.StatusOK},
+		{name: "tenant forbidden", tenant: true, status: http.StatusForbidden},
+		{name: "missing user", noUser: true, status: http.StatusInternalServerError},
+		{name: "another provider site", foreignSite: true, status: http.StatusForbidden},
+		{name: "Flow disabled", disabled: true, status: http.StatusPreconditionFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := fixture.providerUser
+			if tc.tenant {
+				user = fixture.tenantUser
+			}
+			if tc.noUser {
+				user = nil
+			}
+			siteID := fixture.site.ID.String()
+			if tc.foreignSite {
+				provider := &cdbm.InfrastructureProvider{ID: uuid.New(), Name: "foreign-provider", Org: "foreign-org"}
+				_, err := fixture.dbSession.DB.NewInsert().Model(provider).Exec(t.Context())
+				require.NoError(t, err)
+				foreignSite := *fixture.site
+				foreignSite.ID = uuid.New()
+				foreignSite.InfrastructureProviderID = provider.ID
+				foreignSite.Org = provider.Org
+				foreignSite.Name = "foreign-site"
+				_, err = fixture.dbSession.DB.NewInsert().Model(&foreignSite).Exec(t.Context())
+				require.NoError(t, err)
+				siteID = foreignSite.ID.String()
+			}
+			if tc.disabled {
+				fixture.site.Config.Flow = false
+				_, err := fixture.dbSession.DB.NewUpdate().Model(fixture.site).Column("config").WherePK().Exec(t.Context())
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					fixture.site.Config.Flow = true
+					_, err := fixture.dbSession.DB.NewUpdate().Model(fixture.site).Column("config").WherePK().Exec(context.Background())
+					require.NoError(t, err)
+				})
+			}
+			topology := "GB200_NVL72R1_C2G4"
+			r := &flowv1.NVLinkDomain{Id: "rack-01", Name: "nvl5", Topology: &topology}
+			if !tc.emptyComponents {
+				r.Components = []*flowv1.Component{{Info: &flowv1.DeviceInfo{Name: "tray-01"}}}
+			}
+			if tc.empty {
+				r = nil
+			}
+			var response proto.Message = &flowv1.GetNVLinkDomainResponse{Domain: r}
+			if list {
+				domains := []*flowv1.NVLinkDomain{}
+				if r != nil {
+					domains = append(domains, r)
+				}
+				response = &flowv1.GetListOfNVLinkDomainsResponse{Domains: domains, Total: int32(len(domains))}
+			}
+			var captured *capturedNVLinkDomainProxyCall
+			if tc.status == http.StatusOK {
+				run := &tmocks.WorkflowRun{}
+				testFlowProxyReply(t, run, response)
+				captured = fixture.installFlowRun(t, run)
+			}
+			path := "/?siteId=" + siteID
+			if tc.includeComponents {
+				path += "&includeComponents=true"
+			}
+			if list {
+				path += "&pageNumber=1&pageSize=20&orderBy=NAME_DESC&name=domain-a&name=domain-b"
+			}
+			c, rec := fixture.echoContext(t, path, "", user, "rack-01")
+			c.Request().Method = http.MethodGet
+			var err error
+			if list {
+				err = NewGetAllNVLinkDomainHandler(fixture.dbSession, nil, fixture.scp, common.GetTestConfig()).Handle(c)
+			} else {
+				err = NewGetNVLinkDomainHandler(fixture.dbSession, nil, fixture.scp, common.GetTestConfig()).Handle(c)
+			}
+			require.NoError(t, err)
+			wantStatus := tc.status
+			if tc.empty && !list {
+				wantStatus = http.StatusNotFound
+			}
+			assert.Equal(t, wantStatus, rec.Code)
+			if tc.status != http.StatusOK {
+				return
+			}
+			if list {
+				assert.Equal(t, flowv1.Flow_GetListOfNVLinkDomains_FullMethodName, captured.request.FullMethod)
+				var req flowv1.GetListOfNVLinkDomainsRequest
+				require.NoError(t, protojson.Unmarshal(captured.request.RequestJSON, &req))
+				assert.Equal(t, tc.includeComponents, req.GetWithComponents())
+				assert.Equal(t, "NAME_DESC", req.GetOrderBy())
+				assert.Equal(t, []string{"domain-a", "domain-b"}, req.GetInfo().GetPatterns())
+				assert.True(t, req.GetInfo().GetUseOr())
+				assert.False(t, req.GetInfo().GetIsWildcard())
+				assert.EqualValues(t, 20, req.GetPagination().GetLimit())
+				assert.NotEmpty(t, rec.Header().Get("X-Pagination"))
+				var domains []model.APINVLinkDomain
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &domains))
+				if tc.empty {
+					assert.Empty(t, domains)
+					assert.NotNil(t, domains)
+					return
+				}
+				require.Len(t, domains, 1)
+				assert.Equal(t, "rack-01", domains[0].ID)
+			} else {
+				var req flowv1.GetNVLinkDomainRequest
+				require.NoError(t, protojson.Unmarshal(captured.request.RequestJSON, &req))
+				assert.Equal(t, "rack-01", req.GetId())
+				assert.Equal(t, tc.includeComponents, req.GetWithComponents())
+			}
+			if !tc.empty {
+				assert.Contains(t, rec.Body.String(), "GB200_NVL72R1_C2G4")
+				if !tc.includeComponents {
+					assert.Contains(t, rec.Body.String(), `"components":null`)
+				} else if tc.emptyComponents {
+					assert.Contains(t, rec.Body.String(), `"components":[]`)
+				} else {
+					assert.Contains(t, rec.Body.String(), "tray-01")
+				}
+				workflowIDs[tc.includeComponents] = captured.options.ID
+			}
+		})
+	}
+	assert.NotEmpty(t, workflowIDs[false])
+	assert.NotEmpty(t, workflowIDs[true])
+	assert.NotEqual(t, workflowIDs[false], workflowIDs[true])
+}
 
 type nvLinkDomainHandlerTestFixture struct {
 	e            *echo.Echo
@@ -189,7 +340,7 @@ func assertProxiedNVLinkDomainIDs(
 	targets := targetSpec.GetNvlDomains().GetTargets()
 	require.Len(t, targets, len(wantNVLinkDomainIDs))
 	for i, nvLinkDomainID := range wantNVLinkDomainIDs {
-		assert.Equal(t, nvLinkDomainID, targets[i].GetId().GetId())
+		assert.Equal(t, nvLinkDomainID, targets[i].GetExternalId())
 	}
 }
 
@@ -216,7 +367,7 @@ func assertValidationResponseData(
 func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 	fixture := newNVLinkDomainHandlerTestFixture(t)
 	handler := NewUpdateNVLinkDomainPowerStateHandler(fixture.dbSession, fixture.scp)
-	nvLinkDomainID := uuid.NewString()
+	nvLinkDomainID := "Rack-01"
 	ruleID := uuid.NewString()
 
 	tests := []struct {
@@ -258,15 +409,15 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 			wantACCycle:    true,
 		},
 		{
-			name:           "rejects malformed domain ID",
-			nvLinkDomainID: "not-a-uuid",
+			name:           "rejects blank domain ID",
+			nvLinkDomainID: " ",
 			body:           fmt.Sprintf(`{"siteId":%q,"state":"on"}`, fixture.site.ID.String()),
 			user:           fixture.providerUser,
 			wantStatus:     http.StatusBadRequest,
 		},
 		{
 			name:           "authorizes before validating the request",
-			nvLinkDomainID: "not-a-uuid",
+			nvLinkDomainID: " ",
 			body:           `{}`,
 			user:           fixture.tenantUser,
 			wantStatus:     http.StatusForbidden,
@@ -295,7 +446,7 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 					TaskIds: []*flowv1.UUID{{Id: uuid.NewString()}},
 				})
 			}
-			path := fmt.Sprintf("/v2/org/%s/nico/domain/nvlink/%s/power", fixture.org, test.nvLinkDomainID)
+			path := fmt.Sprintf("/v2/org/%s/nico/domain/nvlink/%s/power", fixture.org, url.PathEscape(test.nvLinkDomainID))
 			ec, rec := fixture.echoContext(t, path, test.body, test.user, test.nvLinkDomainID)
 
 			err := handler.Handle(ec)
@@ -326,12 +477,12 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 			}
 			if test.wantACCycle {
 				flowRequest := &flowv1.ACPowerCycleRackRequest{}
-				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{test.nvLinkDomainID})
 				assert.Equal(t, ruleID, flowRequest.GetRuleId().GetId())
 				assert.True(t, flowRequest.GetOverrideReadinessCheck())
 			} else {
 				flowRequest := &flowv1.PowerOnRackRequest{}
-				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{test.nvLinkDomainID})
 				assert.Equal(t, ruleID, flowRequest.GetRuleId().GetId())
 				assert.True(t, flowRequest.GetOverrideReadinessCheck())
 			}
@@ -351,8 +502,8 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 		"00000000000000000000000000000001",
 	}
 	canonicalNVLinkDomainIDs := []string{
-		"00000000-0000-0000-0000-000000000001",
-		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+		"00000000000000000000000000000001",
+		"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
 	}
 
 	tests := []struct {
@@ -404,14 +555,14 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 		},
 		{
 			name:       "returns all field validation errors",
-			body:       `{"domainIds":["bad"]}`,
+			body:       `{"domainIds":[" "]}`,
 			wantStatus: http.StatusBadRequest,
 			wantData:   []string{"siteId", "domainIds", "state"},
-			wantBody:   "NVLink Domain ID must be a non-zero UUID",
+			wantBody:   "NVLink Domain ID must not be blank",
 		},
 		{
 			name:       "authorizes before validating the request",
-			body:       `{"domainIds":["bad"]}`,
+			body:       `{"domainIds":[" "]}`,
 			user:       fixture.tenantUser,
 			wantStatus: http.StatusForbidden,
 		},
@@ -465,7 +616,7 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 	fixture := newNVLinkDomainHandlerTestFixture(t)
 	handler := NewUpdateNVLinkDomainFirmwareHandler(fixture.dbSession, fixture.scp)
-	nvLinkDomainID := uuid.NewString()
+	nvLinkDomainID := "Rack-01"
 	version := "1.2.3"
 	ruleID := uuid.NewString()
 
@@ -502,7 +653,7 @@ func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 		},
 		{
 			name:           "authorizes before validating the request",
-			nvLinkDomainID: "not-a-uuid",
+			nvLinkDomainID: " ",
 			body:           `{}`,
 			user:           fixture.tenantUser,
 			wantStatus:     http.StatusForbidden,
@@ -530,7 +681,7 @@ func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 				testNVLinkDomainID = nvLinkDomainID
 			}
 			captured := fixture.installFlowReply(t, &flowv1.SubmitTaskResponse{})
-			path := fmt.Sprintf("/v2/org/%s/nico/domain/nvlink/%s/firmware", fixture.org, testNVLinkDomainID)
+			path := fmt.Sprintf("/v2/org/%s/nico/domain/nvlink/%s/firmware", fixture.org, url.PathEscape(testNVLinkDomainID))
 			ec, rec := fixture.echoContext(t, path, test.body, user, testNVLinkDomainID)
 
 			err := handler.Handle(ec)
@@ -546,7 +697,7 @@ func TestUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 
 			assert.Equal(t, flowv1.Flow_UpgradeFirmware_FullMethodName, captured.request.FullMethod)
 			request := &flowv1.UpgradeFirmwareRequest{}
-			assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, request, []string{nvLinkDomainID})
+			assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, request, []string{testNVLinkDomainID})
 			if test.wantVersionUnset {
 				assert.Nil(t, request.TargetVersion)
 			} else {
@@ -570,8 +721,8 @@ func TestBatchUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 		"00000000000000000000000000000001",
 	}
 	canonicalNVLinkDomainIDs := []string{
-		"00000000-0000-0000-0000-000000000001",
-		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+		"00000000000000000000000000000001",
+		"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
 	}
 
 	tests := []struct {
@@ -624,13 +775,13 @@ func TestBatchUpdateNVLinkDomainFirmwareHandler_Handle(t *testing.T) {
 			wantOverride: true,
 		},
 		{
-			name:       "rejects malformed domain ID",
-			body:       fmt.Sprintf(`{"siteId":%q,"domainIds":["bad"]}`, fixture.site.ID.String()),
+			name:       "rejects blank domain ID",
+			body:       fmt.Sprintf(`{"siteId":%q,"domainIds":[" "]}`, fixture.site.ID.String()),
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "authorizes before validating the request",
-			body:       `{"domainIds":["bad"]}`,
+			body:       `{"domainIds":[" "]}`,
 			user:       fixture.tenantUser,
 			wantStatus: http.StatusForbidden,
 		},
@@ -696,7 +847,7 @@ func TestNewNVLinkDomainOperationWorkflowIdentity(t *testing.T) {
 		wantErr         string
 	}{
 		{
-			name:   "canonicalizes UUIDs and domain order",
+			name:   "canonicalizes site and rule IDs while preserving domain ID spelling",
 			siteID: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
 			nvLinkDomainIDs: []string{
 				"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
@@ -706,8 +857,8 @@ func TestNewNVLinkDomainOperationWorkflowIdentity(t *testing.T) {
 			want: nvLinkDomainOperationWorkflowIdentity{
 				SiteID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
 				NVLinkDomainIDs: []string{
-					"00000000-0000-0000-0000-000000000001",
-					"ffffffff-ffff-ffff-ffff-ffffffffffff",
+					"00000000000000000000000000000001",
+					"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
 				},
 				RuleID: &canonicalRuleID,
 			},
@@ -719,7 +870,7 @@ func TestNewNVLinkDomainOperationWorkflowIdentity(t *testing.T) {
 			ruleID:          &emptyRuleID,
 			want: nvLinkDomainOperationWorkflowIdentity{
 				SiteID:          "cccccccc-cccc-cccc-cccc-cccccccccccc",
-				NVLinkDomainIDs: []string{"dddddddd-dddd-dddd-dddd-dddddddddddd"},
+				NVLinkDomainIDs: []string{"DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"},
 			},
 		},
 		{
@@ -731,14 +882,14 @@ func TestNewNVLinkDomainOperationWorkflowIdentity(t *testing.T) {
 		{
 			name:            "rejects invalid NVLink Domain ID",
 			siteID:          uuid.NewString(),
-			nvLinkDomainIDs: []string{"bad"},
-			wantErr:         "NVLink Domain ID at index 0 must be a non-zero UUID",
+			nvLinkDomainIDs: []string{" "},
+			wantErr:         "NVLink Domain ID at index 0: NVLink Domain ID must not be blank",
 		},
 		{
 			name:            "rejects nil NVLink Domain ID",
 			siteID:          uuid.NewString(),
-			nvLinkDomainIDs: []string{uuid.NewString(), uuid.Nil.String()},
-			wantErr:         "NVLink Domain ID at index 1 must be a non-zero UUID",
+			nvLinkDomainIDs: []string{uuid.NewString(), ""},
+			wantErr:         "NVLink Domain ID at index 1: NVLink Domain ID must not be blank",
 		},
 		{
 			name:            "rejects invalid rule ID",

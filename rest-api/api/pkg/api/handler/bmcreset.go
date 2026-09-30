@@ -42,7 +42,7 @@ func NewResetMachineBMCHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *
 // Handle godoc
 // @Summary Reset Machine BMC
 // @Description Reset a Machine BMC.
-// @Tags bmc-reset
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth

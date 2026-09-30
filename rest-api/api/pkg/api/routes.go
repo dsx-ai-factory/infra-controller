@@ -541,6 +541,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewUpdateExpectedMachinesHandler(dbSession, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/expected-machine/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedMachinesHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-machine/all",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAllExpectedMachinesHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/expected-machine/label/key",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllExpectedMachineLabelKeyHandler(dbSession),
@@ -575,6 +585,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/expected-power-shelf",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllExpectedPowerShelfHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-power-shelf/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedPowerShelvesHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-power-shelf/all",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAllExpectedPowerShelvesHandler(dbSession, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/expected-power-shelf/:id",
@@ -685,6 +705,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/expected-switch",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllExpectedSwitchHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-switch/all",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedSwitchesHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-switch/all",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAllExpectedSwitchesHandler(dbSession, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/expected-switch/:id",
@@ -1253,7 +1283,12 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodPost,
 			Handler: apiHandler.NewCancelTaskRunHandler(dbSession, tc, scp, cfg),
 		},
-		// NVLink Domain operation endpoints (Flow).
+		// NVLink Domain endpoints (Flow).
+		{
+			Path:    apiPathPrefix + "/domain/nvlink",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllNVLinkDomainHandler(dbSession, tc, scp, cfg),
+		},
 		{
 			Path:    apiPathPrefix + "/domain/nvlink/power",
 			Method:  http.MethodPatch,
@@ -1273,6 +1308,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/domain/nvlink/:id/firmware",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateNVLinkDomainFirmwareHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/domain/nvlink/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetNVLinkDomainHandler(dbSession, tc, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/rack",

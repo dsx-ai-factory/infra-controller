@@ -5,8 +5,8 @@
 # 4,500 hosts × 3 BMCs = 13,500 BMC addresses, published as Service externalIPs,
 # so the BMC segments must lie outside the cluster ServiceCIDR, pod CIDR, node
 # network, and any network the nodes or pods must otherwise reach.
-# They are carved from 10.200.0.0/16 above the default simulated-oob range
-# (SCALE_OOB_PREFIX, 10.200.0.0/18). NICo allows one IPv4 prefix per segment,
+# They are carved from 10.200.0.0/16 above the simulated-oob range
+# (10.200.0.0/18 in nico-core-simulation.yaml). NICo allows one IPv4 prefix per segment,
 # so each pod gets its own segment:
 #
 #   mat-0: 10.200.64.0/20 (4,094 IPs) → 1,350 hosts (4,050 BMCs)
@@ -21,6 +21,8 @@
 #   [networks.mat-bmc-2] type=underlay prefix=10.200.80.0/21 gateway=10.200.80.1
 # =============================================================================
 
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
 image:
   repository: ""
   tag: ""
@@ -38,6 +40,9 @@ machineATron:
   nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
   configureBmcProxyHost: ""
   registerExpectedMachines: true
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
 
 macAddressPool:
   enabled: true
@@ -57,8 +62,9 @@ mat-k8s-controller:
     # bare local name with no registry, which ImagePullBackOffs on any real
     # cluster -- and with no controller there are no per-BMC Services, so
     # exploration finds nothing and the run reports zeros with no obvious cause.
-    #   MAT_K8S_CONTROLLER_IMAGE=<registry>/mat-k8s-controller
-    #   MAT_K8S_CONTROLLER_TAG=<tag>
+    # Set it here or with
+    #   --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller
+    #   --set mat-k8s-controller.image.tag=<tag>
     repository: ""
     tag: ""
   imagePullSecrets:

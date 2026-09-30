@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -31,9 +32,12 @@ type mockClient struct {
 	switchRackIDs              map[string]string // switch ID → rack ID
 	powerShelfRackIDs          map[string]string // power shelf ID → rack ID
 	switchControllerStates     map[string]string // switch ID → raw core controller_state
+	switchHealth               map[string]*types.HealthReport
 	switchNvosIPs              map[string]string // switch ID → resolved NVOS host IP
 	nvLinkDomainMemberships    []NVLinkDomainMembership
 	powerShelfControllerStates map[string]string // shelf ID → raw core controller_state
+	powerShelfHealth           map[string]*types.HealthReport
+	rackHealth                 map[string]*types.HealthReport
 	observedSwitches           []ObservedControllerDevice
 	observedPowerShelves       []ObservedControllerDevice
 	hostMachinesByRackID       map[string][]string
@@ -104,8 +108,11 @@ func NewMockClient() MockClient {
 		switchRackIDs:                 map[string]string{},
 		powerShelfRackIDs:             map[string]string{},
 		switchControllerStates:        map[string]string{},
+		switchHealth:                  map[string]*types.HealthReport{},
 		switchNvosIPs:                 map[string]string{},
 		powerShelfControllerStates:    map[string]string{},
+		powerShelfHealth:              map[string]*types.HealthReport{},
+		rackHealth:                    map[string]*types.HealthReport{},
 		hostMachinesByRackID:          map[string][]string{},
 		expectedRackDetails:           map[string]ExpectedRackDetail{},
 		expectedMachineDetails:        map[string]ExpectedMachineDetail{},
@@ -269,6 +276,18 @@ func (c *mockClient) FindSwitchControllerStates(_ context.Context, switchIds []s
 	return out, nil
 }
 
+func (c *mockClient) FindSwitchRuntimeStatuses(_ context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error) {
+	out := make(map[string]ComponentRuntimeStatus, len(switchIds))
+	for _, id := range switchIds {
+		state, hasState := c.switchControllerStates[id]
+		health, hasHealth := c.switchHealth[id]
+		if hasState || hasHealth {
+			out[id] = ComponentRuntimeStatus{ControllerState: state, Health: health}
+		}
+	}
+	return out, nil
+}
+
 func (c *mockClient) FindSwitchNvosIPs(_ context.Context, switchIds []string) (map[string]string, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
@@ -308,10 +327,37 @@ func (c *mockClient) FindPowerShelfControllerStates(_ context.Context, shelfIds 
 	return out, nil
 }
 
+func (c *mockClient) FindPowerShelfRuntimeStatuses(_ context.Context, shelfIds []string) (map[string]ComponentRuntimeStatus, error) {
+	out := make(map[string]ComponentRuntimeStatus, len(shelfIds))
+	for _, id := range shelfIds {
+		state, hasState := c.powerShelfControllerStates[id]
+		health, hasHealth := c.powerShelfHealth[id]
+		if hasState || hasHealth {
+			out[id] = ComponentRuntimeStatus{ControllerState: state, Health: health}
+		}
+	}
+	return out, nil
+}
+
+func (c *mockClient) FindRackHealthReports(_ context.Context, rackIds []string) (map[string]*types.HealthReport, error) {
+	out := make(map[string]*types.HealthReport, len(rackIds))
+	for _, id := range rackIds {
+		if health, ok := c.rackHealth[id]; ok {
+			out[id] = health
+		}
+	}
+	return out, nil
+}
+
 // SetSwitchControllerState records the raw controller_state Core reports for a
 // switch (mock only).
 func (c *mockClient) SetSwitchControllerState(switchID, state string) {
 	c.switchControllerStates[switchID] = state
+}
+
+// SetSwitchHealth records the aggregate health Core reports for a switch.
+func (c *mockClient) SetSwitchHealth(switchID string, health *types.HealthReport) {
+	c.switchHealth[switchID] = health
 }
 
 // SetSwitchNvosIP records the resolved NVOS host IP Core reports for a switch
@@ -324,6 +370,16 @@ func (c *mockClient) SetSwitchNvosIP(switchID, ip string) {
 // for a power shelf (mock only).
 func (c *mockClient) SetPowerShelfControllerState(shelfID, state string) {
 	c.powerShelfControllerStates[shelfID] = state
+}
+
+// SetPowerShelfHealth records the aggregate health Core reports for a shelf.
+func (c *mockClient) SetPowerShelfHealth(shelfID string, health *types.HealthReport) {
+	c.powerShelfHealth[shelfID] = health
+}
+
+// SetRackHealth records the aggregate health Core reports for a rack.
+func (c *mockClient) SetRackHealth(rackID string, health *types.HealthReport) {
+	c.rackHealth[rackID] = health
 }
 
 // SetRackHostMachineIDs records which host machines a rack contains (mock only).

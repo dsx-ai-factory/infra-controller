@@ -732,10 +732,10 @@ async fn update_interface_hostname(
     sqlx::query(query)
         .bind(hostname)
         .bind(interface_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    crate::dns::domain::bump_serial_for_interface(txn, interface_id).await
 }
 
 #[cfg(test)]

@@ -472,6 +472,15 @@ func (i *ipamer) releaseIPFromPrefixInternal(ctx context.Context, prefixCidr, ip
 	if !ok {
 		return fmt.Errorf("%w: unable to release ip:%s because it is not allocated in prefix:%s", ErrNotFound, ip, prefixCidr)
 	}
+	ipnet, err := netip.ParsePrefix(prefix.Cidr)
+	if err != nil {
+		return err
+	}
+	// Keep reservations stored so they cannot be reassigned and `hasIPs` stays accurate.
+	iprange := netipx.RangeOfPrefix(ipnet)
+	if address == iprange.From() || (address.Is4() && address == iprange.To()) {
+		return fmt.Errorf("unable to release ip:%s because it is reserved in prefix:%s", key, prefix.Cidr)
+	}
 	delete(prefix.ips, key)
 	_, err = i.storage.UpdatePrefix(ctx, *prefix, i.namespace)
 	if err != nil {

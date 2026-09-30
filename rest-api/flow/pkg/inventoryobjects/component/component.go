@@ -32,6 +32,9 @@ type Component struct {
 	// Status is the Flow-derived view of operability. Nil when no status
 	// has been computed yet (e.g. before the first inventory sync).
 	Status *types.ComponentOperationStatus `json:"status,omitempty"`
+	// Health is the most recent Core aggregate health snapshot mirrored by the
+	// inventory sync loop.
+	Health *types.HealthReport `json:"health,omitempty"`
 	// LeakStatus is the Flow-derived coolant leak detection status, owned by
 	// the leak-detection loop. LeakStatusUnknown until the loop evaluates it.
 	LeakStatus types.LeakStatus `json:"leak_status,omitempty"`

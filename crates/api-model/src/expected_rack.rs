@@ -52,24 +52,32 @@ pub fn derive_rack_profile_id(
             if value.trim().is_empty() {
                 return Err(format!("rack {rack_id} has a blank {kind} manufacturer"));
             }
-            if selected.is_some_and(|previous| previous != value) {
-                return Err(format!("rack {rack_id} has multiple {kind} manufacturers"));
-            }
             selected = Some(value);
         }
         Ok(selected)
     };
-    let compute = manufacturer(RackCapabilityType::Compute)?
+    manufacturer(RackCapabilityType::Compute)?
         .ok_or_else(|| format!("rack {rack_id} has no Compute members"))?;
-    let switch = manufacturer(RackCapabilityType::Switch)?
+    manufacturer(RackCapabilityType::Switch)?
         .ok_or_else(|| format!("rack {rack_id} has no Switch members"))?;
-    let power_shelf = manufacturer(RackCapabilityType::PowerShelf)?.unwrap_or("NO_POWERSHELF");
+    let power_suffix = if manufacturer(RackCapabilityType::PowerShelf)?.is_some() {
+        ""
+    } else {
+        "_NO_POWERSHELF"
+    };
+    let vendor = ["WIWYNN", "LENOVO", "SMC"]
+        .into_iter()
+        .find(|vendor| {
+            rack.members.iter().any(|member| {
+                member.manufacturer.eq_ignore_ascii_case(vendor)
+                    || (*vendor == "SMC" && member.manufacturer.eq_ignore_ascii_case("Supermicro"))
+            })
+        })
+        .unwrap_or("NVIDIA");
     Ok(RackProfileId::new(format!(
-        "{}_{}_{}_{}",
+        "{}_{}{power_suffix}",
         group.topology.as_str().to_uppercase(),
-        compute,
-        switch,
-        power_shelf
+        vendor
     )))
 }
 
@@ -128,19 +136,44 @@ mod tests {
                     (Switch, "NVIDIA"),
                     (PowerShelf, "WiWynn"),
                 ],
-                Some("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"),
+                Some("GB200_NVL72R1_C2G4_WIWYNN"),
             ),
             (
                 "no power shelf",
                 vec![(Compute, "NVIDIA"), (Compute, "NVIDIA"), (Switch, "NVIDIA")],
-                Some("GB200_NVL72R1_C2G4_NVIDIA_NVIDIA_NO_POWERSHELF"),
+                Some("GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF"),
             ),
             ("missing compute", vec![(Switch, "NVIDIA")], None),
             ("missing switch", vec![(Compute, "NVIDIA")], None),
             (
                 "mixed type manufacturers",
                 vec![(Compute, "NVIDIA"), (Compute, "WiWynn"), (Switch, "NVIDIA")],
-                None,
+                Some("GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF"),
+            ),
+            (
+                "wiwynn takes precedence across device types",
+                vec![(Compute, "SMC"), (Switch, "LENOVO"), (PowerShelf, "wiwynn")],
+                Some("GB200_NVL72R1_C2G4_WIWYNN"),
+            ),
+            (
+                "lenovo takes precedence over supermicro",
+                vec![(Compute, "Supermicro"), (Switch, "lenovo")],
+                Some("GB200_NVL72R1_C2G4_LENOVO_NO_POWERSHELF"),
+            ),
+            (
+                "supermicro alias",
+                vec![(Compute, "NVIDIA"), (Switch, "SuperMicro")],
+                Some("GB200_NVL72R1_C2G4_SMC_NO_POWERSHELF"),
+            ),
+            (
+                "smc power shelf",
+                vec![(Compute, "NVIDIA"), (Switch, "NVIDIA"), (PowerShelf, "smc")],
+                Some("GB200_NVL72R1_C2G4_SMC"),
+            ),
+            (
+                "unrecognized manufacturers default to nvidia",
+                vec![(Compute, "other-vendor"), (Switch, "NVIDIA")],
+                Some("GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF"),
             ),
             (
                 "blank manufacturer",
@@ -172,7 +205,7 @@ mod tests {
                 rack_id: RackId::new("other-rack"),
                 members: vec![ExpectedRackGroupMember {
                     device_type: Compute,
-                    manufacturer: "other-vendor".into(),
+                    manufacturer: "WIWYNN".into(),
                     id: "other-device".into(),
                 }],
             });

@@ -227,6 +227,18 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	}
 }
 
+func TestAPIDpuMachineFromProtoClearsMissingHealth(t *testing.T) {
+	ctx := APIDpuMachineProtoContext{}
+	dpu := APIDpuMachine{}
+	dpu.FromProto(&corev1.DpuMachine{Machine: &corev1.Machine{
+		Status: &corev1.MachineStatus{Health: &corev1.HealthReport{}},
+	}}, ctx)
+	assert.NotNil(t, dpu.Health)
+
+	dpu.FromProto(&corev1.DpuMachine{Machine: &corev1.Machine{}}, ctx)
+	assert.Nil(t, dpu.Health)
+}
+
 // TestAPIDpuMachine_FromProto_NilMachine guards against a panic when a
 // DpuMachine proto carries no inner Machine (or interfaces with nil IDs):
 // the Site worker / workflow could legitimately return such a shape, and the

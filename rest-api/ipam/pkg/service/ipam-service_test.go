@@ -25,6 +25,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestIPAMService_AcquireChildPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		request  *v1.AcquireChildPrefixRequest
+		wantCIDR string
+	}{
+		{name: "IPv6 maximum", request: &v1.AcquireChildPrefixRequest{Cidr: "2001:db8::/64", Length: 128}, wantCIDR: "2001:db8::/128"},
+		{name: "IPv6 length would wrap", request: &v1.AcquireChildPrefixRequest{Cidr: "2001:db8::/64", Length: 336}},
+		{name: "IPv4 too long", request: &v1.AcquireChildPrefixRequest{Cidr: "192.0.2.0/24", Length: 33}},
+		{name: "equal length remains unsupported", request: &v1.AcquireChildPrefixRequest{Cidr: "2001:db8::/64", Length: 64}},
+		{name: "specific CIDR ignores length", request: &v1.AcquireChildPrefixRequest{Cidr: "2001:db8::/64", Length: 336, ChildCidr: new("2001:db8::/80")}, wantCIDR: "2001:db8::/80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ipamer := goipam.New(ctx)
+			_, err := ipamer.NewPrefix(ctx, tc.request.Cidr)
+			require.NoError(t, err)
+			service := New(slog.Default(), ipamer)
+			response, err := service.AcquireChildPrefix(ctx, connect.NewRequest(tc.request))
+			if tc.wantCIDR == "" {
+				require.Error(t, err)
+				assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+				assert.Equal(t, uint64(0), ipamer.PrefixFrom(ctx, tc.request.Cidr).Usage().AcquiredPrefixes)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantCIDR, response.Msg.Prefix.Cidr)
+			}
+		})
+	}
+}
+
 func TestIpamService(t *testing.T) {
 	t.Parallel()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))

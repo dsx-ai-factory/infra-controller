@@ -1,0 +1,219 @@
+# machine-a-tron-10racks.yaml - ten GB200 NVL72 racks, one rack per pod
+# (Controller Mode with the protocol gateway).
+#
+# mat-0 simulates rack-001 through mat-9 simulating rack-010. Each rack
+# expands to 18 compute trays (one host with 2 DPUs each), 9 NVLink switch
+# trays and 8 power shelves: 71 BMCs and 54 NICo machines per rack. The
+# mat-k8s-controller publishes every BMC as a Service externalIP, and its
+# protocol gateway serves one RMS mock and one UFM API for all ten pods.
+#
+# Install order:
+#   1. nico-core with helm-prereqs/values/nico-core-simulation.yaml. Its
+#      simulated-oob and simulated-underlay segments are the relay targets
+#      below. Point nico-api.rms.apiUrl at the gateway Service (refer to
+#      docs/development/machine-a-tron-rms-mock.md):
+#      https://nico-machine-a-tron-mat-k8s-controller-gateway.nico-mat.svc.cluster.local:8443
+#   2. The labeled nico-mat namespace and the machine-a-tron-pull Secret
+#      (Cluster Prerequisites in docs/development/machine-a-tron-deployment.md).
+#   3. helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+#        -n nico-mat --set createNamespace=false \
+#        -f helm-prereqs/values/machine-a-tron-10racks.yaml
+#
+# The site BMC root password comes from the site credentials Secret, not this
+# file. Expect in NICo: 10 racks, 180 hosts, 360 DPUs, 90 switches and 80
+# power shelves (710 BMCs), each BMC reachable on its simulated-oob address.
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+global:
+  # Pre-created with the nico.nvidia.com/managed label (install step 2).
+  namespaceOverride: nico-mat
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+
+certificate:
+  uris:
+    - spiffe://nico.local/nico-system/sa/machine-a-tron
+
+extraEnv:
+  - name: RUST_LOG
+    value: info
+
+machineATron:
+  configureBmcProxyHost: ""  # Not used in controller mode
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
+  registerExpectedMachines: true
+
+# Per-pod MAC pools: pod N gets 02:00:0N and 02:01:0N, so MACs and the UFM
+# inventory id derived from the range base stay unique across pods.
+macAddressPool:
+  enabled: true
+  basePrefix: "02:00"
+
+hwMacAddressRanges:
+  enabled: true
+  basePrefix: "02:01"
+
+# Controller mode: one Service per BMC with the BMC IP as externalIP, plus the
+# protocol gateway in the controller pod fronting all ten instances.
+mat-k8s-controller:
+  enabled: true
+  # REQUIRED: the mat-k8s-controller image, which also carries the gateway
+  # binary. Set it here or on the command line with
+  #   --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller
+  #   --set mat-k8s-controller.image.tag=<tag>
+  image:
+    repository: ""
+    tag: ""
+  config:
+    insecureSkipVerify: true  # For self-signed certs
+  gateway:
+    enabled: true
+    # Ten sources to poll and route: limits twice the subchart defaults.
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+
+# Sizing rule: see the startupProbe comment in the chart values.yaml. One rack
+# registers 36 records (1 rack + 18 hosts + 9 switches + 8 power shelves):
+# 36 x 2s = 72s. 10 x 30s = 5 min leaves headroom for ten pods registering
+# against one nico-api at once plus a retry after an outage. livenessProbe and
+# readinessProbe stay at chart defaults.
+startupProbe:
+  tcpSocket:
+    port: redfish
+  periodSeconds: 30
+  failureThreshold: 10
+  successThreshold: 1
+  timeoutSeconds: 10
+
+# One rack (71 BMCs, 54 machines) per pod. The chart applies this block to
+# every pod.
+resources:
+  limits:
+    cpu: "2"
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# Rack groups use the chart's snake_case keys. bmc_dhcp_relay_address is the
+# simulated-oob gateway. underlay_dhcp_relay_address is the simulated-underlay
+# gateway: NICo predicts DPU OOB on an underlay segment, so DPU OOB and switch
+# NVOS DHCP relay there (both segments in nico-core-simulation.yaml).
+# mat-1 to mat-9 declare no machine groups. machines: {} makes the chart
+# render the bare [machines] table the binary requires.
+pods:
+  mat-0:
+    machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-001
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-1:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-002
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-2:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-003
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-3:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-004
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-4:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-005
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-5:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-006
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-6:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-007
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-7:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-008
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-8:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-009
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"
+  mat-9:
+    machines: {}
+    racks:
+      gb200:
+        type: wiwynn_gb200_nvl72
+        rack_profile_id: NVL72
+        ids:
+          - rack-010
+        bmc_dhcp_relay_address: "10.200.0.1"
+        underlay_dhcp_relay_address: "10.104.0.1"

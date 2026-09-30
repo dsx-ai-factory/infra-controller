@@ -188,6 +188,14 @@ func TestAllocationHandler_Create(t *testing.T) {
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "ipv6-prefix-length", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	_, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	require.NoError(t, err)
+	invalidV6Body, err := json.Marshal(model.APIAllocationCreateRequest{
+		Name: "invalid-ipv6-prefix-length", TenantID: tenant1.ID.String(), SiteID: site.ID.String(),
+		AllocationConstraints: []model.APIAllocationConstraintCreateRequest{{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbV6.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 336}},
+	})
+	require.NoError(t, err)
 
 	acBadInstanceTypeDoesNotExist := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: uuid.New().String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 5}
 	acBadInstanceTypeProviderMismatch := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 5}
@@ -325,7 +333,28 @@ func TestAllocationHandler_Create(t *testing.T) {
 		checkFullGrant       bool
 		verifyChildSpanner   bool
 		tmc                  *tmocks.Client
+		assertState          func(t *testing.T)
 	}{
+		{
+			name:               "reject IPv6 length before narrowing",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(invalidV6Body),
+			user:               ipu,
+			expectedErr:        true,
+			expectedStatus:     http.StatusBadRequest,
+			expectedIpamErrMsg: "prefix length must be between 64 and 128",
+			assertState: func(t *testing.T) {
+				count, err := cdbm.NewAllocationDAO(dbSession).GetCount(ctx, nil, cdbm.AllocationFilterInput{Name: cutil.GetPtr("invalid-ipv6-prefix-length")})
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				constraints, _, err := cdbm.NewAllocationConstraintDAO(dbSession).GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{ResourceTypeIDs: []uuid.UUID{ipbV6.ID}}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				assert.Empty(t, constraints)
+				usage, err := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, ipbV6)
+				require.NoError(t, err)
+				assert.Zero(t, usage.AcquiredPrefixes)
+			},
+		},
 		{
 			name:           "error when User not found in request context",
 			reqOrgName:     ipOrg1,
@@ -498,12 +527,13 @@ func TestAllocationHandler_Create(t *testing.T) {
 			expectedStatus:     http.StatusConflict,
 		},
 		{
-			name:           "error when Allocation Constraint value is larger than parent IP Block size",
-			reqOrgName:     ipOrg1,
-			reqBody:        string(errAllocationConstraintHasBlockSizeLargerThanParent),
-			user:           ipu,
-			expectedErr:    true,
-			expectedStatus: http.StatusConflict,
+			name:               "error when Allocation Constraint value is larger than parent IP Block size",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(errAllocationConstraintHasBlockSizeLargerThanParent),
+			user:               ipu,
+			expectedErr:        true,
+			expectedIpamErrMsg: "Could not create child IPAM entry for Allocation Constraint. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
+			expectedStatus:     http.StatusConflict,
 		},
 		{
 			name:             "error when Allocation with same name already exists",
@@ -564,6 +594,9 @@ func TestAllocationHandler_Create(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusCreated)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.assertState != nil {
+				tc.assertState(t)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIAllocation{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)

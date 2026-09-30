@@ -219,6 +219,33 @@ nico-api:
                 self.assertEqual(warnings, [])
                 self.assertEqual(pool_errors, [])
 
+    def test_per_pod_service_family_selection(self):
+        """Check every DNS/NTP replica against its chart-wide family selection."""
+        for component in ("nico-dns", "nico-ntp"):
+            with self.subTest(component=component):
+                values = {component: {"externalService": {
+                    "enabled": True, "ipFamilies": ["IPv6"], "ipFamilyPolicy": "SingleStack",
+                    "perPodAnnotations": [
+                        {"metallb.io/loadBalancerIPs": "2001:db8::1"},
+                        {"metallb.io/loadBalancerIPs": "192.0.2.1"},
+                    ],
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, [
+                    f"{component}.externalService: VIP 192.0.2.1 does not match ipFamilies ['IPv6']",
+                ])
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_invalid_pxe_family_configuration(self):
+        values = {"nico-pxe": {"externalService": {
+            "enabled": True, "ipFamilyPolicy": "RequiredDualStack",
+        }}}
+        with self.assertRaises(ValueError) as raised:
+            check_vips(io.StringIO(json.dumps(values)))
+        self.assertEqual(str(raised.exception),
+                         "nico-pxe.externalService.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
+
     def test_invalid_api_family_configuration(self):
         """Report malformed family settings before inspecting explicit or automatic VIPs."""
         cases = [

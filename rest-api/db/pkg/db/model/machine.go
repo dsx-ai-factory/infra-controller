@@ -74,6 +74,16 @@ var (
 	}
 )
 
+// ControllerMachineStateReady identifies Core's Ready lifecycle state.
+// It is separate from the REST status, which also accounts for assignment and health.
+const ControllerMachineStateReady = "Ready"
+
+// Canonical Machine history messages shared by allocation, release, and inventory.
+const (
+	MachineStatusInUseMessage = "Machine is being used by an Instance"
+	MachineStatusReadyMessage = "Machine is ready for assignment"
+)
+
 // A light wrapper around the protobuf so
 // that we can implement our own marshal/unmarshal
 // that understands how to work with protobuf messages
@@ -201,6 +211,20 @@ func (m *Machine) ToMetadataUpdateRequestProto(labels []*corev1.Label) *corev1.M
 			Labels: labels,
 		},
 	}
+}
+
+// StatusForAssignment combines the observed status with REST assignment. Only
+// Ready is masked; health, maintenance and transitional states keep precedence.
+// Clearing an assignment can restore Ready only when retained Core metadata
+// reports Ready. Otherwise fresh machine inventory must establish readiness.
+func (m *Machine) StatusForAssignment(assigned bool) string {
+	if assigned && m.Status == MachineStatusReady {
+		return MachineStatusInUse
+	}
+	if m.IsAssigned && !assigned && m.Status == MachineStatusInUse && m.Metadata.GetNormalizedState() == ControllerMachineStateReady {
+		return MachineStatusReady
+	}
+	return m.Status
 }
 
 // MachineCreateInput input parameters for Create method

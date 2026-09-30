@@ -36,8 +36,23 @@ func TestAPIRackJSONContract(t *testing.T) {
 		"operationStatus":"Unknown",
 		"nvLinkDomainIds":[],
 		"location":{"region":"","datacenter":"DC1","room":"","position":""},
-		"taskStats":{"pendingTaskCount":0,"activeTaskCount":0}
+		"taskStats":{"pendingTaskCount":0,"activeTaskCount":0},
+		"health":null
 	}`, string(got))
+}
+
+func TestAPIRackFromProtoClearsMissingHealth(t *testing.T) {
+	var rack APIRack
+	rack.FromProto(&flowv1.Rack{Health: &flowv1.HealthReport{}}, false)
+	assert.NotNil(t, rack.Health)
+	rack.FromProto(&flowv1.Rack{}, false)
+	assert.Nil(t, rack.Health)
+
+	var component APIRackComponent
+	component.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, component.Health)
+	component.FromProto(&flowv1.Component{})
+	assert.Nil(t, component.Health)
 }
 
 func TestAPIComponentDiffJSONContract(t *testing.T) {

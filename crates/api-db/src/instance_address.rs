@@ -142,13 +142,18 @@ async fn lock_addresses_for_instance(
 pub async fn delete(txn: &mut PgConnection, instance_id: InstanceId) -> Result<(), DatabaseError> {
     lock_addresses_for_instance(txn, instance_id).await?;
 
-    let query = "DELETE FROM instance_addresses WHERE instance_id=$1";
-    sqlx::query(query)
+    // The deleted rows name the segments whose subdomains lose records.
+    let query = "DELETE FROM instance_addresses WHERE instance_id=$1 RETURNING segment_id";
+    let segment_ids: Vec<NetworkSegmentId> = sqlx::query_scalar(query)
         .bind(instance_id)
-        .execute(txn)
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(())
+    crate::dns::domain::bump_serial_for_segments(
+        txn,
+        &segment_ids.into_iter().unique().collect_vec(),
+    )
+    .await
 }
 
 /// `delete_addresses_for_instance` releases exact segment/address pairs from
@@ -174,19 +179,26 @@ pub async fn delete_addresses_for_instance(
         .iter()
         .map(|(_, address)| *address)
         .collect::<Vec<_>>();
+    // The deleted rows name the segments whose subdomains lose records; a
+    // retried release that matches nothing bumps nothing.
     let query = "DELETE FROM instance_addresses stored
         USING UNNEST($2::uuid[], $3::inet[]) AS released(segment_id, address)
         WHERE stored.instance_id = $1
           AND stored.segment_id = released.segment_id
-          AND stored.address = released.address";
-    sqlx::query(query)
+          AND stored.address = released.address
+        RETURNING stored.segment_id";
+    let released_segments: Vec<NetworkSegmentId> = sqlx::query_scalar(query)
         .bind(instance_id)
         .bind(segment_ids)
         .bind(released_addresses)
-        .execute(txn)
+        .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(())
+    crate::dns::domain::bump_serial_for_segments(
+        txn,
+        &released_segments.into_iter().unique().collect_vec(),
+    )
+    .await
 }
 
 fn interface_vpc_id(iface: &InstanceInterfaceConfig, segments: &[NetworkSegment]) -> Option<VpcId> {
@@ -606,6 +618,9 @@ pub async fn allocate(
 
     // Persist every accumulated address with one INSERT, still under the lock.
     insert_instance_addresses(inner_txn.as_pgconn(), &rows).await?;
+    // New names appeared in the segments' subdomains.
+    let segment_ids = rows.iter().map(|row| row.segment_id).unique().collect_vec();
+    crate::dns::domain::bump_serial_for_segments(inner_txn.as_pgconn(), &segment_ids).await?;
 
     inner_txn.commit().await?;
 
