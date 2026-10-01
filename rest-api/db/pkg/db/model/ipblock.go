@@ -286,6 +286,12 @@ type IPBlockDAO interface {
 // GetBySitePrefixID finds the globally unique Core identity, including deleted rows.
 // The receiver must verify ownership and reject a deleted identity before mutation.
 func (ipbsd IPBlockSQLDAO) GetBySitePrefixID(ctx context.Context, tx *db.Tx, sitePrefixID uuid.UUID) (*IPBlock, error) {
+	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetBySitePrefixID")
+	if ipblockDAOSpan != nil {
+		defer ipblockDAOSpan.End()
+		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "site_prefix_id", sitePrefixID.String())
+	}
+
 	ipb := &IPBlock{}
 	err := db.GetIDB(tx, ipbsd.dbSession).NewSelect().Model(ipb).
 		WhereAllWithDeleted().Where("ipb.site_prefix_id = ?", sitePrefixID).Scan(ctx)
