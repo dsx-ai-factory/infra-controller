@@ -80,7 +80,11 @@ like `{id}` or `{session_id}` with `*`.
 ## Request Classes
 
 The same TOML also takes `[[class]]` tables, which set how long the proxy waits
-on the BMC for groups of requests. The baseline config declares none, so every
-request gets the default 60-second budget. See
+on the BMC for groups of requests and how many of them it sends to a BMC at a
+time, and an `[admission]` table, which limits the requests it sends to each
+BMC. Limits apply per replica: with the chart's default `replicas: 2`, a BMC
+can receive up to twice each limit. The baseline config declares neither, so
+every request gets the default 60-second budget and is sent at once. See
 [`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class)
-for the format.
+and [`admission`](../../../crates/bmc-proxy/README.md#admission) for the
+format.

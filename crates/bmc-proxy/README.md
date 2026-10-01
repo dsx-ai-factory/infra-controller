@@ -30,7 +30,10 @@ Important configuration fields:
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
 - `bmc_proxy`: optional upstream override for dev/test chaining
 - `class`: optional request classes that set how long the proxy waits on the
-  BMC; see [`class`](#class)
+  BMC, and how many of their requests it sends to a BMC at a time; see
+  [`class`](#class)
+- `admission`: optional limit on the requests the proxy sends to each BMC; see
+  [`admission`](#admission)
 
 Example shape:
 
@@ -122,7 +125,8 @@ If you are translating endpoint docs into ACLs, replace templated path component
 
 ### `class`
 
-Each `[[class]]` table groups proxied requests that share an upstream budget:
+Each `[[class]]` table groups proxied requests that share an upstream budget
+and admission settings:
 
 ```toml
 [[class]]
@@ -135,7 +139,8 @@ name = "default"
 upstream_timeout = "90s"
 ```
 
-- `name`: the class's name on the request's trace span, as `bmc_proxy.class`.
+- `name`: the class's name on the request's trace span, as `bmc_proxy.class`,
+  and its `class` label on the admission metrics.
   A lowercase letter followed by lowercase letters, digits, or `_`, at most
   32 characters in all, and unique across the tables.
 - `match`: an array of the requests the class takes, each written like an ACL
@@ -146,23 +151,105 @@ upstream_timeout = "90s"
   duration string such as `"500ms"`, `"45s"`, or `"5m"`, above zero and at
   most 30 minutes. A class that omits it gets 60 seconds, not the `default`
   class's budget.
+- `priority`: from 0 to 255, higher first; orders the requests of different
+  classes waiting for the same BMC under `max_in_flight_per_bmc`, and has no
+  effect without it. Optional, 0 by default.
+- `max_in_flight`: how many of the class's requests one proxy replica sends
+  to one BMC at a time, at least 1. Optional; unlimited by default.
+- `max_queued`: how many of the class's requests may wait for one BMC at a
+  time, from 1 to 128; a request that stops waiting gives up its place, and
+  one more than this is refused with `503` at once. Requests arriving
+  together on their way to free slots do not count. Optional, 16 by default.
+  Each BMC in use costs the proxy memory in proportion to the `max_queued` of
+  every class that takes slots.
 
-The budget runs from connecting to the BMC until the proxy has read the last
-byte of the BMC's response body, redirects the proxy follows included. Most
+The budget covers looking up the BMC's credentials in nico-api and any wait
+for a slot at the BMC (see [`admission`](#admission)), then runs from
+connecting to the BMC until the proxy has read the last byte of the BMC's
+response body, redirects the proxy follows included. Most
 bodies are passed on to the caller as they are read, so a slow caller spends
 the budget too. When the budget runs out before the BMC answers, the caller
 gets `502`; when it runs out while the body is being passed on, the body is
 cut off. A request the proxy replays with fresh credentials gets a budget of
-its own. A streamed upload (a body over 8 MiB that declares its length)
-ignores its class's budget and scales its own from its declared size: 60
-seconds plus the transfer at 10 kB/s, at most four hours.
+its own, which covers looking up the fresh credentials. A streamed upload (a
+body over 8 MiB that declares its length) looks up credentials and waits for
+a slot within its class's budget, then gets a budget of its own for the
+transfer, scaled from its declared size: 60 seconds plus the transfer at
+10 kB/s, at most four hours.
 
 A request belongs to the first class, in file order, with a matching pattern.
 A request no class matches belongs to `default`, whose budget is 60 seconds;
-declare `default`, without `match`, only to change that. A budget longer than
+declare `default`, without `match`, only to change that or its admission
+settings. A budget longer than
 the caller's own deadline does not help that caller. A `[[class]]` table that
 breaks these rules, or has a key not listed here, stops the proxy from
 starting.
+
+### `admission`
+
+The proxy can limit how many requests it sends to each BMC at a time, and
+choose which waiting request goes next:
+
+```toml
+[admission]
+max_in_flight_per_bmc = 4
+
+[[class]]
+name = "power"
+match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
+priority = 1
+
+[[class]]
+name = "metrics"
+match = ["GET /redfish/v1/**/EnvironmentMetrics"]
+max_in_flight = 2
+```
+
+- `max_in_flight_per_bmc`: how many requests one proxy replica sends to one
+  BMC at a time, across all classes, at least 1. Optional; unlimited by
+  default. A class's own `max_in_flight` applies within it. An `[admission]`
+  table with a key not listed here stops the proxy from starting.
+
+A request takes a slot at its BMC before the proxy sends it when its class
+sets `max_in_flight` or `max_in_flight_per_bmc` is set; otherwise it is sent
+at once. The proxy looks up the BMC's credentials first, so a request for an
+address nico-api has no BMC credentials for gets `502` without taking a slot
+or a place in a queue. A request holds its slot until the proxy has passed
+the whole response on to the caller, or the exchange has failed; a replay
+with fresh credentials keeps the same slot. From the moment it gets the
+slot, it holds it no longer than its exchange with the BMC can take, though:
+twice its class's budget, for a first attempt and a replay, or its class's
+budget and its own for a streamed upload. Past that, the slot goes to the
+next waiting request, so a caller that stops reading cannot keep it, though
+the proxy keeps that response's connection to the BMC open until the caller
+reads on or goes away.
+
+A request that finds no free slot waits at the proxy in its class's queue for
+that BMC. A freed slot goes to the highest-priority class that has a request
+waiting and is under its own `max_in_flight`; classes of equal priority take
+turns, and each class's requests go in the order they came. A class gets no
+slot while a higher-priority class has a request waiting that its
+`max_in_flight` lets through, and its requests are refused when their budget
+runs out. A request whose caller disconnects gives up its place, except a
+streamed upload over HTTP/1, whose caller the proxy finds gone only once it
+starts sending the upload.
+
+Waiting spends the request's budget, and a request that waited has only the
+rest of it for its first exchange with the BMC; a streamed upload keeps its
+own. The proxy refuses a request with `503` and a plain-text body giving the
+reason when its class's queue at the BMC is full of requests still waiting,
+when no slot frees within its budget, when the proxy already tracks 100,000
+BMCs, or when the proxy is shutting down. It counts refusals in
+`carbide_bmc_proxy_admission_refused_total`, by `class` and `reason`
+(`queue_full`, `timeout`, `too_many_bmcs`, or `shutting_down`), and records
+the waits of requests that got a slot in
+`carbide_bmc_proxy_admission_wait_milliseconds`.
+
+Limits are per proxy replica: with two replicas, a BMC can receive up to twice
+a limit. A request the BMC is already handling cannot be overtaken, so keep
+the classes whose requests are slow, and streamed uploads, which can hold a
+slot for hours, at a `max_in_flight` below `max_in_flight_per_bmc`, leaving
+slots for the others.
 
 ## Example Request
 

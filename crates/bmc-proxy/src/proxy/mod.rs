@@ -26,6 +26,8 @@
 //! - `guard`: identifies the caller from its certificate, then checks the
 //!   principal allow-list and the per-principal ACL.
 //! - `target`: resolves the BMC the `Forwarded` header names to its IP.
+//! - `admission`: holds a request until its BMC has a slot for it, when its
+//!   class or the per-BMC limit caps how many requests the BMC receives.
 //! - `credentials`: the BMC's credentials, fetched from nico-api and cached
 //!   by IP.
 //! - `upstream`: sends the request to the BMC with the caller's headers and
@@ -38,6 +40,7 @@
 //! answers 401 or 403 and the body can be sent again, it drops the cached
 //! credentials and sends the request once more with fresh ones.
 
+mod admission;
 mod credentials;
 #[cfg(test)]
 mod end_to_end_tests;
@@ -71,8 +74,9 @@ use trace_propagation::set_span_parent_from_headers;
 use tracing::Instrument;
 
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
+use crate::proxy::admission::Admission;
 use crate::proxy::credentials::{
-    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials,
+    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
 };
 use crate::proxy::guard::{authorize_proxy_request, cert_description_layer};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
@@ -113,6 +117,7 @@ struct BmcProxyState {
     /// internally, so per-BMC clients bought nothing and grew without bound.
     http_client: reqwest_middleware::ClientWithMiddleware,
     ip_cache: LookupToIpCache,
+    admission: Arc<Admission>,
 }
 
 /// Upper bound on cached entries; sized far above any realistic BMC fleet.
@@ -172,12 +177,19 @@ pub(crate) async fn start(
     let api_config = ApiConfig::new(config.carbide_api.api_url.as_str(), &client_config);
     let api_client = ForgeApiClient::new(&api_config);
 
+    let admission = Admission::start(
+        &config.classes,
+        &config.admission,
+        cancel_token.clone(),
+        join_set,
+    );
     let state = BmcProxyState {
         config,
         api_client,
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         http_client: build_http_client()?,
         ip_cache: bounded_cache(IP_CACHE_TTL),
+        admission,
     };
 
     let app = Router::new()
@@ -330,13 +342,44 @@ async fn proxy_request_inner(
         UpstreamBody::None
     };
 
+    // The first attempt's budget also covers resolving the BMC's
+    // credentials and waiting for a slot there. Resolving them first means
+    // only a BMC nico-api knows takes a slot, and the lookup holds none.
+    let deadline = tokio::time::Instant::now() + class.upstream_timeout;
+    tokio::time::timeout_at(
+        deadline,
+        get_bmc_credentials(target_ip, &state.api_client, &state.credential_cache),
+    )
+    .await
+    .map_err(|_elapsed| {
+        error_response(
+            (
+                StatusCode::BAD_GATEWAY,
+                "timed out resolving the BMC's credentials",
+            )
+                .into(),
+        )
+    })?
+    .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    let slot = state
+        .admission
+        .acquire(
+            target_ip,
+            class,
+            deadline,
+            upstream_body.exchange_bound(class.upstream_timeout),
+        )
+        .await
+        .map_err(|refused| {
+            error_response((StatusCode::SERVICE_UNAVAILABLE, refused.to_string()).into())
+        })?;
     let mut upstream_response = send_upstream(
         &state,
         target_ip,
         &parts,
         path_and_query.clone(),
         &mut upstream_body,
-        class.upstream_timeout,
+        deadline,
     )
     .await?;
 
@@ -359,7 +402,7 @@ async fn proxy_request_inner(
             &parts,
             path_and_query,
             &mut upstream_body,
-            class.upstream_timeout,
+            tokio::time::Instant::now() + class.upstream_timeout,
         )
         .await?;
     }
@@ -382,7 +425,7 @@ async fn proxy_request_inner(
         evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
-    Ok(build_response(status, &headers, body))
+    Ok(build_response(status, &headers, body).map(|body| slot.hold_until_sent(body)))
 }
 
 fn error_response(error: ProxyError) -> Response<Body> {

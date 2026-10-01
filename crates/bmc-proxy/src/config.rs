@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
@@ -62,6 +63,18 @@ pub(crate) struct Config {
     /// request in the implicit default class.
     #[serde(rename = "class", default)]
     pub(crate) classes: ClassTable,
+    #[serde(default)]
+    pub(crate) admission: AdmissionConfig,
+}
+
+/// Limits on the requests one proxy replica sends to each BMC, across every
+/// class. A class's own limit applies within this one.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdmissionConfig {
+    /// Requests one replica sends to one BMC at a time. Absent is unlimited.
+    #[serde(default)]
+    pub(crate) max_in_flight_per_bmc: Option<NonZeroU32>,
 }
 
 /// OpenTelemetry trace export settings for proxied BMC requests.
@@ -168,7 +181,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -445,6 +459,28 @@ mod tests {
                     tracing_enabled: true,
                     tracing_otlp_endpoint: Some("http://collector.example.com:4317".to_string()),
                 },
+            }
+        );
+    }
+
+    /// `[admission]` sets the per-BMC limit; without it there is none. A
+    /// zero limit or an unknown key does not load.
+    #[test]
+    fn admission_limits_parse() {
+        scenarios!(
+            run = |admission: &str| {
+                Config::parse(&format!("{admission}\n{MINIMAL_TLS}"))
+                    .map(|config| config.admission.max_in_flight_per_bmc.map(NonZeroU32::get))
+                    .map_err(drop)
+            };
+            "loaded" {
+                "" => Yields(None),
+                "[admission]\nmax_in_flight_per_bmc = 4" => Yields(Some(4)),
+            }
+
+            "rejected" {
+                "[admission]\nmax_in_flight_per_bmc = 0" => Fails,
+                "[admission]\nmax_in_flight = 4" => Fails,
             }
         );
     }
