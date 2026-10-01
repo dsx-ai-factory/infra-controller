@@ -15,37 +15,19 @@
  * limitations under the License.
  */
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, InstanceState, ManagedHostState,
 };
 use rpc::forge::machine_cleanup_info::{CleanupResult, CleanupStepResult};
-use state_controller::controller::StateController;
-use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::site_prefix_controller::SitePrefixReadiness;
 use crate::tests::common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config,
 };
 use crate::tests::common::api_fixtures::{
     TestManagedHost, create_managed_host_multi_dpu, network_configured_with_health,
 };
-
-fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
-    StateController::builder()
-        .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
-        .processor_id("site-prefix-readiness-test".to_string())
-        .services(Arc::new(env.pool.clone()))
-        .state_handler(Arc::new(SitePrefixReadiness {
-            vpc_isolation_behavior: env.api.runtime_config.vpc_isolation_behavior,
-        }))
-        .build_for_manual_iterations(CancellationToken::new())
-        .unwrap()
-}
 
 fn allocation_request(
     host: &TestManagedHost,
@@ -69,25 +51,6 @@ async fn requested_at(env: &TestEnv, id: SitePrefixId) -> Option<DateTime<Utc>> 
         .fetch_one(&env.pool)
         .await
         .unwrap()
-}
-
-async fn stored_prefix(env: &TestEnv, id: SitePrefixId) -> SitePrefix {
-    db::site_prefix::find_by_ids(&env.pool, &[id])
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
-}
-
-async fn stored_outcome(env: &TestEnv, id: SitePrefixId) -> PersistentStateHandlerOutcome {
-    sqlx::query_scalar::<_, sqlx::types::Json<PersistentStateHandlerOutcome>>(
-        "SELECT controller_state_outcome FROM site_prefixes WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap()
-    .0
 }
 
 #[crate::sqlx_test]

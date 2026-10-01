@@ -934,6 +934,32 @@ pub async fn retire_tenant_managed(
     Ok(site_prefix)
 }
 
+/// `delete_tenant_managed_if_unused` removes a deleting tenant SitePrefix only
+/// after every VpcPrefix referencing its ID has been physically removed.
+///
+/// The caller must hold the routing lock and this root's row lock through commit.
+/// Removing the root changes the prefix set used in DPU isolation configuration.
+/// Returns `false` for an absent root, another authority or lifecycle state, or
+/// any retained child, including a soft-deleted child. Database failures remain errors.
+pub async fn delete_tenant_managed_if_unused(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+) -> DatabaseResult<bool> {
+    let query = "DELETE FROM site_prefixes
+        WHERE id = $1 AND authority = $2 AND lifecycle_state = $3
+          AND NOT EXISTS (
+              SELECT 1 FROM network_vpc_prefixes WHERE site_prefix_id = $1
+          )";
+    let result = sqlx::query(query)
+        .bind(site_prefix_id)
+        .bind(SitePrefixAuthority::TenantManaged)
+        .bind(SitePrefixLifecycleState::Deleting)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub async fn find_ids(
     db: impl DbReader<'_>,
     filter: SitePrefixSearchFilter,
@@ -1124,7 +1150,7 @@ pub async fn try_mark_ready(
     })
 }
 
-/// `update_controller_state_outcome` stores the last readiness handler result
+/// `update_controller_state_outcome` stores the last lifecycle handler result
 /// without changing the SitePrefix's public lifecycle or optimistic version.
 pub async fn update_controller_state_outcome(
     txn: &mut PgConnection,
@@ -2126,6 +2152,118 @@ mod tests {
         );
         assert!(operator_managed_prefixes_exist(&mut *txn).await?);
 
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// A tenant root stays reserved until every exact child is physically gone.
+    #[crate::sqlx_test]
+    async fn tenant_root_deletion_waits_for_every_exact_child(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+        create_tenant(&pool, "tenant-b").await?;
+        let root = create(&pool, tenant_managed("10.72.0.0/16", "tenant-a"), 8)
+            .await?
+            .site_prefix;
+        let other = create(&pool, tenant_managed("10.72.0.0/16", "tenant-b"), 8)
+            .await?
+            .site_prefix;
+
+        let mut txn = pool.begin().await?;
+        crate::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        sqlx::query("UPDATE site_prefixes SET lifecycle_state = $1 WHERE id = ANY($2)")
+            .bind(SitePrefixLifecycleState::Ready)
+            .bind([root.id, other.id])
+            .execute(&mut *txn)
+            .await?;
+        let root = find_by_id_for_update(&mut txn, root.id).await?.unwrap();
+        assert!(!delete_tenant_managed_if_unused(&mut txn, root.id).await?);
+        assert_eq!(find_by_ids(&mut *txn, &[root.id]).await?.len(), 1);
+
+        let first_child = VpcPrefixId::new();
+        let second_child = VpcPrefixId::new();
+        let other_child = VpcPrefixId::new();
+        for (id, prefix, parent) in [
+            (first_child, "10.72.1.0/24", &root),
+            (second_child, "10.72.2.0/24", &root),
+            (other_child, "10.72.3.0/24", &other),
+        ] {
+            let vpc_id = carbide_uuid::vpc::VpcId::new();
+            sqlx::query(
+                "INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(vpc_id)
+            .bind(prefix)
+            .bind(&parent.config.tenant_organization_id)
+            .bind(ConfigVersion::initial())
+            .execute(&mut *txn)
+            .await?;
+            sqlx::query(
+                "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id, site_prefix_id)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(prefix.parse::<IpNetwork>()?)
+            .bind(prefix)
+            .bind(vpc_id)
+            .bind(parent.id)
+            .execute(&mut *txn)
+            .await?;
+        }
+        retire_tenant_managed(
+            &RetireTenantManagedSitePrefix {
+                id: root.id,
+                tenant_organization_id: root.config.tenant_organization_id.clone().unwrap(),
+            },
+            &root,
+            &mut txn,
+        )
+        .await?;
+        assert!(!delete_tenant_managed_if_unused(&mut txn, root.id).await?);
+        assert_eq!(find_by_ids(&mut *txn, &[root.id]).await?.len(), 1);
+
+        sqlx::query("UPDATE network_vpc_prefixes SET deleted = now() WHERE id = ANY($1)")
+            .bind([first_child, second_child])
+            .execute(&mut *txn)
+            .await?;
+        assert!(!delete_tenant_managed_if_unused(&mut txn, root.id).await?);
+        assert_eq!(find_by_ids(&mut *txn, &[root.id]).await?.len(), 1);
+
+        for (child_id, root_deleted) in [(first_child, false), (second_child, true)] {
+            crate::vpc_prefix::final_delete(child_id, &mut txn).await?;
+            assert_eq!(
+                delete_tenant_managed_if_unused(&mut txn, root.id).await?,
+                root_deleted,
+            );
+            assert_eq!(
+                find_by_ids(&mut *txn, &[root.id]).await?.is_empty(),
+                root_deleted
+            );
+        }
+        assert!(!delete_tenant_managed_if_unused(&mut txn, root.id).await?);
+        assert_eq!(find_by_ids(&mut *txn, &[other.id]).await?.len(), 1);
+        let remaining_child: VpcPrefixId =
+            sqlx::query_scalar("SELECT id FROM network_vpc_prefixes WHERE site_prefix_id = $1")
+                .bind(other.id)
+                .fetch_one(&mut *txn)
+                .await?;
+        assert_eq!(remaining_child, other_child);
+
+        let operator_cidr = "192.168.0.0/16".parse()?;
+        reconcile_configured(&mut txn, &[operator_cidr]).await?;
+        reconcile_configured(&mut txn, &[]).await?;
+        let operator_id = find_ids(
+            &mut *txn,
+            SitePrefixSearchFilter {
+                authority: Some(SitePrefixAuthority::OperatorManaged),
+                ..Default::default()
+            },
+        )
+        .await?[0];
+        find_by_id_for_update(&mut txn, operator_id).await?.unwrap();
+        assert!(!delete_tenant_managed_if_unused(&mut txn, operator_id).await?);
+        assert_eq!(find_by_ids(&mut *txn, &[operator_id]).await?.len(), 1);
         txn.commit().await?;
         Ok(())
     }

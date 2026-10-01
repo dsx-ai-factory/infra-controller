@@ -938,7 +938,7 @@ Tenant roots remain included in every retained lifecycle state, including
 `Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots start
 in `Provisioning` and cannot be used for new VpcPrefixes until they become `Ready`.
 Under `mutual_isolation`, `nico-api` requests a network configuration update for
-hosts assigned to Instances or still able to serve tenant traffic. The readiness
+hosts assigned to Instances or still able to serve tenant traffic. The SitePrefix
 controller waits for every DPU in each affected host's topology to acknowledge
 the current host network configuration version before marking the root `Ready`.
 Missing acknowledgements leave the root `Provisioning`. Retries and API restarts
@@ -973,7 +973,7 @@ restart readiness for prefixes already marked `Ready`.
 Retiring operator roots are excluded from the legacy input but remain in inherited
 FNN null routes until their children are hard-deleted.
 
-Before starting an API with this readiness controller, every API process serving
+Before starting an API with this SitePrefix controller, every API process serving
 DPU configurations must include the tenant-prefix rendering added in
 [#6388](https://github.com/dsx-ai-factory/infra-controller/pull/6388).
 For a direct upgrade from an API without it, such as `v2.2.0-rc.8`, stop the old
@@ -989,11 +989,21 @@ Adding `isolation_requested_at` and `controller_state_outcome` can make those
 queries fail until the old API's connections or process are replaced. Stopping
 the old API before migrations avoids this additional error window.
 
-Deleting a tenant root still keeps its CIDR, quota slot, and protection until final
-removal. The retirement work in
-[#3894](https://github.com/dsx-ai-factory/infra-controller/issues/3894) requires proof
-that learned routes have been withdrawn; a configuration acknowledgement alone
-does not provide that proof.
+`DeleteSitePrefix` marks a `TenantManaged` root `Deleting`. It keeps its CIDR,
+quota slot, and isolation protection while any child `VpcPrefix` row remains,
+including children marked for deletion. Once every child is physically removed,
+the SitePrefix controller deletes the root and releases its CIDR and quota slot.
+While children remain, the controller waits without taking the routing lock.
+Removing the row also removes that root from subsequent DPU isolation inputs;
+other retained roots still contribute coverage. An explicit
+`site_fabric_null_routes` override stays unchanged.
+Normal child teardown handles DPU network cleanup; removing the empty root does
+not release an attachment or VNI and needs no additional DPU acknowledgement.
+See [tenant SitePrefix deletion](https://github.com/dsx-ai-factory/infra-controller/issues/3894)
+for the scope and qualification boundaries.
+
+The controller does not physically remove `OperatorManaged` roots. Restoring
+a removed CIDR to `site_fabric_prefixes` reuses its existing SitePrefix ID.
 
 ### Tenant prefix overlap checks
 

@@ -16,11 +16,13 @@
  */
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::metadata::Metadata;
 use model::site_prefix::{
     NewTenantManagedSitePrefix, SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState,
@@ -35,10 +37,13 @@ use rpc::forge::{
     SitePrefixStateHistoriesRequest, SitePrefixUpdateRequest, SitePrefixesByIdsRequest,
     VersionRequest,
 };
+use state_controller::controller::StateController;
+use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request};
 
 use crate::cfg::file::{AdminFnnConfig, VpcIsolationBehaviorType};
 use crate::handlers::tenant_prefix_overlap::validate_retained_state;
+use crate::site_prefix_controller::SitePrefixLifecycle;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
@@ -49,7 +54,39 @@ use crate::tests::common::network_segment::NetworkSegmentHelper;
 use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
+mod deletion;
 mod readiness;
+
+fn controller(env: &TestEnv) -> StateController<SitePrefixLifecycle> {
+    StateController::builder()
+        .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
+        .processor_id("site-prefix-lifecycle-test".to_string())
+        .services(Arc::new(env.pool.clone()))
+        .state_handler(Arc::new(SitePrefixLifecycle {
+            vpc_isolation_behavior: env.api.runtime_config.vpc_isolation_behavior,
+        }))
+        .build_for_manual_iterations(CancellationToken::new())
+        .unwrap()
+}
+
+async fn stored_prefix(env: &TestEnv, id: SitePrefixId) -> SitePrefix {
+    db::site_prefix::find_by_ids(&env.pool, &[id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+async fn stored_outcome(env: &TestEnv, id: SitePrefixId) -> PersistentStateHandlerOutcome {
+    sqlx::query_scalar::<_, sqlx::types::Json<PersistentStateHandlerOutcome>>(
+        "SELECT controller_state_outcome FROM site_prefixes WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&env.pool)
+    .await
+    .unwrap()
+    .0
+}
 
 fn tenant_managed_site_prefix(
     prefix: &str,

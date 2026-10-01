@@ -15,17 +15,18 @@
  * limitations under the License.
  */
 
-//! Makes tenant SitePrefixes usable after the required DPUs apply protection.
+//! Makes tenant SitePrefixes ready after DPU protection and deletes them after child cleanup.
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
-use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixSearchFilter,
 };
+use model::vpc_prefix::VpcPrefixSearch;
+use model::{DeletedFilter, StateSla};
 use sqlx::{PgConnection, PgPool};
 use state_controller::CheckApplied;
 use state_controller::io::StateControllerIO;
@@ -38,11 +39,11 @@ use state_controller::state_handler::{
 use crate::cfg::file::VpcIsolationBehaviorType;
 
 #[derive(Debug, Default)]
-pub(crate) struct SitePrefixReadiness {
+pub(crate) struct SitePrefixLifecycle {
     pub(crate) vpc_isolation_behavior: VpcIsolationBehaviorType,
 }
 
-impl SitePrefixReadiness {
+impl SitePrefixLifecycle {
     async fn wait_for_isolation(
         &self,
         txn: &mut PgConnection,
@@ -74,13 +75,13 @@ impl SitePrefixReadiness {
     }
 }
 
-impl StateHandlerContextObjects for SitePrefixReadiness {
+impl StateHandlerContextObjects for SitePrefixLifecycle {
     type Services = PgPool;
     type ObjectMetrics = ();
 }
 
 #[async_trait::async_trait]
-impl StateControllerIO for SitePrefixReadiness {
+impl StateControllerIO for SitePrefixLifecycle {
     type ObjectId = SitePrefixId;
     type State = SitePrefix;
     type ControllerState = SitePrefixLifecycleState;
@@ -95,15 +96,27 @@ impl StateControllerIO for SitePrefixReadiness {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<SitePrefixId>, DatabaseError> {
-        db::site_prefix::find_ids(
-            txn,
+        let mut ids = db::site_prefix::find_ids(
+            &mut *txn,
             SitePrefixSearchFilter {
                 authority: Some(SitePrefixAuthority::TenantManaged),
                 lifecycle_state: Some(SitePrefixLifecycleState::Provisioning),
                 ..Default::default()
             },
         )
-        .await
+        .await?;
+        ids.extend(
+            db::site_prefix::find_ids(
+                txn,
+                SitePrefixSearchFilter {
+                    authority: Some(SitePrefixAuthority::TenantManaged),
+                    lifecycle_state: Some(SitePrefixLifecycleState::Deleting),
+                    ..Default::default()
+                },
+            )
+            .await?,
+        );
+        Ok(ids)
     }
 
     async fn load_object_state(
@@ -187,7 +200,7 @@ impl StateControllerIO for SitePrefixReadiness {
 }
 
 #[async_trait::async_trait]
-impl StateHandler for SitePrefixReadiness {
+impl StateHandler for SitePrefixLifecycle {
     type ObjectId = SitePrefixId;
     type State = SitePrefix;
     type ControllerState = SitePrefixLifecycleState;
@@ -201,6 +214,43 @@ impl StateHandler for SitePrefixReadiness {
         ctx: &mut StateHandlerContext<Self>,
     ) -> Result<StateHandlerOutcome<SitePrefixLifecycleState>, StateHandlerError> {
         let mut txn = ctx.services.begin().await?;
+        if state.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
+            // A retained child only delays deletion. Keep ordinary waits off
+            // the routing lock; the locked delete below checks again.
+            let children = db::vpc_prefix::search(
+                &mut txn,
+                VpcPrefixSearch {
+                    site_prefix_id: Some(*object_id),
+                    deleted_filter: DeletedFilter::Include,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            if children.is_empty() {
+                db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+                let Some(current) =
+                    db::site_prefix::find_by_id_for_update(&mut txn, *object_id).await?
+                else {
+                    return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+                };
+                if current.status.authority != SitePrefixAuthority::TenantManaged
+                    || current.status.lifecycle_state != SitePrefixLifecycleState::Deleting
+                {
+                    return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+                }
+
+                // Removing the root changes DPU isolation inputs. Serialize
+                // with routing updates and recheck every physical child.
+                if db::site_prefix::delete_tenant_managed_if_unused(&mut txn, *object_id).await? {
+                    tracing::info!(site_prefix_id = %object_id, "Removing tenant-managed SitePrefix");
+                    return Ok(StateHandlerOutcome::deleted().with_txn(txn));
+                }
+            }
+            return Ok(StateHandlerOutcome::wait(
+                "waiting for child VPC prefixes to be deleted".to_string(),
+            )
+            .with_txn(txn));
+        }
         let requested_at = db::site_prefix::isolation_requested_at(&mut txn, *object_id).await?;
         if let Some(requested_at) = requested_at {
             // A stale negative only delays readiness. Avoid holding the routing
