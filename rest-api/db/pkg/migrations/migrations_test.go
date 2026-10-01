@@ -373,6 +373,74 @@ func TestDomainOwnershipMigration(t *testing.T) {
 	assert.Equal(t, 1, ownershipIndexCount)
 }
 
+func TestDomainLifecycleMigrationIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	countColumns := func(table string, columns ...string) int {
+		var count int
+		err := dbSession.DB.NewSelect().
+			TableExpr("information_schema.columns").
+			ColumnExpr("COUNT(*)").
+			Where("table_schema = 'public'").
+			Where("table_name = ?", table).
+			Where("column_name IN (?)", bun.In(columns)).
+			Scan(ctx, &count)
+		require.NoError(t, err)
+		return count
+	}
+	countIndexes := func(names ...string) int {
+		var count int
+		err := dbSession.DB.NewSelect().
+			TableExpr("pg_indexes").
+			ColumnExpr("COUNT(*)").
+			Where("schemaname = 'public'").
+			Where("indexname IN (?)", bun.In(names)).
+			Scan(ctx, &count)
+		require.NoError(t, err)
+		return count
+	}
+	recoveryColumns := []string{"recovery_token", "recovery_lease_until", "recovery_next_at", "recovery_attempts"}
+	attachColumns := []string{
+		"attach_intent_id", "attach_source_vpc_id", "attach_target_vpc_id",
+		"attach_source_controller_vpc_id", "attach_target_controller_vpc_id",
+		"attach_segment_version", "attach_recovery_token", "attach_lease_until",
+		"attach_next_at", "attach_attempts",
+	}
+	indexes := []string{"domain_owned_name_idx", "domain_recovery_due_idx", "subnet_attach_recovery_due_idx"}
+
+	// A fresh install creates domain and subnet from the current models, which
+	// already contain every lifecycle column.
+	model.TestSetupSchema(t, dbSession)
+	require.Equal(t, len(recoveryColumns), countColumns("domain", recoveryColumns...))
+	require.Equal(t, len(attachColumns), countColumns("subnet", attachColumns...))
+	require.NoError(t, domainLifecycleUpMigration(ctx, dbSession.DB))
+	assert.Equal(t, len(indexes), countIndexes(indexes...))
+
+	// A retry after a partial failure (index created, columns present) and a
+	// repeated run both converge without error.
+	_, err := dbSession.DB.ExecContext(ctx, `DROP INDEX domain_recovery_due_idx, subnet_attach_recovery_due_idx`)
+	require.NoError(t, err)
+	require.NoError(t, domainLifecycleUpMigration(ctx, dbSession.DB))
+	require.NoError(t, domainLifecycleUpMigration(ctx, dbSession.DB))
+	assert.Equal(t, len(indexes), countIndexes(indexes...))
+
+	// An upgraded install that predates the lifecycle columns receives them.
+	_, err = dbSession.DB.ExecContext(ctx, `DROP INDEX domain_owned_name_idx, domain_recovery_due_idx, subnet_attach_recovery_due_idx`)
+	require.NoError(t, err)
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE domain DROP COLUMN recovery_token, DROP COLUMN recovery_lease_until, DROP COLUMN recovery_next_at, DROP COLUMN recovery_attempts`)
+	require.NoError(t, err)
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE subnet DROP COLUMN attach_intent_id, DROP COLUMN attach_source_vpc_id, DROP COLUMN attach_target_vpc_id, DROP COLUMN attach_source_controller_vpc_id, DROP COLUMN attach_target_controller_vpc_id, DROP COLUMN attach_segment_version, DROP COLUMN attach_recovery_token, DROP COLUMN attach_lease_until, DROP COLUMN attach_next_at, DROP COLUMN attach_attempts`)
+	require.NoError(t, err)
+	require.Equal(t, 0, countColumns("domain", recoveryColumns...))
+	require.Equal(t, 0, countColumns("subnet", attachColumns...))
+	require.NoError(t, domainLifecycleUpMigration(ctx, dbSession.DB))
+	assert.Equal(t, len(recoveryColumns), countColumns("domain", recoveryColumns...))
+	assert.Equal(t, len(attachColumns), countColumns("subnet", attachColumns...))
+	assert.Equal(t, len(indexes), countIndexes(indexes...))
+}
+
 func Test_vpcProviderIDUpMigration(t *testing.T) {
 	ctx := context.Background()
 
