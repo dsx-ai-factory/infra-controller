@@ -53,11 +53,6 @@ not bypass the Admin network acknowledgement.
 Skip host cleanup after the live instance is deleted. The previous
 tenants data stays on the host.
 
-`--ignore-cleanup`
-
-Skip host cleanup after the live instance is deleted. The previous
-tenants data stays on the host.
-
 `--update-message <UPDATE_MESSAGE>`
 
 If set, a HostUpdateInProgress health alert with this message is applied
