@@ -94,10 +94,13 @@ spec:
             - name: boot-artifacts
               mountPath: /forge-boot-artifacts/blobs/internal
       volumes:
+        # Legacy Rocket mount: the current PXE binary reads configuration from
+        # environment variables only, so the pod must not wait for this map.
         - name: config
           configMap:
             defaultMode: 420
             name: nico-pxe-config
+            optional: true
         - name: spiffe
           secret:
             secretName: nico-pxe-certificate

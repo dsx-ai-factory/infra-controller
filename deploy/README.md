@@ -68,7 +68,7 @@ The templates in `deploy/files/` are mounted into services and must be filled wi
 
 Rendering the complete root also requires standalone `kustomize` and `ksops` on `PATH`, with credentials to decrypt the SOPS-encrypted `deploy/nico-base/ssh-console-rs/secrets/ssh_host_key.enc.yaml`. That file must contain the `ssh-host-key` Secret with `ssh_host_ed25519_key` and `ssh_host_ed25519_key_pub` keys. Supply `deploy/nico-unbound-base/local.conf.d/patchme.conf` with the base Unbound forwarders; the base generator reads it before the root replaces `forwarders.conf` with `deploy/files/unbound/forwarders.conf`.
 
-Before deploying, supply the [PXE external inputs](#nico-pxe), including the required `nico-pxe-config` with `Rocket.toml` in the deployment namespace (`nico-system` for the top-level `deploy/` overlay). After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
+Before deploying, supply the [PXE external inputs](#nico-pxe) in the deployment namespace (`nico-system` for the top-level `deploy/` overlay). After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
 
 ```bash
 kustomize build deploy --enable-alpha-plugins --enable-exec | kubectl apply -f -
@@ -330,28 +330,27 @@ Path: `deploy/nico-base/pxe/`
   - `ServiceAccount/nico-pxe`
   - `Role/RoleBinding nico-pxe` (CertificateRequests for cert‑manager)
 
-The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io`, reads Rocket/pxe config from `/tmp/nico`, and reloads when the `nico-pxe-config` ConfigMap changes.
+The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io` and reads its runtime configuration from environment variables.
 
 **External inputs you must provide**
 
 - A published PXE image (override `yourdockerregistry.com/path/to/nico-core:latest`).
-- Required operator-supplied ConfigMap `nico-pxe-config` with a `Rocket.toml`
-  key mounted at `/tmp/nico/Rocket.toml`. The base does not generate it, and
-  the pod cannot start without it. Optional `nico-pxe-env-config` supplies
-  environment settings. The `full` DevSpace profile packages PXE request
-  templates in its image.
+- Optional `nico-pxe-env-config` supplies environment settings. The `full`
+  DevSpace profile packages PXE request templates in its image.
+- The base keeps a legacy `config` volume for the optional `nico-pxe-config`
+  ConfigMap at `/tmp/nico`. The current PXE binary does not read it, so the
+  pod starts without it and the base does not generate it.
 - A cert‑manager `ClusterIssuer` for the SPIFFE certificate.
 
 **Quick start**
 
 1. Build/publish the PXE image and patch the Deployment to use it.
-2. Create `nico-pxe-config` with `Rocket.toml` for your environment in the
-   **same namespace** as the Deployment (for this standalone command,
-   `<NICO_NAMESPACE>`), before applying it. Provide the optional env ConfigMap
-   if needed. Do not commit site credentials to this repo.
+2. If needed, create the optional env ConfigMap in the **same namespace** as
+   the Deployment (for this standalone command, `<NICO_NAMESPACE>`) before
+   applying it. Do not commit site credentials to this repo.
 3. If a downstream JSON6902 overlay already adds a `config` volume to
    `nico-pxe`, remove that addition or replace the base `config` volume instead.
-   Duplicate volume names are invalid; retain the site-specific Rocket source.
+   Duplicate volume names are invalid.
 4. Deploy PXE:
 
    ```bash
