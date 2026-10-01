@@ -1680,7 +1680,7 @@ func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
 	assert.Empty(t, machineInterfaces[0].IPAddresses)
 }
 
-// A reconcile stamps every Machine it writes with the time the reconcile started, and the
+// A reconcile stamps every Machine it writes with one time, backdated from its start, and the
 // staleness guard reads that same column. Stamping each statement's own time instead left the
 // write less than one interval old when the next snapshot arrived, so the guard rejected the
 // reconciler's own write as an external change and the fleet reconciled on alternating cycles.
@@ -1738,12 +1738,12 @@ func TestManageMachine_UpdateMachinesInDB_ReconcilesEveryCycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, firstPass.Updated, secondPass.Updated, "want one anchor for the whole reconcile")
 
-	// Age both Machines by exactly one interval to put the next snapshot where the real cadence
-	// puts it. Temporal cron can delay a cycle but never advance it, so this is the closest two
-	// cycles ever are.
+	// Age both Machines by a second less than one interval. Temporal schedules the next cron run
+	// from the previous run's start truncated to the second, so the next cycle can start up to a
+	// second sooner than one interval after this one.
 	_, err = dbSession.DB.NewUpdate().
 		Model((*cdbm.Machine)(nil)).
-		Set("updated = updated - ?::interval", cutil.DefaultInventoryReceiptInterval.String()).
+		Set("updated = updated - ?::interval", (cutil.DefaultInventoryReceiptInterval - time.Second).String()).
 		Where("1 = 1").
 		Exec(ctx)
 	require.NoError(t, err)

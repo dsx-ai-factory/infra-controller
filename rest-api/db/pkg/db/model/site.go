@@ -112,9 +112,10 @@ type SiteContact struct {
 // protection it had before the field existed. The Site Agent refuses a schedule slower than
 // cutil.MaxInventoryReceiptInterval, so the reported interval is followed as given.
 //
-// The window is exactly the interval, with no padding. Two consecutive cycles are at least one
-// interval apart because Temporal cron can delay a run but never advance it, so any padding at
-// all would make a reconciler that stamps its own writes read them back as external changes.
+// The window is exactly the interval, with no padding. Consecutive cycles can start closer
+// together than the interval, so a reconciler that writes on every cycle has to backdate those
+// writes for the next cycle to read them as older than the window. Padding here would make them
+// look recent again.
 func (st *Site) IsTimeWithinStaleInventoryThreshold(actionTime time.Time) bool {
 	interval := cutil.DefaultInventoryReceiptInterval
 	if st != nil && st.InventoryIntervalSeconds != nil && *st.InventoryIntervalSeconds > 0 {

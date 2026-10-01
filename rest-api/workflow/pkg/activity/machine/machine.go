@@ -114,6 +114,12 @@ const (
 	MachineDPUFirmwareUpdateStatusMessage = "Machine DPU firmware update is in progress"
 )
 
+// reconcileStampBackdate is how far before its start a reconcile stamps the Machines it writes.
+// Temporal schedules the next cron run from the previous run's start truncated to the second,
+// and delivery time varies. So a cycle can start sooner than one interval after the last. Without
+// the backdate, that cycle would skip those Machines as externally modified.
+const reconcileStampBackdate = 5 * time.Second
+
 // ManageMachine is an activity wrapper for Machine management tasks that allows injecting DB access
 type ManageMachine struct {
 	dbSession      *cdb.Session
@@ -129,7 +135,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	// each statement runs. The staleness guard below reads the same column, so stamping the
 	// current time instead would leave it less than one interval old when the next snapshot
 	// arrives, and that snapshot would skip the Machine as externally modified.
-	reconcileStart := cdb.GetCurTime()
+	reconcileStamp := cdb.GetCurTime().Add(-reconcileStampBackdate)
 
 	siteID, err := uuid.Parse(siteIDStr)
 	if err != nil {
@@ -367,7 +373,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Hostname:                 hostname,
 				Labels:                   labels,
 				Status:                   machineStatus,
-				Updated:                  &reconcileStart,
+				Updated:                  &reconcileStamp,
 			}
 
 			newMachine, serr := mDAO.Create(ctx, txn, createInput)
@@ -463,7 +469,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				existingCloudMachine, err = mDAO.Clear(ctx, txn, cdbm.MachineClearInput{
 					MachineID: existingCloudMachine.ID,
 					Deleted:   true,
-					Updated:   &reconcileStart,
+					Updated:   &reconcileStamp,
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
@@ -525,7 +531,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Labels:                labels,
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
-				Updated:               &reconcileStart,
+				Updated:               &reconcileStamp,
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)
@@ -592,7 +598,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					MaintenanceMessage:   clearMaintenanceMessage,
 					NetworkHealthMessage: clearNetworkHealthMessage,
 					InstanceTypeID:       clearInstanceTypeID,
-					Updated:              &reconcileStart,
+					Updated:              &reconcileStamp,
 				}
 				_, serr = mDAO.Clear(ctx, txn, clearInput)
 				if serr != nil {
@@ -783,7 +789,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
-			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false), Updated: &reconcileStart})
+			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false), Updated: &reconcileStamp})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update missing on Site flag in DB")
 				continue
