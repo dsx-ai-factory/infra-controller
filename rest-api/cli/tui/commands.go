@@ -1139,6 +1139,9 @@ func cmdSubnetAttachVPC(s *Session, args []string) error {
 	if str(updated, "vpcId") != target.ID {
 		return fmt.Errorf("parsing attached subnet response: vpcId does not match selected target VPC")
 	}
+	if strings.TrimSpace(str(updated, "name")) == "" {
+		return fmt.Errorf("parsing attached subnet response: missing name")
+	}
 	fmt.Printf("%s Subnet attached to VPC: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }

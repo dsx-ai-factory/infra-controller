@@ -115,6 +115,38 @@ func TestCmdSubnetAttachVPC(t *testing.T) {
 			wantErrContains: "vpcId does not match selected target VPC",
 			wantPosts:       1,
 		},
+		{
+			name:            "response with missing Subnet name is rejected",
+			input:           "y\n",
+			sourceUsage:     2,
+			response:        `{"id":"subnet-1","vpcId":"vpc-target"}`,
+			wantErrContains: "parsing attached subnet response: missing name",
+			wantPosts:       1,
+		},
+		{
+			name:            "response with null Subnet name is rejected",
+			input:           "y\n",
+			sourceUsage:     2,
+			response:        `{"id":"subnet-1","name":null,"vpcId":"vpc-target"}`,
+			wantErrContains: "parsing attached subnet response: missing name",
+			wantPosts:       1,
+		},
+		{
+			name:            "response with empty Subnet name is rejected",
+			input:           "y\n",
+			sourceUsage:     2,
+			response:        `{"id":"subnet-1","name":"","vpcId":"vpc-target"}`,
+			wantErrContains: "parsing attached subnet response: missing name",
+			wantPosts:       1,
+		},
+		{
+			name:            "response with non-string Subnet name is rejected",
+			input:           "y\n",
+			sourceUsage:     2,
+			response:        `{"id":"subnet-1","name":7,"vpcId":"vpc-target"}`,
+			wantErrContains: "parsing attached subnet response: missing name",
+			wantPosts:       1,
+		},
 	}
 
 	for _, test := range tests {
