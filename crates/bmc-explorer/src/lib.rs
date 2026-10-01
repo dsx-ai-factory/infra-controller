@@ -152,6 +152,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let explored_system = ExploredComputerSystem::explore(system, &system_explore_config).await?;
 
     let hw_type = hw_type(&root, &explored_system, &explored_chassis);
+    let is_mgx_c2 = explored_chassis.is_mgx_c2();
     let manager_explore_config = hw_type
         .map(|hw_type| match hw_type {
             hw::HwType::Ami => manager::Config {
@@ -176,7 +177,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             },
             hw::HwType::Supermicro => manager::Config {
                 need_host_interfaces: true,
-                need_oem_supermicro_kcs_interface: true,
+                need_oem_supermicro_kcs_interface: !is_mgx_c2,
                 need_oem_supermicro_sys_lockdown: true,
                 ..Default::default()
             },
@@ -221,7 +222,14 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await?;
 
     let lockdown_status = hw_type
-        .map(|hw_type| lockdown_status(&hw_type, &explored_system, &explored_manager))
+        .map(|hw_type| {
+            lockdown_status(
+                &hw_type,
+                &explored_system,
+                &explored_manager,
+                &explored_chassis,
+            )
+        })
         .transpose()?
         .and_then(identity);
 
@@ -408,6 +416,7 @@ fn lockdown_status<B: Bmc>(
     hw_type: &hw::HwType,
     explored_system: &ExploredComputerSystem<B>,
     explored_manager: &ExploredManager<B>,
+    explored_chassis: &ExploredChassisCollection<B>,
 ) -> Result<Option<LockdownStatus>, Error<B>> {
     let bios = &explored_system.bios;
     let system = &explored_system.system;
@@ -645,33 +654,42 @@ fn lockdown_status<B: Bmc>(
                 .as_ref()
                 .and_then(|lck| lck.sys_lockdown_enabled())
                 .ok_or_else(Error::bmc_not_provided("Supermicro lockdown status"))?;
+            let ipmi_host_interface_enabled = system
+                .raw()
+                .ipmi_host_interface
+                .as_ref()
+                .and_then(|interface| interface.service_enabled);
             let message = format!(
-                "SysLockdownEnabled={is_syslockdown}, kcs_privilege={kcs_privilege:#?}, host_interface_enabled={hi_enabled}"
+                "SysLockdownEnabled={is_syslockdown}, kcs_privilege={kcs_privilege:#?}, \
+                 host_interface_enabled={hi_enabled}, \
+                 ipmi_host_interface_enabled={ipmi_host_interface_enabled:?}"
             );
 
             let model = system.hardware_id().model.map(|v| v.into_inner());
-            if model == Some("ARS-121L-DNR") {
-                // Grace-Grace SMCs (ARS-121L-DNR):
-                // 1. Need host_interface enabled even with lockdown
-                // 2. Doesn't provide KCSInterface
-                match (hi_enabled, is_syslockdown) {
-                    (true, true) => Ok(InternalLockdownStatus::Enabled),
-                    (true, false) => Ok(InternalLockdownStatus::Disabled),
-                    _ => Ok(InternalLockdownStatus::Partial),
-                }
+            let is_ars_121l_dnr = model == Some("ARS-121L-DNR");
+            let (inband_locked, inband_unlocked) = if explored_chassis.is_mgx_c2() {
+                (
+                    ipmi_host_interface_enabled.is_none_or(|enabled| !enabled),
+                    ipmi_host_interface_enabled.is_none_or(identity),
+                )
             } else {
-                match (hi_enabled, kcs_privilege, is_syslockdown) {
-                    (false, Some(SupermicroPrivilege::Callback), true) => {
-                        Ok(InternalLockdownStatus::Enabled)
-                    }
-                    (true, Some(SupermicroPrivilege::Administrator), false) => {
-                        Ok(InternalLockdownStatus::Disabled)
-                    }
-                    (true, None, false) => Ok(InternalLockdownStatus::Disabled),
-                    _ => Ok(InternalLockdownStatus::Partial),
-                }
-            }
-            .map(|status| Some(LockdownStatus { status, message }))
+                (
+                    kcs_privilege == Some(SupermicroPrivilege::Callback),
+                    kcs_privilege.is_none()
+                        || kcs_privilege == Some(SupermicroPrivilege::Administrator),
+                )
+            };
+            // ARS-121L-DNR must keep HostInterface enabled to PXE boot.
+            let host_interface_locked = hi_enabled == is_ars_121l_dnr;
+
+            let status = if is_syslockdown && inband_locked && host_interface_locked {
+                InternalLockdownStatus::Enabled
+            } else if !is_syslockdown && inband_unlocked && hi_enabled {
+                InternalLockdownStatus::Disabled
+            } else {
+                InternalLockdownStatus::Partial
+            };
+            Ok(Some(LockdownStatus { status, message }))
         }
 
         hw::HwType::Hpe => {

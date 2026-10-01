@@ -20,7 +20,7 @@ use crate::hw::BiosAttr;
 // Real attribute names examples:
 // "IPv4HTTPSupport_009F", "DeviceSelect_0034", "DeviceSelect_003D", "SR_IOVSupport_002B"
 // This constant defines prefixes till last underscore.
-pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 14] = [
+pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 15] = [
     BiosAttr::new_bool("QuietBoot", false),
     BiosAttr::new_str("Re_tryBoot", "EFI Boot"),
     BiosAttr::new_str("CSMSupport", "Disabled"),
@@ -33,6 +33,7 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 14] = [
     // Not that some are "Enable" and some are "Enabled". Subtle.
     BiosAttr::new_str("IntelVTforDirectedI_O_VT_d", "Enable"),
     BiosAttr::new_str("IntelVirtualizationTechnology", "Enable"),
+    BiosAttr::new_str("SR-IOVSupport", "Enabled"),
     BiosAttr::new_str("SR_IOVSupport", "Enabled"),
     // UEFI NIC boot
     BiosAttr::new_str("IPv4HTTPSupport", "Enabled"),
