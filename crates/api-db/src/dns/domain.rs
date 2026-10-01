@@ -189,7 +189,8 @@ pub async fn persist_reserved(
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
     let query = "INSERT INTO domains
                  (id, name, soa, domain_metadata_id, default_ttl, reserved_create, create_default_ttl)
-                 VALUES ($1, $2, $3, $4, $5, true, $5) RETURNING *";
+                 VALUES ($1, $2, $3, $4, $5, true, $5)
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(id)
         .bind(&value.name)
@@ -407,7 +408,8 @@ pub async fn find_by_uuid_for_delete(
     uuid: DomainId,
 ) -> Result<Option<Domain>, DatabaseError> {
     lock_id_exclusive(txn, uuid).await?;
-    let query = "SELECT * FROM domains WHERE id = $1";
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
+                 FROM domains WHERE id = $1";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(uuid)
         .fetch_optional(txn)
@@ -444,7 +446,8 @@ pub async fn reserved_create_intent(
     txn: &mut PgConnection,
     id: DomainId,
 ) -> DatabaseResult<Option<(Domain, bool, Option<model::dns::ZoneTtl>)>> {
-    let query = "SELECT * FROM domains WHERE id = $1";
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
+                 FROM domains WHERE id = $1";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(id)
         .fetch_optional(txn)
