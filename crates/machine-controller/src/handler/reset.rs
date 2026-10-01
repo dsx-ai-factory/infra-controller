@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-//! Operator-requested managed host reset: delete the tenant instance, clean up the host,
-//! delete the host's DPF CRs, then hand the host back to DPU discovery so DPF re-ingests it.
+//! Operator-requested managed host reset: wait for the DPUs to return to `Admin`,
+//! delete the tenant instance, clean up the host, and remove its DPF CRs before
+//! DPU discovery re-ingests it. Hosts without an instance skip the network wait.
 
 use eyre::eyre;
 use model::machine::{
@@ -24,12 +25,14 @@ use model::machine::{
     ManagedHostStateSnapshot, ResetState,
 };
 use model::resource_pool::common::CommonPools;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use super::{
-    release_network_segments_with_vpc_prefix, release_vpc_dpu_loopback, waiting_for_cleanup_state,
+    process_dpu_use_admin_network_state_change, release_network_segments_with_vpc_prefix,
+    release_vpc_dpu_loopback, waiting_for_cleanup_state,
 };
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
@@ -57,6 +60,43 @@ async fn handle_deleting_instance(
             reset_state: ResetState::DeletingCrs,
         }));
     };
+
+    if !state.use_admin_network() {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut network_config = state.host_snapshot.network_config.value.clone();
+        network_config.use_admin_network = Some(true);
+        db::machine::try_update_network_config(
+            &mut txn,
+            &state.host_snapshot.id,
+            state.host_snapshot.network_config.version,
+            &network_config,
+        )
+        .await?
+        .check_applied()?;
+
+        if ctx
+            .services
+            .site_config
+            .restart_ovs_on_use_admin_network_change
+        {
+            process_dpu_use_admin_network_state_change(&mut txn, state).await?;
+        }
+
+        // Commit Admin intent before checking observations from a fresh snapshot.
+        // The persisted mode keeps retries from requesting another version.
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for DPUs to apply Admin networking before deleting the Instance".to_string(),
+        )
+        .with_txn(txn));
+    }
+
+    // Retain the Instance and its resources until every topology DPU has
+    // acknowledged Admin. Missing observations cannot establish isolation.
+    if !state.managed_host_network_config_version_synced() {
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for DPUs to apply Admin networking before deleting the Instance".to_string(),
+        ));
+    }
 
     // The delete and the segment release must commit together, as in the Assigned
     // termination path.

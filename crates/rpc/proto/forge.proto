@@ -438,8 +438,11 @@ service Forge {
   // List hosts waiting for reprovisioning
   rpc ListHostsWaitingForReprovisioning(HostReprovisioningListRequest) returns (HostReprovisioningListResponse);
 
-  // Trigger a reset of a managed host: tear down its instance and DPF
+  // Trigger a reset of a managed host: tear down its Instance and DPF
   // resources, then re-ingest it from DPU discovery.
+  // With an Instance present, retain it and its network resources until every
+  // DPU attached to the host acknowledges Admin networking. An unreachable DPU
+  // keeps the reset waiting; hosts without an Instance skip this network wait.
   rpc TriggerManagedHostReset(ManagedHostResetRequest) returns (google.protobuf.Empty);
   // List managed hosts waiting for reset
   rpc ListManagedHostsWaitingForReset(ManagedHostResetListRequest) returns (ManagedHostResetListResponse);
@@ -11336,9 +11339,10 @@ message ManagedHostResetRequest {
 
   // Operator acknowledgment that resetting an assigned host destroys the live
   // tenant instance and its data. The server rejects a Set on an assigned host
-  // unless this is set.
+  // unless this is set. This does not bypass the Admin network acknowledgement.
   bool allow_reset_with_instance = 4;
-  // Skip host cleanup after the live instance is deleted.
+  // Skip host cleanup after the live instance is deleted, not the Admin
+  // network acknowledgement required before deletion.
   bool ignore_cleanup = 5;
 }
 

@@ -66248,9 +66248,10 @@ type ManagedHostResetRequest struct {
 	Initiator UpdateInitiator              `protobuf:"varint,3,opt,name=initiator,proto3,enum=forge.UpdateInitiator" json:"initiator,omitempty"`
 	// Operator acknowledgment that resetting an assigned host destroys the live
 	// tenant instance and its data. The server rejects a Set on an assigned host
-	// unless this is set.
+	// unless this is set. This does not bypass the Admin network acknowledgement.
 	AllowResetWithInstance bool `protobuf:"varint,4,opt,name=allow_reset_with_instance,json=allowResetWithInstance,proto3" json:"allow_reset_with_instance,omitempty"`
-	// Skip host cleanup after the live instance is deleted.
+	// Skip host cleanup after the live instance is deleted, not the Admin
+	// network acknowledgement required before deletion.
 	IgnoreCleanup bool `protobuf:"varint,5,opt,name=ignore_cleanup,json=ignoreCleanup,proto3" json:"ignore_cleanup,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
