@@ -1,0 +1,443 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	sdk "github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	inventory "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/siteprefix"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/require"
+	tclient "go.temporal.io/sdk/client"
+	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+type tenantIPBlockClient struct {
+	tclient.Client
+	call func(context.Context, grpcproxy.Request) (tclient.WorkflowRun, error)
+}
+
+func (c tenantIPBlockClient) ExecuteWorkflow(ctx context.Context, _ tclient.StartWorkflowOptions, _ any, args ...any) (tclient.WorkflowRun, error) {
+	return c.call(ctx, args[0].(grpcproxy.Request))
+}
+
+type tenantIPBlockRun struct {
+	tclient.WorkflowRun
+	data []byte
+	err  error
+	wait bool
+}
+
+func (r tenantIPBlockRun) Get(ctx context.Context, value any) error {
+	if r.wait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if value != nil {
+		value.(*grpcproxy.Response).ResponseJSON = r.data
+	}
+	return r.err
+}
+
+type tenantIPBlockFixture struct {
+	session            *cdb.Session
+	site               *cdbm.Site
+	tenant             *cdbm.Tenant
+	user, providerUser *cdbm.User
+	router             *echo.Echo
+	core               *corev1.SitePrefix
+	calls              []string
+	nextError          error
+	nextWait           bool
+	requestTimeout     time.Duration
+	failMethod         string
+	deadlines          []time.Time
+	org                string
+}
+
+func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
+	t.Helper()
+	f := &tenantIPBlockFixture{session: common.TestInitDB(t), org: "tenant"}
+	t.Cleanup(f.session.Close)
+	common.TestSetupSchema(t, f.session)
+	f.user = common.TestBuildUser(t, f.session, uuid.NewString(), "tenant", []string{auth.TenantAdminRole})
+	f.providerUser = common.TestBuildUser(t, f.session, uuid.NewString(), "provider", []string{auth.ProviderAdminRole})
+	provider := common.TestBuildInfrastructureProvider(t, f.session, "provider", "provider", f.providerUser)
+	f.site = common.TestBuildSite(t, f.session, provider, "site", f.providerUser)
+	var err error
+	f.site, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Status: cutil.GetPtr(cdbm.SiteStatusRegistered), Config: &cdbm.SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+	require.NoError(t, err)
+	f.tenant = common.TestBuildTenant(t, f.session, "tenant", "tenant", f.user)
+	common.TestBuildTenantSite(t, f.session, f.tenant, f.site, f.user)
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[f.site.ID.String()] = tenantIPBlockClient{call: func(ctx context.Context, request grpcproxy.Request) (tclient.WorkflowRun, error) {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		f.deadlines = append(f.deadlines, deadline)
+		f.calls = append(f.calls, request.FullMethod)
+		var data []byte
+		var err error
+		switch request.FullMethod {
+		case "/forge.Forge/CreateSitePrefix":
+			req := &corev1.SitePrefixCreationRequest{}
+			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
+			require.Equal(t, f.tenant.Org, req.TenantOrganizationId)
+			// The row is in the caller's transaction and must not be committed yet.
+			blocks, _, findErr := cdbm.NewIPBlockDAO(f.session).GetAll(context.Background(), nil, cdbm.IPBlockFilterInput{SitePrefixIDs: []uuid.UUID{uuid.MustParse(req.Id.Value)}}, cdbp.PageInput{}, nil)
+			require.NoError(t, findErr)
+			require.Empty(t, blocks)
+			f.core = &corev1.SitePrefix{Id: req.Id, Version: "v1", Metadata: req.Metadata, Config: &corev1.SitePrefixConfig{Prefix: req.Prefix, TenantOrganizationId: &req.TenantOrganizationId, RoutingScope: corev1.SitePrefixRoutingScope_SITE_PREFIX_ROUTING_SCOPE_DATACENTER_ONLY}, Status: &corev1.SitePrefixStatus{Authority: corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED, LifecycleState: corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY}}
+			data, err = protojson.Marshal(f.core)
+		case "/forge.Forge/FindSitePrefixesByIds":
+			data, err = protojson.Marshal(&corev1.SitePrefixList{SitePrefixes: []*corev1.SitePrefix{f.core}})
+		case "/forge.Forge/UpdateSitePrefix":
+			req := &corev1.SitePrefixUpdateRequest{}
+			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
+			require.Equal(t, f.core.Version, req.GetIfVersionMatch())
+			f.core.Metadata = req.Metadata
+			data, err = protojson.Marshal(f.core)
+		case "/forge.Forge/DeleteSitePrefix":
+			f.core.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			data, err = protojson.Marshal(&corev1.SitePrefixDeletionResult{SitePrefix: f.core})
+		default:
+			t.Fatalf("unexpected Core method %s", request.FullMethod)
+		}
+		require.NoError(t, err)
+		result := tenantIPBlockRun{data: data, wait: f.nextWait}
+		f.nextWait = false
+		if f.failMethod == "" || request.FullMethod == f.failMethod {
+			result.err = f.nextError
+			f.nextError = nil
+		}
+		return result, nil
+	}}
+	f.router = echo.New()
+	f.router.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error { c.Set("user", f.user); return next(c) }
+	})
+	for _, r := range NewAPIRoutes(f.session, nil, nil, pool, common.GetTestConfig(), nil) {
+		f.router.Add(r.Method, "/v2"+r.Path, r.Handler.Handle)
+		if r.Method == http.MethodPost && r.Path == "/org/:orgName/nico/ipblock" {
+			f.router.Add(r.Method, "/custom/org/:orgName/carbide/ipblock", r.Handler.Handle)
+		}
+	}
+	return f
+}
+func (f *tenantIPBlockFixture) request(t *testing.T, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, "/v2/org/"+f.org+"/nico/ipblock"+path, strings.NewReader(string(data)))
+	if f.requestTimeout > 0 {
+		ctx, cancel := context.WithTimeout(req.Context(), f.requestTimeout)
+		defer cancel()
+		req = req.WithContext(ctx)
+	}
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	return rec
+}
+func (f *tenantIPBlockFixture) body() model.APIIPBlockCreateRequest {
+	return model.APIIPBlockCreateRequest{Name: "private-root", SiteID: f.site.ID.String(), Prefix: "10.21.0.0", PrefixLength: 24, ProtocolVersion: cdbm.IPBlockProtocolVersionV4, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly}
+}
+func readTenantIPBlock(t *testing.T, r *httptest.ResponseRecorder, code int) model.APIIPBlock {
+	t.Helper()
+	require.Equal(t, code, r.Code, r.Body.String())
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(r.Body.Bytes(), &fields))
+	require.Contains(t, fields, "managed")
+	var result model.APIIPBlock
+	require.NoError(t, json.Unmarshal(r.Body.Bytes(), &result))
+	return result
+}
+func testNewAPIRoutesTenantIPBlocks(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		check func(*testing.T, *tenantIPBlockFixture)
+	}{
+		{"create metadata deletion and inventory", func(t *testing.T, f *tenantIPBlockFixture) {
+			result := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			require.Equal(t, cdbm.IPBlockStatusProvisioning, result.Status)
+			require.False(t, result.Managed)
+			block, err := cdbm.NewIPBlockDAO(f.session).GetByID(context.Background(), nil, uuid.MustParse(result.ID), nil)
+			require.NoError(t, err)
+			require.False(t, block.Managed)
+			require.Equal(t, block.ID, *block.SitePrefixID)
+			report := &corev1.SitePrefixInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, Timestamp: timestamppb.Now(), SitePrefixes: []*corev1.SitePrefix{f.core}}
+			receiver := inventory.NewManageSitePrefix(f.session)
+			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, report))
+			got := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+result.ID+"?includeUsageStats=true", nil), http.StatusOK)
+			require.Equal(t, cdbm.IPBlockStatusReady, got.Status)
+			// Dual-role users must still be able to mutate their own tenant root.
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.ProviderAdminRole, auth.TenantAdminRole})
+			f.core.Metadata.Labels = []*corev1.Label{{Key: "existing", Value: cutil.GetPtr("preserved")}}
+			updated := readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+result.ID, map[string]any{"name": "renamed"}), http.StatusOK)
+			require.Equal(t, "renamed", updated.Name)
+			require.Equal(t, f.deadlines[1], f.deadlines[2], "both Core calls must share one overall deadline")
+			require.Equal(t, "preserved", f.core.Metadata.Labels[0].GetValue())
+			// Inventory only changes lifecycle; it cannot undo an API metadata update.
+			f.core.Metadata.Name = "old-name"
+			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, report))
+			updated = readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+result.ID, nil), http.StatusOK)
+			require.Equal(t, "renamed", updated.Name)
+			_, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Config: &cdbm.SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+result.ID, nil).Code)
+			f.core.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY
+			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, report))
+			got = readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+result.ID, nil), http.StatusOK)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, got.Status)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+result.ID, nil).Code)
+		}},
+		{"Core create timeout rolls back and inventory recovers the same ID", func(t *testing.T, f *tenantIPBlockFixture) {
+			f.nextWait = true
+			f.requestTimeout = time.Second
+			require.Equal(t, http.StatusGatewayTimeout, f.request(t, http.MethodPost, "", f.body()).Code)
+			f.requestTimeout = 0
+			blocks, _, err := cdbm.NewIPBlockDAO(f.session).GetAll(context.Background(), nil, cdbm.IPBlockFilterInput{TenantIDs: []uuid.UUID{f.tenant.ID}}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			require.Empty(t, blocks)
+			receiver := inventory.NewManageSitePrefix(f.session)
+			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, &corev1.SitePrefixInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, SitePrefixes: []*corev1.SitePrefix{f.core}}))
+			result := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+f.core.Id.Value, nil), http.StatusOK)
+			require.Equal(t, f.core.Id.Value, result.ID)
+		}},
+		{"mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			for _, mutation := range []struct {
+				method, coreMethod string
+				body               any
+				errorType          string
+				code               int
+			}{
+				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"description": "committed-in-core"}, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
+				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"name": "stale-version"}, swe.ErrTypeNICoFailedPrecondition, http.StatusPreconditionFailed},
+				{http.MethodDelete, "/forge.Forge/DeleteSitePrefix", nil, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
+			} {
+				f.failMethod = mutation.coreMethod
+				f.nextError = tp.NewNonRetryableApplicationError("Core mutation failed", mutation.errorType, nil)
+				response := f.request(t, mutation.method, "/"+created.ID, mutation.body)
+				require.Equal(t, mutation.code, response.Code, response.Body.String())
+				persisted := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+				require.Equal(t, created.Name, persisted.Name)
+				require.Equal(t, created.Status, persisted.Status)
+				if mutation.method == http.MethodPatch && mutation.errorType == swe.ErrTypeNICoUnavailable {
+					f.failMethod = ""
+					created = readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "confirmed"}), http.StatusOK)
+					require.Equal(t, "committed-in-core", *created.Description)
+				}
+			}
+		}},
+		{"privacy and allocation ownership", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			allocated, err := cdbm.NewIPBlockDAO(f.session).Create(context.Background(), nil, cdbm.IPBlockCreateInput{
+				Name: "allocated", SiteID: f.site.ID, InfrastructureProviderID: f.site.InfrastructureProviderID, TenantID: &f.tenant.ID,
+				Managed: cutil.GetPtr(true), Prefix: "10.22.0.0", PrefixLength: 24, ProtocolVersion: cdbm.IPBlockProtocolVersionV4,
+				RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly, Status: cdbm.IPBlockStatusReady, CreatedBy: &f.user.ID})
+			require.NoError(t, err)
+			for _, id := range []string{allocated.ID.String(), uuid.NewString()} {
+				for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+					require.Equal(t, http.StatusNotFound, f.request(t, method, "/"+id, map[string]any{"name": "forbidden"}).Code)
+				}
+			}
+			listed := f.request(t, http.MethodGet, "?orderBy=NAME_ASC&pageSize=1", nil)
+			require.Equal(t, http.StatusOK, listed.Code, listed.Body.String())
+			var blocks []model.APIIPBlock
+			require.NoError(t, json.Unmarshal(listed.Body.Bytes(), &blocks))
+			require.Len(t, blocks, 1)
+			require.True(t, blocks[0].Managed)
+			require.Contains(t, listed.Header().Get("X-Pagination"), `"total":2`)
+			listed = f.request(t, http.MethodGet, "?orderBy=NAME_ASC&pageSize=1&pageNumber=2", nil)
+			require.Equal(t, http.StatusOK, listed.Code, listed.Body.String())
+			require.NoError(t, json.Unmarshal(listed.Body.Bytes(), &blocks))
+			require.Len(t, blocks, 1)
+			require.Equal(t, created.ID, blocks[0].ID)
+			require.False(t, blocks[0].Managed)
+			calls := len(f.calls)
+			f.org = "other-tenant"
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.TenantAdminRole})
+			common.TestBuildTenant(t, f.session, "other-tenant", f.org, f.user)
+			for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+				require.Equal(t, http.StatusNotFound, f.request(t, method, "/"+created.ID, map[string]any{"name": "forbidden"}).Code)
+			}
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.ProviderAdminRole, auth.TenantAdminRole})
+			common.TestBuildInfrastructureProvider(t, f.session, "other-provider", f.org, f.user)
+			for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+				foreign := f.request(t, method, "/"+created.ID, map[string]any{"name": "forbidden"})
+				unknown := f.request(t, method, "/"+uuid.NewString(), map[string]any{"name": "forbidden"})
+				require.Equal(t, http.StatusNotFound, foreign.Code)
+				require.Equal(t, unknown.Body.String(), foreign.Body.String())
+			}
+			f.org, f.user = "provider", f.providerUser
+			require.Equal(t, http.StatusNotFound, f.request(t, http.MethodGet, "/"+created.ID, nil).Code)
+			require.Len(t, f.calls, calls)
+		}},
+		{"capability association and strict request validation", func(t *testing.T, f *tenantIPBlockFixture) {
+			_, err := f.session.DB.ExecContext(context.Background(), "UPDATE site SET config = NULL WHERE id = ?", f.site.ID)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusPreconditionFailed, f.request(t, http.MethodPost, "", f.body()).Code)
+			_, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Config: &cdbm.SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusPreconditionFailed, f.request(t, http.MethodPost, "", f.body()).Code)
+			_, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Config: &cdbm.SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+			require.NoError(t, err)
+			data, err := json.Marshal(f.body())
+			require.NoError(t, err)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(data, &body))
+			body["managed"] = true
+			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPost, "", body).Code)
+			f.org = "unattached"
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.TenantAdminRole})
+			common.TestBuildTenant(t, f.session, "unattached", f.org, f.user)
+			existing := f.request(t, http.MethodPost, "", f.body())
+			require.Equal(t, http.StatusBadRequest, existing.Code)
+			unknownBody := f.body()
+			unknownBody.SiteID = uuid.NewString()
+			unknown := f.request(t, http.MethodPost, "", unknownBody)
+			require.Equal(t, existing.Code, unknown.Code)
+			require.Equal(t, existing.Body.String(), unknown.Body.String())
+			require.Empty(t, f.calls)
+		}},
+		{"generated SDK tenant IP Block round trip", func(t *testing.T, f *tenantIPBlockFixture) {
+			server := httptest.NewServer(f.router)
+			defer server.Close()
+			cfg := sdk.NewConfiguration()
+			cfg.Servers = sdk.ServerConfigurations{{URL: server.URL}}
+			client := sdk.NewAPIClient(cfg)
+			capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
+			capabilities.SetTenantSitePrefix(false)
+			siteUpdate := sdk.NewSiteUpdateRequest()
+			siteUpdate.SetCapabilities(*capabilities)
+			_, response, err := client.SiteAPI.UpdateSite(context.Background(), f.org, f.site.ID.String()).SiteUpdateRequest(*siteUpdate).Execute()
+			require.Error(t, err)
+			require.Equal(t, http.StatusBadRequest, response.StatusCode)
+			tenantUser := f.user
+			f.user = f.providerUser
+			for _, enabled := range []bool{false, true} {
+				capabilities.SetTenantSitePrefix(enabled)
+				siteUpdate.SetCapabilities(*capabilities)
+				site, _, err := client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*siteUpdate).Execute()
+				require.NoError(t, err)
+				storedCapabilities := site.GetCapabilities()
+				require.Equal(t, enabled, storedCapabilities.GetTenantSitePrefix())
+				persisted, err := cdbm.NewSiteDAO(f.session).GetByID(context.Background(), nil, f.site.ID, nil, false, false)
+				require.NoError(t, err)
+				require.Equal(t, enabled, persisted.Config.TenantSitePrefix)
+			}
+			f.user = tenantUser
+			request := sdk.NewIpBlockCreateRequest("sdk-private", f.site.ID.String(), cdbm.IPBlockRoutingTypeDatacenterOnly, "10.21.0.0", 24, cdbm.IPBlockProtocolVersionV4)
+			created, response, err := client.IPBlockAPI.CreateIpblock(context.Background(), f.org).IpBlockCreateRequest(*request).Execute()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusCreated, response.StatusCode)
+			require.False(t, created.GetManaged())
+			require.Equal(t, "/v2/org/tenant/nico/ipblock/"+created.GetId(), response.Header.Get("Location"))
+			got, _, err := client.IPBlockAPI.GetIpblock(context.Background(), f.org, created.GetId()).Execute()
+			require.NoError(t, err)
+			require.Equal(t, created.GetId(), got.GetId())
+			update := sdk.NewIpBlockUpdateRequest()
+			update.SetName("sdk-renamed")
+			got, _, err = client.IPBlockAPI.UpdateIpblock(context.Background(), f.org, created.GetId()).IpBlockUpdateRequest(*update).Execute()
+			require.NoError(t, err)
+			require.Equal(t, "sdk-renamed", got.GetName())
+			_, response, err = client.IPBlockAPI.DeleteIpblock(context.Background(), f.org, created.GetId()).Execute()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusAccepted, response.StatusCode)
+		}},
+		{"retirement survives removal of the last Allocation", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			allocation := common.TestBuildAllocation(t, f.session, f.site, f.tenant, "last-allocation", f.providerUser)
+			tenantUser := f.user
+			f.user = f.providerUser
+			req := httptest.NewRequest(http.MethodDelete, "/v2/org/provider/nico/allocation/"+allocation.ID.String(), nil)
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			_, err := cdbm.NewTenantSiteDAO(f.session).GetByTenantIDAndSiteID(context.Background(), nil, f.tenant.ID, f.site.ID, nil)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			f.user = tenantUser
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+			require.Equal(t, corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING, f.core.Status.LifecycleState)
+		}},
+		{"validation includes actionable field errors", func(t *testing.T, f *tenantIPBlockFixture) {
+			body := f.body()
+			body.Prefix = "8.8.8.0"
+			response := f.request(t, http.MethodPost, "", body)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "RFC1918")
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			response = f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"description": strings.Repeat("x", 1025)})
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "description")
+		}},
+		{"Location follows the mounted route", func(t *testing.T, f *tenantIPBlockFixture) {
+			data, err := json.Marshal(f.body())
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/custom/org/tenant/carbide/ipblock", strings.NewReader(string(data)))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+			created := readTenantIPBlock(t, rec, http.StatusCreated)
+			require.Equal(t, req.URL.Path+"/"+created.ID, rec.Header().Get("Location"))
+		}},
+		{"lost first retirement response remains retryable after Core removal", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			f.nextWait = true
+			f.requestTimeout = time.Second
+			require.Equal(t, http.StatusGatewayTimeout, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+			f.requestTimeout = 0
+			got := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+			require.Equal(t, created.Status, got.Status)
+			f.nextError = tp.NewNonRetryableApplicationError("already absent", swe.ErrTypeNICoObjectNotFound, nil)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+			got = readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, got.Status)
+			require.NotEmpty(t, got.StatusHistory)
+			require.Equal(t, cutil.GetPtr("Core reported SitePrefix absent; waiting for inventory"), got.StatusHistory[0].Message)
+		}},
+		{"restored deletion remains removable through the public API", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+			id := uuid.MustParse(created.ID)
+			require.NoError(t, cdbm.NewIPBlockDAO(f.session).Delete(context.Background(), nil, id))
+			_, err := f.session.DB.ExecContext(context.Background(), "UPDATE ip_block SET deleted = ? WHERE id = ?", time.Now().Add(-time.Hour), id)
+			require.NoError(t, err)
+			f.core.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY
+			receiver := inventory.NewManageSitePrefix(f.session)
+			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, &corev1.SitePrefixInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, SitePrefixes: []*corev1.SitePrefix{f.core}}))
+			restored := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, restored.Status)
+			calls := len(f.calls)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+			require.Len(t, f.calls, calls+1)
+			require.Equal(t, corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING, f.core.Status.LifecycleState)
+			f.nextError = tp.NewNonRetryableApplicationError("already absent", swe.ErrTypeNICoObjectNotFound, nil)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) { row.check(t, newTenantIPBlockFixture(t)) })
+	}
+}

@@ -46,11 +46,13 @@ CreateIpblock Create IP Block
 
 Create an IP block for the org.
 
-Only Infrastructure Providers can create a root IP Block. User must have authorization role with `PROVIDER_ADMIN` suffix.
+A `PROVIDER_ADMIN` creates a managed provider root. A conflicting provider name or address range returns 409. A range conflicts when it overlaps another root IP Block of the Site, whatever its routing type. Provider creation also returns 409 while another Site fabric IP Block update holds the shared Site lock; retry the request. If the caller has both provider and tenant admin roles, creation uses the provider path.
 
-Tenant IP Blocks are created via Allocation.
+A `TENANT_ADMIN` without the provider admin role can create a private tenant root with `managed: false`. The tenant must be associated with the Registered Site, and the provider-controlled `tenantSitePrefix` capability must be enabled (default false). The request uses the existing fields: `prefix` is a network-aligned IPv4 address, `prefixLength` is /8 through /31 wholly within RFC1918 space, `protocolVersion` is IPv4, and `routingType` is DatacenterOnly. Unknown fields, including caller-supplied ownership or managed values, are rejected. Tenant descriptions are limited to 1024 UTF-8 bytes.
 
-A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
+Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and are returned immediately, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
+
+Tenant-created blocks remain outside cloud IPAM. Allocated tenant blocks retain their existing Allocation workflow and managed value of true. VPC Prefix and Subnet creation accept only allocated blocks; using tenant-created roots for VPC Prefixes is tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3900. SitePrefix publication and final absence processing require the deployment described in https://github.com/dsx-ai-factory/infra-controller/issues/5763; the capability must remain disabled until that dependency is available.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -159,6 +161,61 @@ func (a *IPBlockAPIService) CreateIpblockExecute(r ApiCreateIpblockRequest) (*Ip
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 502 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -191,11 +248,15 @@ DeleteIpblock Delete IP Block
 
 # Delete an IP block
 
-Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
+For provider deletion, the org must have an Infrastructure Provider entity and the user must have `PROVIDER_ADMIN`. Only provider roots with no associated allocations can be deleted.
 
 If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
-Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+A Site fabric root linked to an `OperatorManaged` SitePrefix returns 409; remove the prefix from Core configuration instead. Allocated tenant blocks remain managed through Allocations.
+
+A `TENANT_ADMIN` can delete its own tenant-created (`managed: false`) IP Block at a Registered Site. Retirement remains allowed when tenantSitePrefix is disabled or the Tenant Site association has been removed. The transaction sets Deleting and calls Core DeleteSitePrefix; a Core error other than NotFound rolls back the status change and is returned immediately. Success returns 202. Repeated deletion re-sends retirement to Core. Core NotFound also returns 202 for the known IP Block, including when an earlier retirement response was lost. The block stays visible as Deleting, and delayed Ready inventory cannot clear that status. Final removal through complete inventory absence depends on https://github.com/dsx-ai-factory/infra-controller/issues/5763.
+
+Unknown IDs, other tenants' blocks, and allocated blocks requested by a tenant return 404. Providers cannot delete tenant-created blocks unless they also have the owning tenant's admin role.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -308,6 +369,39 @@ func (a *IPBlockAPIService) DeleteIpblockExecute(r ApiDeleteIpblockRequest) (*Me
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 502 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -571,7 +665,7 @@ func (r ApiGetAllIpblockRequest) Status(status string) ApiGetAllIpblockRequest {
 	return r
 }
 
-// Include IP Block usage stats in response
+// Include IPAM usage statistics for managed IP Blocks. Tenant-created blocks do not use cloud IPAM and return null usageStats even when this is true. Defaults to false.
 func (r ApiGetAllIpblockRequest) IncludeUsageStats(includeUsageStats bool) ApiGetAllIpblockRequest {
 	r.includeUsageStats = &includeUsageStats
 	return r
@@ -601,7 +695,7 @@ func (r ApiGetAllIpblockRequest) PageSize(pageSize int32) ApiGetAllIpblockReques
 	return r
 }
 
-// Ordering for pagination query
+// Sort by name, prefix, status, creation time, or update time in the indicated direction before pagination. Defaults to CREATED_ASC. Ties use IP Block ID ascending.
 func (r ApiGetAllIpblockRequest) OrderBy(orderBy string) ApiGetAllIpblockRequest {
 	r.orderBy = &orderBy
 	return r
@@ -614,7 +708,7 @@ func (r ApiGetAllIpblockRequest) Execute() ([]IpBlock, *http.Response, error) {
 /*
 GetAllIpblock Retrieve all IP Blocks
 
-Retrieve the IP Blocks visible to the requesting organization. Tenant-created IP Blocks (`managed: false`) are not exposed through this API. Blocks allocated to Tenants by the Infrastructure Provider remain managed and visible within the requesting organization's scope.
+Retrieve the IP Blocks visible to the requesting organization. Tenants see their allocated blocks (`managed: true`) and their own tenant-created blocks (`managed: false`). Providers see their managed blocks; tenant-created blocks are private to the owning tenant.
 
 User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
 
@@ -686,6 +780,10 @@ func (a *IPBlockAPIService) GetAllIpblockExecute(r ApiGetAllIpblockRequest) ([]I
 	}
 	if r.orderBy != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "CREATED_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -776,7 +874,7 @@ func (r ApiGetIpblockRequest) TenantId(tenantId string) ApiGetIpblockRequest {
 	return r
 }
 
-// Include IP Block usage stats in response
+// Include IPAM usage statistics for managed IP Blocks. Tenant-created blocks do not use cloud IPAM and return null usageStats even when this is true. Defaults to false.
 func (r ApiGetIpblockRequest) IncludeUsageStats(includeUsageStats bool) ApiGetIpblockRequest {
 	r.includeUsageStats = &includeUsageStats
 	return r
@@ -795,7 +893,7 @@ func (r ApiGetIpblockRequest) Execute() (*IpBlock, *http.Response, error) {
 /*
 GetIpblock Retrieve IP Block
 
-Retrieve an IP Block by ID. Records outside the requesting organization's scope, including Tenant-created IP Blocks (`managed: false`), return the same 404 response as an unknown ID.
+Retrieve an IP Block by ID. Tenants can retrieve both their allocated and tenant-created blocks. Tenant-created blocks are hidden from other tenants and from providers. Records outside the requesting organization's scope return the same 404 response as an unknown ID.
 
 User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
 
@@ -946,11 +1044,13 @@ UpdateIpblock Update IP Block
 
 # Update an existing IP Block
 
-Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+For provider updates, the org must have an Infrastructure Provider and the user must have `PROVIDER_ADMIN`. The IP Block must be a root belonging to that Provider.
 
 Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
-Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
+A `TENANT_ADMIN` can update name and description on its own tenant-created (`managed: false`) IP Block at an associated, Registered Site, including when tenantSitePrefix is disabled. Omitted or null metadata fields preserve their value; an empty description clears it. Unknown fields are rejected, and owner, Site, prefix, protocol version, routing type, and managed value cannot be changed. Deleting blocks return 409. Core metadata updates preserve labels and use the observed version to reject concurrent changes. The REST metadata update and Core call share a transaction; a Core error rolls back the REST change and is returned immediately. If Core committed despite a lost response or REST commit failure, GET can retain the earlier metadata until a successful PATCH reads Core metadata and applies the requested fields. Retry the desired metadata update to converge; inventory does not repair metadata.
+
+Allocated tenant blocks remain managed through Allocations. Unknown IDs, other tenants' blocks, and allocated blocks requested by a tenant return 404. Providers cannot update tenant-created blocks unless they also have the owning tenant's admin role.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -1054,6 +1154,61 @@ func (a *IPBlockAPIService) UpdateIpblockExecute(r ApiUpdateIpblockRequest) (*Ip
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 502 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

@@ -22,6 +22,8 @@ var _ MappedNullable = &SiteCapabilities{}
 
 // SiteCapabilities Boolean flags to indicate features supported by a Site
 type SiteCapabilities struct {
+	// Whether tenant administrators may create their own private IP Blocks at this Site. Provider-controlled and disabled by default. Disabling it preserves access to existing blocks. Enable only after SitePrefix inventory publication and absence processing are deployed (https://github.com/dsx-ai-factory/infra-controller/issues/5763).
+	TenantSitePrefix *bool `json:"tenantSitePrefix,omitempty"`
 	// Whether the Site supports native networking
 	NativeNetworking *bool `json:"nativeNetworking,omitempty"`
 	// Whether the Site supports Network Security Groups
@@ -44,6 +46,8 @@ type SiteCapabilities struct {
 // will change when the set of required properties is changed
 func NewSiteCapabilities() *SiteCapabilities {
 	this := SiteCapabilities{}
+	var tenantSitePrefix bool = false
+	this.TenantSitePrefix = &tenantSitePrefix
 	var dpsPowerManagement bool = false
 	this.DpsPowerManagement = &dpsPowerManagement
 	return &this
@@ -54,9 +58,43 @@ func NewSiteCapabilities() *SiteCapabilities {
 // but it doesn't guarantee that properties required by API are set
 func NewSiteCapabilitiesWithDefaults() *SiteCapabilities {
 	this := SiteCapabilities{}
+	var tenantSitePrefix bool = false
+	this.TenantSitePrefix = &tenantSitePrefix
 	var dpsPowerManagement bool = false
 	this.DpsPowerManagement = &dpsPowerManagement
 	return &this
+}
+
+// GetTenantSitePrefix returns the TenantSitePrefix field value if set, zero value otherwise.
+func (o *SiteCapabilities) GetTenantSitePrefix() bool {
+	if o == nil || IsNil(o.TenantSitePrefix) {
+		var ret bool
+		return ret
+	}
+	return *o.TenantSitePrefix
+}
+
+// GetTenantSitePrefixOk returns a tuple with the TenantSitePrefix field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *SiteCapabilities) GetTenantSitePrefixOk() (*bool, bool) {
+	if o == nil || IsNil(o.TenantSitePrefix) {
+		return nil, false
+	}
+	return o.TenantSitePrefix, true
+}
+
+// HasTenantSitePrefix returns a boolean if a field has been set.
+func (o *SiteCapabilities) HasTenantSitePrefix() bool {
+	if o != nil && !IsNil(o.TenantSitePrefix) {
+		return true
+	}
+
+	return false
+}
+
+// SetTenantSitePrefix gets a reference to the given bool and assigns it to the TenantSitePrefix field.
+func (o *SiteCapabilities) SetTenantSitePrefix(v bool) {
+	o.TenantSitePrefix = &v
 }
 
 // GetNativeNetworking returns the NativeNetworking field value if set, zero value otherwise.
@@ -293,6 +331,9 @@ func (o SiteCapabilities) MarshalJSON() ([]byte, error) {
 
 func (o SiteCapabilities) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.TenantSitePrefix) {
+		toSerialize["tenantSitePrefix"] = o.TenantSitePrefix
+	}
 	if !IsNil(o.NativeNetworking) {
 		toSerialize["nativeNetworking"] = o.NativeNetworking
 	}

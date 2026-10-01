@@ -20,11 +20,11 @@ import (
 // checks if the IpBlockUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &IpBlockUpdateRequest{}
 
-// IpBlockUpdateRequest Request data for editing IP block
+// IpBlockUpdateRequest Request data for editing IP Block metadata. For tenant-created blocks, omitted or null fields preserve the value; an empty description clears it. Only name and description can be updated.
 type IpBlockUpdateRequest struct {
 	// Name of the IP Block
 	Name NullableString `json:"name,omitempty"`
-	// Description of the IP Block
+	// Description of the IP Block. Tenant requests accept at most 1024 UTF-8 bytes.
 	Description NullableString `json:"description,omitempty"`
 }
 

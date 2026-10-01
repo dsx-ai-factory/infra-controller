@@ -614,7 +614,7 @@ func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlock
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
+	err = paginator.Query.OrderExpr("ipb.id ASC").Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

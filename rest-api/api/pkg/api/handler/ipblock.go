@@ -30,6 +30,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -42,14 +43,16 @@ import (
 type CreateIPBlockHandler struct {
 	dbSession *cdb.Session
 	tc        temporalClient.Client
+	sc        *sc.ClientPool
 	cfg       *config.Config
 }
 
 // NewCreateIPBlockHandler initializes and returns a new handler for creating IPBlock
-func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateIPBlockHandler {
+func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateIPBlockHandler {
 	return CreateIPBlockHandler{
 		dbSession: dbSession,
 		tc:        tc,
+		sc:        scp,
 		cfg:       cfg,
 	}
 }
@@ -85,9 +88,12 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to create IP Blocks
+	// Validate the role before selecting provider or tenant creation.
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
+		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+			return (tenantIPBlockHandler{dbSession: cipbh.dbSession, scp: cipbh.sc}).handle(c)
+		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
@@ -441,7 +447,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 			Statuses:    statuses,
 			SearchQuery: searchQuery,
 		}
-		tenantFilter.TenantAllocated(tenant.ID)
+		tenantFilter.TenantIDs = []uuid.UUID{tenant.ID}
 		ipbs, _, err := ipbDAO.GetAll(ctx, nil, tenantFilter, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 
 		if err != nil {
@@ -478,7 +484,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 	for _, ipb := range ipbs {
 		pagedIpbIDs = append(pagedIpbIDs, ipb.ID.String())
 
-		if includeUsageStats {
+		if includeUsageStats && ipb.Managed {
 			prefixUsage, serr := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, &ipb)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error retrieving ipam usage stats details for IPBlock")
@@ -836,7 +842,7 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 
 	if ipb == nil && tenant != nil {
 		tenantFilter := cdbm.IPBlockFilterInput{}
-		tenantFilter.TenantAllocated(tenant.ID)
+		tenantFilter.TenantIDs = []uuid.UUID{tenant.ID}
 		ipb, err = ipbDAO.GetOne(ctx, nil, ipbID, tenantFilter, qIncludeRelations)
 		if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Error().Err(err).Msg("error retrieving IPBlock visible to tenant from DB")
@@ -860,7 +866,7 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 
 	// Get IPAM usage stats
 	var puipb *cipam.Usage
-	if includeUsageStats {
+	if includeUsageStats && ipb.Managed {
 		// Get Usage stats from IPAM for the IPBlock
 		ipamStorage := ipam.NewIpamStorage(gipbh.dbSession.DB, nil)
 		puipb, err = ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, ipb)
@@ -884,14 +890,16 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 type UpdateIPBlockHandler struct {
 	dbSession *cdb.Session
 	tc        temporalClient.Client
+	sc        *sc.ClientPool
 	cfg       *config.Config
 }
 
 // NewUpdateIPBlockHandler initializes and returns a new handler for updating IPBlock
-func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateIPBlockHandler {
+func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateIPBlockHandler {
 	return UpdateIPBlockHandler{
 		dbSession: dbSession,
 		tc:        tc,
+		sc:        scp,
 		cfg:       cfg,
 	}
 }
@@ -928,9 +936,12 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to update IP Blocks
+	// Tenant Admins can update their own unmanaged IP Blocks.
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
+		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+			return (tenantIPBlockHandler{dbSession: uipbh.dbSession, scp: uipbh.sc}).handle(c)
+		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
@@ -947,6 +958,20 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 	}
 
 	ipbDAO := cdbm.NewIPBlockDAO(uipbh.dbSession)
+
+	if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+		tenant, err := common.GetTenantForOrg(ctx, nil, uipbh.dbSession, org)
+		if err == nil {
+			_, err = ipbDAO.GetOne(ctx, nil, ipbID, cdbm.IPBlockFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, Managed: cutil.GetPtr(false)}, nil)
+			if err == nil {
+				return (tenantIPBlockHandler{dbSession: uipbh.dbSession, scp: uipbh.sc}).handle(c)
+			}
+		}
+		if !errors.Is(err, cdb.ErrDoesNotExist) && !errors.Is(err, common.ErrOrgTenantNotFound) {
+			logger.Error().Err(err).Msg("failed to determine IP Block management")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IP Block", nil)
+		}
+	}
 
 	// Validate request
 	// Bind request data to API model
@@ -1057,14 +1082,16 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 type DeleteIPBlockHandler struct {
 	dbSession *cdb.Session
 	tc        temporalClient.Client
+	sc        *sc.ClientPool
 	cfg       *config.Config
 }
 
 // NewDeleteIPBlockHandler initializes and returns a new handler for deleting IPBlock
-func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteIPBlockHandler {
+func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteIPBlockHandler {
 	return DeleteIPBlockHandler{
 		dbSession: dbSession,
 		tc:        tc,
+		sc:        scp,
 		cfg:       cfg,
 	}
 }
@@ -1100,9 +1127,12 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to delete IP Blocks
+	// Tenant Admins can delete their own unmanaged IP Blocks.
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
+		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+			return (tenantIPBlockHandler{dbSession: dipbh.dbSession, scp: dipbh.sc}).handle(c)
+		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
@@ -1121,6 +1151,20 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 	logger.Info().Str("IP Block ID", ipbStrID).Msg("deleting IP Block")
 
 	ipbDAO := cdbm.NewIPBlockDAO(dipbh.dbSession)
+
+	if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+		tenant, err := common.GetTenantForOrg(ctx, nil, dipbh.dbSession, org)
+		if err == nil {
+			_, err = ipbDAO.GetOne(ctx, nil, ipbID, cdbm.IPBlockFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, Managed: cutil.GetPtr(false)}, nil)
+			if err == nil {
+				return (tenantIPBlockHandler{dbSession: dipbh.dbSession, scp: dipbh.sc}).handle(c)
+			}
+		}
+		if !errors.Is(err, cdb.ErrDoesNotExist) && !errors.Is(err, common.ErrOrgTenantNotFound) {
+			logger.Error().Err(err).Msg("failed to determine IP Block management")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IP Block", nil)
+		}
+	}
 
 	// Check that the org's infrastructureProvider matches infrastructureProvider in IPBlock
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, dipbh.dbSession, org)

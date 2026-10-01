@@ -326,7 +326,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/ipblock",
 			Method:  http.MethodPost,
-			Handler: apiHandler.NewCreateIPBlockHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewCreateIPBlockHandler(dbSession, tc, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/ipblock",
@@ -346,12 +346,12 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/ipblock/:id",
 			Method:  http.MethodPatch,
-			Handler: apiHandler.NewUpdateIPBlockHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewUpdateIPBlockHandler(dbSession, tc, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/ipblock/:id",
 			Method:  http.MethodDelete,
-			Handler: apiHandler.NewDeleteIPBlockHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewDeleteIPBlockHandler(dbSession, tc, scp, cfg),
 		},
 		// Instance endpoints
 		{

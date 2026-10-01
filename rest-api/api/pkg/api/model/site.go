@@ -54,6 +54,7 @@ func (ascr APISiteCreateRequest) Validate() error {
 }
 
 type APISiteCapabilitiesUpdateRequest struct {
+	TenantSitePrefix          *bool `json:"tenantSitePrefix"`
 	NativeNetworking          *bool `json:"nativeNetworking"`
 	NetworkSecurityGroup      *bool `json:"networkSecurityGroup"`
 	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem"`
@@ -69,6 +70,10 @@ func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteCo
 	cfg := existing
 	if cfg == nil {
 		cfg = &cdbm.SiteConfig{}
+	}
+
+	if ascur.TenantSitePrefix != nil {
+		cfg.TenantSitePrefix = *ascur.TenantSitePrefix
 	}
 
 	if ascur.NativeNetworking != nil {
@@ -320,6 +325,7 @@ func NewAPISite(dbs cdbm.Site, dbsds []cdbm.StatusDetail, ts *cdbm.TenantSite) A
 
 // APISiteCapabilities holds the model of site capabilities
 type APISiteCapabilities struct {
+	TenantSitePrefix          bool `json:"tenantSitePrefix"`
 	NativeNetworking          bool `json:"nativeNetworking"`
 	NetworkSecurityGroup      bool `json:"networkSecurityGroup"`
 	NVLinkPartition           bool `json:"nvLinkPartition"`
@@ -333,6 +339,7 @@ func siteConfigToAPISiteCapabilities(cfg *cdbm.SiteConfig) *APISiteCapabilities 
 	apiCaps := &APISiteCapabilities{}
 
 	if cfg != nil {
+		apiCaps.TenantSitePrefix = cfg.TenantSitePrefix
 		apiCaps.NativeNetworking = cfg.NativeNetworking
 		apiCaps.NetworkSecurityGroup = cfg.NetworkSecurityGroup
 		apiCaps.NVLinkPartition = cfg.NVLinkPartition

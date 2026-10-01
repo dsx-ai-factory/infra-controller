@@ -18,6 +18,7 @@ import (
 )
 
 func TestNewAPIRoutes(t *testing.T) {
+	t.Run("tenant IP Blocks", testNewAPIRoutesTenantIPBlocks)
 	type args struct {
 		dbSession *cdb.Session
 		tc        temporalClient.Client

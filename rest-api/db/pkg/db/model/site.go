@@ -52,6 +52,7 @@ var (
 // Config stays flat so PostgreSQL JSONB concatenation can apply partial
 // updates without replacing unrelated settings.
 type SiteConfig struct {
+	TenantSitePrefix                 bool `json:"tenant_site_prefix"`
 	NetworkSecurityGroup             bool `json:"network_security_group"`
 	NativeNetworking                 bool `json:"native_networking"`
 	VpcSlaac                         bool `json:"vpc_slaac"`
@@ -148,6 +149,7 @@ type SiteCreateInput struct {
 }
 
 type SiteConfigUpdateInput struct {
+	TenantSitePrefix                 *bool `json:"tenant_site_prefix,omitempty"`
 	NetworkSecurityGroup             *bool `json:"network_security_group,omitempty"`
 	NativeNetworking                 *bool `json:"native_networking,omitempty"`
 	VpcSlaac                         *bool `json:"vpc_slaac,omitempty"`
@@ -229,6 +231,8 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 type SiteDAO interface {
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
+	// GetByIDForShare protects Site eligibility while allowing concurrent readers.
+	GetByIDForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -249,7 +253,22 @@ type SiteSQLDAO struct {
 
 // GetByID returns a Site by its ID
 func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (_ *Site, retErr error) {
-	if forUpdate && tx == nil {
+	lock := ""
+	if forUpdate {
+		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
+		lock = "NO KEY UPDATE OF st"
+	}
+	return ssd.getByID(ctx, tx, id, includeRelations, includeDeleted, lock)
+}
+
+// GetByIDForShare protects Site eligibility until the caller's transaction ends.
+// Concurrent shared readers do not block one another; Site updates and deletion wait.
+func (ssd SiteSQLDAO) GetByIDForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error) {
+	return ssd.getByID(ctx, tx, id, nil, false, "SHARE OF st")
+}
+
+func (ssd SiteSQLDAO) getByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, lock string) (_ *Site, retErr error) {
+	if lock != "" && tx == nil {
 		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
 	}
 	// Create a child span and set the attributes for current request
@@ -260,9 +279,8 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	st := &Site{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
-	if forUpdate {
-		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
-		query = query.For("NO KEY UPDATE OF st")
+	if lock != "" {
+		query = query.For(lock)
 	}
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)

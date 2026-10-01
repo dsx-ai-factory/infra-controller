@@ -500,6 +500,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 			if apiRequest.Capabilities != nil {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
+					TenantSitePrefix:          apiRequest.Capabilities.TenantSitePrefix,
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
 					Flow:                      apiRequest.Capabilities.Flow,

@@ -174,6 +174,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			// REST owns metadata after creation, including on adopted and restored
 			// roots. Only lifecycle changes produce writes and status details.
 			status := getSitePrefixStatus(prefix.Status.LifecycleState)
+			if !block.Managed && block.Status == cdbm.IPBlockStatusDeleting {
+				status = cdbm.IPBlockStatusDeleting
+			}
 			if status != block.Status {
 				block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
 				if err != nil {
@@ -350,8 +353,13 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		return dao.Clear(ctx, tx, cdbm.IPBlockClearInput{IPBlockID: existingBlock.ID, Deleted: true})
 	}
 	status := getSitePrefixStatus(prefix.Status.LifecycleState)
+	var blockID *uuid.UUID
+	if tenantID != nil {
+		blockID = &id
+	}
 	block, err := dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
-		Name: name, Description: description,
+		IPBlockID: blockID,
+		Name:      name, Description: description,
 		SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
 		SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
 		Managed:         cutil.GetPtr(tenantID == nil),

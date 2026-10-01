@@ -22,11 +22,11 @@ import (
 // checks if the IpBlockCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &IpBlockCreateRequest{}
 
-// IpBlockCreateRequest Request data for creating IP block
+// IpBlockCreateRequest Request data for creating an IP Block. Tenant creation requires IPv4, DatacenterOnly, and a network-aligned RFC1918 prefix with length /8 through /31. The Site must be Registered, associated with the tenant, and have tenantSitePrefix enabled.
 type IpBlockCreateRequest struct {
 	// Name of the IP Block
 	Name string `json:"name"`
-	// Description of the IP Block
+	// Description of the IP Block. Tenant requests accept at most 1024 UTF-8 bytes.
 	Description NullableString `json:"description,omitempty"`
 	// ID of the site
 	SiteId string `json:"siteId"`

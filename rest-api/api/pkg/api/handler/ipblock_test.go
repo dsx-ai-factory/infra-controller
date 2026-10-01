@@ -155,7 +155,7 @@ func testIPBlockBuildIPBlock(t *testing.T, dbSession *cdb.Session, name string, 
 }
 
 // testIPBlockBuildTenantSitePrefix creates a private Tenant SitePrefix. The
-// unmanaged classification keeps it out of generic IPBlock handlers.
+// unmanaged classification keeps it out of provider IP Block handlers.
 func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, ip *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, prefix string, prefixLength int, status string, user *cdbm.User) *cdbm.IPBlock {
 	t.Helper()
 	sitePrefixID := uuid.New()
@@ -1163,12 +1163,12 @@ func TestIPBlockHandler_Get(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 		{
-			name:           "tenant cannot retrieve its SitePrefix through the generic IPBlock API",
+			name:           "tenant can retrieve its own SitePrefix through the IP Block API",
 			reqOrgName:     tnOrg1,
 			user:           tnu,
 			ipbID:          tenantSitePrefix.ID.String(),
-			expectedErr:    true,
-			expectedStatus: http.StatusNotFound,
+			expectedID:     tenantSitePrefix.ID.String(),
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:                     "success when retrieving IP Block as Provider with admin role",
@@ -1344,7 +1344,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedID, rsp.ID)
-				assert.True(t, rsp.Managed, "visible IP Blocks remain provider-managed independently of tenant assignment")
+				assert.Equal(t, rsp.ID != tenantSitePrefix.ID.String(), rsp.Managed)
 				assert.Equal(t, tc.expectedStatusDetailsCnt, len(rsp.StatusHistory))
 				if tc.queryIncludeProviderRelation != nil || tc.queryIncludeTenantRelation != nil || tc.queryIncludeSiteRelation != nil {
 					if tc.expectedInfrastructureProviderOrg != nil {
@@ -1594,7 +1594,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			user:           tnu,
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    totalCount / 2,
+			expectedCnt:    totalCount/2 + 1,
 		},
 		{
 			name:           "success when retrieving as service account",
@@ -1611,7 +1611,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			querySiteID:    cutil.GetPtr(site.ID.String()),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    totalCount / 2,
+			expectedCnt:    totalCount/2 + 1,
 		},
 		{
 			name:           "success when filtering by Site with no IP Blocks",
@@ -1678,13 +1678,13 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			expectedCnt:    totalCount / 2,
 		},
 		{
-			name:           "Tenant SitePrefix is absent from search and pagination total",
+			name:           "Tenant SitePrefix is included in search and pagination total",
 			reqOrgName:     tnOrg1,
 			user:           tnu,
 			querySearch:    cutil.GetPtr(tenantSitePrefix.Name),
 			expectedStatus: http.StatusOK,
-			expectedCnt:    0,
-			expectedTotal:  cutil.GetPtr(0),
+			expectedCnt:    1,
+			expectedTotal:  cutil.GetPtr(1),
 		},
 		{
 			name:           "success when status query search specified",
@@ -1693,7 +1693,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			querySearch:    cutil.GetPtr("pending"),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    totalCount / 2,
+			expectedCnt:    totalCount/2 + 1,
 		},
 		{
 			name:           "success when search query containing name and status is specified",
@@ -1711,7 +1711,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			queryStatus:    cutil.GetPtr(cdbm.IPBlockStatusPending),
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    totalCount / 2,
+			expectedCnt:    totalCount/2 + 1,
 		},
 		{
 			name:           "success when search query containing invalid status is specified",
@@ -1826,7 +1826,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedCnt, len(resp))
 			for _, block := range resp {
-				assert.True(t, block.Managed)
+				assert.Equal(t, block.ID != tenantSitePrefix.ID.String(), block.Managed)
 			}
 
 			ph := rec.Header().Get(pagination.ResponseHeaderName)
@@ -1862,7 +1862,11 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 				}
 
 				for _, apiIpb := range resp {
-					assert.Equal(t, 2, len(apiIpb.StatusHistory))
+					if apiIpb.ID == tenantSitePrefix.ID.String() {
+						assert.Empty(t, apiIpb.StatusHistory)
+					} else {
+						assert.Len(t, apiIpb.StatusHistory, 2)
+					}
 				}
 			}
 

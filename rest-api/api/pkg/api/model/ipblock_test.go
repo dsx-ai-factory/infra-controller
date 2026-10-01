@@ -6,6 +6,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,6 +366,31 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 			value, present := fields["managed"]
 			require.True(t, present, "false is a supported value, not an omitted field")
 			require.Equal(t, tc.dbObj.Managed, value)
+		})
+	}
+}
+
+func TestAPIIPBlockCreateRequest_ValidateTenant(t *testing.T) {
+	for _, row := range []struct {
+		name, prefix, routing, protocol string
+		bits                            int
+		description                     *string
+		valid                           bool
+	}{
+		{"largest private root", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, nil, true},
+		{"smallest private root", "172.16.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 31, cutil.GetPtr(strings.Repeat("é", 512)), true},
+		{"third private range", "192.168.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 16, nil, true},
+		{"public IPv4", "8.8.8.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 24, nil, false},
+		{"private IPv6", "fd00::", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV6, 64, nil, false},
+		{"public routing", "10.0.0.0", cdbm.IPBlockRoutingTypePublic, cdbm.IPBlockProtocolVersionV4, 8, nil, false},
+		{"host route", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 32, nil, false},
+		{"not network aligned", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 24, nil, false},
+		{"range extends beyond RFC1918", "192.168.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 15, nil, false},
+		{"description byte limit", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, cutil.GetPtr(strings.Repeat("é", 513)), false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			request := APIIPBlockCreateRequest{Name: "private-root", SiteID: uuid.NewString(), Prefix: row.prefix, PrefixLength: row.bits, RoutingType: row.routing, ProtocolVersion: row.protocol, Description: row.description}
+			assert.Equal(t, row.valid, request.ValidateTenant() == nil)
 		})
 	}
 }

@@ -21,7 +21,7 @@ import (
 // checks if the IpBlock type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &IpBlock{}
 
-// IpBlock IP block contains information about an IPv4 address pool owned by the Infrastructure Provider and assigned as an overlay network for a particular Site. It is equivalent to Network Resource in product terminology.
+// IpBlock An address range at a Site. Managed blocks are provider roots or tenant allocations; unmanaged blocks are private tenant-created Core SitePrefixes.
 type IpBlock struct {
 	// Unique UUID v4 identifier for the IP Block
 	Id *string `json:"id,omitempty"`
