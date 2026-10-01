@@ -869,7 +869,7 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/domain":
 			_, _ = io.WriteString(w, `[
-				{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1"}
+				{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1","status":"Ready"}
 			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/subnet":
