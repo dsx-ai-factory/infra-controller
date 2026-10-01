@@ -257,7 +257,7 @@ nico-machine-a-tron:
         [racks.gb200]
         type = "wiwynn_gb200_nvl72"
         rack_profile_id = "NVL72"
-        ids = ["rack-001"]
+        ids = ["rack-001", "rack-002"]
         dpu_reboot_delay = 20
         host_reboot_delay = 10
         acceleration_factor = 0.01
@@ -288,6 +288,7 @@ nico-machine-a-tron:
           rack_profile_id: NVL72
           ids:
             - rack-001
+            - rack-002
           dpu_reboot_delay: 20
           host_reboot_delay: 10
           oob_dhcp_relay_address: 10.96.64.1
