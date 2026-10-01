@@ -643,11 +643,11 @@ pub async fn find_bmc_ips_by_power_shelf_ids(
             ps.id,
             mia.address
         FROM power_shelves ps
-        JOIN expected_power_shelves eps ON eps.serial_number = ps.config->>'name'
+        JOIN expected_power_shelves eps ON eps.bmc_mac_address = ps.bmc_mac_address
         JOIN machine_interfaces mi ON mi.mac_address = eps.bmc_mac_address
         JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE ps.id = ANY($1)
-        ORDER BY ps.id
+        ORDER BY ps.id, family(mia.address), mia.address
     "#;
 
     sqlx::query_as(sql)
@@ -666,22 +666,26 @@ pub struct PowerShelfEndpointRow {
 }
 
 /// Resolve PowerShelfIds to PMC MAC + IP.
+///
+/// A shelf is tied to its expected record by its own `bmc_mac_address`, so a
+/// shelf without one does not resolve. `DISTINCT ON` collapses a PMC interface
+/// with multiple addresses, and the `family(mia.address), mia.address`
+/// tie-break deterministically keeps the IPv4 address (then the lowest).
 pub async fn find_power_shelf_endpoints_by_ids(
     db: impl crate::db_read::DbReader<'_>,
     power_shelf_ids: &[PowerShelfId],
 ) -> DatabaseResult<Vec<PowerShelfEndpointRow>> {
-    // DISTINCT ON guards against a machine_interface having multiple addresses
     let sql = r#"
         SELECT DISTINCT ON (ps.id)
             ps.id                AS power_shelf_id,
             eps.bmc_mac_address  AS pmc_mac,
             mia.address          AS pmc_ip
         FROM power_shelves ps
-        JOIN expected_power_shelves eps ON eps.serial_number = ps.config->>'name'
+        JOIN expected_power_shelves eps ON eps.bmc_mac_address = ps.bmc_mac_address
         JOIN machine_interfaces mi ON mi.mac_address = eps.bmc_mac_address
         JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE ps.id = ANY($1)
-        ORDER BY ps.id
+        ORDER BY ps.id, family(mia.address), mia.address
     "#;
 
     sqlx::query_as(sql)
@@ -1543,6 +1547,135 @@ mod tests {
                 .iter()
                 .map(|shelf| (shelf.bmc_mac_address, shelf.config.name.clone()))
                 .collect::<HashSet<_>>()
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Regression test for issue #7060: endpoint resolution must follow each
+    /// shelf's own `bmc_mac_address`, not the blank `config.name` /
+    /// `serial_number` that every shelf shares. Shelves with blank names must
+    /// not resolve to another shelf's PMC, a shelf without a MAC must not
+    /// resolve at all, and a dual-stack PMC resolves to its IPv4 address.
+    #[crate::sqlx_test]
+    async fn endpoint_resolution_follows_shelf_bmc_mac_not_name(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::MachineInterfaceId;
+        use carbide_uuid::network::NetworkSegmentId;
+        use model::allocation_type::AllocationType;
+
+        let mut txn = pool.begin().await?;
+
+        let mac_a: MacAddress = "02:00:00:00:0d:01".parse()?;
+        let mac_b: MacAddress = "02:00:00:00:0d:02".parse()?;
+        let ipv4_a: IpAddr = "10.71.149.229".parse()?;
+        let ipv6_a: IpAddr = "2001:db8::229".parse()?;
+        let ipv4_b: IpAddr = "10.71.149.165".parse()?;
+
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ($1, 'V1-T0', 'underlay') RETURNING id",
+        )
+        .bind("power-shelf-endpoint-resolution")
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        // Both expected records and all shelves share a blank serial / name.
+        let mut shelf_ids = Vec::new();
+        for (seed, mac, addresses) in [
+            (51, Some(mac_a), vec![ipv6_a, ipv4_a]),
+            (52, Some(mac_b), vec![ipv4_b]),
+            (53, None, vec![]),
+        ] {
+            if let Some(mac) = mac {
+                crate::expected_power_shelf::create(
+                    txn.as_mut(),
+                    ExpectedPowerShelf {
+                        bmc_mac_address: mac,
+                        bmc_username: "admin".to_string(),
+                        bmc_password: "pw".to_string(),
+                        serial_number: String::new(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            let shelf = create(
+                txn.as_mut(),
+                &NewPowerShelf {
+                    id: seeded_id(seed),
+                    config: PowerShelfConfig {
+                        name: String::new(),
+                        capacity: None,
+                        voltage: None,
+                    },
+                    bmc_mac_address: mac,
+                    metadata: None,
+                    rack_id: None,
+                },
+            )
+            .await?;
+            shelf_ids.push(shelf.id);
+
+            if let Some(mac) = mac {
+                let interface_id: MachineInterfaceId = sqlx::query_scalar(
+                    "INSERT INTO machine_interfaces
+                         (power_shelf_id, association_type, segment_id, mac_address,
+                          primary_interface, hostname, interface_type)
+                     VALUES ($1, 'PowerShelf', $2, $3::macaddr, false, $4, 'Bmc')
+                     RETURNING id",
+                )
+                .bind(shelf.id)
+                .bind(segment_id)
+                .bind(mac)
+                .bind(format!("pmc-{seed}"))
+                .fetch_one(txn.as_mut())
+                .await?;
+                for address in addresses {
+                    crate::machine_interface_address::insert(
+                        txn.as_mut(),
+                        interface_id,
+                        address,
+                        AllocationType::Dhcp,
+                    )
+                    .await?;
+                }
+            }
+        }
+        let [shelf_a, shelf_b, shelf_no_mac] = shelf_ids[..] else {
+            unreachable!("three shelves are seeded");
+        };
+
+        let endpoints =
+            find_power_shelf_endpoints_by_ids(txn.as_mut(), &[shelf_a, shelf_b, shelf_no_mac])
+                .await?;
+        assert_eq!(
+            endpoints
+                .iter()
+                .map(|row| (row.power_shelf_id, row.pmc_mac, row.pmc_ip))
+                .collect::<HashSet<_>>(),
+            HashSet::from([(shelf_a, mac_a, ipv4_a), (shelf_b, mac_b, ipv4_b)]),
+            "each shelf must resolve to its own PMC, and a shelf without a MAC to none"
+        );
+
+        let bmc_ips =
+            find_bmc_ips_by_power_shelf_ids(txn.as_mut(), &[shelf_a, shelf_b, shelf_no_mac])
+                .await?;
+        assert_eq!(
+            bmc_ips.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([(shelf_a, ipv4_a), (shelf_b, ipv4_b)]),
+        );
+
+        let linked = crate::expected_power_shelf::find_all_linked(txn.as_mut()).await?;
+        assert_eq!(
+            linked
+                .into_iter()
+                .map(|row| (row.bmc_mac_address, row.power_shelf_id))
+                .collect::<HashSet<_>>(),
+            HashSet::from([(mac_a, Some(shelf_a)), (mac_b, Some(shelf_b))]),
+            "expected shelves must link only to the shelf with the same BMC MAC"
         );
 
         txn.rollback().await?;
