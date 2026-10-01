@@ -35,21 +35,34 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 // identity. Publication, absence processing, and setting the cutover marker
 // belong to the subsequent complete-inventory implementation.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
+	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
+	logger.Info().Msg("starting activity")
+
 	hash, err := validatePage(inventory)
 	if err != nil {
+		logger.Warn().Err(err).Msg("received invalid SitePrefix inventory")
 		return err
 	}
 	if inventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
-		log.Warn().Str("site_id", siteID.String()).Str("status_message", inventory.StatusMsg).
-			Msg("Site Agent failed to collect SitePrefix inventory")
+		logger.Warn().Str("Status Message", inventory.StatusMsg).
+			Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
 	siteDAO := cdbm.NewSiteDAO(manager.dbSession)
 	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			logger.Warn().Err(err).Msg("received SitePrefix inventory for unknown or deleted Site")
+		} else {
+			logger.Error().Err(err).Msg("failed to retrieve Site from DB")
+		}
 		return err
 	}
-	return cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
+	page := inventory.InventoryPage
+	logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
+		page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
+
+	err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
 		// A lock collision returns to Temporal's bounded retry rather than
 		// holding a worker or transaction indefinitely.
 		err := tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), false)
@@ -68,6 +81,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		// Only a newer accepted collection supersedes them, not elapsed age.
 		progress := lockedSite.SitePrefixInventoryProgress
 		if progress != nil && reportedAt.Before(progress.ReportedAt) {
+			logger.Info().Msg("skipping inventory superseded by a newer collection")
 			return nil
 		}
 		if progress == nil || reportedAt.After(progress.ReportedAt) {
@@ -77,7 +91,6 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				Pages:      make(map[int32]cdbm.SitePrefixInventoryPage),
 			}
 		}
-		page := inventory.InventoryPage
 		if !slices.Equal(progress.ItemIDs, page.ItemIds) {
 			return invalid("SitePrefix collection changed its declared IDs")
 		}
@@ -85,6 +98,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			if receipt.Hash != hash {
 				return invalid("SitePrefix page retry changed its contents")
 			}
+			logger.Info().Msg("skipping previously reconciled inventory page")
 			return nil
 		}
 		ids := make([]string, 0, len(inventory.SitePrefixes))
@@ -132,12 +146,14 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		for _, prefix := range inventory.SitePrefixes {
 			deferred, err := manager.reconcile(ctx, tx, lockedSite, prefix)
 			if err != nil {
+				logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
+					Msg("failed to reconcile SitePrefix in DB")
 				return err
 			}
 			if deferred {
 				id := prefix.GetId().GetValue()
 				receipt.DeferredIDs = append(receipt.DeferredIDs, id)
-				log.Warn().Str("site_id", siteID.String()).Str("site_prefix_id", id).
+				logger.Warn().Str("Site Prefix ID", id).
 					Msg("Deferring operator SitePrefix replacement until complete inventory")
 			}
 		}
@@ -151,6 +167,12 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		_, err = siteDAO.Update(ctx, tx, cdbm.SiteUpdateInput{SiteID: siteID, SitePrefixInventoryProgress: progress})
 		return err
 	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to reconcile SitePrefix inventory page")
+		return err
+	}
+	logger.Info().Msg("completing activity")
+	return nil
 }
 
 func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix) (bool, error) {
@@ -167,6 +189,7 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 	}
 	if errors.Is(err, cdb.ErrDoesNotExist) {
 		block = nil
+		err = nil
 	}
 	var tenantID *uuid.UUID
 	if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
@@ -269,11 +292,19 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 		})
 	} else {
 		previousStatus = block.Status
-		update := cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Description: description, Status: &status}
-		if prefix.Metadata.Name != "" {
+		update := cdbm.IPBlockUpdateInput{IPBlockID: block.ID}
+		if prefix.Metadata.Name != "" && prefix.Metadata.Name != block.Name {
 			update.Name = &prefix.Metadata.Name
 		}
-		_, err = dao.Update(ctx, tx, update)
+		if description != nil && (block.Description == nil || *description != *block.Description) {
+			update.Description = description
+		}
+		if status != block.Status {
+			update.Status = &status
+		}
+		if update.Name != nil || update.Description != nil || update.Status != nil {
+			_, err = dao.Update(ctx, tx, update)
+		}
 	}
 	if err != nil {
 		return false, err

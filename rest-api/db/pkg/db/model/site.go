@@ -270,6 +270,12 @@ func (ssd SiteSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.U
 	if tx == nil {
 		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
 	}
+	ctx, siteDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetByIDForUpdate")
+	if siteDAOSpan != nil {
+		defer siteDAOSpan.End()
+		ssd.tracerSpan.SetAttribute(siteDAOSpan, "id", id.String())
+	}
+
 	st := &Site{}
 	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id).For("UPDATE").Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
