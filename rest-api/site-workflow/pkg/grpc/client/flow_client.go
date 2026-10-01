@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
@@ -191,9 +192,10 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 	if config.ClientMetrics != nil {
 		streamInterceptors = append(streamInterceptors, newGrpcStreamMetricsInterceptor(config.ClientMetrics))
 	}
-	// Unconditional: was gated on LS_SERVICE_NAME, which no chart sets.
-	handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
-	client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	if cotel.TransportEnabled() {
+		handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
+		client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	}
 	if len(unaryInterceptors) > 0 {
 		client.dialOpts = append(client.dialOpts, grpc.WithUnaryInterceptor(grpcmw.ChainUnaryClient(unaryInterceptors...)))
 	}

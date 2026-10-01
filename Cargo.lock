@@ -851,6 +851,7 @@ dependencies = [
  "indexmap 2.14.0",
  "itertools 0.14.0",
  "lazy_static",
+ "libredfish",
  "mac_address",
  "metrics-endpoint",
  "nix 0.31.3",
@@ -1626,6 +1627,7 @@ dependencies = [
  "mac_address",
  "metrics-endpoint",
  "moka",
+ "nv-redfish-dispatcher",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
@@ -2354,10 +2356,13 @@ dependencies = [
  "futures-util",
  "logfmt",
  "opentelemetry 0.32.0",
+ "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
  "prometheus",
+ "tokio",
  "tracing",
+ "tracing-opentelemetry 0.33.0",
  "tracing-subscriber",
 ]
 
@@ -2940,6 +2945,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mime",
  "opentelemetry 0.32.0",
+ "opentelemetry_sdk",
  "pin-project-lite",
  "prometheus",
  "rand 0.10.1",
@@ -2954,7 +2960,9 @@ dependencies = [
  "tower-http 0.7.0",
  "tower-layer",
  "tower-service",
+ "trace-propagation",
  "tracing",
+ "tracing-opentelemetry 0.33.0",
  "tracing-subscriber",
  "uuid",
 ]
@@ -3664,6 +3672,9 @@ dependencies = [
 [[package]]
 name = "carbide-version"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "carbide-vpc-prefix-controller"

@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -41,6 +42,21 @@ more classifications. Classifications define operational impact. For example,
 `PreventAllocations` blocks new allocations while the alert is active, and
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
+
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
 
 ## Hardware Health Monitoring
 

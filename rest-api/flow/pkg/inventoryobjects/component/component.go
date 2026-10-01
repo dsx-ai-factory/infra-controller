@@ -19,16 +19,17 @@ import (
 // Component represents a hardware component with various properties and
 // associated BMCs.
 type Component struct {
-	Type            devicetypes.ComponentType         `json:"type"`
-	Info            deviceinfo.DeviceInfo             `json:"info"`
-	FirmwareVersion string                            `json:"firmware_version"`
-	Position        InRackPosition                    `json:"position"`
-	BmcsByType      map[devicetypes.BMCType][]bmc.BMC `json:"bmcs_by_type"`
-	ComponentID     string                            `json:"component_id,omitempty"`
-	RackID          uuid.UUID                         `json:"rack_id"`
-	RackExternalID  string                            `json:"rack_external_id,omitempty"`
-	NVLDomainID     uuid.UUID                         `json:"nvl_domain_id"`
-	PowerState      string                            `json:"power_state,omitempty"`
+	Type                devicetypes.ComponentType         `json:"type"`
+	Info                deviceinfo.DeviceInfo             `json:"info"`
+	FirmwareVersion     string                            `json:"firmware_version"`
+	Position            InRackPosition                    `json:"position"`
+	BmcsByType          map[devicetypes.BMCType][]bmc.BMC `json:"bmcs_by_type"`
+	ComponentID         string                            `json:"component_id,omitempty"`
+	RackID              uuid.UUID                         `json:"rack_id"`
+	RackExternalID      string                            `json:"rack_external_id,omitempty"`
+	NVLDomainID         uuid.UUID                         `json:"nvl_domain_id"`
+	NVLDomainExternalID *string                           `json:"nvl_domain_external_id"`
+	PowerState          string                            `json:"power_state,omitempty"`
 	// Status is the Flow-derived view of operability. Nil when no status
 	// has been computed yet (e.g. before the first inventory sync).
 	Status *types.ComponentOperationStatus `json:"status,omitempty"`

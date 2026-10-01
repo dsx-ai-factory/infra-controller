@@ -22,7 +22,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -389,7 +388,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -749,7 +748,6 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateVpcPrefixHandler{
@@ -905,8 +903,6 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(tnOrg1)
 		ec.Set("user", tnu)
-		requestCtx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
 
 		handlerDone := make(chan error, 1)
 		go func() {
@@ -967,9 +963,8 @@ func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPoo
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	tc := &tmocks.Client{}
@@ -1102,7 +1097,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -1370,7 +1365,6 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gash := GetAllVpcPrefixHandler{
@@ -1537,7 +1531,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                            string
@@ -1707,7 +1701,6 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetVpcPrefixHandler{
@@ -1876,7 +1869,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -2021,7 +2014,6 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateVpcPrefixHandler{
@@ -2227,7 +2219,7 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -2368,7 +2360,6 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient

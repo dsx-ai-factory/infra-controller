@@ -5,7 +5,6 @@ package elektra
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
@@ -57,7 +56,7 @@ func TestRlaRack(t *testing.T) {
 				assert.Nil(t, createErr)
 
 				// Now test GetRackInfoByID
-				ctx, span := otel.Tracer(os.Getenv("LS_SERVICE_NAME")).Start(ctx, "FlowTest-GetRack")
+				ctx, span := otel.Tracer("flowgrpc-test").Start(ctx, "FlowTest-GetRack")
 
 				getRequest := &flowv1.GetRackInfoByIDRequest{
 					Id: &flowv1.UUID{Id: rackID},
@@ -83,7 +82,7 @@ func TestRlaRack(t *testing.T) {
 				t.Log("GRPCResponse", response)
 			case "list":
 				ctx := context.Background()
-				ctx, span := otel.Tracer(os.Getenv("LS_SERVICE_NAME")).Start(ctx, "FlowTest-GetListOfRacks")
+				ctx, span := otel.Tracer("flowgrpc-test").Start(ctx, "FlowTest-GetListOfRacks")
 				listRequest := &flowv1.GetListOfRacksRequest{}
 				resq, err := grpcClient.GrpcServiceClient().GetListOfRacks(ctx, listRequest)
 				span.End()

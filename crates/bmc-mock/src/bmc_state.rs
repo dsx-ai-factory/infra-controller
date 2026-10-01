@@ -93,8 +93,10 @@ pub enum BmcEvent {
 impl<C: Callbacks> BmcState<C> {
     /// Simulate a BMC reset without changing host power: begin the outage
     /// window, if one is configured, then close event streams and clear replay
-    /// history. Returns the outage duration, zero when downtime is disabled.
+    /// history. Activates completed host BMC firmware without activating UEFI.
+    /// Returns the outage duration, zero when downtime is disabled.
     pub(crate) fn reset(&self) -> std::time::Duration {
+        self.update_service_state.apply_staged_bmc_firmware();
         let window = self
             .availability
             .as_ref()

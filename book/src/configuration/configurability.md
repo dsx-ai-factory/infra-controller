@@ -494,8 +494,10 @@ for the complete Helm guidance.
 ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
 is the reference. `nico-bmc-proxy` also takes `[[class]]` tables that set how
-long it waits on a BMC for groups of requests; see
-[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class).
+long it waits on a BMC for groups of requests and how many it sends at a time,
+and an `[admission]` table that limits the requests it sends to each BMC; see
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class)
+and [`admission`](../../../crates/bmc-proxy/README.md#admission).
 
 ### DPU configuration — `[dpu_config]`
 

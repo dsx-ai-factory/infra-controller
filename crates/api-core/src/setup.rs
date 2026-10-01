@@ -866,11 +866,47 @@ async fn initialize_dpf_sdk(
         carbide_config.vmaas_config.as_ref(),
         carbide_config.dpu_config.num_of_vfs,
     )?;
-    let effective_interfaces = carbide_dpf::build_effective_dpu_interfaces(
+
+    // BF3 interface vector drops pf1hpf from the static interface list
+    // because the flavor hides port 2. However, if user has configured
+    // pf1 explicitly for VMaaS, we accept it for compatibility, but log
+    // a warning regards this.
+    if let Some(identity) = carbide_config
+        .vmaas_config
+        .as_ref()
+        .and_then(|config| config.bridging.as_ref())
+        .and_then(|bridging| {
+            bridging
+                .host_representor_intercept_bridging
+                .values()
+                .find_map(|interface| {
+                    let identity = interface.dpf_interface?;
+                    (identity.pf_id == 1).then_some(identity)
+                })
+        })
+    {
+        tracing::warn!(
+            controller_id = identity.controller_id,
+            pf_id = identity.pf_id,
+            "VMaaS intercept-bridging configuration added PF1 for BF3 although the BF3 flavor hides port 2"
+        );
+    }
+
+    // Build interfaces vector for each deployment type.
+    // For Astra we only build the static interfaces vector here, and
+    // the function resolve_initialization_inventory() adds the required
+    // xplane patch interfaces before it applies DPF CRs. In theory, we
+    // could have augmented the patch interfaces here also.
+    let bf3_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf3,
         carbide_config.dpu_config.num_of_vfs,
         intercept_bridging.as_ref(),
     );
-
+    let bf4_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf4Generic,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging.as_ref(),
+    );
     let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
 
     let service_vpc_slots =
@@ -915,9 +951,8 @@ async fn initialize_dpf_sdk(
                 .resolved_services_for(deployment, deployment_type);
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => &effective_interfaces,
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
+                DpuDeploymentType::Bf4Generic => &bf4_interfaces,
             };
             let (service_vpc_slots, additional_managed_sf) = match deployment_type {
                 DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
@@ -1030,10 +1065,31 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
-    for (name, config) in init_configs {
-        sdk.create_initialization_objects(&config)
+    for (name, config) in &init_configs {
+        sdk.create_initialization_objects(config)
             .await
             .map_err(|err| eyre::eyre!("failed to initialize {name} DPF deployment: {err}"))?;
+    }
+
+    // Cleanup stale PF1 interfaces for BF3. For scoped deployment this is
+    // unconditional, for unscoped we only cleanup if BF4 is not present.
+    let bf4_configured = carbide_config.dpf.deployments.bf4_generic.is_some()
+        || carbide_config.dpf.deployments.bf4_astra.is_some();
+    let cleanup_configs = init_configs
+        .iter()
+        .filter(|(_, config)| {
+            matches!(
+                config.deployment_type(),
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            )
+        })
+        .map(|(_, config)| config)
+        .collect::<Vec<_>>();
+    if let Err(error) = sdk
+        .cleanup_stale_pf1_interfaces(&cleanup_configs, bf4_configured)
+        .await
+    {
+        tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
     }
 
     Ok(Some(Arc::new(DpfSdkOps::new(

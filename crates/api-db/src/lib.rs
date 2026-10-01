@@ -63,6 +63,7 @@ pub mod machine_boot_override;
 pub mod machine_desired_boot_interface;
 pub mod machine_interface;
 pub mod machine_interface_address;
+pub mod machine_lldp_neighbor;
 pub mod machine_pending_action;
 pub mod machine_topology;
 pub mod machine_validation;

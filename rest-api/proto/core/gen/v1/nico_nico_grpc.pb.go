@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
+	Forge_GetRmsVersion_FullMethodName                                      = "/forge.Forge/GetRmsVersion"
 	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
@@ -505,6 +506,7 @@ const (
 	Forge_MlxAdminLockdownStatus_FullMethodName                             = "/forge.Forge/MlxAdminLockdownStatus"
 	Forge_MlxAdminShowDevice_FullMethodName                                 = "/forge.Forge/MlxAdminShowDevice"
 	Forge_MlxAdminShowMachine_FullMethodName                                = "/forge.Forge/MlxAdminShowMachine"
+	Forge_MlxAdminShowDeviceIdentities_FullMethodName                       = "/forge.Forge/MlxAdminShowDeviceIdentities"
 	Forge_MlxAdminRegistryList_FullMethodName                               = "/forge.Forge/MlxAdminRegistryList"
 	Forge_MlxAdminRegistryShow_FullMethodName                               = "/forge.Forge/MlxAdminRegistryShow"
 	Forge_MlxAdminConfigQuery_FullMethodName                                = "/forge.Forge/MlxAdminConfigQuery"
@@ -553,6 +555,12 @@ const (
 type ForgeClient interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*BuildInfo, error)
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
+	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
@@ -891,8 +899,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
@@ -958,7 +969,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	// Periodic LLDP neighbor report from scout. The DPU agent reports through
+	// RecordDpuNetworkStatus instead.
 	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
@@ -1426,6 +1438,9 @@ type ForgeClient interface {
 	MlxAdminShowDevice(ctx context.Context, in *MlxAdminDeviceInfoRequest, opts ...grpc.CallOption) (*MlxAdminDeviceInfoResponse, error)
 	// MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
 	MlxAdminShowMachine(ctx context.Context, in *MlxAdminDeviceReportRequest, opts ...grpc.CallOption) (*MlxAdminDeviceReportResponse, error)
+	// Read stored NIC identity evidence and current managed-DPU associations.
+	// Scout need not be connected. This does not establish update/reset eligibility.
+	MlxAdminShowDeviceIdentities(ctx context.Context, in *MlxAdminDeviceIdentitiesRequest, opts ...grpc.CallOption) (*MlxAdminDeviceIdentitiesResponse, error)
 	// Mellanox administrative endpoints for registry querying, which are called by
 	// the CLI (nico-admin-cli) and potentially the UI. These endpoints ultimately
 	// interconnect with a scout agent listening via an open ScoutStream connection.
@@ -1536,6 +1551,16 @@ func (c *forgeClient) Version(ctx context.Context, in *VersionRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BuildInfo)
 	err := c.cc.Invoke(ctx, Forge_Version_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRmsVersionResponse)
+	err := c.cc.Invoke(ctx, Forge_GetRmsVersion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6371,6 +6396,16 @@ func (c *forgeClient) MlxAdminShowMachine(ctx context.Context, in *MlxAdminDevic
 	return out, nil
 }
 
+func (c *forgeClient) MlxAdminShowDeviceIdentities(ctx context.Context, in *MlxAdminDeviceIdentitiesRequest, opts ...grpc.CallOption) (*MlxAdminDeviceIdentitiesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MlxAdminDeviceIdentitiesResponse)
+	err := c.cc.Invoke(ctx, Forge_MlxAdminShowDeviceIdentities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) MlxAdminRegistryList(ctx context.Context, in *MlxAdminRegistryListRequest, opts ...grpc.CallOption) (*MlxAdminRegistryListResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MlxAdminRegistryListResponse)
@@ -6777,6 +6812,12 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 type ForgeServer interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(context.Context, *VersionRequest) (*BuildInfo, error)
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
+	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
@@ -7115,8 +7156,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)
@@ -7182,7 +7226,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
-	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	// Periodic LLDP neighbor report from scout. The DPU agent reports through
+	// RecordDpuNetworkStatus instead.
 	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
@@ -7650,6 +7695,9 @@ type ForgeServer interface {
 	MlxAdminShowDevice(context.Context, *MlxAdminDeviceInfoRequest) (*MlxAdminDeviceInfoResponse, error)
 	// MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
 	MlxAdminShowMachine(context.Context, *MlxAdminDeviceReportRequest) (*MlxAdminDeviceReportResponse, error)
+	// Read stored NIC identity evidence and current managed-DPU associations.
+	// Scout need not be connected. This does not establish update/reset eligibility.
+	MlxAdminShowDeviceIdentities(context.Context, *MlxAdminDeviceIdentitiesRequest) (*MlxAdminDeviceIdentitiesResponse, error)
 	// Mellanox administrative endpoints for registry querying, which are called by
 	// the CLI (nico-admin-cli) and potentially the UI. These endpoints ultimately
 	// interconnect with a scout agent listening via an open ScoutStream connection.
@@ -7757,6 +7805,9 @@ type UnimplementedForgeServer struct{}
 
 func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*BuildInfo, error) {
 	return nil, status.Error(codes.Unimplemented, "method Version not implemented")
+}
+func (UnimplementedForgeServer) GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRmsVersion not implemented")
 }
 func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
@@ -9201,6 +9252,9 @@ func (UnimplementedForgeServer) MlxAdminShowDevice(context.Context, *MlxAdminDev
 func (UnimplementedForgeServer) MlxAdminShowMachine(context.Context, *MlxAdminDeviceReportRequest) (*MlxAdminDeviceReportResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MlxAdminShowMachine not implemented")
 }
+func (UnimplementedForgeServer) MlxAdminShowDeviceIdentities(context.Context, *MlxAdminDeviceIdentitiesRequest) (*MlxAdminDeviceIdentitiesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MlxAdminShowDeviceIdentities not implemented")
+}
 func (UnimplementedForgeServer) MlxAdminRegistryList(context.Context, *MlxAdminRegistryListRequest) (*MlxAdminRegistryListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MlxAdminRegistryList not implemented")
 }
@@ -9355,6 +9409,24 @@ func _Forge_Version_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).Version(ctx, req.(*VersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetRmsVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRmsVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetRmsVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetRmsVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetRmsVersion(ctx, req.(*GetRmsVersionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17999,6 +18071,24 @@ func _Forge_MlxAdminShowMachine_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_MlxAdminShowDeviceIdentities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MlxAdminDeviceIdentitiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).MlxAdminShowDeviceIdentities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_MlxAdminShowDeviceIdentities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).MlxAdminShowDeviceIdentities(ctx, req.(*MlxAdminDeviceIdentitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_MlxAdminRegistryList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MlxAdminRegistryListRequest)
 	if err := dec(in); err != nil {
@@ -18729,6 +18819,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Version",
 			Handler:    _Forge_Version_Handler,
+		},
+		{
+			MethodName: "GetRmsVersion",
+			Handler:    _Forge_GetRmsVersion_Handler,
 		},
 		{
 			MethodName: "CreateDomain",
@@ -20645,6 +20739,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MlxAdminShowMachine",
 			Handler:    _Forge_MlxAdminShowMachine_Handler,
+		},
+		{
+			MethodName: "MlxAdminShowDeviceIdentities",
+			Handler:    _Forge_MlxAdminShowDeviceIdentities_Handler,
 		},
 		{
 			MethodName: "MlxAdminRegistryList",

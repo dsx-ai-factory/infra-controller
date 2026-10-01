@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -237,18 +240,14 @@ type SiteDAO interface {
 type SiteSQLDAO struct {
 	dbSession *db.Session
 	SiteDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // GetByID returns a Site by its ID
-func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (*Site, error) {
+func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetByID")
-	if stDAOSpan != nil {
-		defer stDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", id.String())
-	}
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
 
 	st := &Site{}
 
@@ -272,30 +271,28 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	return st, nil
 }
 
-func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.SelectQuery, siteDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.SelectQuery, siteDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.Name != nil {
 		query = query.Where("st.name = ?", *filter.Name)
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "name", *filter.Name)
+		cotel.SetAttribute(siteDAOSpan, attribute.String("name", *filter.Name))
 	}
 
 	if filter.Org != nil {
 		query = query.Where("st.org = ?", *filter.Org)
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "org", *filter.Org)
+		cotel.SetAttribute(siteDAOSpan, attribute.String("org", *filter.Org))
 	}
 
 	if filter.InfrastructureProviderIDs != nil {
 		query = query.Where("st.infrastructure_provider_id IN (?)", bun.In(filter.InfrastructureProviderIDs))
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "infrastructure_provider_ids", filter.InfrastructureProviderIDs)
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("st.id IN (?)", bun.In(filter.SiteIDs))
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "id", filter.SiteIDs)
 	}
 
 	if filter.Config != nil {
 		query = query.Where("st.config @> ?::jsonb", filter.Config)
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "config", fmt.Sprintf("%+v", filter.Config))
+		cotel.SetAttribute(siteDAOSpan, attribute.String("config", fmt.Sprintf("%+v", filter.Config)))
 	}
 
 	if filter.Statuses != nil {
@@ -304,7 +301,6 @@ func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.Sele
 		} else {
 			query = query.Where("st.status IN (?)", bun.In(filter.Statuses))
 		}
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "status", filter.Statuses)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -319,7 +315,7 @@ func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.Sele
 				WhereOr("st.location::text ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("st.contact::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(siteDAOSpan, attribute.String("search_query", searchQuery))
 	}
 	return query, nil
 }
@@ -328,10 +324,8 @@ func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.Sele
 // if orderBy is nil, then records are ordered by column specified in SiteOrderByDefault in ascending order
 func (ssd SiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error) {
 	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetAll")
-	if stDAOSpan != nil {
-		defer stDAOSpan.End()
-	}
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetAll")
+	defer func() { cotel.EndSpan(stDAOSpan, err) }()
 
 	sts := []Site{}
 
@@ -377,10 +371,9 @@ func (ssd SiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterIn
 // GetCount returns count of sites for given params
 func (ssd SiteSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter SiteFilterInput) (count int, err error) {
 	// Create a child span and set the attributes for current request
-	ctx, siteDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetCount")
-	if siteDAOSpan != nil {
-		defer siteDAOSpan.End()
-	}
+	ctx, siteDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetCount")
+	defer func() { cotel.EndSpan(siteDAOSpan, err) }()
+
 	sts := []Site{}
 
 	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
@@ -397,14 +390,11 @@ func (ssd SiteSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter SiteFilter
 }
 
 // Create creates a Site from the given parameters
-func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInput) (*Site, error) {
+func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInput) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.Create")
-	if stDAOSpan != nil {
-		defer stDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "name", input.Name)
-	}
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.Create")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("name", input.Name))
 
 	st := &Site{
 		ID:                            uuid.New(),
@@ -442,13 +432,11 @@ func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInp
 }
 
 // Update updates a Site from the given parameters
-func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInput) (*Site, error) {
+func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInput) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.Update")
-	if stDAOSpan != nil {
-		defer stDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", input.SiteID.String())
-	}
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.Update")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("id", input.SiteID.String()))
 
 	updatedFields := []string{}
 
@@ -490,110 +478,101 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 	if input.Name != nil {
 		st.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(stDAOSpan, attribute.String("name", *input.Name))
 	}
 
 	if input.DisplayName != nil {
 		st.DisplayName = input.DisplayName
 		updatedFields = append(updatedFields, "display_name")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "display_name", *input.DisplayName)
+		cotel.SetAttribute(stDAOSpan, attribute.String("display_name", *input.DisplayName))
 	}
 
 	if input.Description != nil {
 		st.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(stDAOSpan, attribute.String("description", *input.Description))
 	}
 
 	if input.SiteControllerVersion != nil {
 		st.SiteControllerVersion = input.SiteControllerVersion
 		updatedFields = append(updatedFields, "site_controller_version")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "site_controller_version", *input.SiteControllerVersion)
+		cotel.SetAttribute(stDAOSpan, attribute.String("site_controller_version", *input.SiteControllerVersion))
 	}
 
 	if input.SiteAgentVersion != nil {
 		st.SiteAgentVersion = input.SiteAgentVersion
 		updatedFields = append(updatedFields, "site_agent_version")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "site_agent_version", *input.SiteAgentVersion)
+		cotel.SetAttribute(stDAOSpan, attribute.String("site_agent_version", *input.SiteAgentVersion))
 	}
 
 	if input.RegistrationToken != nil {
 		st.RegistrationToken = input.RegistrationToken
+		// never put the token value on the span - spans are exported in plaintext
 		updatedFields = append(updatedFields, "registration_token")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "registration_token", *input.RegistrationToken)
 	}
 
 	if input.RegistrationTokenExpiration != nil {
 		st.RegistrationTokenExpiration = input.RegistrationTokenExpiration
 		updatedFields = append(updatedFields, "registration_token_expiration")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "registration_token_expiration", *input.RegistrationTokenExpiration)
 	}
 
 	if input.IsInfinityEnabled != nil {
 		st.IsInfinityEnabled = *input.IsInfinityEnabled
 		updatedFields = append(updatedFields, "is_infinity_enabled")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "is_infinity_enabled", *input.IsInfinityEnabled)
 	}
 
 	if input.SerialConsoleHostname != nil {
 		st.SerialConsoleHostname = input.SerialConsoleHostname
 		updatedFields = append(updatedFields, "serial_console_hostname")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "serial_console_hostname", *input.SerialConsoleHostname)
+		cotel.SetAttribute(stDAOSpan, attribute.String("serial_console_hostname", *input.SerialConsoleHostname))
 	}
 
 	if input.IsSerialConsoleEnabled != nil {
 		st.IsSerialConsoleEnabled = *input.IsSerialConsoleEnabled
 		updatedFields = append(updatedFields, "is_serial_console_enabled")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "is_serial_console_enabled", *input.IsSerialConsoleEnabled)
 	}
 
 	if input.SerialConsoleIdleTimeout != nil {
 		st.SerialConsoleIdleTimeout = input.SerialConsoleIdleTimeout
 		updatedFields = append(updatedFields, "serial_console_idle_timeout")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "serial_console_idle_timeout", *input.SerialConsoleIdleTimeout)
 	}
 
 	if input.SerialConsoleMaxSessionLength != nil {
 		st.SerialConsoleMaxSessionLength = input.SerialConsoleMaxSessionLength
 		updatedFields = append(updatedFields, "serial_console_max_session_length")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "serial_console_max_session_length", *input.SerialConsoleMaxSessionLength)
 	}
 
 	if input.InventoryReceived != nil {
 		st.InventoryReceived = input.InventoryReceived
 		updatedFields = append(updatedFields, "inventory_received")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "inventory_received", *input.InventoryReceived)
 	}
 
 	if input.InventoryIntervalSeconds != nil {
 		st.InventoryIntervalSeconds = input.InventoryIntervalSeconds
 		updatedFields = append(updatedFields, "inventory_interval_seconds")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "inventory_interval_seconds", *input.InventoryIntervalSeconds)
 	}
 
 	if input.Status != nil {
 		st.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(stDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if input.Location != nil {
 		st.Location = input.Location
 		updatedFields = append(updatedFields, "location")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "location", *input.Location)
 	}
 
 	if input.Contact != nil {
 		st.Contact = input.Contact
 		updatedFields = append(updatedFields, "contact")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "contact", *input.Contact)
 	}
 
 	// AgentCertExpiry only handled on update as requested
 	if input.AgentCertExpiry != nil {
 		st.AgentCertExpiry = input.AgentCertExpiry
 		updatedFields = append(updatedFields, "agent_cert_expiry")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "agent_cert_expiry", input.AgentCertExpiry.String())
+		cotel.SetAttribute(stDAOSpan, attribute.String("agent_cert_expiry", input.AgentCertExpiry.String()))
 	}
 
 	if len(updatedFields) > 0 {
@@ -628,14 +607,11 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 }
 
 // Delete deletes a Site by its ID
-func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.DeleteByID")
-	if stDAOSpan != nil {
-		defer stDAOSpan.End()
-
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", id.String())
-	}
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.DeleteByID")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
 
 	_, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*Site)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
@@ -648,7 +624,6 @@ func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 // NewSiteDAO returns a new SiteDAO
 func NewSiteDAO(dbSession *db.Session) SiteDAO {
 	return &SiteSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

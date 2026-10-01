@@ -130,6 +130,9 @@ impl TryFrom<Args> for ::rpc::forge::UpdateDpuExtensionServiceRequest {
             };
 
         Ok(Self {
+            // TODO(Service VPC 03): Expose the complete service interface definition.
+            // Omission lets Core accept services with no interfaces and reject incomplete updates.
+            service_vpc_interfaces: None,
             service_id: args.service_id,
             service_name: args.service_name,
             description: args.description,
@@ -140,5 +143,24 @@ impl TryFrom<Args> for ::rpc::forge::UpdateDpuExtensionServiceRequest {
                 configs: observability,
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies the CLI omits a service-interface definition it cannot express,
+    /// so Core can reject incomplete updates to networked services.
+    #[test]
+    fn update_omits_unexpressed_service_interface_definition() {
+        // Parse the smallest valid update through the public command arguments.
+        let args = Args::try_parse_from(["update", "--id", "service-id", "--data", "{}"])
+            .expect("valid update arguments");
+
+        // The request must not misrepresent the missing controls as an explicit removal.
+        let request = ::rpc::forge::UpdateDpuExtensionServiceRequest::try_from(args)
+            .expect("valid update request");
+        assert!(request.service_vpc_interfaces.is_none());
     }
 }

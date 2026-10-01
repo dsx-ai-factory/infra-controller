@@ -42,6 +42,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_authn_connection_attributes_missing_total</td><td>counter</td><td>Number of requests authentication could not inspect because connection attributes were missing</td></tr>
 <tr><td>carbide_available_ips_count</td><td>gauge</td><td>Number of available IPs per network segment</td></tr>
 <tr><td>carbide_bmc_credential_rotation_results_total</td><td>counter</td><td>Number of persisted BMC credential rotation results, by result</td></tr>
+<tr><td>carbide_bmc_proxy_admission_refused_total</td><td>counter</td><td>Number of requests the proxy refused with 503 for want of a slot at their BMC, by request class and reason (queue_full, timeout, too_many_bmcs, shutting_down)</td></tr>
+<tr><td>carbide_bmc_proxy_admission_wait_milliseconds</td><td>histogram</td><td>Time requests that got a slot at their BMC waited for it, by request class; only classes that take slots are observed, and requests refused or abandoned while waiting are not</td></tr>
 <tr><td>carbide_bmc_proxy_authorization_denied_total</td><td>counter</td><td>Number of BMC proxy requests denied by authorization layer and HTTP method</td></tr>
 <tr><td>carbide_bmc_proxy_authorization_errors_total</td><td>counter</td><td>Number of BMC proxy authorization errors caused by missing authentication context, by authorization layer and HTTP method</td></tr>
 <tr><td>carbide_bmc_proxy_redirects_total</td><td>counter</td><td>Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition</td></tr>
@@ -120,6 +122,11 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_gpus_in_use_count</td><td>gauge</td><td>Number of GPUs actively used by tenants in instances in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_total_count</td><td>gauge</td><td>Number of GPUs in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_usable_count</td><td>gauge</td><td>Number of remaining GPUs in the NICo deployment available for immediate instance creation</td></tr>
+<tr><td>carbide_hardware_health_component_inventory_info</td><td>gauge</td><td>Authoritative NICo component inventory for the current rack-ingestion session</td></tr>
+<tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
+<tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
+<tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
+<tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
 <tr><td>carbide_health_otlp_export_failures_total</td><td>counter</td><td>Number of OTLP export batches dropped after a send failure, by signal and gRPC status code.</td></tr>
 <tr><td>carbide_health_otlp_queue_depth</td><td>gauge</td><td>Number of entries waiting in an OTLP queue, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_dropped_total</td><td>counter</td><td>Number of OTLP queue entries dropped because a per-target queue reached capacity, by target and signal.</td></tr>

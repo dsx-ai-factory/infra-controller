@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -174,19 +176,15 @@ type NVLinkInterfaceDAO interface {
 
 // NVLinkInterfaceSQLDAO is an implementation of the NVLinkInterfaceDAO interface
 type NVLinkInterfaceSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a NVLinkInterface by ID
-func (nvlisd NVLinkInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkInterface, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *NVLinkInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.GetByID")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "id", id.String())
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.GetByID")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkInterfaceDAOSpan, attribute.String("id", id.String()))
 
 	nvli := &NVLinkInterface{}
 
@@ -211,47 +209,37 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id u
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in NVLinkInterfaceOrderByDefault in ascending order
-func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]NVLinkInterface, int, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []NVLinkInterface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.GetAll")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.GetAll")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
 
 	nvlis := []NVLinkInterface{}
 
 	query := db.GetIDB(tx, nvlisd.dbSession).NewSelect().Model(&nvlis)
 	if filter.NVLinkInterfaceIDs != nil {
 		query = query.Where("nvli.id IN (?)", bun.In(filter.NVLinkInterfaceIDs))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "ids", filter.NVLinkInterfaceIDs)
 	}
 	if filter.InstanceIDs != nil {
 		query = query.Where("nvli.instance_id IN (?)", bun.In(filter.InstanceIDs))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "instance_ids", filter.InstanceIDs)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("nvli.site_id IN (?)", bun.In(filter.SiteIDs))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.NVLinkLogicalPartitionIDs != nil {
 		query = query.Where("nvli.nvlink_logical_partition_id IN (?)", bun.In(filter.NVLinkLogicalPartitionIDs))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "nvlink_logical_partition_id", filter.NVLinkLogicalPartitionIDs)
 	}
 	if filter.NVLinkDomainIDs != nil {
 		query = query.Where("nvli.nvlink_domain_id IN (?)", bun.In(filter.NVLinkDomainIDs))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "nvlink_domain_id", filter.NVLinkDomainIDs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("nvli.status IN (?)", bun.In(filter.Statuses))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "status", filter.Statuses)
 	}
 	if filter.Devices != nil {
 		query = query.Where("nvli.device IN (?)", bun.In(filter.Devices))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "device", filter.Devices)
 	}
 	if filter.DeviceInstances != nil {
 		query = query.Where("nvli.device_instance IN (?)", bun.In(filter.DeviceInstances))
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "device_instance", filter.DeviceInstances)
 	}
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -261,7 +249,7 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filte
 				WhereOr("nvli.device ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("nvli.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(NVLinkInterfaceDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -287,12 +275,10 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filte
 }
 
 // Create creates a new NVLinkInterface from the given parameters
-func (nvlisd NVLinkInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkInterfaceCreateInput) (*NVLinkInterface, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkInterfaceCreateInput) (_ *NVLinkInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.Create")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.Create")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
 
 	results, err := nvlisd.CreateMultiple(ctx, tx, []NVLinkInterfaceCreateInput{input})
 	if err != nil {
@@ -312,16 +298,13 @@ func (nvlisd NVLinkInterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input
 
 // UpdateMultiple updates multiple NVLinkInterfaces in a single batch operation.
 // Since there are 2 operations (UPDATE, SELECT), this method should be called within a transaction.
-func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []NVLinkInterfaceUpdateInput) ([]NVLinkInterface, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []NVLinkInterfaceUpdateInput) (_ []NVLinkInterface, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
-	ctx, nvlIfcDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.UpdateMultiple")
-	if nvlIfcDAOSpan != nil {
-		defer nvlIfcDAOSpan.End()
-		nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, nvlIfcDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.UpdateMultiple")
+	defer func() { cotel.EndSpan(nvlIfcDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []NVLinkInterface{}, nil
@@ -334,9 +317,7 @@ func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.T
 	traceItems := len(inputs)
 	if traceItems > db.MaxBatchItemsToTrace {
 		traceItems = db.MaxBatchItemsToTrace
-		if nvlIfcDAOSpan != nil {
-			nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, "items_truncated", "true")
-		}
+		cotel.SetAttribute(nvlIfcDAOSpan, attribute.String("items_truncated", "true"))
 	}
 
 	for idx, input := range inputs {
@@ -344,42 +325,39 @@ func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.T
 			ID: input.NVLinkInterfaceID,
 		}
 		columns := []string{}
-		addTrace := nvlIfcDAOSpan != nil && idx < traceItems
+		addTrace := idx < traceItems
 		prefix := fmt.Sprintf("items.%d.", idx)
 
 		if input.NVLinkDomainID != nil {
 			nvli.NVLinkDomainID = input.NVLinkDomainID
 			columns = append(columns, "nvlink_domain_id")
 			if addTrace {
-				nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, prefix+"nvlink_domain_id", input.NVLinkDomainID.String())
+				cotel.SetAttribute(nvlIfcDAOSpan, attribute.String(prefix+"nvlink_domain_id", input.NVLinkDomainID.String()))
 			}
 		}
 		if input.Device != nil {
 			nvli.Device = input.Device
 			columns = append(columns, "device")
 			if addTrace {
-				nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, prefix+"device", *input.Device)
+				cotel.SetAttribute(nvlIfcDAOSpan, attribute.String(prefix+"device", *input.Device))
 			}
 		}
 		if input.DeviceInstance != nil {
 			nvli.DeviceInstance = *input.DeviceInstance
 			columns = append(columns, "device_instance")
-			if addTrace {
-				nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, prefix+"device_instance", *input.DeviceInstance)
-			}
 		}
 		if input.GpuGUID != nil {
 			nvli.GpuGUID = input.GpuGUID
 			columns = append(columns, "gpu_guid")
 			if addTrace {
-				nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, prefix+"gpu_guid", *input.GpuGUID)
+				cotel.SetAttribute(nvlIfcDAOSpan, attribute.String(prefix+"gpu_guid", *input.GpuGUID))
 			}
 		}
 		if input.Status != nil {
 			nvli.Status = *input.Status
 			columns = append(columns, "status")
 			if addTrace {
-				nvlisd.tracerSpan.SetAttribute(nvlIfcDAOSpan, prefix+"status", *input.Status)
+				cotel.SetAttribute(nvlIfcDAOSpan, attribute.String(prefix+"status", *input.Status))
 			}
 		}
 
@@ -427,14 +405,10 @@ func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.T
 }
 
 // Clear clears NVLinkInterface attributes based on provided arguments
-func (nvlisd NVLinkInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkInterfaceClearInput) (*NVLinkInterface, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkInterfaceClearInput) (_ *NVLinkInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.Clear")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "id", input.NVLinkInterfaceID)
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.Clear")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
 
 	nvli := &NVLinkInterface{
 		ID: input.NVLinkInterfaceID,
@@ -475,14 +449,11 @@ func (nvlisd NVLinkInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input 
 }
 
 // Delete deletes a NVLinkInterface by ID
-func (nvlisd NVLinkInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (nvlisd NVLinkInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.Delete")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "id", id.String())
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.Delete")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkInterfaceDAOSpan, attribute.String("id", id.String()))
 
 	nvli := &NVLinkInterface{
 		ID: id,
@@ -498,13 +469,10 @@ func (nvlisd NVLinkInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uu
 
 // DeleteAllBySiteID deletes all NVLinkInterface records for a given Site
 // error is returned only if there is a db error
-func (nvlisd NVLinkInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error {
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.DeleteAllBySiteID")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "site_id", siteID.String())
-	}
+func (nvlisd NVLinkInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) (retErr error) {
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.DeleteAllBySiteID")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkInterfaceDAOSpan, attribute.String("site_id", siteID.String()))
 
 	nvli := &NVLinkInterface{
 		SiteID: siteID,
@@ -516,17 +484,14 @@ func (nvlisd NVLinkInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *d
 }
 
 // CreateMultiple creates multiple NVLinkInterfaces from the given parameters
-func (nvlisd NVLinkInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []NVLinkInterfaceCreateInput) ([]NVLinkInterface, error) {
+func (nvlisd NVLinkInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []NVLinkInterfaceCreateInput) (_ []NVLinkInterface, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkInterfaceDAOSpan := nvlisd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkInterfaceDAO.CreateMultiple")
-	if NVLinkInterfaceDAOSpan != nil {
-		defer NVLinkInterfaceDAOSpan.End()
-		nvlisd.tracerSpan.SetAttribute(NVLinkInterfaceDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(NVLinkInterfaceDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []NVLinkInterface{}, nil
@@ -587,7 +552,6 @@ func (nvlisd NVLinkInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.T
 // NewNVLinkInterfaceDAO returns a new NVLinkInterfaceDAO
 func NewNVLinkInterfaceDAO(dbSession *db.Session) NVLinkInterfaceDAO {
 	return &NVLinkInterfaceSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

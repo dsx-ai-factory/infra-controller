@@ -908,11 +908,12 @@ pub(crate) fn mandatory_services(
 mod tests {
     use carbide_dpf::sdk::{build_dpu_interfaces_vec, build_effective_dpu_interfaces};
     use carbide_dpf::types::{
-        DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity,
+        DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity, DpuDeploymentType,
         DpuServiceInterfaceTemplateType,
     };
     use carbide_dpf::{
-        build_service_configuration, build_service_interface, build_service_template,
+        build_deployment_dpu_interfaces, build_service_configuration, build_service_interface,
+        build_service_template,
     };
     use carbide_test_support::value_scenarios;
     use url::Url;
@@ -920,6 +921,39 @@ mod tests {
     use super::*;
 
     const TEST_NS: &str = "dpf-operator-system";
+
+    /// HBN configuration follows the platform inventory used to build service chains.
+    #[test]
+    fn default_hbn_omits_hidden_bf3_host_pf1() {
+        for (deployment_type, has_pf1) in [
+            (DpuDeploymentType::Bf3, false),
+            (DpuDeploymentType::Bf3Gb200, false),
+            (DpuDeploymentType::Bf4Generic, true),
+        ] {
+            let interfaces = build_deployment_dpu_interfaces(deployment_type, 16, None);
+            let hbn = doca_hbn_service(
+                &default_doca_hbn_service(),
+                &interfaces,
+                ServiceVpcSlots::default(),
+            );
+            assert_eq!(
+                hbn.interfaces
+                    .iter()
+                    .any(|interface| interface.name == "pf1hpf_if"),
+                has_pf1
+            );
+            assert!(
+                hbn.interfaces
+                    .iter()
+                    .any(|interface| interface.name == "p1_if")
+            );
+            let startup_yaml =
+                hbn.config_values.as_ref().unwrap()["configuration"]["startupYAMLJ2"]
+                    .as_str()
+                    .unwrap();
+            assert_eq!(startup_yaml.contains("pf1hpf_if:"), has_pf1);
+        }
+    }
 
     /// Verifies every service definition consumes the same configured effective inventory.
     #[test]

@@ -25,7 +25,9 @@ pub async fn find_config_by_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "SELECT * FROM machine_validation_external_config WHERE name=$1";
+    let query = "SELECT
+            name, description, config, version
+        FROM machine_validation_external_config WHERE name=$1";
     match sqlx::query_as(query).bind(name).fetch_one(txn).await {
         Ok(val) => Ok(val),
         Err(_) => Err(DatabaseError::NotFoundError {
@@ -89,7 +91,9 @@ pub async fn create_or_update(
 pub async fn find_configs(
     txn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<MachineValidationExternalConfig>> {
-    let query = "SELECT * FROM machine_validation_external_config";
+    let query = "SELECT
+            name, description, config, version
+        FROM machine_validation_external_config";
 
     let names = sqlx::query_as(query)
         .fetch_all(txn)
@@ -102,7 +106,9 @@ pub async fn remove_config(
     txn: &mut PgConnection,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "DELETE FROM machine_validation_external_config WHERE name=$1 RETURNING *";
+    let query = "DELETE FROM machine_validation_external_config WHERE name=$1
+        RETURNING
+            name, description, config, version";
     match sqlx::query_as(query).bind(name).fetch_one(txn).await {
         Ok(val) => Ok(val),
         Err(_) => Err(DatabaseError::NotFoundError {

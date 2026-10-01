@@ -82,8 +82,12 @@
     - [GetEventRuleRequest](#v1-GetEventRuleRequest)
     - [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest)
     - [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse)
+    - [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest)
+    - [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse)
     - [GetListOfRacksRequest](#v1-GetListOfRacksRequest)
     - [GetListOfRacksResponse](#v1-GetListOfRacksResponse)
+    - [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest)
+    - [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse)
     - [GetOperationRuleRequest](#v1-GetOperationRuleRequest)
     - [GetOperationRunRequest](#v1-GetOperationRunRequest)
     - [GetOperationRunResponse](#v1-GetOperationRunResponse)
@@ -122,6 +126,7 @@
     - [NVLDomain](#v1-NVLDomain)
     - [NVLDomainTarget](#v1-NVLDomainTarget)
     - [NVLDomainTargets](#v1-NVLDomainTargets)
+    - [NVLinkDomain](#v1-NVLinkDomain)
     - [OperationKind](#v1-OperationKind)
     - [OperationRule](#v1-OperationRule)
     - [OperationRun](#v1-OperationRun)
@@ -551,6 +556,7 @@ An empty list means no conflicts were detected.
 | rack_external_id | [string](#string) |  |  |
 | leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
+| nvl_domain_external_id | [string](#string) | optional | Owning rack&#39;s domain external ID (rack group ID). |
 
 
 
@@ -1553,6 +1559,40 @@ GetComponents - retrieves components from local database
 
 
 
+<a name="v1-GetListOfNVLinkDomainsRequest"></a>
+
+### GetListOfNVLinkDomainsRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
+| with_components | [bool](#bool) |  |  |
+| pagination | [Pagination](#v1-Pagination) | optional |  |
+| order_by | [string](#string) |  | NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. |
+
+
+
+
+
+
+<a name="v1-GetListOfNVLinkDomainsResponse"></a>
+
+### GetListOfNVLinkDomainsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| domains | [NVLinkDomain](#v1-NVLinkDomain) | repeated |  |
+| total | [int32](#int32) |  |  |
+
+
+
+
+
+
 <a name="v1-GetListOfRacksRequest"></a>
 
 ### GetListOfRacksRequest
@@ -1565,6 +1605,7 @@ GetComponents - retrieves components from local database
 | with_components | [bool](#bool) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Rack UUID ascending breaks equal-field ties. |
+| with_external_id_only | [bool](#bool) |  |  |
 
 
 
@@ -1581,6 +1622,37 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | racks | [Rack](#v1-Rack) | repeated |  |
 | total | [int32](#int32) |  |  |
+
+
+
+
+
+
+<a name="v1-GetNVLinkDomainRequest"></a>
+
+### GetNVLinkDomainRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| with_components | [bool](#bool) |  |  |
+
+
+
+
+
+
+<a name="v1-GetNVLinkDomainResponse"></a>
+
+### GetNVLinkDomainResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| domain | [NVLinkDomain](#v1-NVLinkDomain) |  |  |
 
 
 
@@ -2173,6 +2245,8 @@ every Task is returned subject to pagination.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | identifier | [Identifier](#v1-Identifier) |  |  |
+| external_id | [string](#string) | optional |  |
+| nmxc_cluster_id | [string](#string) | optional |  |
 
 
 
@@ -2190,6 +2264,7 @@ components selected from every rack currently belonging to that domain.
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | NVLink domain UUID |
 | name | [string](#string) |  | NVLink domain name |
+| external_id | [string](#string) |  |  |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain. |
 
 
@@ -2206,6 +2281,27 @@ NVLDomainTargets contains one or more NVLink domain targets.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [NVLDomainTarget](#v1-NVLDomainTarget) | repeated |  |
+
+
+
+
+
+
+<a name="v1-NVLinkDomain"></a>
+
+### NVLinkDomain
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+| name | [string](#string) |  |  |
+| topology | [string](#string) | optional |  |
+| operation_status | [Phase](#v1-Phase) |  |  |
+| components | [Component](#v1-Component) | repeated |  |
+| nmxc_cluster_id | [string](#string) | optional |  |
+| rack_group_id | [string](#string) |  | Same value as id: the domain&#39;s external ID. |
 
 
 
@@ -3067,6 +3163,8 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | external_id | [string](#string) |  |  |
 | operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
+| rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
+| nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
 
 
 
@@ -4117,6 +4215,8 @@ RackOrderByField represents the supported order by field types for rack queries
 | DetachRacksFromNVLDomain | [DetachRacksFromNVLDomainRequest](#v1-DetachRacksFromNVLDomainRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |
 | GetListOfNVLDomains | [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest) | [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse) |  |
 | GetRacksForNVLDomain | [GetRacksForNVLDomainRequest](#v1-GetRacksForNVLDomainRequest) | [GetRacksForNVLDomainResponse](#v1-GetRacksForNVLDomainResponse) |  |
+| GetNVLinkDomain | [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest) | [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse) |  |
+| GetListOfNVLinkDomains | [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest) | [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse) |  |
 | ListTasks | [ListTasksRequest](#v1-ListTasksRequest) | [ListTasksResponse](#v1-ListTasksResponse) | Tasks |
 | GetTasksByIDs | [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest) | [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse) |  |
 | CancelTask | [CancelTaskRequest](#v1-CancelTaskRequest) | [CancelTaskResponse](#v1-CancelTaskResponse) |  |

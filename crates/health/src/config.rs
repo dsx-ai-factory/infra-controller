@@ -6298,53 +6298,27 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
     /// Capture tracing WARN events emitted during a closure.
     /// Uses a per-call dispatcher so parallel tests don't interfere.
     fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
-        use std::sync::{Arc, Mutex};
+        carbide_instrument::testing::capture_logs(f)
+            .into_iter()
+            .filter(|log| log.level == tracing::Level::WARN)
+            .map(|log| log.message)
+            .collect()
+    }
 
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
+    #[test]
+    fn capture_warnings_allows_retained_dispatch() {
+        let mut dispatch = None;
+        let warnings = capture_warnings(|| {
+            // Tracing can keep our `Dispatch` alive while another test rebuilds
+            // the callsite cache. Hold it past capture to verify that reading
+            // the warnings doesn't require exclusive ownership of the buffer.
+            dispatch = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::info!("not a warning");
+            tracing::warn!("captured warning");
+        });
 
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
-
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() != Level::WARN {
-                    return;
-                }
-                struct Visitor(String);
-                impl tracing::field::Visit for Visitor {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message" {
-                            self.0 = format!("{value:?}").trim_matches('"').to_string();
-                        }
-                    }
-                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                        if field.name() == "message" {
-                            self.0 = value.to_string();
-                        }
-                    }
-                }
-                let mut v = Visitor(String::new());
-                event.record(&mut v);
-                self.0.lock().unwrap().push(v.0);
-            }
-        }
-
-        tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
-            f,
-        );
-        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+        assert_eq!(warnings, ["captured warning"]);
+        drop(dispatch);
     }
 
     #[test]

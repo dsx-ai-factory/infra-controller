@@ -11,10 +11,10 @@ firmware on power shelves
 
 ```text
 nico-admin-cli component-manager update-firmware power-shelf
-[--power-shelf-id] [--mac-address] <--target-version>
-[--force-update] [--component]
-[--bypass-state-controller] [--extended] [--sort-by]
-[-h|--help]
+[--power-shelf-id] [--mac-address] [--target-version]
+[--sot-json-file] [--access-token] [--force-update]
+[--component] [--bypass-state-controller] [--extended]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -34,7 +34,18 @@ power shelf)
 
 `--target-version <TARGET_VERSION>`
 
-Firmware target version
+Firmware target version for legacy direct-update paths; exactly one of
+--target-version and --sot-json-file is required
+
+`--sot-json-file <PATH>`
+
+SOT JSON file for RMS ApplyFirmwareObject; exactly one of
+--target-version and --sot-json-file is required
+
+`--access-token <ACCESS_TOKEN>`
+
+Artifact access token for RMS SOT JSON downloads; omit or pass empty for
+NOAUTH; only valid with --sot-json-file
 
 `--force-update`
 

@@ -16,19 +16,25 @@
  */
 
 //! Request classes: operator-defined groups of proxied BMC requests that
-//! share an upstream budget.
+//! share an upstream budget and a place in each BMC's admission queue.
 //!
-//! A class is a name, an ordered list of [`RequestPattern`]s, and an upstream
-//! timeout. The table classifies every proxied request by walking the classes
-//! in config order and taking the first whose patterns match; a request no
-//! class claims belongs to the implicit `default` class, which carries the
-//! proxy's historical upstream budget, [`DEFAULT_UPSTREAM_TIMEOUT`]. Operators
-//! may declare `default` themselves to change that budget, but it takes no
-//! patterns: it exists to catch what nothing else matched.
+//! A class is a name, an ordered list of [`RequestPattern`]s, an upstream
+//! timeout, and its admission settings. The table classifies every proxied
+//! request by walking the classes in config order and taking the first whose
+//! patterns match; a request no class claims belongs to the implicit `default`
+//! class, which carries the proxy's historical upstream budget,
+//! [`DEFAULT_UPSTREAM_TIMEOUT`], and no `max_in_flight` of its own. Operators may declare
+//! `default` themselves to change those, but it takes no patterns: it exists
+//! to catch what nothing else matched.
 
 use std::collections::HashSet;
+use std::fmt;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_instrument::LabelValue;
+use opentelemetry::StringValue;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer};
 
@@ -51,6 +57,42 @@ const MAX_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Longest class name accepted.
 const MAX_CLASS_NAME_LEN: usize = 32;
 
+/// How many of a class's requests may wait for one BMC when the class sets
+/// no `max_queued`: several times the few requests a BMC handles at once,
+/// while each waiting request also holds its buffered body.
+const DEFAULT_MAX_QUEUED: NonZeroUsize = NonZeroUsize::new(16).expect("16 is not zero");
+
+/// Most requests a class may let wait for one BMC. Each BMC in use holds a
+/// queue with room for the class's `max_queued`, and for requests on their
+/// way to its free slots, for every class that takes slots, allocated when
+/// its runtime starts; each waiting request holds its buffered body.
+const MAX_QUEUED: usize = 128;
+
+/// The name of a request class: its label on metrics and its name on trace
+/// spans. Names come from the proxy's own `[[class]]` tables, so the set of
+/// values is fixed at startup and small; nothing a caller sends can create a
+/// metric series.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ClassName(Arc<str>);
+
+impl ClassName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ClassName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl LabelValue for ClassName {
+    fn label_value(&self) -> StringValue {
+        StringValue::from(Arc::clone(&self.0))
+    }
+}
+
 /// One `[[class]]` table as written in the config file. An unknown field is
 /// a configuration error: a misspelled knob must not be silently ignored.
 #[derive(Deserialize)]
@@ -67,30 +109,57 @@ struct ClassDefinition {
     /// Total budget for one upstream exchange in this class.
     #[serde(with = "humantime_serde", default = "default_upstream_timeout")]
     upstream_timeout: Duration,
+    /// The order in which this class's waiting requests reach a BMC under
+    /// the per-BMC limit: higher first. No effect without that limit.
+    #[serde(default)]
+    priority: u8,
+    /// How many of this class's requests one proxy replica sends to one BMC
+    /// at a time. Absent leaves the class unlimited.
+    #[serde(default)]
+    max_in_flight: Option<NonZeroU32>,
+    /// How many of this class's requests may wait for one BMC at a time.
+    #[serde(default = "default_max_queued")]
+    max_queued: NonZeroUsize,
 }
 
 fn default_upstream_timeout() -> Duration {
     DEFAULT_UPSTREAM_TIMEOUT
 }
 
+fn default_max_queued() -> NonZeroUsize {
+    DEFAULT_MAX_QUEUED
+}
+
 /// A validated request class.
 pub(crate) struct RequestClass {
-    pub(crate) name: String,
+    pub(crate) name: ClassName,
     patterns: Vec<RequestPattern>,
-    /// Total budget for one upstream exchange: from connecting to the BMC
+    /// Total budget for one upstream exchange: looking up the BMC's
+    /// credentials, waiting for a slot there, and from connecting to the BMC
     /// until the last byte of its response body has been streamed to the
     /// caller, redirects included. A request replayed with fresh credentials
-    /// gets a budget of its own. A streamed upload scales its own budget from
-    /// its declared size instead.
+    /// gets a budget of its own. A streamed upload looks up credentials and
+    /// waits within this budget, then scales its own from its declared size.
     pub(crate) upstream_timeout: Duration,
+    /// Higher is admitted first when classes wait for the same BMC under the
+    /// per-BMC limit.
+    pub(crate) priority: u8,
+    /// Requests of this class one replica sends to one BMC at a time; `None`
+    /// is unlimited.
+    pub(crate) max_in_flight: Option<NonZeroU32>,
+    /// Requests of this class that may wait for one BMC at a time.
+    pub(crate) max_queued: NonZeroUsize,
 }
 
 impl RequestClass {
     fn default_class() -> Self {
         Self {
-            name: DEFAULT_CLASS_NAME.to_string(),
+            name: ClassName(Arc::from(DEFAULT_CLASS_NAME)),
             patterns: Vec::new(),
             upstream_timeout: DEFAULT_UPSTREAM_TIMEOUT,
+            priority: 0,
+            max_in_flight: None,
+            max_queued: DEFAULT_MAX_QUEUED,
         }
     }
 }
@@ -136,6 +205,8 @@ enum ClassTableError {
     ZeroTimeout(String),
     #[error("class {0:?} upstream_timeout exceeds the {MAX_UPSTREAM_TIMEOUT:?} maximum")]
     TimeoutTooLarge(String),
+    #[error("class {0:?} max_queued exceeds the {MAX_QUEUED} maximum")]
+    QueueTooLong(String),
 }
 
 impl ClassTable {
@@ -157,6 +228,9 @@ impl ClassTable {
             if definition.upstream_timeout > MAX_UPSTREAM_TIMEOUT {
                 return Err(ClassTableError::TimeoutTooLarge(name));
             }
+            if definition.max_queued.get() > MAX_QUEUED {
+                return Err(ClassTableError::QueueTooLong(name));
+            }
 
             let is_default = name == DEFAULT_CLASS_NAME;
             match (is_default, definition.patterns.is_empty()) {
@@ -165,9 +239,12 @@ impl ClassTable {
                 _ => {}
             }
             let class = RequestClass {
-                name,
+                name: ClassName(Arc::from(name)),
                 patterns: definition.patterns,
                 upstream_timeout: definition.upstream_timeout,
+                priority: definition.priority,
+                max_in_flight: definition.max_in_flight,
+                max_queued: definition.max_queued,
             };
             if is_default {
                 table.default = class;
@@ -191,6 +268,11 @@ impl ClassTable {
                     .any(|pattern| pattern.matches(method, path))
             })
             .unwrap_or(&self.default)
+    }
+
+    /// Every class, the default class last.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &RequestClass> {
+        self.classes.iter().chain([&self.default])
     }
 }
 
@@ -259,7 +341,7 @@ mod tests {
             table
                 .classes
                 .iter()
-                .map(|class| class.name.clone())
+                .map(|class| class.name.to_string())
                 .collect(),
             table.default.upstream_timeout.as_secs(),
         ))
@@ -332,7 +414,7 @@ mod tests {
     fn classified(method: http::Method, path: &'static str) -> (String, u64) {
         let table = parse_table(TABLE).expect("the test table parses");
         let class = table.classify(&method, path);
-        (class.name.clone(), class.upstream_timeout.as_secs())
+        (class.name.to_string(), class.upstream_timeout.as_secs())
     }
 
     #[test]
@@ -351,6 +433,56 @@ mod tests {
 
             "unmatched requests fall to the default class" {
                 (http::Method::PUT, "/redfish/v1/Systems/System_0") => ("default".to_string(), 90),
+            }
+        );
+    }
+
+    /// A class's admission settings: (priority, max_in_flight, max_queued)
+    /// of the first class in `source`, or of the default class when it
+    /// declares none.
+    fn admission_of(source: &str) -> Result<(u8, Option<u32>, usize), String> {
+        let table = parse_table(source)?;
+        let class = table.iter().next().expect("the table has a class");
+        Ok((
+            class.priority,
+            class.max_in_flight.map(std::num::NonZeroU32::get),
+            class.max_queued.get(),
+        ))
+    }
+
+    #[test]
+    fn admission_settings_parse() {
+        scenarios!(run = |source| admission_of(source).map_err(drop);
+            "loaded" {
+                "" => Yields((0, None, 16)),
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]
+                   priority = 255
+                   max_in_flight = 2
+                   max_queued = 128"# => Yields((255, Some(2), 128)),
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]"# => Yields((0, None, 16)),
+            }
+
+            "rejected" {
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]
+                   priority = 256"# => Fails,
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]
+                   max_in_flight = 0"# => Fails,
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]
+                   max_queued = 0"# => Fails,
+                r#"[[class]]
+                   name = "power"
+                   match = ["PATCH /redfish/v1/**"]
+                   max_queued = 129"# => Fails,
             }
         );
     }

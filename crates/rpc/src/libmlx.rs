@@ -55,6 +55,7 @@ impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
                 .uefi_version_virtio_net_current
                 .unwrap_or_default(),
             base_mac: info.base_mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            base_guid: info.base_guid,
             status: info.status.unwrap_or_default(),
         }
     }
@@ -87,6 +88,7 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
             uefi_version_virtio_net_current: proto.uefi_version_virtio_net_current.none_if_empty(),
             status: proto.status.none_if_empty(),
             base_mac,
+            base_guid: proto.base_guid,
         })
     }
 }
@@ -155,6 +157,7 @@ mod test {
                     uefi_version_virtio_blk_current: "".to_string(),
                     uefi_version_virtio_net_current: "".to_string(),
                     base_mac: "".to_string(), // Empty MAC becomes None
+                    base_guid: None,
                     status: "".to_string(),
                 } => Yields(MlxDeviceInfo {
                     pci_name: "01:00.0".to_string(),
@@ -168,6 +171,7 @@ mod test {
                     uefi_version_virtio_blk_current: None,
                     uefi_version_virtio_net_current: None,
                     base_mac: None,
+                    base_guid: None,
                     status: None,
                 }),
             }
