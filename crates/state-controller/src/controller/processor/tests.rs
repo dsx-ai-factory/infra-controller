@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 
-use tokio::sync::Semaphore;
+use carbide_utils::test_support::test_meter::TestMeter;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use super::*;
 use crate::state_handler::NoopStateHandler;
@@ -44,6 +45,75 @@ fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
         stats_since_last_log: StatsSinceLastLog::default(),
         processor_id: "deadline-test".to_string(),
         state_change_emitter: Arc::new(StateChangeEmitter::default()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_poll_records_outstanding_and_completed_task_counts() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://unused/unused")
+        .unwrap();
+    pool.close().await;
+    let mut processor = processor(pool);
+    let meter = TestMeter::default();
+    processor.metric_emitter = Some(ProcessorMetricsEmitter::new("test_objects", &meter.meter()));
+
+    let (finished_tx, mut finished_rx) = mpsc::unbounded_channel();
+    let mut releases = Vec::new();
+    for index in 0..3 {
+        let (release_tx, release_rx) = oneshot::channel();
+        releases.push(release_tx);
+        let finished_tx = finished_tx.clone();
+        processor.object_tasks.spawn(async move {
+            release_rx.await.unwrap();
+            finished_tx.send(()).unwrap();
+            ObjectHandlingTaskResult {
+                object_id: index.to_string(),
+                metrics: ObjectHandlerMetrics::default(),
+            }
+        });
+    }
+
+    // Release tasks explicitly so polling timeouts and batched completions do
+    // not depend on wall-clock timing. The completion signal is sent immediately
+    // before returning, with no intervening await on this single-thread runtime.
+    for (name, release_count, expected_running, expected_completed) in [
+        ("poll timeout preserves outstanding tasks", 0, 3, None),
+        ("batch completion reduces gauge", 2, 1, Some(2)),
+        ("another timeout preserves counts", 0, 1, Some(2)),
+        ("final completion clears gauge", 1, 0, Some(3)),
+        ("empty poll does not recount completions", 0, 0, Some(3)),
+    ] {
+        for _ in 0..release_count {
+            releases.pop().unwrap().send(()).unwrap();
+        }
+        for _ in 0..release_count {
+            finished_rx.recv().await.unwrap();
+        }
+
+        assert_eq!(
+            processor
+                .wait_and_process_object_handling_task_completions(Duration::from_secs(2), true)
+                .await,
+            release_count,
+            "{name}",
+        );
+        assert_eq!(processor.object_tasks.len(), expected_running, "{name}");
+        assert_eq!(
+            meter.formatted_metric("test_objects_object_tasks_running"),
+            Some(expected_running.to_string()),
+            "{name}",
+        );
+        assert_eq!(
+            meter.formatted_metric("test_objects_object_tasks_completed_total"),
+            expected_completed.map(|count| count.to_string()),
+            "{name}",
+        );
+        assert_eq!(
+            meter.formatted_metric("test_objects_object_tasks_errored_total"),
+            None,
+            "{name}",
+        );
     }
 }
 
