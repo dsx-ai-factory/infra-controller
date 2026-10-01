@@ -94,8 +94,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		if !slices.Equal(progress.ItemIDs, page.ItemIds) {
 			return invalid("SitePrefix collection changed its declared IDs")
 		}
-		if receipt, exists := progress.Pages[page.CurrentPage]; exists {
-			if receipt.Hash != hash {
+		previousReceipt, exists := progress.Pages[page.CurrentPage]
+		if exists {
+			if previousReceipt.Hash != hash {
 				return invalid("SitePrefix page retry changed its contents")
 			}
 			logger.Info().Msg("skipping previously reconciled inventory page")
@@ -230,6 +231,7 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 			return false, err
 		}
 		var exact []cdbm.IPBlock
+		deferReplacement := false
 		for _, root := range roots {
 			other, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", root.Prefix, root.PrefixLength))
 			if err != nil {
@@ -238,7 +240,13 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 			if other.Masked() == cidr {
 				exact = append(exact, root)
 			} else if other.Overlaps(cidr) {
-				return false, invalid("operator SitePrefix %s overlaps an existing root", id)
+				if root.SitePrefixID == nil || root.InfrastructureProviderID != site.InfrastructureProviderID ||
+					root.ProtocolVersion != family || root.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly {
+					return false, invalid("operator SitePrefix %s overlaps an existing root", id)
+				}
+				// Preserve reported lifecycle changes regardless of which identity arrives first.
+				// The replacement must wait until its linked predecessor is removed.
+				deferReplacement = true
 			}
 		}
 		if len(exact) > 1 {
@@ -254,13 +262,16 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 				candidate.TenantID != nil || candidate.Prefix != cidr.Addr().String() || candidate.PrefixLength != cidr.Bits() {
 				return false, invalid("operator SitePrefix %s has an incompatible adoption candidate", id)
 			}
-			if candidate.SitePrefixID != nil {
+			if candidate.SitePrefixID != nil || deferReplacement {
 				return true, nil
 			}
 			block, err = dao.LinkSitePrefix(ctx, tx, candidate.ID, id)
 			if err != nil {
 				return false, err
 			}
+		}
+		if deferReplacement {
+			return true, nil
 		}
 	}
 	// Empty operator metadata must not erase provider-maintained values.
