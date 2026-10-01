@@ -29,6 +29,9 @@ use crate::db_read::DbReader;
 use crate::machine::MachineRowLockItem;
 use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 impl MachineRowLockItem for MachineValidation {
     fn machine_id(&self) -> MachineId {
         self.machine_id
@@ -72,7 +75,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineValidation>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineValidation>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM machine_validation").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation",
+    )
+    .filter(&filter);
     query.push(" ORDER BY start_time");
 
     let custom_results = query
@@ -99,7 +108,9 @@ pub async fn mark_in_progress_if_active(
         WHERE id=$1
         AND end_time IS NULL
         AND state IN ('Started', 'InProgress')
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(MachineValidationState::InProgress.to_string())
@@ -112,7 +123,10 @@ pub async fn update_end_time(
     id: &MachineValidationId,
     status: &MachineValidationStatus,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_validation SET end_time=NOW(),state=$2 WHERE id=$1 RETURNING *";
+    let query = "UPDATE machine_validation SET end_time=NOW(),state=$2 WHERE id=$1
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let _id = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -150,7 +164,9 @@ pub async fn update_end_time_if_active(
         WHERE id=$1
         AND end_time IS NULL
         AND state IN ('Started', 'InProgress')
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let updated = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -189,7 +205,9 @@ pub async fn mark_stale_if_active(
                     + ($3::bigint * INTERVAL '1 second') < $4
             )
         )
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -206,7 +224,10 @@ pub async fn update_run(
     total: i32,
     duration_to_complete: i64,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_validation SET duration_to_complete=$2,total=$3,completed=0,state=$4 WHERE id=$1 AND end_time IS NULL AND state IN ('Started', 'InProgress') RETURNING *";
+    let query = "UPDATE machine_validation SET duration_to_complete=$2,total=$3,completed=0,state=$4 WHERE id=$1 AND end_time IS NULL AND state IN ('Started', 'InProgress')
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let updated = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(duration_to_complete)
@@ -243,7 +264,9 @@ pub async fn create_new_run(
         )
         VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)
         ON CONFLICT DO NOTHING
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     // TODO fetch total number of test and repopulate the status
     let status = MachineValidationStatus {
         state: MachineValidationState::Started,
@@ -335,7 +358,10 @@ pub async fn find_by_machine_id(
 
 pub async fn find_active(txn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineValidation>> {
     let query = "
-        SELECT * FROM machine_validation
+        SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation
         WHERE end_time IS NULL
         AND state IN ('Started', 'InProgress')
         ORDER BY start_time";
@@ -379,7 +405,10 @@ pub async fn lock_by_id_no_key_update(
     txn: &mut PgConnection,
     id: &MachineValidationId,
 ) -> DatabaseResult<Option<MachineValidation>> {
-    let query = "SELECT * FROM machine_validation WHERE id=$1 FOR NO KEY UPDATE";
+    let query = "SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation WHERE id=$1 FOR NO KEY UPDATE";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .fetch_optional(txn)

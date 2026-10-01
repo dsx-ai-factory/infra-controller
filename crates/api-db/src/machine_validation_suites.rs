@@ -38,8 +38,15 @@ pub async fn find(
     txn: impl DbReader<'_>,
     req: MachineValidationTestsGetRequest,
 ) -> DatabaseResult<Vec<MachineValidationTest>> {
-    let mut qb: QueryBuilder<Postgres> =
-        QueryBuilder::new("SELECT * FROM machine_validation_tests WHERE 1 = 1");
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT
+            test_id, name, description, img_name, execute_in_host, container_arg, command,
+            args, extra_output_file, extra_err_file, external_config_file, contexts,
+            pre_condition, timeout, version, supported_platforms, modified_by, verified,
+            read_only, custom_tags, components, last_modified_at, is_enabled, plugin,
+            full_host_approved
+        FROM machine_validation_tests WHERE 1 = 1",
+    );
 
     if !req.supported_platforms.is_empty() {
         qb.push(" AND supported_platforms && ");
