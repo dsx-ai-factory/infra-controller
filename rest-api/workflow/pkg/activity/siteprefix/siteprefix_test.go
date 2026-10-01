@@ -287,6 +287,23 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "retry changed")
 			require.Equal(t, block.Name, f.blocks(t)[0].Name)
 		}},
+		{"unchanged later collection records receipt without rewriting the block", func(t *testing.T, f fixture) {
+			inventory := testInventory(testPrefix())
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			block := f.blocks(t)[0]
+			inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(time.Second))
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Equal(t, block, f.blocks(t)[0])
+			progress := f.inventorySite(t).SitePrefixInventoryProgress
+			require.Equal(t, inventory.Timestamp.AsTime(), progress.ReportedAt)
+			hash, err := validatePage(inventory)
+			require.NoError(t, err)
+			require.Equal(t, hash, progress.Pages[1].Hash)
+			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
+				cdbm.StatusDetailFilterInput{EntityIDs: []string{block.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, details, 1)
+		}},
 		{"older collection cannot overwrite or infer absence", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
