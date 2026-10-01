@@ -1089,6 +1089,7 @@ fn pool_startup_config(env: &TestEnv) -> CarbideConfig {
     config.enable_admin_ui = true;
     config.auth = Some(AuthConfig {
         permissive_mode: false,
+        allow_machineatron_scout_stream: false,
         casbin_policy_file: None,
         cli_certs: None,
         trust: Some(carbide_authn::config::TrustConfig {
