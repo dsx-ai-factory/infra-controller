@@ -218,6 +218,16 @@ func TestAPIExpectedPowerShelfCreateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedPowerShelfCreateRequest{
+				SiteID:            "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:     "00:11:22:33:44:55",
+				ShelfSerialNumber: validShelfSerial,
+				BmcIpAddress:      cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedPowerShelfCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
@@ -493,6 +503,14 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedPowerShelfUpdateRequest{
+				ShelfSerialNumber: &validShelfSerial,
+				BmcIpAddress:      cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedPowerShelfUpdateRequest{

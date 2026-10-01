@@ -218,6 +218,16 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
@@ -583,6 +593,14 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchUpdateRequest{

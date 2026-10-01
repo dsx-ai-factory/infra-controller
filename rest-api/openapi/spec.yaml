@@ -29489,7 +29489,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -29660,7 +29660,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
           type:
             - string
@@ -29861,7 +29861,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30004,7 +30004,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30807,7 +30807,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30976,7 +30976,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
