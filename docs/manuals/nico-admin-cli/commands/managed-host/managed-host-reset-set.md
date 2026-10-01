@@ -11,8 +11,9 @@ host.
 
 ```text
 nico-admin-cli managed-host reset set <--machine>
-[--allow-reset-with-instance] [--update-message]
-[--extended] [--sort-by] [-h|--help]
+[--allow-reset-with-instance] [--ignore-cleanup]
+[--update-message] [--extended] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -29,6 +30,11 @@ Managed host machine ID to reset.
 
 Acknowledge that resetting an assigned host destroys the live instance
 and its data. Required when the host has an instance.
+
+`--ignore-cleanup`
+
+Skip host cleanup after the live instance is deleted. The previous
+tenants data stays on the host.
 
 `--update-message <UPDATE_MESSAGE>`
 
