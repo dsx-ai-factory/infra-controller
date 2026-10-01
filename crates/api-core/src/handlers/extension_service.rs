@@ -513,7 +513,14 @@ async fn update_dpf_helm_chart(
     let existing_v1 =
         extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
     let existing_data = parse_dpf_helm_chart_data(&existing_v1.data)?;
-    if desired_data.service_id != existing_data.service_id
+    if desired_data.service_id != existing_data.service_id {
+        return Err(CarbideError::InvalidArgument(
+            "serviceID cannot be changed for a DPF helm chart extension service".to_string(),
+        )
+        .into());
+    }
+
+    if desired_data == existing_data
         && service_vpc_interfaces == current_service.service_vpc_interfaces
     {
         return Err(CarbideError::InvalidArgument(
@@ -534,12 +541,6 @@ async fn update_dpf_helm_chart(
         .into());
     }
 
-    if desired_data == existing_data {
-        return Err(CarbideError::InvalidArgument(
-            "no changes to data from the current DPF helm chart data".to_string(),
-        )
-        .into());
-    }
     let desired_data = desired_data
         .normalized_json()
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;

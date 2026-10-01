@@ -1427,6 +1427,7 @@ async fn test_dpf_helm_chart_update_skips_uniqueness_for_unchanged_service_id(
     let created = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
             service_id: None,
             service_name: "unchanged-service-id".to_string(),
@@ -1446,6 +1447,7 @@ async fn test_dpf_helm_chart_update_skips_uniqueness_for_unchanged_service_id(
     let updated = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: created.service_id,
             service_name: None,
             description: None,
@@ -2115,6 +2117,7 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_service_id(
     // Prepare different NICo names and tenants that intentionally claim
     // case variants of the same explicit DPF serviceID.
     let first_request = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
         service_id: None,
         service_name: "first-dpf-service".to_string(),
@@ -2171,6 +2174,7 @@ async fn test_dpf_helm_chart_update_rejects_changed_service_id(
     // Create and reconcile the original service so data updates are eligible.
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
             service_id: Some(service_id.to_string()),
             service_name: "immutable-service-id".to_string(),
@@ -2191,6 +2195,7 @@ async fn test_dpf_helm_chart_update_rejects_changed_service_id(
     let error = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.to_string(),
             service_name: None,
             description: None,
