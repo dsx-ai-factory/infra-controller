@@ -131,8 +131,8 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	logger := log.With().Str("Activity", "UpdateMachinesInDB").Str("Site ID", siteIDStr).Logger()
 	logger.Info().Msg("starting activity")
 
-	// Every Machine this reconcile writes is stamped with this one time rather than the time
-	// each statement runs. The staleness guard below reads the same column, so stamping the
+	// Every reported Machine this reconcile writes is stamped with this one time rather than the
+	// time each statement runs. The staleness guard below reads the same column, so stamping the
 	// current time instead would leave it less than one interval old when the next snapshot
 	// arrives, and that snapshot would skip the Machine as externally modified.
 	reconcileStamp := cdb.GetCurTime().Add(-reconcileStampBackdate)
@@ -789,7 +789,9 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
-			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false), Updated: &reconcileStamp})
+			// This update stamps its own time rather than reconcileStamp. It takes no row lock, so
+			// a backdated stamp could predate an external write and cut short its staleness window.
+			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false)})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update missing on Site flag in DB")
 				continue

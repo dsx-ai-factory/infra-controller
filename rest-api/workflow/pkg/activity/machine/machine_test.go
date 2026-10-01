@@ -1576,6 +1576,33 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		assert.Equal(t, statusDetailCountBefore, statusDetailCountAfter)
 		assert.NotContains(t, logOutput.String(), "failed to update missing on Site flag in DB")
 	})
+	t.Run("marks an unreported Machine missing without backdating an external write", func(t *testing.T) {
+		ctx := context.Background()
+		missingSite := testMachineBuildSite(t, dbSession, ip, "test-machine-missing-site", cdbm.SiteStatusRegistered)
+		machine := testMachineBuildMachine(t, dbSession, ip.ID, missingSite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+
+		// An external write just before the reconcile falls after its backdated stamp.
+		machineDAO := cdbm.NewMachineDAO(dbSession)
+		externalWrite, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+			MachineID:        machine.ID,
+			IsUsableByTenant: cutil.GetPtr(true),
+		})
+		require.NoError(t, err)
+
+		manager := ManageMachine{dbSession: dbSession, siteClientPool: tSiteClientPool}
+		err = manager.UpdateMachinesInDB(ctx, missingSite.ID.String(), &corev1.MachineInventory{
+			Machines:        []*corev1.MachineInfo{},
+			Timestamp:       timestamppb.Now(),
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		})
+		require.NoError(t, err)
+
+		got, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.MachineStatusError, got.Status)
+		assert.True(t, got.IsMissingOnSite)
+		assert.False(t, got.Updated.Before(externalWrite.Updated), "want the external write's staleness window kept")
+	})
 	t.Run("Ready inventory waits for REST assignment", func(t *testing.T) {
 		ctx := context.Background()
 		assignmentSite := testMachineBuildSite(t, dbSession, ip, "assignment-site", cdbm.SiteStatusRegistered)
