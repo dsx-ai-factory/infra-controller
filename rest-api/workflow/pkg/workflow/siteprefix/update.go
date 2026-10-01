@@ -11,6 +11,7 @@ import (
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 	sitePrefixActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/siteprefix"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -18,9 +19,13 @@ import (
 // UpdateSitePrefixInventory receives one Core inventory page without inferring
 // absence or enabling Site Agent publication.
 func UpdateSitePrefixInventory(ctx workflow.Context, siteID string, inventory *corev1.SitePrefixInventory) error {
+	logger := log.With().Str("Workflow", "UpdateSitePrefixInventory").Str("Site ID", siteID).Logger()
+	logger.Info().Msg("starting workflow")
+
 	start := workflow.Now(ctx)
 	id, err := uuid.Parse(siteID)
 	if err != nil {
+		logger.Warn().Err(err).Msg("workflow triggered with invalid site ID")
 		return err
 	}
 	options := cwi.ActivityOptions()
@@ -36,6 +41,9 @@ func UpdateSitePrefixInventory(ctx workflow.Context, siteID string, inventory *c
 	activityCtx := workflow.WithActivityOptions(ctx, options)
 	var manager sitePrefixActivity.ManageSitePrefix
 	err = workflow.ExecuteActivity(activityCtx, manager.UpdateSitePrefixesInDB, id, inventory).Get(activityCtx, nil)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to execute activity: UpdateSitePrefixesInDB")
+	}
 
 	metricsCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second, ScheduleToCloseTimeout: 5 * time.Second,
@@ -45,7 +53,8 @@ func UpdateSitePrefixInventory(ctx workflow.Context, siteID string, inventory *c
 	metricsErr := workflow.ExecuteActivity(metricsCtx, metrics.RecordLatency, id,
 		"UpdateSitePrefixInventory", err != nil, workflow.Now(ctx).Sub(start)).Get(metricsCtx, nil)
 	if metricsErr != nil {
-		workflow.GetLogger(ctx).Warn("Failed to record SitePrefix inventory latency", "error", metricsErr)
+		logger.Warn().Err(metricsErr).Msg("failed to execute activity: RecordLatency")
 	}
+	logger.Info().Msg("completing workflow")
 	return err
 }
