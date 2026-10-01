@@ -1,4 +1,3 @@
-{{- $redirectMode := include "nico-bmc-proxy.redirectMode" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -109,7 +108,7 @@ spec:
             - name: NICO_BMC_PROXY__DATABASE_URL
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
             - name: NICO_BMC_PROXY__REDIRECTS__MODE
-              value: {{ $redirectMode | quote }}
+              value: {{ include "nico-bmc-proxy.redirectMode" . | quote }}
             - name: RUST_BACKTRACE
               value: {{ .Values.env.RUST_BACKTRACE | quote }}
             - name: RUST_LIB_BACKTRACE
