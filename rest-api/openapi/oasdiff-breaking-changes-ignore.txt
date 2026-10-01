@@ -314,3 +314,9 @@ API PATCH /v2/org/{org}/nico/domain/nvlink/firmware the `domainIds/items/` reque
 API PATCH /v2/org/{org}/nico/domain/nvlink/firmware added the pattern `\S` to the request property `domainIds/items/`
 API PATCH /v2/org/{org}/nico/domain/nvlink/power the `domainIds/items/` request property's minLength was increased from `0` to `1`
 API PATCH /v2/org/{org}/nico/domain/nvlink/power added the pattern `\S` to the request property `domainIds/items/`
+# Rack and Tray domain references now use the Domain external ID (rack group ID),
+# not an internal UUID or the observed NMX-C cluster UUID.
+GET /v2/org/{org}/nico/rack the `items/nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/tray the `items/nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/tray/{id} the `nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`

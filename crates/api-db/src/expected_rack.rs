@@ -46,9 +46,9 @@ pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRack
 /// create creates a new expected rack.
 pub async fn create(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResult<ExpectedRack> {
     let query = "INSERT INTO expected_racks
-             (rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels)
+             (rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels, rack_group_id)
              VALUES
-             ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::jsonb) RETURNING *";
+             ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::jsonb, $6::varchar) RETURNING *";
 
     sqlx::query_as(query)
         .bind(&rack.rack_id)
@@ -56,6 +56,7 @@ pub async fn create(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResu
         .bind(&rack.metadata.name)
         .bind(&rack.metadata.description)
         .bind(sqlx::types::Json(&rack.metadata.labels))
+        .bind(&rack.rack_group_id)
         .fetch_one(txn)
         .await
         .map_err(|err: sqlx::Error| match err {

@@ -4,260 +4,126 @@
 package inventorysync
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"testing"
-
-	"github.com/google/uuid"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"testing"
 )
 
-type failDomainMembershipClient struct {
-	nicoapi.Client
-}
+type failDomainMembershipClient struct{ nicoapi.Client }
 
 func (c *failDomainMembershipClient) GetObservedNVLinkDomainMemberships(_ context.Context) ([]nicoapi.NVLinkDomainMembership, error) {
 	return nil, errors.New("domain snapshot unavailable")
 }
+func TestPullObservedNVLinkDomainMemberships(t *testing.T) {
+	rows, ok := pullObservedNVLinkDomainMemberships(t.Context(), &failDomainMembershipClient{})
+	assert.False(t, ok)
+	assert.Nil(t, rows)
+}
 
 func TestBuildDomainTopologySnapshot(t *testing.T) {
-	rackA := uuid.MustParse("10000000-0000-0000-0000-000000000001")
-	rackB := uuid.MustParse("10000000-0000-0000-0000-000000000002")
-	domainA := "20000000-0000-0000-0000-000000000001"
-	domainB := "20000000-0000-0000-0000-000000000002"
-	rackIDs := map[string]uuid.UUID{"rack-a": rackA, "rack-b": rackB}
-
-	tests := []struct {
-		name            string
-		memberships     []nicoapi.NVLinkDomainMembership
-		wantRackCount   int
-		wantDomainCount int
-		wantErr         string
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	x, y := uuid.New(), uuid.New()
+	racks := map[string]uuid.UUID{"a": a, "b": b, "c": c}
+	groups := map[string]string{"a": "group-ab", "b": "group-ab", "c": "group-c"}
+	for _, tc := range []struct {
+		name    string
+		rows    []nicoapi.NVLinkDomainMembership
+		invalid bool
+		cluster *uuid.UUID
 	}{
-		{
-			name: "deduplicates switch observations",
-			memberships: []nicoapi.NVLinkDomainMembership{
-				{DomainID: domainA, RackID: "rack-a"},
-				{DomainID: domainA, RackID: "rack-a"},
-				{DomainID: domainA, RackID: "rack-b"},
-			},
-			wantRackCount:   2,
-			wantDomainCount: 1,
-		},
-		{
-			name: "accepts no valid observations",
-		},
-		{
-			name: "rejects invalid domain UUID",
-			memberships: []nicoapi.NVLinkDomainMembership{
-				{DomainID: "not-a-uuid", RackID: "rack-a"},
-			},
-			wantErr: "invalid observed NVLink domain ID",
-		},
-		{
-			name: "skips unknown rack",
-			memberships: []nicoapi.NVLinkDomainMembership{
-				{DomainID: domainA, RackID: "unknown"},
-			},
-		},
-		{
-			name: "keeps known membership when another rack is unknown",
-			memberships: []nicoapi.NVLinkDomainMembership{
-				{DomainID: domainA, RackID: "rack-a"},
-				{DomainID: domainB, RackID: "unknown"},
-			},
-			wantRackCount:   1,
-			wantDomainCount: 1,
-		},
-		{
-			name: "rejects conflicting rack memberships",
-			memberships: []nicoapi.NVLinkDomainMembership{
-				{DomainID: domainA, RackID: "rack-a"},
-				{DomainID: domainB, RackID: "rack-a"},
-			},
-			wantErr: "conflicting observed NVLink domains",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			snapshot, err := buildDomainTopologySnapshot(test.memberships, rackIDs)
-			if test.wantErr != "" {
-				require.ErrorContains(t, err, test.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Len(t, snapshot.domainByRack, test.wantRackCount)
-			assert.Len(t, snapshot.domainIDs, test.wantDomainCount)
+		{name: "group without switches"},
+		{name: "duplicates and multiple racks", rows: []nicoapi.NVLinkDomainMembership{{RackID: "a", DomainID: x.String()}, {RackID: "a", DomainID: x.String()}, {RackID: "b", DomainID: x.String()}}, cluster: &x},
+		{name: "unknown invalid observation is skipped", rows: []nicoapi.NVLinkDomainMembership{{RackID: "unknown", DomainID: "invalid"}, {RackID: "a", DomainID: x.String()}}, cluster: &x},
+		{name: "invalid known observation", rows: []nicoapi.NVLinkDomainMembership{{RackID: "a", DomainID: "invalid"}}, invalid: true},
+		{name: "conflicting group observations", rows: []nicoapi.NVLinkDomainMembership{{RackID: "a", DomainID: x.String()}, {RackID: "b", DomainID: y.String()}}, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := append(append([]nicoapi.NVLinkDomainMembership{}, tc.rows...), nicoapi.NVLinkDomainMembership{RackID: "c", DomainID: y.String()})
+			got := buildDomainTopologySnapshot(rows, racks, groups)
+			assert.Equal(t, map[uuid.UUID]string{a: "group-ab", b: "group-ab", c: "group-c"}, got.groupByRack)
+			assert.Equal(t, tc.invalid, got.invalidGroups["group-ab"])
+			assert.Equal(t, tc.cluster, got.clusterByGroup["group-ab"])
+			assert.Equal(t, &y, got.clusterByGroup["group-c"])
 		})
 	}
 }
 
-func TestPullObservedNVLinkDomainMembershipsPreservesTopologyOnFailure(t *testing.T) {
-	client := &failDomainMembershipClient{Client: nicoapi.NewMockClient()}
-	memberships, ok := pullObservedNVLinkDomainMemberships(context.Background(), client)
-	assert.False(t, ok)
-	assert.Nil(t, memberships)
-}
-
-func TestMirrorObservedNVLinkDomainMembershipsLifecycle(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	rackA := model.Rack{Name: "domain-rack-a", ExternalID: strPtr("rack-a")}
-	rackB := model.Rack{Name: "domain-rack-b", ExternalID: strPtr("rack-b")}
-	require.NoError(t, rackA.Create(ctx, pool.DB))
-	require.NoError(t, rackB.Create(ctx, pool.DB))
-	rackIDs := map[string]uuid.UUID{"rack-a": rackA.ID, "rack-b": rackB.ID}
-	domainA := uuid.MustParse("20000000-0000-0000-0000-000000000001")
-	domainB := uuid.MustParse("20000000-0000-0000-0000-000000000002")
-
-	initial := []nicoapi.NVLinkDomainMembership{
-		{DomainID: domainA.String(), RackID: "rack-a"},
-		{DomainID: domainA.String(), RackID: "rack-a"},
-		{DomainID: domainA.String(), RackID: "rack-b"},
+func TestMirrorObservedNVLinkDomainMemberships(t *testing.T) {
+	for _, scenario := range []string{"lifecycle", "rollback"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			legacy := model.NVLDomain{ID: uuid.New(), Name: "legacy"}
+			require.NoError(t, legacy.Create(ctx, pool.DB))
+			a := model.Rack{Name: "a", ExternalID: strPtr("a"), NVLDomainID: legacy.ID}
+			b := model.Rack{Name: "b", ExternalID: strPtr("b")}
+			require.NoError(t, a.Create(ctx, pool.DB))
+			require.NoError(t, b.Create(ctx, pool.DB))
+			racks := map[string]uuid.UUID{"a": a.ID, "b": b.ID}
+			groups := map[string]string{"a": "group-ab", "b": "group-ab"}
+			x, y := uuid.New(), uuid.New()
+			rows := []nicoapi.NVLinkDomainMembership{{RackID: "a", DomainID: x.String()}}
+			if scenario == "rollback" {
+				_, err := pool.DB.ExecContext(ctx, "ALTER TABLE nvldomain ADD CONSTRAINT reject_group CHECK (external_id <> 'group-ab')")
+				require.NoError(t, err)
+				result, err := mirrorObservedNVLinkDomainMemberships(ctx, pool, rows, racks, groups)
+				require.Error(t, err)
+				assert.Equal(t, domainMirrorResult{pulled: 1}, result)
+				stored, err := a.Get(ctx, pool.DB, false)
+				require.NoError(t, err)
+				assert.Equal(t, legacy.ID, stored.NVLDomainID)
+				assert.Nil(t, stored.RackGroupID)
+				return
+			}
+			result, err := mirrorObservedNVLinkDomainMemberships(ctx, pool, rows, racks, groups)
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.domainsInserted)
+			assert.Equal(t, 2, result.membershipsAssigned)
+			assert.Equal(t, 1, result.domainsSoftDeleted)
+			domain, err := (&model.NVLDomain{ExternalID: strPtr("group-ab")}).Get(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.NotEqual(t, x, domain.ID)
+			assert.Empty(t, domain.Name)
+			var unnamed bool
+			require.NoError(t, pool.DB.NewRaw("SELECT name IS NULL FROM nvldomain WHERE id = ?", domain.ID).Scan(ctx, &unnamed))
+			assert.True(t, unnamed)
+			assert.Equal(t, &x, domain.NMXCClusterID)
+			for _, rack := range []*model.Rack{&a, &b} {
+				stored, err := rack.Get(ctx, pool.DB, false)
+				require.NoError(t, err)
+				assert.Equal(t, domain.ID, stored.NVLDomainID)
+				assert.Equal(t, strPtr("group-ab"), stored.RackGroupID)
+			}
+			_, err = pool.DB.NewUpdate().Model(domain).Set("name = ?", "operator-name").Where("id = ?", domain.ID).Exec(ctx)
+			require.NoError(t, err)
+			result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, rows, racks, groups)
+			require.NoError(t, err)
+			assert.Equal(t, domainMirrorResult{pulled: 1}, result)
+			rows = append(rows, nicoapi.NVLinkDomainMembership{RackID: "b", DomainID: y.String()})
+			_, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, rows, racks, groups)
+			require.NoError(t, err)
+			domain, err = domain.Get(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Equal(t, &x, domain.NMXCClusterID)
+			// Missing observations clear the cluster but not the rack-group domain.
+			_, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, nil, racks, groups)
+			require.NoError(t, err)
+			domain, err = domain.Get(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Nil(t, domain.NMXCClusterID)
+			_, err = pool.DB.NewDelete().Model(domain).Where("id = ?", domain.ID).Exec(ctx)
+			require.NoError(t, err)
+			result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, nil, racks, groups)
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.domainsResurrected)
+			restored, err := domain.Get(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Equal(t, domain.ID, restored.ID)
+			assert.Equal(t, "operator-name", restored.Name)
+		})
 	}
-	result, err := mirrorObservedNVLinkDomainMemberships(ctx, pool, initial, rackIDs)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.domainsInserted)
-	assert.Equal(t, 2, result.membershipsAssigned)
-
-	result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, initial, rackIDs)
-	require.NoError(t, err)
-	assert.Equal(t, domainMirrorResult{pulled: len(initial)}, result)
-
-	moved := []nicoapi.NVLinkDomainMembership{
-		{DomainID: domainA.String(), RackID: "rack-a"},
-		{DomainID: domainB.String(), RackID: "rack-b"},
-	}
-	result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, moved, rackIDs)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.domainsInserted)
-	assert.Equal(t, 1, result.membershipsAssigned)
-	orphanDomain := model.NVLDomain{
-		ID:   uuid.MustParse("20000000-0000-0000-0000-000000000003"),
-		Name: "manually-created-domain",
-	}
-	require.NoError(t, orphanDomain.Create(ctx, pool.DB))
-
-	var logOutput bytes.Buffer
-	originalLogger := log.Logger
-	log.Logger = zerolog.New(&logOutput)
-	result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, nil, rackIDs)
-	log.Logger = originalLogger
-	require.NoError(t, err)
-	assert.Equal(t, 2, result.membershipsCleared)
-	assert.Equal(t, 2, result.domainsSoftDeleted)
-	assert.Contains(t, logOutput.String(), "cleared rack NVLink domain membership because the observed snapshot contained no valid membership")
-	assert.Contains(t, logOutput.String(), `"rack_external_id":"rack-a"`)
-	assert.Contains(t, logOutput.String(), `"previous_domain_id":"`+domainA.String()+`"`)
-	var rackAAfterEmpty model.Rack
-	err = pool.DB.NewSelect().Model(&rackAAfterEmpty).Where("id = ?", rackA.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, uuid.Nil, rackAAfterEmpty.NVLDomainID)
-	var rackBAfterEmpty model.Rack
-	err = pool.DB.NewSelect().Model(&rackBAfterEmpty).Where("id = ?", rackB.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, uuid.Nil, rackBAfterEmpty.NVLDomainID)
-	_, err = pool.DB.NewUpdate().
-		Model((*model.NVLDomain)(nil)).
-		Set("name = ?", "friendly-domain-b").
-		WhereAllWithDeleted().
-		Where("id = ?", domainB).
-		Exec(ctx)
-	require.NoError(t, err)
-	_, err = pool.DB.NewDelete().
-		Model(&model.NVLDomain{ID: domainB}).
-		Where("id = ?", domainB).
-		Exec(ctx)
-	require.NoError(t, err)
-
-	resurrected := []nicoapi.NVLinkDomainMembership{
-		{DomainID: domainB.String(), RackID: "rack-b"},
-	}
-	result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, resurrected, rackIDs)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.domainsResurrected)
-	assert.Equal(t, 1, result.membershipsAssigned)
-
-	converged := []nicoapi.NVLinkDomainMembership{
-		{DomainID: domainB.String(), RackID: "rack-a"},
-		{DomainID: domainB.String(), RackID: "rack-b"},
-	}
-	result, err = mirrorObservedNVLinkDomainMemberships(ctx, pool, converged, rackIDs)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.membershipsAssigned)
-	assert.Equal(t, 0, result.domainsSoftDeleted)
-
-	var gotRackA model.Rack
-	err = pool.DB.NewSelect().Model(&gotRackA).Where("id = ?", rackA.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, domainB, gotRackA.NVLDomainID)
-	var gotRackB model.Rack
-	err = pool.DB.NewSelect().Model(&gotRackB).Where("id = ?", rackB.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, domainB, gotRackB.NVLDomainID)
-	var gotDomainB model.NVLDomain
-	err = pool.DB.NewSelect().Model(&gotDomainB).Where("id = ?", domainB).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, "friendly-domain-b", gotDomainB.Name)
-	var gotOrphanDomain model.NVLDomain
-	err = pool.DB.NewSelect().Model(&gotOrphanDomain).Where("id = ?", orphanDomain.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, orphanDomain.Name, gotOrphanDomain.Name)
-	var gotDomainA model.NVLDomain
-	err = pool.DB.NewSelect().
-		Model(&gotDomainA).
-		WhereAllWithDeleted().
-		Where("id = ?", domainA).
-		Scan(ctx)
-	require.NoError(t, err)
-	assert.NotNil(t, gotDomainA.DeletedAt)
-}
-
-func TestMirrorObservedNVLinkDomainMembershipsRollsBackAllWrites(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	oldDomain := model.NVLDomain{
-		ID:   uuid.MustParse("30000000-0000-0000-0000-000000000001"),
-		Name: "old-domain",
-	}
-	require.NoError(t, oldDomain.Create(ctx, pool.DB))
-	targetDomainID := uuid.MustParse("30000000-0000-0000-0000-000000000002")
-	nameConflict := model.NVLDomain{
-		ID:   uuid.MustParse("30000000-0000-0000-0000-000000000003"),
-		Name: targetDomainID.String(),
-	}
-	require.NoError(t, nameConflict.Create(ctx, pool.DB))
-	rack := model.Rack{
-		Name:        "rollback-rack",
-		ExternalID:  strPtr("rack-a"),
-		NVLDomainID: oldDomain.ID,
-	}
-	require.NoError(t, rack.Create(ctx, pool.DB))
-
-	memberships := []nicoapi.NVLinkDomainMembership{
-		{DomainID: targetDomainID.String(), RackID: "rack-a"},
-	}
-	result, err := mirrorObservedNVLinkDomainMemberships(
-		ctx,
-		pool,
-		memberships,
-		map[string]uuid.UUID{"rack-a": rack.ID},
-	)
-	require.Error(t, err)
-	assert.Equal(t, domainMirrorResult{pulled: 1}, result)
-
-	var gotRack model.Rack
-	err = pool.DB.NewSelect().Model(&gotRack).Where("id = ?", rack.ID).Scan(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, oldDomain.ID, gotRack.NVLDomainID)
-	var activeDomains []model.NVLDomain
-	err = pool.DB.NewSelect().Model(&activeDomains).Order("id").Scan(ctx)
-	require.NoError(t, err)
-	assert.Len(t, activeDomains, 2)
 }

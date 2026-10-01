@@ -80,7 +80,7 @@ func (cd *Component) Get(
 		)
 	}
 
-	query = query.Relation("BMCs").Relation("Rack")
+	query = query.Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain")
 
 	if err := query.Scan(ctx); err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ func GetAllComponents(ctx context.Context, idb bun.IDB) (ret []Component, err er
 // component's BMCs relation preloaded (callers rely on this for BMC-MAC-based
 // linking).
 func GetComponentsByType(ctx context.Context, idb bun.IDB, componentType devicetypes.ComponentType) (ret []Component, err error) {
-	err = idb.NewSelect().Model(&ret).Where("c.type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Relation("Rack").Scan(ctx)
+	err = idb.NewSelect().Model(&ret).Where("c.type = ?", devicetypes.ComponentTypeToString(componentType)).Relation("BMCs").Relation("Rack").Relation("Rack.NVLDomain").Scan(ctx)
 	return ret, err
 }
 
@@ -209,7 +209,7 @@ func (cd *Component) GetIncludingDeleted(ctx context.Context, idb bun.IDB) (*Com
 		Where("c.id = ?", cd.ID).
 		WhereAllWithDeleted().
 		Relation("BMCs").
-		Relation("Rack").
+		Relation("Rack").Relation("Rack.NVLDomain").
 		Scan(ctx)
 	if err != nil {
 		return nil, err

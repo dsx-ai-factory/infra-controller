@@ -49,6 +49,8 @@ const (
 
 	// ConfigAPIName specifies the name of the API
 	ConfigAPIName = "api.name"
+	// ConfigAPIPort specifies the port the API server listens on
+	ConfigAPIPort = "api.port"
 	// ConfigAPIRouteVersion specifies the version of the API
 	ConfigAPIRouteVersion = "api.route.version"
 
@@ -113,6 +115,9 @@ const (
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName is the name of the tracing service
 	ConfigTracingServiceName = "tracing.serviceName"
+	// DefaultTracingServiceName is the service.name used when neither the
+	// config nor the OTEL environment supplies one
+	DefaultTracingServiceName = "nico-rest-api"
 
 	// ConfigKeycloakEnabled is a feature flag for Keycloak authentication
 	ConfigKeycloakEnabled = "keycloak.enabled"
@@ -239,6 +244,7 @@ func NewConfig() *Config {
 
 	// Set API name
 	c.v.SetDefault(ConfigAPIName, "nico")
+	c.v.SetDefault(ConfigAPIPort, 8388)
 	c.v.SetDefault(ConfigAPIRouteVersion, "v1")
 
 	// Set config file
@@ -850,6 +856,11 @@ func (c *Config) GetAPIName() string {
 	return c.v.GetString(ConfigAPIName)
 }
 
+// GetAPIPort returns the port the API server listens on
+func (c *Config) GetAPIPort() int {
+	return c.v.GetInt(ConfigAPIPort)
+}
+
 // GetAPIRouteVersion returns the version of the API
 func (c *Config) GetAPIRouteVersion() string {
 	return c.v.GetString(ConfigAPIRouteVersion)
@@ -1060,9 +1071,14 @@ func (c *Config) GetTracingEnabled() bool {
 	return c.v.GetBool(ConfigTracingEnabled)
 }
 
-// GetTracingServiceName gets the service name for tracing
+// GetTracingServiceName gets the service name for tracing, falling back to
+// the binary's default when the config omits it or leaves it empty. The OTEL
+// environment variables still take precedence over either value.
 func (c *Config) GetTracingServiceName() string {
-	return c.v.GetString(ConfigTracingServiceName)
+	if name := c.v.GetString(ConfigTracingServiceName); name != "" {
+		return name
+	}
+	return DefaultTracingServiceName
 }
 
 // Keycloak configuration methods

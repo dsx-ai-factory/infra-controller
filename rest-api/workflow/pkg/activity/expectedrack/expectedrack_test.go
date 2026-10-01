@@ -119,6 +119,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 			SiteID:         st.ID,
 			RackID:         fmt.Sprintf("rack-%02d", i),
 			RackProfileID:  fmt.Sprintf("profile-%d", i),
+			RackGroupID:    new(fmt.Sprintf("group-%d", i)),
 			Name:           fmt.Sprintf("Rack %d", i),
 			Description:    fmt.Sprintf("Rack %d description", i),
 			Labels:         labels,
@@ -145,6 +146,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		ctrlExpectedRack := &corev1.ExpectedRack{
 			RackId:        &corev1.RackId{Id: pagedExpectedRacks[i].RackID},
 			RackProfileId: &corev1.RackProfileId{Id: pagedExpectedRacks[i].RackProfileID},
+			RackGroupId:   &corev1.RackGroupId{Id: *pagedExpectedRacks[i].RackGroupID},
 			Metadata: &corev1.Metadata{
 				Name:        pagedExpectedRacks[i].Name,
 				Description: pagedExpectedRacks[i].Description,
@@ -163,6 +165,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 		if i%3 == 0 {
 			if i < 10 {
 				ctrlExpectedRack.RackProfileId = &corev1.RackProfileId{Id: fmt.Sprintf("profile-updated-%d", i)} // Changed RackProfileID
+				ctrlExpectedRack.RackGroupId = &corev1.RackGroupId{Id: fmt.Sprintf("group-updated-%d", i)}
 				ctrlExpectedRack.Metadata.Name = fmt.Sprintf("Updated Rack %d", i)
 				ctrlExpectedRack.Metadata.Description = fmt.Sprintf("Updated Rack %d description", i)
 				expectedRacksToUpdate = append(expectedRacksToUpdate, pagedExpectedRacks[i])
@@ -439,6 +442,7 @@ func TestManageExpectedRack_UpdateExpectedRacksInDB(t *testing.T) {
 					}
 				}
 				if ctrlER != nil && updated != nil {
+					assert.Equal(t, new(ctrlER.GetRackGroupId().GetId()), updated.RackGroupID)
 					assert.Equal(t, ctrlER.RackProfileId.Id, updated.RackProfileID,
 						fmt.Sprintf("ExpectedRack %v RackProfileID should have been updated", er.RackID))
 					reportedName := ""

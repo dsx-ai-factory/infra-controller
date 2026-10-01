@@ -771,10 +771,13 @@ impl InternalRBACRules {
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
-        x.perm("FindPowerShelfIds", vec![ForgeAdminCLI, Machineatron, Flow]);
+        x.perm(
+            "FindPowerShelfIds",
+            vec![ForgeAdminCLI, Machineatron, Flow, Health],
+        );
         x.perm(
             "FindPowerShelvesByIds",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, Flow, Health],
         );
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
@@ -949,8 +952,11 @@ impl InternalRBACRules {
             "FindSwitchHealthHistories",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
-        x.perm("FindRackIds", vec![ForgeAdminCLI, SiteAgent, Flow]);
-        x.perm("FindRacksByIds", vec![ForgeAdminCLI, SiteAgent, Flow]);
+        x.perm("FindRackIds", vec![ForgeAdminCLI, SiteAgent, Flow, Health]);
+        x.perm(
+            "FindRacksByIds",
+            vec![ForgeAdminCLI, SiteAgent, Flow, Health],
+        );
         x.perm("GetRack", vec![ForgeAdminCLI, Flow]);
         x.perm("DeleteRack", vec![ForgeAdminCLI, Flow]);
         x.perm("GetRackProfile", vec![ForgeAdminCLI]);
@@ -1302,6 +1308,28 @@ mod rbac_rule_tests {
             assert!(
                 InternalRBACRules::allowed_from_static(method, &[]),
                 "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_health_can_load_authoritative_inventory() {
+        for method in [
+            "FindRackIds",
+            "FindRacksByIds",
+            "FindSwitchIds",
+            "FindSwitchesByIds",
+            "FindPowerShelfIds",
+            "FindPowerShelvesByIds",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(
+                    method,
+                    &[Principal::SpiffeServiceIdentifier(
+                        "nico-hardware-health".to_string()
+                    )]
+                ),
+                "{method} should allow hardware health"
             );
         }
     }

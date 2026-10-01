@@ -274,6 +274,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 ReadyBootConfigState::PollingBiosSetup { .. } => "pollingbiossetup",
                 ReadyBootConfigState::SetBootOrder { .. } => "setbootorder",
                 ReadyBootConfigState::LockHost { .. } => "lockhost",
+                ReadyBootConfigState::RestoreFullLockdown { .. } => "restorefulllockdown",
                 ReadyBootConfigState::Failed { .. } => "failed",
             }
         }

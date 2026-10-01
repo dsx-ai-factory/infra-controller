@@ -5,6 +5,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -21,6 +22,8 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 		deviceInstance       *int
 		attachmentType       cdbm.SpectrumXAttachmentType
 		virtualFunctionID    *int
+		bridgeName           *string
+		ovnNetworkName       *string
 	}
 	tests := []struct {
 		name   string
@@ -53,14 +56,144 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test validation success, OVS attachment",
+			// OVS requires bridgeName; ovnNetworkName is optional and accepted here.
+			name: "test validation success, OVS attachment with bridge and network",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+				ovnNetworkName:       cutil.GetPtr("spx-net-a"),
+			},
+			wantErr: false,
+		},
+		{
+			// ovnNetworkName omitted is still valid for OVS.
+			name: "test validation success, OVS attachment with only bridge",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test validation failure, OVS attachment missing bridgeName",
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
 				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
 			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, OVS attachment with empty bridgeName",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr(""),
+			},
+			wantErr: true,
+		},
+		{
+			// Both names at Weave's maximum length, using every character class each one allows.
+			name: "test validation success, OVS names at the Weave limits",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br.Spx_0-" + strings.Repeat("a", 23)),
+				ovnNetworkName:       cutil.GetPtr("spx_Net-9" + strings.Repeat("a", 247)),
+			},
 			wantErr: false,
+		},
+		{
+			name: "test validation failure, OVS bridgeName longer than 32 characters",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr(strings.Repeat("a", 33)),
+			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, OVS bridgeName with a space",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br spx0"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, OVS attachment with empty ovnNetworkName",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+				ovnNetworkName:       cutil.GetPtr(""),
+			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, OVS ovnNetworkName longer than 256 characters",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+				ovnNetworkName:       cutil.GetPtr(strings.Repeat("a", 257)),
+			},
+			wantErr: true,
+		},
+		{
+			// A dot is valid in a bridge name but not in an OVN network name.
+			name: "test validation failure, OVS ovnNetworkName with a dot",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+				ovnNetworkName:       cutil.GetPtr("spx.net"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, bridgeName on non-OVS attachment",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+				bridgeName:           cutil.GetPtr("br-spx0"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "test validation failure, ovnNetworkName on non-OVS attachment",
+			fields: fields{
+				spectrumXPartitionID: uuid.New().String(),
+				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+				deviceInstance:       cutil.GetPtr(0),
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+				ovnNetworkName:       cutil.GetPtr("spx-net-a"),
+			},
+			wantErr: true,
 		},
 		{
 			name: "test validation failure, invalid SpectrumX Partition ID",
@@ -135,6 +268,8 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				DeviceInstance:       tt.fields.deviceInstance,
 				AttachmentType:       tt.fields.attachmentType,
 				VirtualFunctionID:    tt.fields.virtualFunctionID,
+				BridgeName:           tt.fields.bridgeName,
+				OvnNetworkName:       tt.fields.ovnNetworkName,
 			}
 			if tt.body != "" {
 				sacr = APISpectrumXAttachmentCreateOrUpdateRequest{}

@@ -313,6 +313,7 @@ message Component {
     string rack_external_id = 13;
     LeakHandlingStatus leak_handling_status = 14;  // Flow's leakage-handling status for this component.
     HealthReport health = 15;  // Latest Core aggregate health snapshot mirrored by inventory sync.
+    optional string nvl_domain_external_id = 16; // Owning rack's domain external ID (rack group ID).
 }
 
 message Rack {
@@ -326,6 +327,7 @@ message Rack {
     Phase operation_status = 7;
     HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
     optional string rack_profile_id = 9; // Core rack profile mirrored by expected inventory sync.
+    repeated string nvl_domain_external_ids = 10; // Public rack-group domain identities.
 }
 
 message Identifier {
@@ -408,6 +410,8 @@ message ExternalRef {
 
 message NVLDomain {
     Identifier identifier = 1;
+    optional string external_id = 2;
+    optional string nmxc_cluster_id = 3;
 }
 
 message Pagination {
@@ -560,6 +564,8 @@ message NVLinkDomain {
     optional string topology = 3;
     Phase operation_status = 4;
     repeated Component components = 5;
+    optional string nmxc_cluster_id = 6;
+    string rack_group_id = 7; // Same value as id: the domain's external ID.
 }
 
 message GetNVLinkDomainResponse {

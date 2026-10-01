@@ -83,6 +83,8 @@ type Client interface {
 
 	// FindRackHealthReports returns Core aggregate health keyed by rack ID.
 	FindRackHealthReports(ctx context.Context, rackIds []string) (map[string]*types.HealthReport, error)
+	// FindRackGroupIDs returns persisted group identities from actual Core racks.
+	FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error)
 
 	// GetSwitches returns a complete snapshot of active Core switches with the
 	// runtime ID and BMC MAC needed for actual-inventory reconciliation.

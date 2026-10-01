@@ -48,7 +48,10 @@ impl InstanceSpxConfig {
 pub enum SpxAttachmentType {
     Physical = 0,
     Virtual = 1,
-    Ovs = 2,
+    // Matches the wire value in forge.proto's SpxAttachmentType (OVS = 3; 2 is
+    // reserved for the retired Ovn). This enum is bridged to the proto enum by
+    // raw i32, so the discriminants must stay in sync.
+    Ovs = 3,
 }
 
 impl TryFrom<i32> for SpxAttachmentType {
@@ -58,7 +61,7 @@ impl TryFrom<i32> for SpxAttachmentType {
         match value {
             0 => Ok(SpxAttachmentType::Physical),
             1 => Ok(SpxAttachmentType::Virtual),
-            2 => Ok(SpxAttachmentType::Ovs),
+            3 => Ok(SpxAttachmentType::Ovs),
             _ => Err("Invalid SpxAttachmentType value"),
         }
     }
@@ -80,5 +83,17 @@ pub struct InstanceSpxAttachment {
     pub mac_address: Option<String>,
     pub spx_partition_id: SpxPartitionId,
     pub attachment_type: SpxAttachmentType,
-    pub virtual_function_id: Option<u32>,
+    pub attachment_vf: Option<SpxAttachmentVf>,
+    pub attachment_ovs: Option<SpxAttachmentOvs>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentVf {
+    pub vf_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentOvs {
+    pub bridge_name: String,
+    pub ovn_network_name: Option<String>,
 }

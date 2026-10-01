@@ -30,6 +30,7 @@ COPY sdk/standard/go.mod ./sdk/standard/
 RUN go mod download
 
 # Copy source files
+COPY common/ ./common/
 COPY cert-manager/ ./cert-manager/
 
 # Build the credentials manager

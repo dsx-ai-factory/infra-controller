@@ -549,6 +549,48 @@ async fn test_machine_interface_ipv6_allocation_shift_widths(
     Ok(())
 }
 
+/// Verify that an IPv6 /128 address is persisted and cannot be allocated twice.
+#[crate::sqlx_test]
+async fn test_machine_interface_ipv6_single_address_allocation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let address: IpAddr = "2001:db8::1".parse()?;
+    let mut definition = admin_segment("IPV6-SINGLETON", "2001:db8::1/128", "2001:db8::1", 0);
+    // IPv6 prefixes cannot have a gateway, including this single-address prefix.
+    definition.prefixes[0].gateway = None;
+    let segment =
+        db::network_segment::persist(definition, &mut txn, NetworkSegmentControllerState::Ready)
+            .await?;
+    let interface = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&segment),
+        &MacAddress::from_str("aa:bb:cc:dd:42:00")?,
+        true,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await?;
+    let interface_id = interface.id;
+    txn.commit().await?;
+
+    let mut txn = pool.begin().await?;
+    let persisted = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
+    assert_eq!(persisted.addresses, vec![address]);
+    let error = db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&segment),
+        &MacAddress::from_str("aa:bb:cc:dd:42:01")?,
+        false,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, db::DatabaseError::ResourceExhausted(_)));
+    Ok(())
+}
+
 /// Verifies that IPv6 exhaustion on one candidate segment falls through to the
 /// next candidate segment instead of aborting allocation.
 ///

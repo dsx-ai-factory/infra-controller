@@ -41,6 +41,10 @@ type SpectrumXAttachment struct {
 	AttachmentType string `json:"attachmentType"`
 	// Virtual function the attachment uses. Not currently supported
 	VirtualFunctionId NullableInt32 `json:"virtualFunctionId,omitempty"`
+	// OVS bridge the attachment uses. Set only for an `OVS` attachment
+	BridgeName NullableString `json:"bridgeName,omitempty"`
+	// OVN network the OVS attachment maps onto. Set only for an `OVS` attachment, and optional even then
+	OvnNetworkName NullableString `json:"ovnNetworkName,omitempty"`
 	// MAC address the Site allocated for the attachment
 	MacAddress NullableString `json:"macAddress,omitempty"`
 	// IP address the Site allocated for the attachment
@@ -298,6 +302,92 @@ func (o *SpectrumXAttachment) UnsetVirtualFunctionId() {
 	o.VirtualFunctionId.Unset()
 }
 
+// GetBridgeName returns the BridgeName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *SpectrumXAttachment) GetBridgeName() string {
+	if o == nil || IsNil(o.BridgeName.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.BridgeName.Get()
+}
+
+// GetBridgeNameOk returns a tuple with the BridgeName field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *SpectrumXAttachment) GetBridgeNameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.BridgeName.Get(), o.BridgeName.IsSet()
+}
+
+// HasBridgeName returns a boolean if a field has been set.
+func (o *SpectrumXAttachment) HasBridgeName() bool {
+	if o != nil && o.BridgeName.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetBridgeName gets a reference to the given NullableString and assigns it to the BridgeName field.
+func (o *SpectrumXAttachment) SetBridgeName(v string) {
+	o.BridgeName.Set(&v)
+}
+
+// SetBridgeNameNil sets the value for BridgeName to be an explicit nil
+func (o *SpectrumXAttachment) SetBridgeNameNil() {
+	o.BridgeName.Set(nil)
+}
+
+// UnsetBridgeName ensures that no value is present for BridgeName, not even an explicit nil
+func (o *SpectrumXAttachment) UnsetBridgeName() {
+	o.BridgeName.Unset()
+}
+
+// GetOvnNetworkName returns the OvnNetworkName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *SpectrumXAttachment) GetOvnNetworkName() string {
+	if o == nil || IsNil(o.OvnNetworkName.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.OvnNetworkName.Get()
+}
+
+// GetOvnNetworkNameOk returns a tuple with the OvnNetworkName field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *SpectrumXAttachment) GetOvnNetworkNameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.OvnNetworkName.Get(), o.OvnNetworkName.IsSet()
+}
+
+// HasOvnNetworkName returns a boolean if a field has been set.
+func (o *SpectrumXAttachment) HasOvnNetworkName() bool {
+	if o != nil && o.OvnNetworkName.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetOvnNetworkName gets a reference to the given NullableString and assigns it to the OvnNetworkName field.
+func (o *SpectrumXAttachment) SetOvnNetworkName(v string) {
+	o.OvnNetworkName.Set(&v)
+}
+
+// SetOvnNetworkNameNil sets the value for OvnNetworkName to be an explicit nil
+func (o *SpectrumXAttachment) SetOvnNetworkNameNil() {
+	o.OvnNetworkName.Set(nil)
+}
+
+// UnsetOvnNetworkName ensures that no value is present for OvnNetworkName, not even an explicit nil
+func (o *SpectrumXAttachment) UnsetOvnNetworkName() {
+	o.OvnNetworkName.Unset()
+}
+
 // GetMacAddress returns the MacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SpectrumXAttachment) GetMacAddress() string {
 	if o == nil || IsNil(o.MacAddress.Get()) {
@@ -493,6 +583,12 @@ func (o SpectrumXAttachment) ToMap() (map[string]interface{}, error) {
 	toSerialize["attachmentType"] = o.AttachmentType
 	if o.VirtualFunctionId.IsSet() {
 		toSerialize["virtualFunctionId"] = o.VirtualFunctionId.Get()
+	}
+	if o.BridgeName.IsSet() {
+		toSerialize["bridgeName"] = o.BridgeName.Get()
+	}
+	if o.OvnNetworkName.IsSet() {
+		toSerialize["ovnNetworkName"] = o.OvnNetworkName.Get()
 	}
 	if o.MacAddress.IsSet() {
 		toSerialize["macAddress"] = o.MacAddress.Get()

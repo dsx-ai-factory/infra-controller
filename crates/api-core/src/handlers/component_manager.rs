@@ -5636,6 +5636,7 @@ mod tests {
         Rack {
             id: Default::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig::default(),
             controller_state: Versioned::new(RackState::Ready, ConfigVersion::initial()),
             controller_state_outcome: None,

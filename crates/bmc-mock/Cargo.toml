@@ -68,6 +68,7 @@ tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+libredfish = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 carbide-tls = { path = "../tls" }
 hyper = { workspace = true, features = ["client", "http2"] }

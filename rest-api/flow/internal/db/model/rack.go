@@ -55,6 +55,7 @@ type Rack struct {
 	// ingestion-gRPC rows on first run).
 	ExternalID    *string             `bun:"external_id"`
 	RackProfileID *string             `bun:"rack_profile_id"`
+	RackGroupID   *string             `bun:"rack_group_id"`
 	Status        RackStatus          `bun:"status,type:varchar(16),default:'new'"`
 	Health        *types.HealthReport `bun:"health,type:jsonb,nullzero"`
 	CreatedAt     time.Time           `bun:"created_at,nullzero,notnull,default:current_timestamp"`

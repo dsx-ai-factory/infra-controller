@@ -566,6 +566,7 @@ impl ApiClient {
         rack_profile_id: RackProfileId,
     ) -> ClientApiResult<()> {
         let expected_rack = ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(rack_profile_id.clone()),
             metadata: None,

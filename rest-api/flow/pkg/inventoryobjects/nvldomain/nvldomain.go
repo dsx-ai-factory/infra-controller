@@ -12,7 +12,14 @@ import (
 
 type NVLDomain struct {
 	Identifier      identifier.Identifier   `json:"identifier"`
+	NMXCClusterID   *uuid.UUID              `json:"nmxc_cluster_id"`
 	RackIdentifiers []identifier.Identifier `json:"rack_identifiers"`
+}
+
+// ListOptions selects the public domain surface and its stable name ordering.
+type ListOptions struct {
+	ExternalOnly bool
+	Descending   bool
 }
 
 func (d *NVLDomain) Validate() error {

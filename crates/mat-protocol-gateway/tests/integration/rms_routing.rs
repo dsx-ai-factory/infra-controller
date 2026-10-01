@@ -37,7 +37,7 @@ use tonic::Code;
 use tonic::transport::Channel;
 
 use crate::common::{
-    FakeController, FakeMachineATron, GUID_A, GUID_B, SWITCH_A, SWITCH_B, TRAY_A, counts,
+    FakeController, FakeMachineATron, GUID_A, GUID_B, SWITCH_A, SWITCH_B, TRAY_A, WAIT, counts,
     devices_a, devices_b, finished, free_loopback_address, gateway_config, node, nodes, probe,
     rms_client, spawn_run, wait_until, wait_until_ready,
 };
@@ -615,11 +615,9 @@ async fn a_source_that_stops_answering_keeps_its_racks_until_stale_after_then_an
     assert_eq!(finished(running).await, ExitReason::Shutdown);
 }
 
-/// An instance that is down when the gateway starts holds `/readyz` and routing, naming itself,
-/// only until `stale_after`; then the rest of the fleet is served and its racks are unknown until
-/// it answers.
+/// A pending source is named by `/readyz` and blocks routing until it answers.
 #[tokio::test]
-async fn a_source_down_at_startup_blocks_readiness_only_until_stale_after() {
+async fn a_source_down_at_startup_blocks_readiness_and_routing_until_it_answers() {
     let mat_a =
         FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
     let mat_b =
@@ -628,35 +626,73 @@ async fn a_source_down_at_startup_blocks_readiness_only_until_stale_after() {
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
     let listen = free_loopback_address().await;
     let mut config = gateway_config(controller.serve().await, listen);
-    // The pending state is asserted before it expires, so give the assertion room on a loaded host.
-    config.ownership.stale_after = Duration::from_secs(2);
+    // Expiry must outlast the bounded assertion phase. Its transition is tested separately.
+    config.ownership.stale_after = WAIT * 10;
     config.validate().unwrap();
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
     let running = spawn_run(config, shutdown.clone());
 
-    wait_until("the gateway names the pending source", || async {
-        readyz(&http, listen)
+    tokio::time::timeout(WAIT, async {
+        wait_until("the gateway names the pending source", || async {
+            readyz(&http, listen).await.is_some_and(|(_, body)| {
+                body.starts_with("no rack status from source mat-b yet: GET http://")
+            })
+        })
+        .await;
+        let (status, body) = readyz(&http, listen).await.unwrap();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body.starts_with("no rack status from source mat-b yet: GET http://"),
+            "{body}"
+        );
+        let mut rms = rms_client(listen).await;
+
+        let status = fabric_status(&mut rms, "rack-001", SWITCH_A)
             .await
-            .is_some_and(|(_, body)| body.starts_with("no rack status"))
+            .unwrap_err();
+
+        assert_eq!(status.code(), Code::Unavailable);
+
+        mat_b.set_available(true);
+        wait_until_ready(&http, listen).await;
+
+        assert_eq!(
+            fabric_status(&mut rms, "rack-001", SWITCH_A).await.unwrap(),
+            ""
+        );
+
+        assert_eq!(
+            fabric_status(&mut rms, "rack-002", SWITCH_B).await.unwrap(),
+            ""
+        );
     })
-    .await;
-    let (status, body) = readyz(&http, listen).await.unwrap();
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        body.starts_with("no rack status from source mat-b yet: GET http://"),
-        "{body}"
-    );
-    let mut rms = rms_client(listen).await;
-    assert_eq!(
-        fabric_status(&mut rms, "rack-001", SWITCH_A)
-            .await
-            .unwrap_err()
-            .code(),
-        Code::Unavailable
-    );
+    .await
+    .expect("startup readiness assertions must finish before source expiry");
+
+    shutdown.cancel();
+    assert_eq!(finished(running).await, ExitReason::Shutdown);
+}
+
+/// A source that never answers stops blocking readiness after expiry and rejoins when it recovers.
+#[tokio::test]
+async fn a_source_down_at_startup_stops_blocking_after_stale_after_and_can_recover() {
+    let mat_a =
+        FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
+    let mat_b =
+        FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+    mat_b.set_available(false);
+    let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
+    let listen = free_loopback_address().await;
+    let config = gateway_config(controller.serve().await, listen);
+    let http = reqwest::Client::new();
+    let shutdown = CancellationToken::new();
+    let running = spawn_run(config, shutdown.clone());
 
     wait_until_ready(&http, listen).await;
+
+    let mut rms = rms_client(listen).await;
+
     assert_eq!(
         fabric_status(&mut rms, "rack-001", SWITCH_A).await.unwrap(),
         ""
