@@ -27,5 +27,13 @@ updated="$(jq --arg dns "${dns_ip}" --arg ntp "${ntp_ip}" --arg pxe "${pxe_ip}" 
 if [[ "$(jq -cS . <<<"${original}")" != "$(jq -cS . <<<"${updated}")" ]]; then
   patch="$(jq -n --arg config "${updated}" '{data: {"kea_config.json": $config}}')"
   kubectl -n "${namespace}" patch configmap nico-dhcp-config --type=merge -p "${patch}"
-  kubectl -n "${namespace}" rollout restart deployment/nico-dhcp
 fi
+
+# Reconcile independently of the ConfigMap patch so a failed rollout update can
+# be retried. An unchanged checksum leaves the Deployment pod template unchanged.
+checksum="$(jq -cS . <<<"${updated}" | shasum -a 256 | awk '{print $1}')"
+patch="$(jq -n --arg checksum "${checksum}" '
+  {spec: {template: {metadata: {annotations: {
+    "devspace.nvidia.com/dhcp-config-checksum": $checksum
+  }}}}}')"
+kubectl -n "${namespace}" patch deployment nico-dhcp --type=merge -p "${patch}"

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ SCRIPT = Path(__file__).with_name("setup-core-services.sh")
 
 class SetupCoreServicesTest(unittest.TestCase):
     def test_dhcp_service_addresses(self):
-        for case in ("placeholders", "configured", "ipv6-only", "api-error"):
+        for case in ("placeholders", "configured", "ipv6-only", "api-error", "retry-rollout"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 placeholders = {
                     "nameservers": "REPLACE_WITH_NICO_DNS_VIP",
@@ -33,8 +34,7 @@ class SetupCoreServicesTest(unittest.TestCase):
                 (Path(directory) / "config.json").write_text(json.dumps({
                     "data": {"kea_config.json": json.dumps(config)}
                 }))
-                result = subprocess.run(
-                    ["bash", "-c", '''
+                command = ["bash", "-c", '''
 kubectl() {
     case "$*" in
         '-n isolated get service '* )
@@ -53,34 +53,60 @@ kubectl() {
             ;;
         '-n isolated get configmap nico-dhcp-config -o json') cat "$TEST_DIRECTORY/config.json" ;;
         '-n isolated patch configmap nico-dhcp-config --type=merge -p '*)
-            printf '%s' "${@: -1}" > "$TEST_DIRECTORY/patch.json" ;;
-        '-n isolated rollout restart deployment/nico-dhcp') touch "$TEST_DIRECTORY/restarted" ;;
+            printf '%s' "${@: -1}" > "$TEST_DIRECTORY/patch.json"
+            cp "$TEST_DIRECTORY/patch.json" "$TEST_DIRECTORY/config.json" ;;
+        '-n isolated patch deployment nico-dhcp --type=merge -p '*)
+            if [[ "$TEST_CASE" == retry-rollout && ! -e "$TEST_DIRECTORY/failed" ]]; then
+                touch "$TEST_DIRECTORY/failed"
+                return 1
+            fi
+            printf '%s' "${@: -1}" > "$TEST_DIRECTORY/deployment-patch.json" ;;
         *) return 99 ;;
     esac
 }
 export -f kubectl
 bash "$1" isolated
-''', "bash", str(SCRIPT)],
-                    env={**os.environ, "TEST_CASE": case, "TEST_DIRECTORY": directory},
-                    capture_output=True, text=True, timeout=10,
-                )
+''', "bash", str(SCRIPT)]
+                def run():
+                    return subprocess.run(
+                        command,
+                        env={**os.environ, "TEST_CASE": case, "TEST_DIRECTORY": directory},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                result = run()
+                deployment_patch = Path(directory) / "deployment-patch.json"
                 if case in ("ipv6-only", "api-error"):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
-                    self.assertFalse((Path(directory) / "restarted").exists())
+                    self.assertFalse(deployment_patch.exists())
                     continue
+                if case == "retry-rollout":
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(deployment_patch.exists())
+                    self.assertTrue((Path(directory) / "failed").exists())
+                    self.assertTrue((Path(directory) / "patch.json").exists())
+                    (Path(directory) / "patch.json").unlink()
+                    result = run()
+                    self.assertFalse((Path(directory) / "patch.json").exists())
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 if case == "configured":
                     self.assertFalse((Path(directory) / "patch.json").exists())
-                    self.assertFalse((Path(directory) / "restarted").exists())
                 else:
-                    patch = json.loads((Path(directory) / "patch.json").read_text())
-                    updated = json.loads(patch["data"]["kea_config.json"])
+                    persisted = json.loads((Path(directory) / "config.json").read_text())
+                    updated = json.loads(persisted["data"]["kea_config.json"])
                     expected = {f"{prefix}-{key}": ip
                                 for prefix in ("nico", "carbide")
                                 for key, ip in zip(placeholders, ("10.96.1.1", "10.96.1.2", "10.96.1.3"))}
                     config["Dhcp4"]["hooks-libraries"][0]["parameters"] = expected
                     self.assertEqual(updated, config)
-                    self.assertTrue((Path(directory) / "restarted").exists())
+                canonical = json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n"
+                checksum = hashlib.sha256(canonical.encode()).hexdigest()
+                patch = json.loads(deployment_patch.read_text())
+                self.assertEqual(patch, {"spec": {"template": {"metadata": {"annotations": {
+                    "devspace.nvidia.com/dhcp-config-checksum": checksum
+                }}}}})
+                result = run()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(deployment_patch.read_text()), patch)
 
 
 if __name__ == "__main__":
