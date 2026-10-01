@@ -382,3 +382,7 @@ openapi-breaking:
 		exit 1; \
 	fi
 	oasdiff breaking <(git show origin/main:rest-api/openapi/spec.yaml) rest-api/openapi/spec.yaml --fail-on ERR
+
+.PHONY: ansible
+ansible: ## Regenerate ansible/plugins/modules/ from the OpenAPI spec (release artifact, not committed)
+	python3 tools/generate/generate.py --backend ansible --spec rest-api/openapi/spec.yaml --output ansible/plugins/modules --docs-output docs/automation/ansible/modules --root .
