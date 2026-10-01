@@ -57,13 +57,7 @@ pub fn build() {
     // those crates and all their dependents, even for two jobs compiling the
     // same commit in the same CI run. The committer date only moves when the
     // commit does, which is the granularity of everything else stamped here.
-    // Without git (local containers) fall back to wall clock, where caching
-    // is not at stake.
-    let build_date = if can_git {
-        run("git", &["log", "-1", "--format=%cI"])
-    } else {
-        run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]) // like 'date --iso-8601=seconds --utc' but portable across GNU/BSD
-    };
+    let build_date = build_date(Path::new("."), std::env::var("CI_COMMIT_TIMESTAMP").ok());
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_DATE={build_date}");
     println!("cargo:rustc-env=CARBIDE_BUILD_DATE={build_date}");
@@ -84,6 +78,7 @@ pub fn build() {
     for var in [
         "VERSION",
         "CI_COMMIT_SHORT_SHA",
+        "CI_COMMIT_TIMESTAMP",
         "USER",
         "HOSTNAME",
         "REPO_ROOT",
@@ -189,6 +184,38 @@ pub fn build() {
 
         println!("cargo:rerun-if-changed={git_head}");
     }
+}
+
+/// In CI the committer date comes from the environment, like the SHA and
+/// version: the release Dockerfiles build inside the empty repository that
+/// `cargo new` creates (`.git/` is excluded from the build context), so git
+/// works there but has no commits to read. Locally it comes from git when
+/// HEAD resolves. Otherwise (local containers without git, or an unborn
+/// HEAD) fall back to wall clock, where caching is not at stake.
+fn build_date(repo: &Path, ci_commit_timestamp: Option<String>) -> String {
+    if let Some(timestamp) = ci_commit_timestamp.filter(|v| !v.is_empty()) {
+        return timestamp;
+    }
+    if git_has_head(repo) {
+        let repo = repo.to_string_lossy();
+        let date = run("git", &["-C", &repo, "log", "-1", "--format=%cI"]);
+        if !date.is_empty() {
+            return date;
+        }
+    }
+    run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]) // like 'date --iso-8601=seconds --utc' but portable across GNU/BSD
+}
+
+/// Whether `repo` is inside a git repository whose HEAD names a commit. A bare
+/// `git rev-parse` also succeeds in a freshly initialised repository, where
+/// every command that reads history fails.
+fn git_has_head(repo: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 // If the current user is not the owner of the repo root (containing .git), then
@@ -333,3 +360,66 @@ macro_rules! version {
          );
      };
  }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMMITTER_DATE: &str = "2026-01-02T03:04:05+00:00";
+    const CI_TIMESTAMP: &str = "2026-05-06T07:08:09+00:00";
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_COMMITTER_DATE", COMMITTER_DATE)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn is_utc_timestamp(date: &str) -> bool {
+        // YYYY-MM-DDTHH:MM:SSZ
+        date.len() == 20 && date.as_bytes()[10] == b'T' && date.ends_with('Z')
+    }
+
+    // The release Dockerfiles build inside the repository `cargo new`
+    // initialises: git works there, but HEAD is unborn. An `ARG` that is not
+    // passed still sets its `ENV` to the empty string.
+    #[test]
+    fn build_date_is_never_empty() {
+        let repo = tempfile::tempdir().expect("create temporary repository");
+        let ci = || Some(CI_TIMESTAMP.to_string());
+        git(repo.path(), &["init", "--quiet"]);
+
+        assert_eq!(
+            build_date(repo.path(), ci()),
+            CI_TIMESTAMP,
+            "unborn HEAD, CI timestamp"
+        );
+        for (scenario, ci_timestamp) in [
+            ("unborn HEAD, no CI timestamp", None),
+            ("unborn HEAD, empty CI timestamp", Some(String::new())),
+        ] {
+            let date = build_date(repo.path(), ci_timestamp);
+            assert!(is_utc_timestamp(&date), "{scenario}: {date:?}");
+        }
+
+        git(
+            repo.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"],
+        );
+        assert_eq!(
+            build_date(repo.path(), ci()),
+            CI_TIMESTAMP,
+            "HEAD, CI timestamp"
+        );
+        assert_eq!(
+            build_date(repo.path(), None),
+            COMMITTER_DATE,
+            "HEAD, no CI timestamp"
+        );
+    }
+}

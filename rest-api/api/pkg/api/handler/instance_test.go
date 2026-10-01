@@ -16,23 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -48,6 +31,22 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 	"gopkg.in/yaml.v3"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func assertDeletionAcceptedResponse(t *testing.T, body []byte) {
@@ -1398,7 +1397,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	tst4.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	setupIbInactiveDevicesInstanceType := func(t *testing.T, allocName string, machineInactiveDevices []int) (*cdbm.InstanceType, *cdbm.Machine) {
 		ist := testInstanceBuildInstanceType(t, dbSession, ip, "ist-ib-inactive-"+uuid.NewString(), st1, cdbm.InstanceStatusReady)
@@ -1467,6 +1466,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
 		verifyChildSpanner       bool
+		check                    func(t *testing.T)
 	}
 	tests := []testCase{
 		{
@@ -2433,7 +2433,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test Instance create API endpoint failure, specify a machine ID already assigned",
+			name: "test Instance create API endpoint conflict, specify a Ready machine ID already assigned",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2456,8 +2456,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
-				respCode:    http.StatusBadRequest,
+				respCode:    http.StatusConflict,
 				respMessage: "is assigned to an Instance, cannot be used for new Instance",
+			},
+			check: func(t *testing.T) {
+				machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, mcassigned.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+				assert.True(t, machine.IsAssigned)
+				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2",
+					mock.MatchedBy(func(req *corev1.InstanceAllocationRequest) bool {
+						return req.GetMachineId().GetId() == mcassigned.ID
+					}))
 			},
 			wantErr: false,
 		},
@@ -3902,10 +3912,13 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		name           string
 		assigned       bool
 		allowUnhealthy bool
+		machineStatus  string
+		responseCode   int
 	}{
-		{"release at assignment gate", true, false},
-		{"release at status gate", false, false},
-		{"release at status gate allowing unhealthy", false, true},
+		{"release at assignment gate", true, false, cdbm.MachineStatusInUse, http.StatusConflict},
+		{"Ready release at assignment gate", true, false, cdbm.MachineStatusReady, http.StatusConflict},
+		{"release at status gate", false, false, cdbm.MachineStatusInUse, http.StatusBadRequest},
+		{"release at status gate allowing unhealthy", false, true, cdbm.MachineStatusInUse, http.StatusBadRequest},
 	} {
 		tests = append(tests, testCase{
 			name:   gate.name,
@@ -3917,11 +3930,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					Interfaces:            []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
 					AllowUnhealthyMachine: cutil.GetPtr(gate.allowUnhealthy),
 				},
-				reqOrg: tnOrg, reqUser: tnu1, respCode: http.StatusBadRequest,
+				reqOrg: tnOrg, reqUser: tnu1, respCode: gate.responseCode,
 				checkRecovery: true, respRetryable: cutil.GetPtr(true),
 				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
 					machine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(gate.assigned), nil)
-					_, updateErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, Status: cutil.GetPtr(cdbm.MachineStatusInUse)})
+					_, updateErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, Status: cutil.GetPtr(gate.machineStatus)})
 					require.NoError(t, updateErr)
 					testInstanceBuildInstance(t, dbSession, uuid.NewString(), tn1.ID, ip.ID, st1.ID, nil, vpc1.ID, &machine.ID, nil, nil, cdbm.InstanceStatusTerminating)
 					req.MachineID = &machine.ID
@@ -4061,7 +4074,6 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -4090,6 +4102,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				} else {
 					assert.NotContains(t, response.Message, "Do not retry automatically.")
 				}
+			}
+			if tt.check != nil {
+				tt.check(t)
 			}
 			if tt.args.respCode != http.StatusCreated {
 				if targetedMachine != nil {
@@ -5071,7 +5086,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	ifcDAO := cdbm.NewInterfaceDAO(dbSession)
 
@@ -5109,6 +5124,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedSiteSpectrumXAttachmentCount  *int
 		expectedRespSpectrumXAttachmentCount  *int
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
+		expectedSiteSpectrumXAttachmentBridge *string
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -5116,7 +5132,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// When true with nvlinkInterfacesToDelete, still assert those rows are Deleting but skip Pending-row count/order checks.
 		nvLinkSkipPendingDBAssertions bool
 		// Optional hook after building the echo context and before Handle (e.g. adjust DB timestamps for time-sensitive branches).
-		beforeHandle           func(t *testing.T)
+		beforeHandle func(t *testing.T)
+		// Optional hook after a successful Handle (e.g. assert persisted DB state).
+		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
 	}
 
@@ -5204,16 +5222,68 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 							DeviceInstance:       cutil.GetPtr(0),
 							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+							BridgeName:           cutil.GetPtr("br-spx0"),
 						},
 					},
 				},
-				reqInstance:                          inst1.ID.String(),
-				cleanInstanceToStatus:                inst1.Status,
-				reqOrg:                               tnOrg1,
-				reqUser:                              tnu1,
-				respCode:                             http.StatusOK,
-				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
-				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_Ovn),
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount:  cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:   cutil.GetPtr(corev1.SpxAttachmentType_OVS),
+				expectedSiteSpectrumXAttachmentBridge: cutil.GetPtr("br-spx0"),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			// The reuse key covers partition, device, device instance and attachment type
+			// but not the OVS bridge, so an OVS attachment whose bridge alone changes reuses
+			// the persisted row. Before the fix the row was carried forward untouched, so the
+			// Site kept the stale bridge and the request's new bridge was discarded. Runs
+			// directly after the OVS type-change case, which left inst1 with one OVS
+			// attachment on br-spx0.
+			name: "test Instance update rebinds a reused SpectrumX OVS Attachment to the requested bridge",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxp1.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+							BridgeName:           cutil.GetPtr("br-new"),
+						},
+					},
+				},
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount:  cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:   cutil.GetPtr(corev1.SpxAttachmentType_OVS),
+				expectedSiteSpectrumXAttachmentBridge: cutil.GetPtr("br-new"),
+				afterHandle: func(t *testing.T) {
+					sxaDAO := cdbm.NewSpectrumXAttachmentDAO(dbSession)
+					persisted, _, gerr := sxaDAO.GetAll(context.Background(), nil, cdbm.SpectrumXAttachmentFilterInput{
+						InstanceIDs: []uuid.UUID{inst1.ID},
+						Statuses:    []string{cdbm.SpectrumXAttachmentStatusPending},
+					}, cdbp.PageInput{}, nil)
+					require.NoError(t, gerr)
+					require.Len(t, persisted, 1, "the reused OVS row must be updated in place, not duplicated")
+					require.NotNil(t, persisted[0].BridgeName)
+					assert.Equal(t, "br-new", *persisted[0].BridgeName, "the reused row must persist the requested bridge")
+					assert.Nil(t, persisted[0].OvnNetworkName)
+				},
 			},
 			verifySiteControllerRequest: true,
 		},
@@ -7758,7 +7828,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstance)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if tt.args.beforeHandle != nil {
@@ -7786,6 +7855,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)
 			if serr != nil {
 				t.Fatal(serr)
+			}
+
+			if tt.args.afterHandle != nil {
+				tt.args.afterHandle(t)
 			}
 
 			if tt.args.reqData.Name != nil {
@@ -8308,6 +8381,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							"the Site must be sent the requested attachment type, not the retired row's")
 					}
 
+					if tt.args.expectedSiteSpectrumXAttachmentBridge != nil {
+						require.Len(t, siteReq.Config.Spxconfig.SpxAttachments, 1)
+						require.NotNil(t, siteReq.Config.Spxconfig.SpxAttachments[0].GetAttachmentOvs(),
+							"an OVS attachment must carry its OVS metadata to the Site")
+						assert.Equal(t, *tt.args.expectedSiteSpectrumXAttachmentBridge, siteReq.Config.Spxconfig.SpxAttachments[0].GetAttachmentOvs().GetBridgeName(),
+							"the Site must be sent the requested OVS bridge")
+					}
+
 					// Verify the SpectrumX Attachments are in the Site Controller request
 					if len(tt.args.reqData.SpectrumXAttachments) > 0 {
 						require.NotNil(t, siteReq.Config.Spxconfig)
@@ -8586,7 +8667,7 @@ func TestGetInstanceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name    string
@@ -8935,7 +9016,6 @@ func TestGetInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstanceID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -9292,7 +9372,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name    string
@@ -10487,7 +10567,6 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -10746,7 +10825,7 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	//
 	// Timeout mocking
@@ -11033,7 +11112,6 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstance)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -11137,12 +11215,11 @@ func TestNewCreateInstanceHandler(t *testing.T) {
 				scp:       scp,
 			},
 			want: CreateInstanceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				dps:        nil,
-				scp:        scp,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+				dps:       nil,
+				scp:       scp,
 			},
 		},
 	}
@@ -11186,12 +11263,11 @@ func TestNewUpdateInstanceHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateInstanceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				dps:        nil,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+				dps:       nil,
 			},
 		},
 	}
@@ -11228,10 +11304,9 @@ func TestNewGetInstanceHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetInstanceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -11269,10 +11344,9 @@ func TestNewGetAllInstanceHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllInstanceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -11319,11 +11393,10 @@ func TestNewDeleteInstanceHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteInstanceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -11406,7 +11479,7 @@ func TestInstanceHandler_GetStatusDetails(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name          string
@@ -11467,7 +11540,6 @@ func TestInstanceHandler_GetStatusDetails(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.reqInstanceID)
 			ec.Set("user", tt.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			assert.NoError(t, handler.Handle(ec))
@@ -11781,7 +11853,7 @@ func TestCreateInstanceHandler_machineUnavailableError(t *testing.T) {
 				locked, getErr := cdbm.NewMachineDAO(session).GetByID(ctx, tx, machine.ID, nil, true)
 				require.NoError(t, getErr)
 				apiErr := cih.machineUnavailableError(ctx, tx, zerolog.Nop(), locked, tenant.ID, "unavailable")
-				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Equal(t, http.StatusConflict, apiErr.Code)
 				assert.Equal(t, tt.want, apiErr.Retryable)
 				assert.Equal(t, "unavailable", apiErr.Message)
 				return nil

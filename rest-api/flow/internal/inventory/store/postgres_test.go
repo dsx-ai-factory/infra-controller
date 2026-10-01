@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -225,6 +226,70 @@ func TestPostgresStore_GetComponentByBMCMAC(t *testing.T) {
 	}
 }
 
+type domainPageQueryCounter struct{ queries int }
+
+func (c *domainPageQueryCounter) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	c.queries++
+	return ctx
+}
+
+func (*domainPageQueryCounter) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+func TestPostgresStore_GetRacksForNVLDomains(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+	ctx := t.Context()
+	conf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	pool, err := commonutils.UnitTestDB(ctx, t, conf)
+	require.NoError(t, err)
+	store := NewPostgres(pool)
+	ids := make([]uuid.UUID, 0, 2)
+	for _, name := range []string{"group-a", "group-b"} {
+		domain := model.NVLDomain{Name: name, ExternalID: &name}
+		require.NoError(t, domain.Create(ctx, pool.DB))
+		member := model.Rack{Name: name, NVLDomainID: domain.ID}
+		require.NoError(t, member.Create(ctx, pool.DB))
+		comp := model.Component{Name: name, Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), RackID: member.ID}
+		require.NoError(t, comp.Create(ctx, pool.DB))
+		ids = append(ids, domain.ID)
+	}
+	counter := &domainPageQueryCounter{}
+	pool.DB.AddQueryHook(counter)
+	for _, tc := range []struct {
+		name       string
+		ids        []uuid.UUID
+		components bool
+	}{
+		{name: "empty page"},
+		{name: "single domain", ids: ids[:1]},
+		{name: "multiple domains with components", ids: ids, components: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter.queries = 0
+			got, err := store.GetRacksForNVLDomains(ctx, tc.ids, tc.components)
+			require.NoError(t, err)
+			require.Len(t, got, len(tc.ids))
+			if len(tc.ids) == 0 {
+				assert.Zero(t, counter.queries)
+			} else {
+				assert.LessOrEqual(t, counter.queries, 7, "page reads must not query each domain separately")
+			}
+			for _, id := range tc.ids {
+				require.Len(t, got[id], 1)
+				assert.Equal(t, id, got[id][0].NVLDomainID)
+				if tc.components {
+					require.Len(t, got[id][0].Components, 1)
+					assert.Equal(t, got[id][0].Info.ID, got[id][0].Components[0].RackID)
+				} else {
+					assert.Empty(t, got[id][0].Components)
+				}
+			}
+		})
+	}
+}
+
 func TestPostgresStore_GetRacksForNVLDomain(t *testing.T) {
 	if os.Getenv("DB_PORT") == "" {
 		t.Skip("Skipping integration test: no DB environment specified")
@@ -235,19 +300,22 @@ func TestPostgresStore_GetRacksForNVLDomain(t *testing.T) {
 	pool, err := commonutils.UnitTestDB(ctx, t, conf)
 	require.NoError(t, err)
 	store := NewPostgres(pool)
-	domain := model.NVLDomain{Name: "legacy"}
+	domain := model.NVLDomain{Name: "legacy", ExternalID: stringPtr("group-legacy")}
 	require.NoError(t, domain.Create(ctx, pool.DB))
 	legacy := model.Rack{Name: "legacy-rack", ExternalID: stringPtr("legacy-rack"), NVLDomainID: domain.ID}
 	require.NoError(t, legacy.Create(ctx, pool.DB))
-	collisionDomain := model.NVLDomain{Name: "collision"}
+	collisionDomain := model.NVLDomain{Name: "collision", ExternalID: stringPtr("group-collision")}
 	require.NoError(t, collisionDomain.Create(ctx, pool.DB))
-	preferred := model.Rack{Name: "preferred", ExternalID: stringPtr(collisionDomain.ID.String())}
+	preferred := model.Rack{Name: "preferred", ExternalID: stringPtr("group-collision")}
 	require.NoError(t, preferred.Create(ctx, pool.DB))
 	comp := model.Component{Name: "compute", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), RackID: preferred.ID}
 	require.NoError(t, comp.Create(ctx, pool.DB))
 
 	legacyComp := model.Component{Name: "legacy-compute", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), RackID: legacy.ID}
 	require.NoError(t, legacyComp.Create(ctx, pool.DB))
+	tray, err := store.GetComponentByID(ctx, legacyComp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ExternalID, tray.NVLDomainExternalID)
 	memberIDs := make([]uuid.UUID, 0, 2)
 	for _, name := range []string{"member-a", "member-b"} {
 		member := model.Rack{Name: name, ExternalID: stringPtr(name), NVLDomainID: collisionDomain.ID}
@@ -266,11 +334,10 @@ func TestPostgresStore_GetRacksForNVLDomain(t *testing.T) {
 		cancel            bool
 		withoutComponents bool
 	}{
-		{name: "external rack ID", id: identifier.Identifier{ExternalID: "legacy-rack"}, want: legacy.ID},
-		{name: "legacy domain UUID fallback", id: identifier.Identifier{ExternalID: domain.ID.String()}, want: legacy.ID},
-		{name: "rack wins UUID collision", id: identifier.Identifier{ExternalID: collisionDomain.ID.String()}, want: preferred.ID},
-		{name: "external rack without components", id: identifier.Identifier{ExternalID: collisionDomain.ID.String()}, want: preferred.ID, withoutComponents: true},
-		{name: "legacy domain without components", id: identifier.Identifier{ExternalID: domain.ID.String()}, want: legacy.ID, withoutComponents: true},
+		{name: "external group ID", id: identifier.Identifier{ExternalID: "group-legacy"}, want: legacy.ID},
+		{name: "no legacy UUID fallback", id: identifier.Identifier{ExternalID: domain.ID.String()}, code: codes.NotFound},
+		{name: "domain wins rack external ID collision", id: identifier.Identifier{ExternalID: "group-collision"}, wantMembers: memberIDs},
+		{name: "external group without components", id: identifier.Identifier{ExternalID: "group-legacy"}, want: legacy.ID, withoutComponents: true},
 		{name: "typed domain UUID expands all domain members despite rack collision", id: identifier.Identifier{ID: collisionDomain.ID}, wantMembers: memberIDs},
 		{name: "domain name remains supported", id: identifier.Identifier{Name: "legacy"}, want: legacy.ID},
 		{name: "unknown external ID", id: identifier.Identifier{ExternalID: "missing"}, code: codes.NotFound},
@@ -306,10 +373,12 @@ func TestPostgresStore_GetRacksForNVLDomain(t *testing.T) {
 			}
 			require.Len(t, got, 1)
 			assert.Equal(t, tc.want, got[0].Info.ID)
+			assert.Equal(t, domain.ExternalID, got[0].NVLDomainExternalID)
 			if tc.withoutComponents {
 				assert.Empty(t, got[0].Components)
 			} else {
 				require.Len(t, got[0].Components, 1)
+				assert.Equal(t, domain.ExternalID, got[0].Components[0].NVLDomainExternalID)
 			}
 		})
 	}

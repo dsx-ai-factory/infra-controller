@@ -27,6 +27,10 @@ Task schedules use a separate dispatcher. The internal job scheduler is a third 
 
 Database definitions are in [migrations](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/db/migrations) and [models](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/db/model). See [rule versioning](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/operation-rules-versioning.md) for rule-format development notes and [rule execution](operation-rule-execution.md) for activity and workflow boundaries.
 
+## Health synchronization
+
+Health synchronization preserves the last snapshot after a failed refresh or an omitted object; an explicitly empty report clears it. Observed NVLink topology is synchronized after switch inventory.
+
 ## Interfaces and configuration
 
 The [Flow protobuf](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/proto/v1/flow.proto) is the API source. [Generated Markdown](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/grpc-api.md) and [generated HTML](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/grpc-api.html) remain owned by the Flow Makefile's `gen-doc` target.

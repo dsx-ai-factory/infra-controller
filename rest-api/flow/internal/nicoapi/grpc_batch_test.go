@@ -270,8 +270,9 @@ func (c *recordingForgeClient) FindRacksByIds(
 	for _, id := range batch {
 		if id != omitID {
 			racks = append(racks, &corev1.Rack{
-				Id:     &corev1.RackId{Id: id},
-				Status: &corev1.RackStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
+				Id:          &corev1.RackId{Id: id},
+				RackGroupId: &corev1.RackGroupId{Id: "group-" + id},
+				Status:      &corev1.RackStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
 			})
 		}
 	}
@@ -577,6 +578,38 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 			assert.Equal(t, expectedBatches, test.batchCalls(fake))
 			require.Len(t, fake.versionRequests, 1)
 			assert.True(t, fake.versionRequests[0].GetDisplayConfig())
+		})
+	}
+}
+
+func TestGrpcClient_FindRackGroupIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ids     []string
+		omit    string
+		delay   time.Duration
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "persisted group and undiscovered rack", ids: []string{"present", "missing"}, omit: "missing", want: map[string]string{"present": "group-present"}},
+		{name: "whole sequence budget prevents call starvation", ids: []string{"a", "b", "c"}, delay: 20 * time.Millisecond, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &recordingForgeClient{omitID: tc.omit, rackDelay: tc.delay, runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 1}}
+			client := newRecordingGRPCClient(fake)
+			if tc.delay > 0 {
+				client.grpcTimeout = 30 * time.Millisecond
+			}
+			got, err := client.FindRackGroupIDs(t.Context(), tc.ids)
+			if tc.wantErr {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Nil(t, got)
+				assert.Less(t, len(fake.rackBatches), len(tc.ids))
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }

@@ -137,6 +137,12 @@ failure_retry_time = "90m"
 [machine_state_controller.controller]
 max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
 
+{{- if not (kindIs "bool" .Values.apiAdmissionControl.enabled) }}
+{{- fail "nico-api.apiAdmissionControl.enabled must be true or false" }}
+{{- end }}
+[api_admission_control]
+enabled = {{ .Values.apiAdmissionControl.enabled }}
+
 [vpc_prefix_state_controller]
 vpc_prefix_drain_time = "5m"
 

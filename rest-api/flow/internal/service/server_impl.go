@@ -38,6 +38,7 @@ import (
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
@@ -168,17 +169,15 @@ func (rs *FlowServerImpl) GetNVLinkDomain(ctx context.Context, req *pb.GetNVLink
 	if strings.TrimSpace(req.GetId()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "domain identifier is required")
 	}
-	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, externalRackIdentifier(req.GetId()), req.GetWithComponents())
+	domain, err := rs.inventoryManager.GetNVLDomain(ctx, identifier.Identifier{ExternalID: req.GetId()})
 	if err != nil {
 		return nil, err
 	}
-	if len(racks) == 0 {
-		return nil, status.Error(codes.NotFound, "NVLink domain not found")
+	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, identifier.Identifier{ID: domain.ID()}, req.GetWithComponents())
+	if err != nil {
+		return nil, err
 	}
-	if len(racks) != 1 {
-		return nil, status.Error(codes.FailedPrecondition, "domain resolves to multiple racks; specify a rack external ID")
-	}
-	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromRack(protobuf.RackTo(racks[0]))}, nil
+	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromInventory(domain, racks)}, nil
 }
 
 // GetListOfNVLinkDomains retrieves paginated domain inventory.
@@ -191,19 +190,31 @@ func (rs *FlowServerImpl) GetListOfNVLinkDomains(ctx context.Context, req *pb.Ge
 	default:
 		return nil, status.Error(codes.InvalidArgument, "order_by must be NAME_ASC or NAME_DESC")
 	}
-	racks, err := rs.GetListOfRacks(ctx, &pb.GetListOfRacksRequest{
-		Filters:        []*pb.Filter{{Field: &pb.Filter_RackField{RackField: pb.RackFilterField_RACK_FILTER_FIELD_NAME}, QueryInfo: req.GetInfo()}},
-		WithComponents: req.GetWithComponents(), Pagination: req.GetPagination(), WithExternalIdOnly: true,
-		OrderBy: &pb.OrderBy{Field: &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME}, Direction: direction},
-	})
+	page := protobuf.PaginationFrom(req.GetPagination())
+	if err := page.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	info := dbquery.StringQueryInfo{}
+	if req.GetInfo() != nil {
+		info = *protobuf.StringQueryInfoFrom(req.GetInfo())
+	}
+	rows, total, err := rs.inventoryManager.GetListOfNVLDomains(ctx, info, page, nvldomain.ListOptions{ExternalOnly: true, Descending: direction == "DESC"})
 	if err != nil {
 		return nil, err
 	}
-	domains := make([]*pb.NVLinkDomain, 0, len(racks.GetRacks()))
-	for _, r := range racks.GetRacks() {
-		domains = append(domains, protobuf.NVLinkDomainFromRack(r))
+	domains := make([]*pb.NVLinkDomain, 0, len(rows))
+	domainIDs := make([]uuid.UUID, 0, len(rows))
+	for _, domain := range rows {
+		domainIDs = append(domainIDs, domain.ID())
 	}
-	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: racks.GetTotal()}, nil
+	members, err := rs.inventoryManager.GetRacksForNVLDomains(ctx, domainIDs, req.GetWithComponents())
+	if err != nil {
+		return nil, err
+	}
+	for _, domain := range rows {
+		domains = append(domains, protobuf.NVLinkDomainFromInventory(domain, members[domain.ID()]))
+	}
+	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: total}, nil
 }
 
 func externalRackIdentifier(rawID string) identifier.Identifier {

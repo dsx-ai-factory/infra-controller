@@ -43,6 +43,7 @@ use crate::config::{
     SensorCollectorConfig as SensorCollectorOptions,
     TelemetryCollectorConfig as TelemetryCollectorOptions,
 };
+use crate::inventory::InventoryMetrics;
 use crate::limiter::RateLimiter;
 use crate::metrics::{MetricsManager, operation_duration_buckets_seconds};
 use crate::tls::MtlsHttpClientProvider;
@@ -325,6 +326,7 @@ pub struct DiscoveryLoopContext {
     pub(super) collectors: CollectorState,
     pub(crate) discovery_iteration_histogram: Histogram,
     pub(crate) discovery_endpoint_fetch_histogram: Histogram,
+    pub(crate) inventory_metrics: InventoryMetrics,
     pub(crate) limiter: Arc<dyn RateLimiter>,
     pub(crate) bmc_request_concurrency: NonZeroUsize,
     pub(crate) metrics_manager: Arc<MetricsManager>,
@@ -407,6 +409,8 @@ impl DiscoveryLoopContext {
         )?;
         registry.register(Box::new(discovery_endpoint_fetch_histogram.clone()))?;
 
+        let inventory_metrics = InventoryMetrics::new(registry, metrics_prefix)?;
+
         let tls_config = tls_config.or_else(|| config.tls.switch.clone());
 
         // Periodic HTTP switch collectors share one provider because
@@ -429,6 +433,7 @@ impl DiscoveryLoopContext {
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
+            inventory_metrics,
             limiter,
             bmc_request_concurrency: config.bmc_request_concurrency,
             metrics_manager,

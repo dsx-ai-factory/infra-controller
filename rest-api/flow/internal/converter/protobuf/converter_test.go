@@ -24,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
@@ -647,7 +648,36 @@ func TestComponentConverter(t *testing.T) {
 	}
 }
 
-func TestNVLinkDomainFromRack(t *testing.T) {
+func TestNVLinkDomainFromInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name, otherProfile, domainName string
+		topology                       *string
+	}{
+		{name: "common topology", otherProfile: "GB200_NVL72R1_C2G4_SMC", topology: new("GB200_NVL72R1_C2G4")},
+		{name: "inconsistent topology", otherProfile: "GB300_NVL72R1_C2G4_SMC", domainName: "group-name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := uuid.New()
+			domain := &nvldomain.NVLDomain{Identifier: identifier.Identifier{ID: uuid.New(), ExternalID: "group-01", Name: tc.domainName}, NMXCClusterID: &cluster}
+			racks := []*rack.Rack{
+				{ExternalID: "rack-a", RackProfileID: new("GB200_NVL72R1_C2G4_NVIDIA"), OperationStatus: types.PhaseReady, Components: []component.Component{{ComponentID: "a"}}},
+				{ExternalID: "rack-b", RackProfileID: &tc.otherProfile, OperationStatus: types.PhaseInUse, Components: []component.Component{{ComponentID: "b"}}},
+			}
+			got := NVLinkDomainFromInventory(domain, racks)
+			assert.Equal(t, "group-01", got.GetId())
+			assert.Equal(t, got.GetId(), got.GetRackGroupId())
+			assert.Equal(t, cluster.String(), got.GetNmxcClusterId())
+			assert.Equal(t, tc.domainName, got.GetName())
+			assert.Equal(t, tc.topology, got.Topology)
+			assert.Equal(t, pb.Phase_PHASE_IN_USE, got.OperationStatus)
+			require.Len(t, got.Components, 2)
+			assert.Equal(t, "a", got.Components[0].GetComponentId())
+			assert.Equal(t, "b", got.Components[1].GetComponentId())
+		})
+	}
+}
+
+func TestRackTopology(t *testing.T) {
 	for _, tc := range []struct{ name, profile, topology string }{
 		{name: "qualified", profile: "GB200_NVL72R1_C2G4_WIWYNN", topology: "GB200_NVL72R1_C2G4"},
 		{name: "without power", profile: "GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF", topology: "GB300_NVL72R1_C2G4"},
@@ -656,17 +686,11 @@ func TestNVLinkDomainFromRack(t *testing.T) {
 		{name: "unknown vendor", profile: "GB200_NVL72R1_C2G4_OTHER"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &pb.Rack{ExternalId: "rack-01", Info: &pb.DeviceInfo{Name: "domain-a"}, RackProfileId: &tc.profile,
-				OperationStatus: pb.Phase_PHASE_READY, Components: []*pb.Component{{ComponentId: "compute-01"}}}
-			d := NVLinkDomainFromRack(r)
-			assert.Equal(t, "rack-01", d.GetId())
-			assert.Equal(t, "domain-a", d.GetName())
-			assert.Equal(t, pb.Phase_PHASE_READY, d.GetOperationStatus())
-			assert.Equal(t, r.Components, d.GetComponents())
+			topology := rackTopology(tc.profile)
 			if tc.topology == "" {
-				assert.Nil(t, d.Topology)
+				assert.Nil(t, topology)
 			} else {
-				assert.Equal(t, tc.topology, d.GetTopology())
+				assert.Equal(t, &tc.topology, topology)
 			}
 		})
 	}

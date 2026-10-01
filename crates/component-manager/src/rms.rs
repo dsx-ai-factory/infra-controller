@@ -6797,6 +6797,7 @@ mod tests {
         db::expected_rack::create(
             &mut *txn,
             &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
                 rack_id: rack_id.clone(),
                 rack_profile_id: rack_profile_id.clone(),
                 metadata: model::metadata::Metadata::default(),
@@ -6847,6 +6848,7 @@ mod tests {
         db::expected_rack::create(
             &mut *txn,
             &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
                 rack_id: rack_id.clone(),
                 rack_profile_id: rack_profile_id.clone(),
                 metadata: model::metadata::Metadata::default(),

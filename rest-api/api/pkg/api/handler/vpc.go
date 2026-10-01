@@ -12,12 +12,13 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/labstack/echo/v4"
+
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/labstack/echo/v4"
 
 	"go.opentelemetry.io/otel/attribute"
 	temporalClient "go.temporal.io/sdk/client"
@@ -35,6 +36,7 @@ import (
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -45,23 +47,21 @@ import (
 
 // CreateVPCHandler is the API Handler for creating new VPC
 type CreateVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewCreateVPCHandler initializes and returns a new handler for creating Tenant
 func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) CreateVPCHandler {
 	return CreateVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -77,7 +77,7 @@ func NewCreateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *s
 // @Success 201 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc [post]
 func (cvh CreateVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Create", c, cvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -569,23 +569,21 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 // UpdateVPCHandler is the API Handler for updating a VPC
 type UpdateVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewUpdateVPCHandler initializes and returns a new handler for updating VPC
 func NewUpdateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) UpdateVPCHandler {
 	return UpdateVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -602,7 +600,7 @@ func NewUpdateVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *s
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id} [patch]
 func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update", c, uvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -631,7 +629,7 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 	// Get vpc instance ID from URL param
 	vpcStrID := c.Param("id")
 
-	uvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Validate request
 	// Bind request data to API model
@@ -1084,21 +1082,19 @@ func powerResourceGroupAPIError(err error, fallbackMessage string) *cutil.APIErr
 
 // UpdateVPCVirtualizationHandler is the API Handler for updating virtualization of a VPC
 type UpdateVPCVirtualizationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateVPCVirtualizationHandler initializes and returns a new handler for updating virtualization of a VPC
 func NewUpdateVPCVirtualizationHandler(dbSession *cdb.Session, tc temporalClient.Client, sc *sc.ClientPool, cfg *config.Config) UpdateVPCVirtualizationHandler {
 	return UpdateVPCVirtualizationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
@@ -1115,7 +1111,7 @@ func NewUpdateVPCVirtualizationHandler(dbSession *cdb.Session, tc temporalClient
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id}/virtualization [patch]
 func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update Virtualization", c, uvvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Update Virtualization", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1144,7 +1140,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	// Get vpc instance ID from URL param
 	vpcStrID := c.Param("id")
 
-	uvvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Validate request
 	// Bind request data to API model
@@ -1359,19 +1355,17 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 
 // GetVPCHandler is the API Handler for getting a VPC
 type GetVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetVPCHandler initializes and returns a new handler for getting VPC
 func NewGetVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetVPCHandler {
 	return GetVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1388,7 +1382,7 @@ func NewGetVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *con
 // @Success 200 {object} model.APIVpc
 // @Router /v2/org/{org}/nico/vpc/{id} [get]
 func (gvh GetVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Get", c, gvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1425,7 +1419,7 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 	// Get VPC ID from URL param
 	vpcIDStr := c.Param("id")
 
-	gvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcIDStr), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcIDStr))
 
 	// Get VPC
 	vpcDAO := cdbm.NewVpcDAO(gvh.dbSession)
@@ -1491,19 +1485,17 @@ func (gvh GetVPCHandler) Handle(c echo.Context) error {
 
 // GetAllVPCHandler is the API Handler for retrieving all VPCs
 type GetAllVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVPCHandler initializes and returns a new handler for retreiving all VPCs
 func NewGetAllVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllVPCHandler {
 	return GetAllVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1526,7 +1518,7 @@ func NewGetAllVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Success 200 {array} []model.APIVpc
 // @Router /v2/org/{org}/nico/vpc [get]
 func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "GetAll", c, gavh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1580,7 +1572,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 	siteIDStrs := qParams["siteId"]
 	if len(siteIDStrs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs))
 		for _, idStr := range siteIDStrs {
 			parsedID, serr := uuid.Parse(idStr)
 			if serr != nil {
@@ -1612,13 +1604,13 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	var statuses []string
 	if statusStrings := qParams["status"]; len(statusStrings) != 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings))
 		for _, status := range statusStrings {
 			_, ok := cdbm.VpcStatusMap[status]
 			if !ok {
@@ -1673,7 +1665,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	// Get network security group IDs from query param
 	networkSecurityGroupIDs := qParams["networkSecurityGroupId"]
 	if len(networkSecurityGroupIDs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("networkSecurityGroupId", networkSecurityGroupIDs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("networkSecurityGroupId", networkSecurityGroupIDs))
 		networkSecurityGroupDAO := cdbm.NewNetworkSecurityGroupDAO(gavh.dbSession)
 
 		networkSecurityGroups, _, err := networkSecurityGroupDAO.GetAll(
@@ -1701,7 +1693,7 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 	qNvLinkLogicalPartitionIDStrs := qParams["nvLinkLogicalPartitionId"]
 	if len(qNvLinkLogicalPartitionIDStrs) > 0 {
-		gavh.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionId", qNvLinkLogicalPartitionIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionId", qNvLinkLogicalPartitionIDStrs))
 		nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(gavh.dbSession)
 		nvLinkLogicalPartitionIDs := make([]uuid.UUID, 0, len(qNvLinkLogicalPartitionIDStrs))
 		for _, nvLinkLogicalPartitionIDStr := range qNvLinkLogicalPartitionIDStrs {
@@ -1792,23 +1784,21 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 // DeleteVPCHandler is the API Handler for deleting a VPC
 type DeleteVPCHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewDeleteVPCHandler initializes and returns a new handler for deleting VPC
 func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) DeleteVPCHandler {
 	return DeleteVPCHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		dps:        dps,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		dps:       dps,
+		scp:       scp,
 	}
 }
 
@@ -1824,7 +1814,7 @@ func NewDeleteVPCHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *
 // @Success 202
 // @Router /v2/org/{org}/nico/vpc/{id} [delete]
 func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Delete", c, dvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1857,7 +1847,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid VPC ID in URL", nil)
 	}
 
-	dvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_id", vpcStrID))
 
 	// Get VPC from DB
 	vpcDAO := cdbm.NewVpcDAO(dvh.dbSession)

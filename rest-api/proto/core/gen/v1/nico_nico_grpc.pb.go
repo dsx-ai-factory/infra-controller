@@ -891,8 +891,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
@@ -7115,8 +7118,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)

@@ -45,6 +45,7 @@ mod tests {
             };
             assert_eq!(request.rack_id.unwrap().as_str(), "rack-01");
             assert!(request.rack_profile_id.is_none());
+            assert!(request.rack_group_id.is_none());
         }
         let imported: common::ExpectedRackJson =
             serde_json::from_str(r#"{"rack_id":"rack-01"}"#).unwrap();

@@ -136,6 +136,7 @@ async fn test_add_expected_rack(pool: PgPool) {
 
     let rack_id = new_rack_id(&env).await;
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: Some(RackProfileId::new("NVL72")),
         metadata: Some(rpc::forge::Metadata {
@@ -176,6 +177,7 @@ async fn test_add_expected_rack_unconfigured_derived_profile(pool: PgPool) {
 
     let rack_id = new_rack_id(&env).await;
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: Some(RackProfileId::new("INVALID_TYPE")),
         metadata: None,
@@ -201,6 +203,7 @@ async fn test_add_expected_rack_ignores_empty_legacy_profile(pool: PgPool) {
 
     let rack_id = new_rack_id(&env).await;
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: Some(RackProfileId::new("")),
         metadata: None,
@@ -217,6 +220,7 @@ async fn test_add_expected_rack_missing_rack_id(pool: PgPool) {
     let env = env_with_rack_profiles(pool).await;
 
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: None,
         rack_profile_id: Some(RackProfileId::new("NVL72")),
         metadata: None,
@@ -261,6 +265,7 @@ async fn test_delete_expected_rack(pool: PgPool) {
 
     let rack_id = new_rack_id(&env).await;
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: Some(RackProfileId::new("NVL72")),
         metadata: None,
@@ -318,6 +323,7 @@ async fn test_update_expected_rack(pool: PgPool) {
     // Add a rack first.
     env.api()
         .add_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(RackProfileId::new("NVL72")),
             metadata: Some(rpc::forge::Metadata {
@@ -331,6 +337,7 @@ async fn test_update_expected_rack(pool: PgPool) {
     // Update it.
     env.api()
         .update_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(RackProfileId::new("NVL36")),
             metadata: Some(rpc::forge::Metadata {
@@ -370,6 +377,7 @@ async fn test_update_expected_rack_not_found(pool: PgPool) {
     let err = env
         .api()
         .update_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(RackProfileId::new("NVL72")),
             metadata: None,
@@ -402,6 +410,7 @@ async fn test_get_all_expected_racks(pool: PgPool) {
         let rack_id = new_rack_id(&env).await;
         env.api()
             .add_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+                rack_group_id: None,
                 rack_id: Some(rack_id),
                 rack_profile_id: Some(RackProfileId::new("NVL72")),
                 metadata: Some(rpc::forge::Metadata {
@@ -428,6 +437,7 @@ async fn test_add_expected_rack_duplicate(pool: PgPool) {
 
     let rack_id = new_rack_id(&env).await;
     let expected_rack = rpc::forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: Some(RackProfileId::new("NVL72")),
         metadata: None,
@@ -461,6 +471,7 @@ async fn test_replace_all_expected_racks(pool: PgPool) {
     let initial_rack_id = new_rack_id(&env).await;
     env.api()
         .add_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(initial_rack_id.clone()),
             rack_profile_id: Some(RackProfileId::new("NVL72")),
             metadata: None,
@@ -474,6 +485,7 @@ async fn test_replace_all_expected_racks(pool: PgPool) {
     let replacement = ExpectedRackList {
         expected_racks: vec![
             rpc::forge::ExpectedRack {
+                rack_group_id: None,
                 rack_id: Some(rack_id_1),
                 rack_profile_id: Some(RackProfileId::new("NVL72")),
                 metadata: Some(rpc::forge::Metadata {
@@ -482,6 +494,7 @@ async fn test_replace_all_expected_racks(pool: PgPool) {
                 }),
             },
             rpc::forge::ExpectedRack {
+                rack_group_id: None,
                 rack_id: Some(rack_id_2),
                 rack_profile_id: Some(RackProfileId::new("NVL36")),
                 metadata: Some(rpc::forge::Metadata {
@@ -525,6 +538,7 @@ async fn test_delete_all_expected_racks(pool: PgPool) {
         let rack_id = new_rack_id(&env).await;
         env.api()
             .add_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+                rack_group_id: None,
                 rack_id: Some(rack_id),
                 rack_profile_id: Some(RackProfileId::new("NVL72")),
                 metadata: None,
@@ -563,6 +577,7 @@ async fn test_add_expected_rack_creates_rack_entry(pool: PgPool) {
     let rack_id = new_rack_id(&env).await;
     env.api()
         .add_expected_rack(tonic::Request::new(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(RackProfileId::new("NVL72")),
             metadata: None,

@@ -64,6 +64,11 @@ struct RedfishSimState {
     /// preserves the normal successful behavior; `Some(false)` models a BMC
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
+    next_lockdown_status_error: Option<RedfishError>,
+    /// Fail one power-state read without changing the host's actual power.
+    next_power_state_error: Option<String>,
+    /// Fail the next matching power action before changing the host's power.
+    next_power_action_error: Option<(SystemPowerControl, String)>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -403,6 +408,21 @@ impl RedfishSim {
         self.state.lock().unwrap().lockdown_bmc_applies = Some(applies);
     }
 
+    /// Fail one lockdown observation without changing the actual policy.
+    pub fn fail_next_lockdown_status(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Inject a transient error into the next power-state read only.
+    pub fn fail_next_power_state_read(&self, error: &str) {
+        self.state.lock().unwrap().next_power_state_error = Some(error.to_string());
+    }
+
+    /// Fail the next matching power action, recording the attempt but applying no change.
+    pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
+    }
+
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller clock. Use a value larger than
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
@@ -639,6 +659,8 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
     Power(libredfish::SystemPowerControl),
+    /// A power request rejected before its effect was applied.
+    PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
@@ -756,7 +778,13 @@ impl Redfish for RedfishSimClient {
     fn get_power_state<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().hosts[&self._host].power) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_power_state_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
+            Ok(state.hosts[&self._host].power)
+        })
     }
 
     fn get_power_metrics<'a>(
@@ -776,6 +804,20 @@ impl Redfish for RedfishSimClient {
                 _ => PowerState::On,
             };
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_power_action_error
+                .as_ref()
+                .is_some_and(|(failed_action, _)| *failed_action == action)
+            {
+                let (_, error) = state.next_power_action_error.take().unwrap();
+                state
+                    .hosts
+                    .get_mut(&self._host)
+                    .unwrap()
+                    .actions
+                    .push(RedfishSimAction::PowerFailed(action));
+                return Err(RedfishError::GenericError { error });
+            }
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.power = power_state;
             host_state.actions.push(RedfishSimAction::Power(action));
@@ -912,7 +954,10 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::Status, RedfishError>> {
         Box::pin(async move {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_lockdown_status_error.take() {
+                return Err(error);
+            }
             Ok(libredfish::Status::build_fake(
                 state.hosts[&self._host].lockdown,
             ))

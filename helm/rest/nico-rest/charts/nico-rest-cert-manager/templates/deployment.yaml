@@ -59,6 +59,13 @@ spec:
               name: https
             - containerPort: {{ .Values.config.insecurePort }}
               name: http
+          {{- with .Values.extraEnv }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
             - name: ca-signing-secret
               mountPath: /etc/pki/ca

@@ -125,6 +125,9 @@ const BLUEFIELD_SOFTWARE_NAME_PREFIX: &str = "bf-software";
 /// DPU-cluster Node. Value format: `<namespace>_<deployment_name>`.
 const DPU_OWNED_BY_DEPLOYMENT_LABEL: &str = "svc.dpu.nvidia.com/owned-by-dpudeployment";
 const SERVICE_INTERFACE_MIGRATION_BLOCKED_LOG_DELAY: Duration = Duration::from_secs(10 * 60);
+// Bound optional startup cleanup to two minutes for the whole batch, including lookup,
+// delete, and finalizer polling, so stuck deletion cannot indefinitely delay the API listener.
+const STALE_PF1_INTERFACE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const SERVICE_INTERFACE_DELETE_INITIAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SERVICE_INTERFACE_DELETE_MAX_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -1508,7 +1511,8 @@ pub fn build_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefinition> 
     interfaces
 }
 
-/// Builds the effective BF3/generic-BF4 interface inventory for one site configuration.
+/// Builds the platform-independent BF3/generic-BF4 inventory before host-PF
+/// filtering.
 pub fn build_effective_dpu_interfaces(
     num_of_vfs: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
@@ -1572,7 +1576,42 @@ pub fn build_effective_dpu_interfaces(
     interfaces
 }
 
+/// Builds the interface inventory for a deployment's platform profile.
+/// A static interface vector is first built using build_dpu_interfaces_vec()
+/// which is then changed based on deployment type.
+/// BF3 exposes only the static PF0 host representor in its NVConfig, so its
+/// static inventory omits `pf1hpf`.
+/// Generic BF4 retains static host PF1.
+/// Astra interface inventory calls build_astra_dpu_interfaces_vec() which
+/// also calls build_dpu_interfaces_vec() and then adds brcx- and br-xplane
+/// patch interfaces.
+/// When intercept bridging (VMaaS) is configured, the PF/VF topology
+/// specified in the site-config TOML replaces ordinary PF/VF entries and
+/// is authoritative. The deployment specific static-name filter does not
+/// alter the topology specified in the site-config.
+pub fn build_deployment_dpu_interfaces(
+    deployment_type: DpuDeploymentType,
+    num_of_vfs: u32,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+) -> Vec<DpuServiceInterfaceTemplateDefinition> {
+    match deployment_type {
+        DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => {
+            let mut interfaces = build_effective_dpu_interfaces(num_of_vfs, intercept_bridging);
+            interfaces.retain(|interface| interface.name != "pf1hpf");
+            interfaces
+        }
+        DpuDeploymentType::Bf4Generic => {
+            build_effective_dpu_interfaces(num_of_vfs, intercept_bridging)
+        }
+        DpuDeploymentType::Bf4Astra => build_astra_dpu_interfaces_vec(),
+    }
+}
+
 /// Builds the static BF4 Astra interface inventory.
+/// Astra starts with the common physical/PF/VF inventory, then adds two
+/// NICo-owned Patch interfaces for each fixed xplane group: one from the
+/// group's `brcx-*` bridge to `br-sfc`, and one from `br-xplane` to `br-sfc`.
+/// The DPUDeployment service chains refer to those patch names.
 pub fn build_astra_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefinition> {
     let mut interfaces = build_dpu_interfaces_vec();
     interfaces.extend(build_astra_patch_dpu_interfaces_vec());
@@ -1747,7 +1786,24 @@ pub(crate) fn validate_initialization_config(
     Ok(())
 }
 
-/// Resolves initialization interfaces and validates their SF capacity without writing resources.
+/// Resolves the final interface inventory and PF SF capacity for a deployment.
+///
+/// Normal NICo startup builds the BF3/generic-BF4 intercept topology in `setup.rs` before it
+/// constructs service definitions. It passes that inventory here in `config.interfaces`. This
+/// function rebuilds the expected inventory and verifies it against the `config.interfaces`
+/// passed in; on success it keeps using the caller's list. For Astra, only the base set of
+/// interfaces is passed in, and this function augments Astra's required xplane patch interfaces
+/// before applying DPF CRs.
+///
+/// For direct SDK callers with an empty inventory, this function builds the
+/// appropriate default or topology projection itself.
+///
+/// The resolved list is used to calculate the `pf_total_sf`, which is used during flavor creation,
+/// DPUServiceInterface creation, and DPUDeployment service chains so those resources cannot
+/// diverge.
+///
+/// This function performs no Kubernetes writes and is the validation boundary for both the normal
+/// and direct-SDK paths.
 fn resolve_initialization_inventory<'a>(
     config: &'a InitDpfResourcesConfig,
 ) -> Result<ResolvedInitialization<'a>, DpfError> {
@@ -1798,7 +1854,11 @@ fn resolve_initialization_inventory<'a>(
     let interfaces = if !matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
         && let Some(topology) = config.intercept_bridging.as_ref()
     {
-        let projected = build_effective_dpu_interfaces(config.num_of_vfs, Some(topology));
+        let projected = build_deployment_dpu_interfaces(
+            config.deployment_type,
+            config.num_of_vfs,
+            Some(topology),
+        );
 
         // Topology is the authoritative PF/VF inventory. Compare any explicit caller projection
         // with the canonical projection in order, reporting the first differing name so operators
@@ -1840,16 +1900,15 @@ fn resolve_initialization_inventory<'a>(
             Cow::Borrowed(config.interfaces.as_slice())
         }
     } else if config.interfaces.is_empty() {
-        // Astra retains its established static inventory and ignores site topology policy.
-        Cow::Owned(match config.deployment_type {
-            DpuDeploymentType::Bf4Astra => build_astra_dpu_interfaces_vec(),
-            DpuDeploymentType::Bf3
-            | DpuDeploymentType::Bf3Gb200
-            | DpuDeploymentType::Bf4Generic => {
-                build_effective_dpu_interfaces(config.num_of_vfs, None)
-            }
-        })
+        // If this function is directly called and config.interfaces
+        // is empty build the deployment interfaces.
+        Cow::Owned(build_deployment_dpu_interfaces(
+            config.deployment_type,
+            config.num_of_vfs,
+            None,
+        ))
     } else if matches!(config.deployment_type, DpuDeploymentType::Bf4Astra) {
+        // For Astra augment the patch interfaces.
         Cow::Owned(augment_astra_dpu_interfaces(config.interfaces.clone())?)
     } else {
         Cow::Borrowed(config.interfaces.as_slice())
@@ -2348,6 +2407,105 @@ impl<
         .await?;
 
         Ok(())
+    }
+}
+
+impl<R: crate::repository::DpuServiceInterfaceRepository, L> DpfSdk<R, L> {
+    /// Removes NICo's obsolete static PF1 interface after deployment updates and waits until
+    /// DPF completes deletion. Only BF3 profiles are called here. Explicit PF1 inventories and
+    /// VMaaS PF1 topology are preserved. Note that if `bf4_configured` is set
+    /// then BF3 unscoped pf1 is not removed.
+    /// Deletes are submitted concurrently, with duplicate unscoped names
+    /// removed. Lookup, deletion, and polling share one two-minute
+    /// deadline for the entire batch. Expiry returns a timeout error.
+    pub async fn cleanup_stale_pf1_interfaces(
+        &self,
+        configs: &[&InitDpfResourcesConfig],
+        bf4_configured: bool,
+    ) -> Result<(), DpfError> {
+        let mut names = Vec::new();
+        for config in configs {
+            if !matches!(
+                config.deployment_type,
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            ) {
+                continue;
+            }
+            // Explicit VMaaS PF1 selections remain authoritative even on BF3.
+            if config.intercept_bridging.as_ref().is_some_and(|topology| {
+                topology
+                    .interfaces()
+                    .iter()
+                    .any(|interface| interface.identity.pf_id == 1)
+            }) || resolve_initialization_inventory(config)?
+                .interfaces
+                .iter()
+                .any(|interface| interface.name == "pf1hpf")
+            {
+                // An explicit request protects the shared interface for every unscoped deployment.
+                if !config.deployment_scoped_service_interfaces {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            let name = if config.deployment_scoped_service_interfaces {
+                service_cr_name(
+                    "pf1hpf",
+                    service_interface_cr_suffix(config.deployment_type),
+                )
+            } else {
+                // BF4 still needs the shared, unscoped PF1 interface.
+                if bf4_configured {
+                    continue;
+                }
+                "pf1hpf".to_string()
+            };
+            names.push(name);
+        }
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            return Ok(());
+        }
+        let cleanup = async {
+            let deletes = names.iter().map(|name| async move {
+                if crate::repository::DpuServiceInterfaceRepository::get(
+                    &*self.repo,
+                    name,
+                    &self.namespace,
+                )
+                .await?
+                .is_none()
+                {
+                    return Ok(());
+                }
+                tracing::info!(
+                    namespace = %self.namespace,
+                    service_interface = %name,
+                    "Deleting obsolete PF1 interface and waiting for DPF cleanup"
+                );
+                crate::repository::DpuServiceInterfaceRepository::delete(
+                    &*self.repo,
+                    name,
+                    &self.namespace,
+                )
+                .await
+            });
+            futures::future::try_join_all(deletes).await?;
+            wait_for_service_interface_deletions(&*self.repo, &names, &self.namespace).await
+        };
+        tokio::time::timeout(STALE_PF1_INTERFACE_CLEANUP_TIMEOUT, cleanup)
+            .await
+            .map_err(|_| {
+                DpfError::timeout(
+                    "stale PF1 interface cleanup",
+                    format!(
+                        "PF1 interfaces {names:?} in namespace {} were not cleaned up within two minutes",
+                        self.namespace,
+                    ),
+                )
+            })?
     }
 }
 
@@ -4430,6 +4588,66 @@ mod tests {
             .expect("default flavor test configuration must be valid")
     }
 
+    /// The default BF3 flavor exposes only host PF0, so its generated resources must not
+    /// request a PF1 representor. Generic BF4 retains the static PF1 endpoint.
+    #[test]
+    fn default_platform_inventory_matches_host_pf_exposure() {
+        for (deployment_type, has_pf1) in [
+            (DpuDeploymentType::Bf3, false),
+            (DpuDeploymentType::Bf3Gb200, false),
+            (DpuDeploymentType::Bf4Generic, true),
+        ] {
+            let interfaces = build_deployment_dpu_interfaces(deployment_type, 16, None);
+            assert_eq!(
+                interfaces
+                    .iter()
+                    .any(|interface| interface.name == "pf1hpf"),
+                has_pf1
+            );
+            assert!(interfaces.iter().any(|interface| interface.name == "p1"));
+
+            let deployment = build_deployment(
+                &[ServiceDefinition::new(
+                    DOCA_HBN_SERVICE_NAME,
+                    "repo",
+                    "chart",
+                    "1",
+                )],
+                "deployment",
+                &DpuProvisioningSource::Bfb("bfb".to_string()),
+                "flavor",
+                TEST_NAMESPACE,
+                &interfaces,
+                BTreeMap::new(),
+                deployment_type,
+            );
+            let switches = deployment.spec.service_chains.unwrap().switches;
+            assert_eq!(
+                switches.iter().any(|switch| {
+                    switch.ports.iter().any(|port| {
+                        port.service_interface.as_ref().is_some_and(|interface| {
+                            interface
+                                .match_labels
+                                .get("interface")
+                                .is_some_and(|name| name == "pf1hpf")
+                        })
+                    })
+                }),
+                has_pf1,
+            );
+            assert_eq!(
+                switches.iter().any(|switch| {
+                    switch.ports.iter().any(|port| {
+                        port.service
+                            .as_ref()
+                            .is_some_and(|service| service.interface == "pf1hpf_if")
+                    })
+                }),
+                has_pf1,
+            );
+        }
+    }
+
     /// Verifies static inventory filtering pins minimum, default, and maximum counts.
     #[test]
     fn effective_static_inventory_follows_provisioned_vf_count() {
@@ -4737,11 +4955,12 @@ mod tests {
                 .any(|interface| interface.name == "p-br-xplane-r3swpln1-to-br-sfc")
         );
 
-        let bf3_config = InitDpfResourcesConfigBuilder::default()
+        let bf4_config = InitDpfResourcesConfigBuilder::default()
+            .deployment_type(DpuDeploymentType::Bf4Generic)
             .interfaces(base_interfaces.clone())
             .build()
-            .expect("explicit BF3 inventory must be accepted unchanged");
-        assert_eq!(bf3_config.interfaces, base_interfaces);
+            .expect("explicit BF4 inventory must be accepted unchanged");
+        assert_eq!(bf4_config.interfaces, base_interfaces);
     }
 
     /// Astra's NICo-owned patch names cannot be rebound by a direct SDK caller.

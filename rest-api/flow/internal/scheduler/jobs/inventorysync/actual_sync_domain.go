@@ -25,18 +25,12 @@ type domainMirrorResult struct {
 	domainsResurrected  int
 	domainsSoftDeleted  int
 	membershipsAssigned int
-	membershipsCleared  int
-}
-
-type clearedDomainMembership struct {
-	rackExternalID string
-	rackID         uuid.UUID
-	domainID       uuid.UUID
 }
 
 type domainTopologySnapshot struct {
-	domainByRack map[uuid.UUID]uuid.UUID
-	domainIDs    map[uuid.UUID]struct{}
+	groupByRack    map[uuid.UUID]string
+	clusterByGroup map[string]*uuid.UUID
+	invalidGroups  map[string]bool
 }
 
 func (r domainMirrorResult) log() {
@@ -47,7 +41,6 @@ func (r domainMirrorResult) log() {
 		Int("domains_resurrected", r.domainsResurrected).
 		Int("domains_soft_deleted", r.domainsSoftDeleted).
 		Int("memberships_assigned", r.membershipsAssigned).
-		Int("memberships_cleared", r.membershipsCleared).
 		Msg("Actual-inventory sync: NVLink domains")
 }
 
@@ -81,7 +74,17 @@ func syncObservedNVLinkDomainTopology(
 		return
 	}
 
-	result, err := mirrorObservedNVLinkDomainMemberships(ctx, pool, memberships, rackIDByExternalID)
+	rackExternalIDs := make([]string, 0, len(rackIDByExternalID))
+	for externalID := range rackIDByExternalID {
+		rackExternalIDs = append(rackExternalIDs, externalID)
+	}
+	sort.Strings(rackExternalIDs)
+	groups, err := nicoClient.FindRackGroupIDs(ctx, rackExternalIDs)
+	if err != nil {
+		log.Error().Err(err).Msg("Actual-inventory sync: pulling rack groups failed; preserving domain topology")
+		return
+	}
+	result, err := mirrorObservedNVLinkDomainMemberships(ctx, pool, memberships, rackIDByExternalID, groups)
 	if err != nil {
 		log.Error().Err(err).
 			Msg("Actual-inventory sync: NVLink domain reconciliation failed; preserving existing topology")
@@ -94,8 +97,10 @@ func syncObservedNVLinkDomainTopology(
 // domain-topology snapshot into Flow. rackIDByExternalID translates inventory
 // rack IDs into Flow rack UUIDs.
 //
-// A rack omitted from a successful snapshot has no observed domain membership
-// and is cleared. Domain rows and rack memberships are committed together. A
+// Persisted rack groups own membership independently of switch observations.
+// Missing groups preserve legacy membership; absent observations clear only the
+// NMX-C cluster. Invalid or conflicting observations preserve that group's cluster.
+// Domain rows and rack memberships are committed together. A
 // displaced domain is soft-deleted only when no active rack references it;
 // unrelated unreferenced domains are preserved because Flow supports manual
 // domain creation. Observations for racks absent from active Flow inventory are
@@ -105,20 +110,12 @@ func mirrorObservedNVLinkDomainMemberships(
 	pool *cdb.Session,
 	memberships []nicoapi.NVLinkDomainMembership,
 	rackIDByExternalID map[string]uuid.UUID,
+	groupByRackExternalID map[string]string,
 ) (domainMirrorResult, error) {
 	result := domainMirrorResult{pulled: len(memberships)}
-	snapshot, err := buildDomainTopologySnapshot(memberships, rackIDByExternalID)
-	if err != nil {
-		return result, err
-	}
+	snapshot := buildDomainTopologySnapshot(memberships, rackIDByExternalID, groupByRackExternalID)
 
-	rackExternalIDByID := make(map[uuid.UUID]string, len(rackIDByExternalID))
-	for externalID, rackID := range rackIDByExternalID {
-		rackExternalIDByID[rackID] = externalID
-	}
-	clearedMemberships := make([]clearedDomainMembership, 0)
-
-	err = pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+	err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 		var existingDomains []model.NVLDomain
 		err := tx.NewSelect().
 			Model(&existingDomains).
@@ -128,9 +125,11 @@ func mirrorObservedNVLinkDomainMemberships(
 			return fmt.Errorf("load existing NVLink domains: %w", err)
 		}
 
-		existingByID := make(map[uuid.UUID]*model.NVLDomain, len(existingDomains))
+		existingByGroup := make(map[string]*model.NVLDomain, len(existingDomains))
 		for i := range existingDomains {
-			existingByID[existingDomains[i].ID] = &existingDomains[i]
+			if existingDomains[i].ExternalID != nil {
+				existingByGroup[*existingDomains[i].ExternalID] = &existingDomains[i]
+			}
 		}
 
 		rackIDs := sortedUUIDValues(rackIDByExternalID)
@@ -150,17 +149,37 @@ func mirrorObservedNVLinkDomainMemberships(
 			}
 		}
 
-		domainIDs := sortedUUIDKeys(snapshot.domainIDs)
-		for _, domainID := range domainIDs {
-			existing, found := existingByID[domainID]
+		groupIDs := make([]string, 0, len(snapshot.clusterByGroup))
+		for groupID := range snapshot.clusterByGroup {
+			groupIDs = append(groupIDs, groupID)
+		}
+		sort.Strings(groupIDs)
+		domainIDByGroup := make(map[string]uuid.UUID, len(groupIDs))
+		for _, groupID := range groupIDs {
+			existing, found := existingByGroup[groupID]
 			if !found {
-				domain := model.NVLDomain{ID: domainID, Name: domainID.String()}
-				_, err = tx.NewInsert().Model(&domain).Exec(ctx)
-				if err != nil {
-					return fmt.Errorf("insert NVLink domain %s: %w", domainID, err)
+				// Core reports group identity, not a domain display name.
+				domain := model.NVLDomain{ID: uuid.New(), ExternalID: &groupID, NMXCClusterID: snapshot.clusterByGroup[groupID]}
+				insertResult, insertErr := tx.NewInsert().Model(&domain).Exec(ctx)
+				if insertErr != nil {
+					return fmt.Errorf("insert NVLink domain %s: %w", groupID, insertErr)
 				}
-				result.domainsInserted++
+				changed, rowsErr := insertResult.RowsAffected()
+				if rowsErr != nil {
+					return rowsErr
+				}
+				result.domainsInserted += int(changed)
+				domainIDByGroup[groupID] = domain.ID
 				continue
+			}
+			domainID := existing.ID
+			domainIDByGroup[groupID] = domainID
+			if !snapshot.invalidGroups[groupID] {
+				_, err = tx.NewUpdate().Model(existing).WhereAllWithDeleted().Where("id = ?", domainID).
+					Set("nmxc_cluster_id = ?", snapshot.clusterByGroup[groupID]).Exec(ctx)
+				if err != nil {
+					return fmt.Errorf("update NMX-C cluster for group %s: %w", groupID, err)
+				}
 			}
 
 			if existing.DeletedAt == nil {
@@ -187,24 +206,23 @@ func mirrorObservedNVLinkDomainMemberships(
 		now := time.Now()
 		displacedDomainIDs := make(map[uuid.UUID]struct{})
 		for _, rackID := range rackIDs {
-			domainID, assigned := snapshot.domainByRack[rackID]
+			groupID, assigned := snapshot.groupByRack[rackID]
+			if !assigned {
+				// Undiscovered and legacy racks have no authoritative group yet.
+				continue
+			}
+			domainID := domainIDByGroup[groupID]
 			currentDomainID := currentDomainByRack[rackID]
-			if currentDomainID != uuid.Nil && (!assigned || currentDomainID != domainID) {
+			if currentDomainID != uuid.Nil && currentDomainID != domainID {
 				displacedDomainIDs[currentDomainID] = struct{}{}
 			}
 			query := tx.NewUpdate().
 				Model((*model.Rack)(nil)).
 				Set("updated_at = ?", now).
-				Where("id = ?", rackID)
-			if assigned {
-				query = query.
-					Set("nvldomain_id = ?", domainID).
-					Where("nvldomain_id IS DISTINCT FROM ?", domainID)
-			} else {
-				query = query.
-					Set("nvldomain_id = NULL").
-					Where("nvldomain_id IS NOT NULL")
-			}
+				Where("id = ?", rackID).
+				Set("nvldomain_id = ?", domainID).
+				Set("rack_group_id = ?", groupID).
+				Where("(nvldomain_id IS DISTINCT FROM ? OR rack_group_id IS DISTINCT FROM ?)", domainID, groupID)
 
 			updateResult, updateErr := query.Exec(ctx)
 			if updateErr != nil {
@@ -217,16 +235,7 @@ func mirrorObservedNVLinkDomainMemberships(
 			if changed == 0 {
 				continue
 			}
-			if assigned {
-				result.membershipsAssigned += int(changed)
-			} else {
-				result.membershipsCleared += int(changed)
-				clearedMemberships = append(clearedMemberships, clearedDomainMembership{
-					rackExternalID: rackExternalIDByID[rackID],
-					rackID:         rackID,
-					domainID:       currentDomainID,
-				})
-			}
+			result.membershipsAssigned += int(changed)
 		}
 
 		var referencedDomainIDs []uuid.UUID
@@ -277,13 +286,6 @@ func mirrorObservedNVLinkDomainMemberships(
 	if err != nil {
 		return domainMirrorResult{pulled: len(memberships)}, err
 	}
-	for _, cleared := range clearedMemberships {
-		log.Info().
-			Str("rack_external_id", cleared.rackExternalID).
-			Stringer("rack_id", cleared.rackID).
-			Stringer("previous_domain_id", cleared.domainID).
-			Msg("Actual-inventory sync: cleared rack NVLink domain membership because the observed snapshot contained no valid membership")
-	}
 
 	return result, nil
 }
@@ -291,59 +293,38 @@ func mirrorObservedNVLinkDomainMemberships(
 func buildDomainTopologySnapshot(
 	memberships []nicoapi.NVLinkDomainMembership,
 	rackIDByExternalID map[string]uuid.UUID,
-) (domainTopologySnapshot, error) {
-	domainByRack := make(map[uuid.UUID]uuid.UUID)
-	domainIDs := make(map[uuid.UUID]struct{})
-	unknownRackIDs := make(map[string]struct{})
-	skippedUnknownMemberships := 0
-
-	for _, membership := range memberships {
-		domainID, err := uuid.Parse(membership.DomainID)
-		if err != nil || domainID == uuid.Nil {
-			return domainTopologySnapshot{}, fmt.Errorf("invalid observed NVLink domain ID %q", membership.DomainID)
+	groupByRackExternalID map[string]string,
+) domainTopologySnapshot {
+	snapshot := domainTopologySnapshot{groupByRack: make(map[uuid.UUID]string), clusterByGroup: make(map[string]*uuid.UUID), invalidGroups: make(map[string]bool)}
+	for externalID, rackID := range rackIDByExternalID {
+		groupID := groupByRackExternalID[externalID]
+		if groupID != "" {
+			snapshot.groupByRack[rackID] = groupID
+			snapshot.clusterByGroup[groupID] = nil
 		}
-
-		rackID, ok := rackIDByExternalID[membership.RackID]
-		if !ok {
-			unknownRackIDs[membership.RackID] = struct{}{}
-			skippedUnknownMemberships++
+	}
+	for _, membership := range memberships {
+		rackID, known := rackIDByExternalID[membership.RackID]
+		groupID := snapshot.groupByRack[rackID]
+		if !known || groupID == "" {
+			log.Warn().Str("rack_id", membership.RackID).Msg("Skipping NMX-C observation without a known rack group")
 			continue
 		}
-
-		currentDomainID, exists := domainByRack[rackID]
-		if exists && currentDomainID != domainID {
-			return domainTopologySnapshot{}, fmt.Errorf(
-				"rack %q has conflicting observed NVLink domains %s and %s",
-				membership.RackID, currentDomainID, domainID,
-			)
+		clusterID, err := uuid.Parse(membership.DomainID)
+		current := snapshot.clusterByGroup[groupID]
+		if err != nil || clusterID == uuid.Nil || (current != nil && *current != clusterID) {
+			log.Error().Str("rack_group_id", groupID).Str("nmxc_cluster_id", membership.DomainID).
+				Msg("Invalid or conflicting NMX-C cluster observation; preserving this group's cluster")
+			snapshot.invalidGroups[groupID] = true
 		}
-
-		domainByRack[rackID] = domainID
-		domainIDs[domainID] = struct{}{}
-	}
-
-	if skippedUnknownMemberships > 0 {
-		unknownRacks := make([]string, 0, len(unknownRackIDs))
-		for rackID := range unknownRackIDs {
-			unknownRacks = append(unknownRacks, rackID)
+		if !snapshot.invalidGroups[groupID] {
+			snapshot.clusterByGroup[groupID] = &clusterID
 		}
-		sort.Strings(unknownRacks)
-		log.Warn().
-			Int("skipped_memberships", skippedUnknownMemberships).
-			Strs("rack_external_ids", unknownRacks).
-			Msg("Actual-inventory sync: skipped observed NVLink domain memberships for racks absent from Flow rack inventory")
 	}
-
-	return domainTopologySnapshot{domainByRack: domainByRack, domainIDs: domainIDs}, nil
-}
-
-func sortedUUIDKeys(values map[uuid.UUID]struct{}) []uuid.UUID {
-	ids := make([]uuid.UUID, 0, len(values))
-	for id := range values {
-		ids = append(ids, id)
+	for groupID := range snapshot.invalidGroups {
+		snapshot.clusterByGroup[groupID] = nil
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
-	return ids
+	return snapshot
 }
 
 func sortedUUIDValues(values map[string]uuid.UUID) []uuid.UUID {

@@ -17,7 +17,6 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -43,8 +42,7 @@ func TestNewGetUserHandler(t *testing.T) {
 				dbSession: dbSession,
 			},
 			want: GetUserHandler{
-				dbSession:  dbSession,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
 			},
 		},
 	}
@@ -102,7 +100,7 @@ func TestGetUserHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -114,7 +112,6 @@ func TestGetUserHandler_Handle(t *testing.T) {
 	ec.SetParamValues(org)
 	ec.Set("user", user)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	tests := []struct {

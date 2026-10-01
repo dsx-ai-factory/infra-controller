@@ -16,7 +16,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
@@ -51,7 +50,7 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -243,7 +242,6 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationTestHandler{
@@ -292,7 +290,7 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -440,7 +438,6 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationTestHandler{
@@ -489,7 +486,7 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationTest
@@ -596,7 +593,6 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationTestHandler{
@@ -648,7 +644,7 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls to site(s).
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -754,7 +750,6 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationTestHandler{
@@ -808,7 +803,7 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationResult
@@ -994,7 +989,6 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationResultsHandler{
@@ -1053,7 +1047,7 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationRun
@@ -1239,7 +1233,6 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationRunHandler{
@@ -1293,7 +1286,7 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationExternalConfig
@@ -1399,7 +1392,6 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationExternalConfigHandler{
@@ -1450,7 +1442,7 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	expCfgName := "test-ext-cfg-13"
 	// tests
@@ -1581,7 +1573,6 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationExternalConfigHandler{
@@ -1629,7 +1620,7 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -1788,7 +1779,6 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationExternalConfigHandler{
@@ -1836,7 +1826,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	extCfgName := "ext-cfg-1"
@@ -1964,7 +1954,6 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationExternalConfigHandler{
@@ -2013,7 +2002,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -2106,7 +2095,6 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := DeleteMachineValidationExternalConfigHandler{

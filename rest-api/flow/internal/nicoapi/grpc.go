@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/grpclog"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
@@ -21,7 +22,6 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -260,12 +260,15 @@ func (c *batchingForgeClient) visitRackBatchesAllowPartial(
 var testingMsgOnce sync.Once
 
 func coreGRPCDialOptions(transportCredentials credentials.TransportCredentials) []grpc.DialOption {
-	return []grpc.DialOption{
+	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGRPCMaxRecvMsgSize)),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.WithChainUnaryInterceptor(grpclog.UnaryClientInterceptor("nico-core-api")),
 	}
+	if cotel.TransportEnabled() {
+		options = append(options, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+	return options
 }
 
 // NewClient creates a GRPC connection pool to nico-core-api.  Returning success does not mean that we have yet made an actual connection;
@@ -1211,6 +1214,31 @@ func (c *grpcClient) FindRackHealthReports(ctx context.Context, rackIds []string
 		return nil, fmt.Errorf("FindRacksByIds: %w", err)
 	}
 	return result, nil
+}
+
+// FindRackGroupIDs reads the identity chosen at expected-rack creation from actual racks.
+// The timeout covers the complete batch sequence, not each individual batch.
+func (c *grpcClient) FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error) {
+	if len(rackIDs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.RacksByIdsRequest{}
+	for _, id := range rackIDs {
+		req.RackIds = append(req.RackIds, &corev1.RackId{Id: id})
+	}
+	groups := make(map[string]string, len(rackIDs))
+	err := c.gclient.visitRackBatchesAllowPartial(ctx, req, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			groups[rack.GetId().GetId()] = rack.GetRackGroupId().GetId()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read rack groups: %w", err)
+	}
+	return groups, nil
 }
 
 // GetMachinePositionInfo returns position information for the given machine IDs

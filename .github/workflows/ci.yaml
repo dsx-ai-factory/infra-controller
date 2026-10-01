@@ -241,6 +241,10 @@ jobs:
 
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          # The release Dockerfiles compile without the repository history, so
+          # the committer date the binaries report as build_date comes from here.
+          COMMIT_TIMESTAMP=$(git log -1 --format=%cI)
+          echo "commit_timestamp=${COMMIT_TIMESTAMP}" >> $GITHUB_OUTPUT
           echo "Using Git describe to extract version as VERSION and HELM_VERSION"
           # On a tagged commit this collapses to the clean tag (ex v2.0.0-rc.1);
           # otherwise it is the long form (ex v2.0.0-3-gabc1234) for dev builds.
@@ -598,6 +602,7 @@ jobs:
           RUNTIME_REF_AARCH64: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_ref }}
           VERSION: ${{ steps.version.outputs.version }}
           SHORT_SHA: ${{ steps.version.outputs.short_sha }}
+          COMMIT_TIMESTAMP: ${{ steps.version.outputs.commit_timestamp }}
           HELM_VERSION: ${{ steps.version.outputs.helm_version }}
           BUILD_VERSION: ${{ steps.base-container-gate.outputs.build_container_x86_64_version }}
           RUNTIME_VERSION: ${{ steps.base-container-gate.outputs.runtime_container_x86_64_version }}
@@ -611,10 +616,11 @@ jobs:
           BUILD_ARGS=$(jq -n -c \
             --arg VERSION "$VERSION" \
             --arg SHORT_SHA "$SHORT_SHA" \
+            --arg COMMIT_TIMESTAMP "$COMMIT_TIMESTAMP" \
             --arg BUILD "$BUILD_REF" \
             --arg RUNTIME "$RUNTIME_REF" \
             --arg HELM_VERSION "$HELM_VERSION" \
-            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CONTAINER_BUILD_X86_64: $BUILD, CONTAINER_RUNTIME_X86_64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
+            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_X86_64: $BUILD, CONTAINER_RUNTIME_X86_64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args=${BUILD_ARGS}" >> "$GITHUB_OUTPUT"
 
@@ -623,10 +629,11 @@ jobs:
           BUILD_ARGS_AARCH64=$(jq -n -c \
             --arg VERSION "$VERSION" \
             --arg SHORT_SHA "$SHORT_SHA" \
+            --arg COMMIT_TIMESTAMP "$COMMIT_TIMESTAMP" \
             --arg BUILD "$BUILD_REF_AARCH64" \
             --arg RUNTIME "$RUNTIME_REF_AARCH64" \
             --arg HELM_VERSION "$HELM_VERSION" \
-            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
+            '{VERSION: $VERSION, CI_COMMIT_SHORT_SHA: $SHORT_SHA, CI_COMMIT_TIMESTAMP: $COMMIT_TIMESTAMP, CONTAINER_BUILD_AARCH64: $BUILD, CONTAINER_RUNTIME_AARCH64: $RUNTIME, CARBIDE_BUILD_HELM_VERSION: $HELM_VERSION}')
 
           echo "build_args_aarch64=${BUILD_ARGS_AARCH64}" >> "$GITHUB_OUTPUT"
 

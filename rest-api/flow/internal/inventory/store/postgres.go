@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	stderrors "errors"
 	"fmt"
 
@@ -462,6 +461,7 @@ func (s *PostgresStore) GetComponentsByExternalIDs(
 		Where("c.external_id IN (?)", bun.In(externalIDs)).
 		Relation("BMCs").
 		Relation("Rack").
+		Relation("Rack.NVLDomain").
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query components by external IDs: %w", err)
@@ -650,9 +650,10 @@ func (s *PostgresStore) GetListOfNVLDomains(
 	ctx context.Context,
 	info dbquery.StringQueryInfo,
 	pagination *dbquery.Pagination,
+	options ...nvldomain.ListOptions,
 ) ([]*nvldomain.NVLDomain, int32, error) {
 	domains, total, err := model.GetListOfNVLDomains(
-		ctx, s.pg.DB, info, pagination,
+		ctx, s.pg.DB, info, pagination, options...,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -664,6 +665,15 @@ func (s *PostgresStore) GetListOfNVLDomains(
 	}
 
 	return results, total, nil
+}
+
+// GetNVLDomain resolves typed internal or external domain identity.
+func (s *PostgresStore) GetNVLDomain(ctx context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error) {
+	domain, err := s.getNVLDomain(ctx, s.pg.DB, id)
+	if err != nil {
+		return nil, err
+	}
+	return dao.NVLDomainFrom(domain), nil
 }
 
 // GetRacksForNVLDomain retrieves all racks belonging to an NVL domain.
@@ -682,35 +692,6 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 
 	operation := func(ctx context.Context, tx bun.Tx) error {
 		domainUUID := nvlDomainID.ID
-		externalID := nvlDomainID.ExternalID
-		// External IDs prefer racks; typed UUIDs retain domain membership lookup.
-		if externalID != "" {
-			var rackDAO model.Rack
-			q := tx.NewSelect().Model(&rackDAO).Where("r.external_id = ?", externalID)
-			if withComponents {
-				q = q.Relation("Components").Relation("Components.BMCs")
-			}
-			err := q.Scan(ctx)
-			if err == nil {
-				resolved, err := s.rackFromDAO(ctx, tx, &rackDAO)
-				if err != nil {
-					return err
-				}
-				results = append(results, resolved)
-				return nil
-			}
-			if !stderrors.Is(err, sql.ErrNoRows) {
-				return s.checkDBGetError(err, "rack for NVLink domain")
-			}
-			domainUUID, err = uuid.Parse(externalID)
-			if err != nil || domainUUID == uuid.Nil {
-				return errors.GRPCErrorNotFound(fmt.Sprintf("nvl domain %s", externalID))
-			}
-			_, err = s.getNVLDomain(ctx, tx, identifier.Identifier{ID: domainUUID})
-			if err != nil {
-				return err
-			}
-		}
 		if domainUUID == uuid.Nil {
 			nvlDomain, err := s.getNVLDomain(ctx, tx, nvlDomainID)
 			if err != nil {
@@ -743,6 +724,37 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 		return nil, err
 	}
 
+	return results, nil
+}
+
+// GetRacksForNVLDomains bounds database round trips independently of page size.
+// Unknown or empty domains have no members; the caller owns domain existence.
+func (s *PostgresStore) GetRacksForNVLDomains(ctx context.Context, domainIDs []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error) {
+	results := make(map[uuid.UUID][]*rack.Rack)
+	if len(domainIDs) == 0 {
+		return results, nil
+	}
+	err := s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var rows []model.Rack
+		query := tx.NewSelect().Model(&rows).Where("nvldomain_id IN (?)", bun.In(domainIDs)).Order("r.id ASC")
+		if withComponents {
+			query = query.Relation("Components").Relation("Components.BMCs")
+		}
+		if err := query.Scan(ctx); err != nil {
+			return err
+		}
+		racks, err := s.racksFromDAOs(ctx, tx, rows)
+		if err != nil {
+			return err
+		}
+		for _, rack := range racks {
+			results[rack.NVLDomainID] = append(results[rack.NVLDomainID], rack)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -782,6 +794,8 @@ func (s *PostgresStore) getNVLDomain(
 
 	if nvlDomainID.ID != uuid.Nil {
 		nvlDomain.ID = nvlDomainID.ID
+	} else if nvlDomainID.ExternalID != "" {
+		nvlDomain.ExternalID = &nvlDomainID.ExternalID
 	} else {
 		nvlDomain.Name = nvlDomainID.Name
 	}
@@ -846,7 +860,25 @@ func (s *PostgresStore) racksFromDAOs(
 	}
 
 	results := make([]*rack.Rack, 0, len(rackDAOs))
+	domainIDs := make([]uuid.UUID, 0, len(rackDAOs))
+	for _, row := range rackDAOs {
+		if row.NVLDomainID != uuid.Nil {
+			domainIDs = append(domainIDs, row.NVLDomainID)
+		}
+	}
+	domainsByID := make(map[uuid.UUID]*model.NVLDomain)
+	if len(domainIDs) > 0 {
+		var domains []model.NVLDomain
+		err = idb.NewSelect().Model(&domains).Where("id IN (?)", bun.In(domainIDs)).Scan(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range domains {
+			domainsByID[domains[i].ID] = &domains[i]
+		}
+	}
 	for i := range rackDAOs {
+		rackDAOs[i].NVLDomain = domainsByID[rackDAOs[i].NVLDomainID]
 		converted := dao.RackFrom(&rackDAOs[i])
 		converted.OperationStatus = statuses[rackDAOs[i].ID]
 		results = append(results, converted)

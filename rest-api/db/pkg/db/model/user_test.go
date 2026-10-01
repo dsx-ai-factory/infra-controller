@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
 func TestUserSQLDAO_Get(t *testing.T) {
@@ -138,8 +138,6 @@ func TestUserSQLDAO_Get(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -458,8 +456,6 @@ func TestUserSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -608,8 +604,6 @@ func TestUserSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -786,8 +780,7 @@ func TestUserSQLDAO_GetOrCreate(t *testing.T) {
 	require.NoError(t, err)
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx   context.Context
@@ -947,8 +940,7 @@ func TestUserSQLDAO_GetOrCreate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			usd := UserSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, gotIsNew, err := usd.GetOrCreate(tt.args.ctx, tt.args.tx, tt.args.input)
 			if tt.wantErr {
