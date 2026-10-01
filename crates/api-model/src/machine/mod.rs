@@ -1638,12 +1638,15 @@ pub enum DeconfiguringDpuState {
     Complete,
 }
 
-/// Sub-states of [`ManagedHostState::Reset`]: delete the tenant instance, then delete
-/// the DPF CRs and wait for them to drain before re-ingesting from DPU discovery.
+/// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
+/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
 pub enum ResetState {
+    /// Retains the Instance and its network resources until every topology DPU
+    /// acknowledges Admin networking, then deletes them before host cleanup.
+    /// A host without an Instance proceeds directly to `DeletingCrs`.
     DeletingInstance,
     /// Deletes the CRs and polls until they are gone. Registration refuses a CR that
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain

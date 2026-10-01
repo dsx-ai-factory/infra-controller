@@ -128,7 +128,9 @@ pub fn instance_status_tenant_state(
             InstanceState::WaitingForDpaToBeReady => TenantState::Updating,
             InstanceState::Failed { .. } => TenantState::Failed,
         },
-        ManagedHostState::ForceDeletion => TenantState::Terminating,
+        ManagedHostState::ForceDeletion | ManagedHostState::Reset { .. } => {
+            TenantState::Terminating
+        }
         _ => {
             tracing::error!(%machine_state, "Invalid state during state handling");
             TenantState::Invalid

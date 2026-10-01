@@ -103,6 +103,9 @@
                 action: permit
                 match:
                   10.217.5.161/30: {}
+              '65003':
+                action: permit
+                match:
                   10.217.5.169/29: {}
 
           ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6:
