@@ -1598,7 +1598,9 @@ pub enum DecommissioningState {
     /// Powers the host back on after the cycle so OOB rediscovery can proceed.
     PoweringOnHost,
     /// Waiting for the pre-cycle OOB DHCP suppression to be acknowledged.
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForOobDhcpAcknowledgement,
     /// BMC DHCP is suppressed before the BMC factory reset.
     SuppressingBmcDhcp,
@@ -1607,7 +1609,9 @@ pub enum DecommissioningState {
         completed: HashSet<MachineId>,
     },
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device BMC and DPU credentials are being removed after factory reset.
     DeletingManagedCredentials,
