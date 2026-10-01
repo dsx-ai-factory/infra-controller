@@ -266,18 +266,17 @@ type SiteDAO interface {
 }
 
 // GetByIDForUpdate prevents inventory from recreating records after Site deletion.
-func (ssd SiteSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error) {
+func (ssd SiteSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *Site, retErr error) {
 	if tx == nil {
 		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
 	}
-	ctx, siteDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetByIDForUpdate")
-	if siteDAOSpan != nil {
-		defer siteDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(siteDAOSpan, "id", id.String())
-	}
+	ctx, siteDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByIDForUpdate")
+	defer func() { cotel.EndSpan(siteDAOSpan, retErr) }()
+	cotel.SetAttribute(siteDAOSpan, attribute.String("id", id.String()))
 
 	st := &Site{}
-	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id).For("UPDATE").Scan(ctx)
+	// Exclude Site deletion while allowing child inserts to check their Site foreign key.
+	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id).For("NO KEY UPDATE").Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, db.ErrDoesNotExist
 	}
