@@ -613,7 +613,7 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 				SwitchSerialNumber: &validSwitchSerial,
 				BmcIpAddress:       &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",

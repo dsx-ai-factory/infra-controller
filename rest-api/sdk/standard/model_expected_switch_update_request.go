@@ -41,7 +41,7 @@ type ExpectedSwitchUpdateRequest struct {
 	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
-	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Display name for this component
 	Name NullableString `json:"name,omitempty"`

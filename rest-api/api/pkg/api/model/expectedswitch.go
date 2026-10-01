@@ -215,7 +215,6 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 		validation.Field(&esur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&esur.BmcIpAddress,
-			validation.NilOrNotEmpty.Error("BmcIpAddress cannot be empty"),
 			validation.When(esur.BmcIpAddress != nil && *esur.BmcIpAddress != "",
 				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
 		validation.Field(&esur.Name,

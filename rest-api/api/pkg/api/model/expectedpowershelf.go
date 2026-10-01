@@ -164,7 +164,6 @@ func (epur *APIExpectedPowerShelfUpdateRequest) Validate() error {
 		validation.Field(&epur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&epur.BmcIpAddress,
-			validation.NilOrNotEmpty.Error("BmcIpAddress cannot be empty"),
 			validation.When(epur.BmcIpAddress != nil && *epur.BmcIpAddress != "",
 				validationis.IP.Error("BmcIpAddress must be a valid IPv4 or IPv6 address"))),
 		validation.Field(&epur.Name,

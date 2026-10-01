@@ -523,7 +523,7 @@ func TestAPIExpectedPowerShelfUpdateRequest_Validate(t *testing.T) {
 				ShelfSerialNumber: &validShelfSerial,
 				BmcIpAddress:      &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",
