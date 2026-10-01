@@ -31,19 +31,21 @@ use clap::Parser;
         `not-configured` — no RMS endpoint is set on this nico-api instance.\n\n\
         `api-unreachable` — the cli could not connect to nico-api, because the server \
         is down or the url is wrong.\n\n\
-        `rms-unreachable` — nico-api was reached but cannot contact the RMS backend.\n\n\
+        `rms-unreachable` — nico-api was reached but cannot contact the RMS backend, \
+        or timed out waiting for it.\n\n\
         `cli-config-error` — a local cli configuration problem, such as a missing CA \
         file, prevented connecting to nico-api.\n\n\
-        `auth-failed` — a certificate was rejected on the cli→nico-api or nico-api→RMS \
-        path.\n\n\
+        `auth-failed` — a certificate was rejected on the cli→nico-api path, or \
+        the RMS backend rejected the credentials that nico-api presented.\n\n\
         `auth-or-version-mismatch` — permission denied: either the cli certificate \
         lacks the required role, or this nico-api server predates `GetRmsVersion` and \
         its rbac rules reject the call before dispatch.\n\n\
         `api-version-mismatch` — nico-api returned `Unimplemented`; the server predates \
         this rpc and has no rbac layer to intercept it.\n\n\
-        `timeout` — the connection attempt exceeded the deadline.\n\n\
-        `error` — an unexpected error; the `message` field carries the grpc code and \
-        detail.",
+        `timeout` — the request to nico-api exceeded the deadline; a nico-api timeout \
+        waiting for RMS is reported as `rms-unreachable`.\n\n\
+        `error` — an unexpected error, including any other error returned by the RMS \
+        backend; the `message` field carries the grpc code and detail.",
     after_long_help = "\
 EXAMPLES:
 

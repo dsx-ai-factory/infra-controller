@@ -38,13 +38,13 @@ Status tokens:
 server is down or the url is wrong.
 
 `rms-unreachable` — nico-api was reached but cannot contact the RMS
-backend.
+backend, or timed out waiting for it.
 
 `cli-config-error` — a local cli configuration problem, such as a
 missing CA file, prevented connecting to nico-api.
 
-`auth-failed` — a certificate was rejected on the cli→nico-api or
-nico-api→RMS path.
+`auth-failed` — a certificate was rejected on the cli→nico-api path,
+or the RMS backend rejected the credentials that nico-api presented.
 
 `auth-or-version-mismatch` — permission denied: either the cli
 certificate lacks the required role, or this nico-api server predates
@@ -53,10 +53,11 @@ certificate lacks the required role, or this nico-api server predates
 `api-version-mismatch` — nico-api returned `Unimplemented`; the
 server predates this rpc and has no rbac layer to intercept it.
 
-`timeout` — the connection attempt exceeded the deadline.
+`timeout` — the request to nico-api exceeded the deadline; a nico-api
+timeout waiting for RMS is reported as `rms-unreachable`.
 
-`error` — an unexpected error; the `message` field carries the grpc
-code and detail.
+`error` — an unexpected error, including any other error returned by
+the RMS backend; the `message` field carries the grpc code and detail.
 
 ## OPTIONS
 
