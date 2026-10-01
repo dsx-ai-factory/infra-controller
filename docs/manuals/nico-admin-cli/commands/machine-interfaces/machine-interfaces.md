@@ -51,6 +51,8 @@ Print help (see a summary with -h)
 | [`show-addresses`](./machine-interfaces-show-addresses.md) | Show addresses for a machine interface |
 | [`assign-address`](./machine-interfaces-assign-address.md) | Assign a static address to a machine interface |
 | [`remove-address`](./machine-interfaces-remove-address.md) | Remove a static address from a machine interface |
+| [`show-reserved-addresses`](./machine-interfaces-show-reserved-addresses.md) | List parked address reservations that outlived their interface |
+| [`release-reserved-address`](./machine-interfaces-release-reserved-address.md) | Release a parked address reservation |
 
 ---
 

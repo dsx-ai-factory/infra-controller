@@ -15,6 +15,7 @@ nico-admin-cli machine force-delete <--machine>
 [-c|--delete-bmc-credentials]
 [--delete-bmc-suppressions]
 [--delete-retained-boot-interfaces]
+[--release-preserved-addresses]
 [--allow-delete-with-instance]
 [--allow-delete-with-orphaned-dpf-crds] [--extended]
 [--sort-by] [-h|--help]
@@ -54,6 +55,12 @@ Delete retained boot-interface pairs for the host/DPU BMC and interface
 MACs. Without this, deleted interfaces keep their boot targets for
 re-ingestion.
 
+`--release-preserved-addresses`
+
+Release preserved address reservations for deleted interfaces instead of
+parking them. Without this, an address marked for preservation is parked
+so the same MAC can reclaim it on re-ingestion.
+
 `--allow-delete-with-instance`
 
 Delete machine with allocated instance. This flag acknowledges
@@ -92,6 +99,7 @@ Print help (see a summary with -h)
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions --delete-retained-boot-interfaces
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --release-preserved-addresses
 ```
 
 ---
