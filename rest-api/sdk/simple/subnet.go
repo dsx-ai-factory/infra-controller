@@ -60,7 +60,7 @@ func (sm SubnetManager) Create(ctx context.Context, request SubnetCreateRequest)
 	apiRequest := toStandardSubnetCreateRequest(request)
 	apiSubnet, response, err := sm.client.apiClient.SubnetAPI.CreateSubnet(ctx, sm.client.apiMetadata.Organization).
 		SubnetCreateRequest(apiRequest).Execute()
-	if apiErr := HandleResponseError(response, err); apiErr != nil {
+	if apiErr := modelResponseError("Subnet", response, err, apiSubnet != nil); apiErr != nil {
 		return nil, apiErr
 	}
 	return apiSubnet, nil
@@ -74,7 +74,7 @@ func (sm SubnetManager) AttachVpc(ctx context.Context, id string, request Subnet
 	apiRequest := toStandardSubnetAttachVpcRequest(request)
 	apiSubnet, response, err := sm.client.apiClient.SubnetAPI.AttachVpcToSubnet(ctx, sm.client.apiMetadata.Organization, id).
 		SubnetAttachVpcRequest(apiRequest).Execute()
-	if apiErr := HandleResponseError(response, err); apiErr != nil {
+	if apiErr := modelResponseError("Subnet", response, err, apiSubnet != nil); apiErr != nil {
 		return nil, apiErr
 	}
 	return apiSubnet, nil

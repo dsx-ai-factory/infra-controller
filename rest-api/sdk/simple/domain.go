@@ -63,7 +63,7 @@ func (dm DomainManager) Create(ctx context.Context, request DomainCreateRequest)
 	apiRequest := standard.NewDomainCreateRequest(request.Name, dm.client.apiMetadata.SiteID)
 	apiDomain, response, err := dm.client.apiClient.DNSDomainAPI.CreateDomain(ctx, dm.client.apiMetadata.Organization).
 		DomainCreateRequest(*apiRequest).Execute()
-	if apiErr := domainResponseError(response, err); apiErr != nil {
+	if apiErr := modelResponseError("Domain", response, err, apiDomain != nil); apiErr != nil {
 		return nil, apiErr
 	}
 	domain := domainFromStandard(*apiDomain)
@@ -83,7 +83,7 @@ func (dm DomainManager) GetDomains(ctx context.Context, domainFilter *DomainFilt
 		request = request.TenantId(*domainFilter.TenantID)
 	}
 	apiDomains, response, err := request.Execute()
-	if apiErr := domainResponseError(response, err); apiErr != nil {
+	if apiErr := modelResponseError("Domain list", response, err, apiDomains != nil); apiErr != nil {
 		return nil, apiErr
 	}
 
@@ -100,7 +100,7 @@ func (dm DomainManager) Get(ctx context.Context, id string) (*Domain, *ApiError)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
 	apiDomain, response, err := dm.client.apiClient.DNSDomainAPI.GetDomain(ctx, dm.client.apiMetadata.Organization, id).Execute()
-	if apiErr := domainResponseError(response, err); apiErr != nil {
+	if apiErr := modelResponseError("Domain", response, err, apiDomain != nil); apiErr != nil {
 		return nil, apiErr
 	}
 	domain := domainFromStandard(*apiDomain)
@@ -113,14 +113,24 @@ func (dm DomainManager) Delete(ctx context.Context, id string) *ApiError {
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
 	response, err := dm.client.apiClient.DNSDomainAPI.DeleteDomain(ctx, dm.client.apiMetadata.Organization, id).Execute()
-	return domainResponseError(response, err)
+	return modelResponseError("Domain", response, err, true)
 }
 
-// A successful HTTP status with an invalid generated response model must not
-// become a successful mutation with zero-valued Domain identity.
-func domainResponseError(response *http.Response, err error) *ApiError {
-	if response != nil && response.StatusCode < http.StatusMultipleChoices && err != nil {
-		return &ApiError{Code: http.StatusBadGateway, Message: "Invalid Domain response from API"}
+// modelResponseError reports API errors for operations whose success contract
+// returns a model. A successful HTTP status whose body cannot be decoded into the
+// generated model, or which decodes to no model at all (for example `null`), is an
+// invalid response; it must not become a successful operation with a nil or
+// zero-valued resource.
+func modelResponseError(resource string, response *http.Response, err error, hasModel bool) *ApiError {
+	if response != nil && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		if err == nil && hasModel {
+			return nil
+		}
+		apiErr := &ApiError{Code: http.StatusBadGateway, Message: "Invalid " + resource + " response from API"}
+		if err != nil {
+			apiErr.Data = map[string]interface{}{"error": err.Error()}
+		}
+		return apiErr
 	}
 	return HandleResponseError(response, err)
 }
