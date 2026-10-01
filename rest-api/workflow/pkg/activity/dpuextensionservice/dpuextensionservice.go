@@ -545,6 +545,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 				transaction,
 				cdbm.DpuExtensionServiceClearInput{
 					DpuExtensionServiceID: existingDpuExtensionService.ID,
+					Description:           description == nil,
 					Deleted:               true,
 				},
 			)
@@ -558,6 +559,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 				cdbm.DpuExtensionServiceUpdateInput{
 					DpuExtensionServiceID: restored.ID,
 					Name:                  &recoveredName,
+					Description:           description,
 					DpuTarget:             dpuTarget,
 					Version:               version,
 					VersionInfo:           versionInfo,

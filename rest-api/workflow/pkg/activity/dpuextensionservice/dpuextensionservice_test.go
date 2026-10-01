@@ -182,6 +182,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	recoveredDpfServiceID := uuid.New()
 	recoveredVersion := "V1-T1761856992377000"
 	recoveredDescription := "recovered from Site inventory"
+	staleDescription := "stale pre-deletion description"
 	recoveredVersionCreated := time.Now().UTC().Round(time.Microsecond)
 
 	deletedDpuExtensionService := util.TestBuildDpuExtensionService(
@@ -202,7 +203,12 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		cdbm.DpuExtensionServiceStatusDeleting,
 		user,
 	)
-	err := dpuExtensionServiceDAO.Delete(ctx, nil, deletedDpuExtensionService.ID)
+	_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+		DpuExtensionServiceID: deletedDpuExtensionService.ID,
+		Description:           &staleDescription,
+	})
+	require.NoError(t, err)
+	err = dpuExtensionServiceDAO.Delete(ctx, nil, deletedDpuExtensionService.ID)
 	require.NoError(t, err)
 	_, err = dbSession.DB.Exec(
 		"UPDATE dpu_extension_service SET deleted = ? WHERE id = ?",
@@ -657,6 +663,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 							ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
 							ServiceName:          deletedDpuExtensionService.Name,
 							TenantOrganizationId: tenant.Org,
+							Description:          recoveredDescription,
 							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
 								Version:       recoveredVersion,
 								Data:          "restored-data",
@@ -682,6 +689,8 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 				assert.Nil(t, restored.Deleted)
 				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, restored.Status)
 				assert.False(t, restored.IsMissingOnSite)
+				require.NotNil(t, restored.Description)
+				assert.Equal(t, recoveredDescription, *restored.Description)
 				assert.Equal(t, recoveredVersion, *restored.Version)
 				assert.Equal(t, "restored-data", restored.VersionInfo.Data)
 				assert.Equal(t, []string{version1, recoveredVersion}, restored.ActiveVersions)
@@ -1021,7 +1030,13 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 				)
 				state.controllerService.ServiceId = deleted.ID.String()
 				state.persistedServiceID = deleted.ID
-				err := state.dpuExtensionServiceDAO.Delete(ctx, nil, deleted.ID)
+				oldDescription := "description that Site has cleared"
+				_, err := state.dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+					DpuExtensionServiceID: deleted.ID,
+					Description:           &oldDescription,
+				})
+				require.NoError(t, err)
+				err = state.dpuExtensionServiceDAO.Delete(ctx, nil, deleted.ID)
 				require.NoError(t, err)
 				_, err = dbSession.DB.Exec(
 					"UPDATE dpu_extension_service SET deleted = ? WHERE id = ?",
@@ -1050,6 +1065,7 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 				}
 
 				assert.Nil(t, got.Deleted)
+				assert.Nil(t, got.Description)
 				assert.Equal(
 					t,
 					fmt.Sprintf("%s-recovered-%s", state.controllerService.GetServiceName(), state.controllerService.GetServiceId()[:8]),
