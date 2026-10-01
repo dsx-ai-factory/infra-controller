@@ -492,12 +492,13 @@ helm unittest helm/nico-flow
 
 Test files live in `tests/` directories within each chart. CI runs these tests automatically on every PR.
 
-### PXE runtime regression (manual developer test)
+### PXE runtime regression
 
 Run this regression after changing PXE packaging, artifact init containers, or
-chart serving paths. CI runs Helm unit tests and the PXE Kustomize render check;
-it does not run this kind-based HTTP test. The developer supplies the locally
-built PXE image and invokes the command below.
+chart serving paths. In addition to Helm unit tests and the PXE Kustomize render
+check, CI runs this regression in the amd64 release-container build job against
+its locally loaded image, using the pinned tools in `.github/ci/test_pxe_runtime.sh`.
+Developers can also supply a locally built PXE image and invoke the command below.
 
 The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
 locally built PXE runtime image containing the binary, templates, and coreutils.

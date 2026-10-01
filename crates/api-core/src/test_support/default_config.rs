@@ -116,6 +116,7 @@ pub fn fully_populated() -> CarbideConfig {
     CarbideConfig {
         auth: Some(AuthConfig {
             permissive_mode: true,
+            allow_machineatron_scout_stream: false,
             casbin_policy_file: None,
             cli_certs: None,
             trust: None,

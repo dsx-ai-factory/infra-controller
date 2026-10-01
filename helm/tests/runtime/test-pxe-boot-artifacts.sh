@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Manual developer regression using the real PXE server in a disposable kind
+# CI and developer regression using the real PXE server in a disposable kind
 # cluster. PXE_TEST_IMAGE must contain the PXE binary, templates, and coreutils.
 set -euo pipefail
 
@@ -139,6 +139,7 @@ VALUES
       stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == "640 ${artifact_owner} 10001" ]]
     directory_stat="$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
       stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")"
+    printf '%s: directory mode/owner/group %s\n' "$scenario" "$directory_stat"
     if [[ "$scenario" == copied-restrictive ]]; then
       # fsGroup sets setgid on volume directories; copied directories can inherit it.
       [[ "$directory_stat" == '750 20001 10001' || "$directory_stat" == '2750 20001 10001' ]]
