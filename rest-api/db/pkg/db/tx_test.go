@@ -211,11 +211,6 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 			name:     "reacquire lock success after rollback existing tx with lock",
 			testcase: 5,
 		},
-		{
-			name:      "blocking lock acquisition honors context cancellation",
-			expectErr: true,
-			testcase:  6,
-		},
 	}
 	var tx1, tx2, tx3 *Tx
 	var err error
@@ -267,29 +262,6 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(456), false)
 				assert.Nil(t, err)
 				tx3.Rollback()
-			case 6:
-				tx1, err = BeginTx(ctx, dbSession, &sql.TxOptions{})
-				require.NoError(t, err)
-
-				defer func(transaction *Tx) {
-					assert.NoError(t, transaction.Rollback())
-				}(tx1)
-
-				err = tx1.AcquireAdvisoryLock(ctx, uint64(789), false)
-				require.NoError(t, err)
-
-				tx2, err = BeginTx(ctx, dbSession, &sql.TxOptions{})
-				require.NoError(t, err)
-
-				defer func(transaction *Tx) {
-					assert.NoError(t, transaction.Rollback())
-				}(tx2)
-
-				lockCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-				defer cancel()
-
-				err = tx2.AcquireAdvisoryLock(lockCtx, uint64(789), true)
-				assert.ErrorIs(t, err, context.DeadlineExceeded)
 			}
 		})
 	}

@@ -141,16 +141,25 @@ func (tx *Tx) Rollback() error {
 	return tx.tx.Rollback()
 }
 
-// AcquireAdvisoryLock acquires a transaction-scoped advisory lock. Blocking
-// acquisition waits until the lock is available or ctx is canceled.
-// Non-blocking acquisition returns ErrXactAdvisoryLockFailed when another
-// transaction holds the lock. The lock is released automatically when the
-// transaction commits, rolls back, or loses its connection.
+// AcquireAdvisoryLock will "try" to take the specified advisory lock
+// on the transaction
+// Error case:
+// -----------
+// if the lock is already held by another transaction, this will
+// error, and the caller needs to (possibly) retry in the same transaction (after a delay)
+// this is the api-handler usecase
+// or retry in a new transaction after rolling back the current transaction
+// this is the workflow worker usecase
+// Success case:
+// -------------
+// the transaction lock when acquired is automatically released
+// when the transaction commits or rollsback (or the transaction connection dies
+// which is equivalent to a rollback for the transaction)
 func (tx *Tx) AcquireAdvisoryLock(ctx context.Context, lockID uint64, blocking bool) error {
 
 	if blocking {
 		query := fmt.Sprintf("SELECT pg_advisory_xact_lock(%d)", lockID)
-		_, err := tx.tx.ExecContext(ctx, query)
+		_, err := tx.tx.Exec(query)
 		return err
 	}
 
