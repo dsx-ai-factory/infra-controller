@@ -200,10 +200,10 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		if apiErr != nil {
 			return nil, apiErr
 		}
-		if stored.GetRackId().GetId() != er.RackID || stored.GetRackProfileId().GetId() == "" {
-			return nil, cutil.NewAPIError(http.StatusBadGateway, "Core returned an invalid Expected Rack profile", nil)
+		if stored.GetRackId().GetId() != er.RackID || stored.GetRackProfileId().GetId() == "" || stored.GetRackGroupId().GetId() == "" {
+			return nil, cutil.NewAPIError(http.StatusBadGateway, "Core returned an invalid Expected Rack profile or group", nil)
 		}
-		return erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{ExpectedRackID: er.ID, RackProfileID: cutil.GetPtr(stored.RackProfileId.Id)})
+		return erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{ExpectedRackID: er.ID, RackProfileID: cutil.GetPtr(stored.RackProfileId.Id), RackGroupID: cutil.GetPtr(stored.RackGroupId.Id)})
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to create Expected Rack due to DB transaction error")
@@ -950,18 +950,22 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 			return nil, apiErr
 		}
 		profiles := make(map[string]string, len(stored.ExpectedRacks))
+		groups := make(map[string]string, len(stored.ExpectedRacks))
 		for _, rack := range stored.ExpectedRacks {
 			profiles[rack.GetRackId().GetId()] = rack.GetRackProfileId().GetId()
+			groups[rack.GetRackId().GetId()] = rack.GetRackGroupId().GetId()
 		}
 		updates := make([]cdbm.ExpectedRackUpdateInput, 0, len(racks))
 		for i := range racks {
 			profile := profiles[racks[i].RackID]
-			if profile == "" {
-				return nil, cutil.NewAPIError(http.StatusBadGateway, "Core did not return a profile for every Expected Rack", nil)
+			group := groups[racks[i].RackID]
+			if profile == "" || group == "" {
+				return nil, cutil.NewAPIError(http.StatusBadGateway, "Core did not return a profile and group for every Expected Rack", nil)
 			}
 			updates = append(updates, cdbm.ExpectedRackUpdateInput{
 				ExpectedRackID: racks[i].ID,
 				RackProfileID:  cutil.GetPtr(profile),
+				RackGroupID:    cutil.GetPtr(group),
 			})
 		}
 		return erDAO.UpdateMultiple(ctx, tx, updates)

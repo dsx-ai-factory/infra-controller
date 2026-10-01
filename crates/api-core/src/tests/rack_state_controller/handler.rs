@@ -505,6 +505,7 @@ async fn create_ready_rack_with_switches(
 async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_profile_id: &str) {
     let mut txn = pool.acquire().await.unwrap();
     let er = ExpectedRack {
+        rack_group_id: None,
         rack_id: rack_id.clone(),
         rack_profile_id: RackProfileId::new(rack_profile_id),
         ..Default::default()

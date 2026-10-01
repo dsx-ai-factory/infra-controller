@@ -3078,6 +3078,9 @@ message ExpectedRack {
   // This includes things like chassis and location attributes,
   // which has some "well known" definitions in api-model::rack.
   Metadata metadata = 3;
+  // Output-only group derived from unique expected-rack-group membership on
+  // creation. Supplied values are ignored; metadata updates preserve the group.
+  common.RackGroupId rack_group_id = 4;
 }
 
 message ExpectedRackRequest {
@@ -8718,6 +8721,8 @@ message Rack {
   string version = 15;
   RackConfig config = 16;
   RackStatus status = 17;
+  // Group selected by the expected rack at creation.
+  common.RackGroupId rack_group_id = 18;
 }
 
 message RackConfig {

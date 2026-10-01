@@ -1216,6 +1216,31 @@ func (c *grpcClient) FindRackHealthReports(ctx context.Context, rackIds []string
 	return result, nil
 }
 
+// FindRackGroupIDs reads the identity chosen at expected-rack creation from actual racks.
+// The timeout covers the complete batch sequence, not each individual batch.
+func (c *grpcClient) FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error) {
+	if len(rackIDs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.RacksByIdsRequest{}
+	for _, id := range rackIDs {
+		req.RackIds = append(req.RackIds, &corev1.RackId{Id: id})
+	}
+	groups := make(map[string]string, len(rackIDs))
+	err := c.gclient.visitRackBatchesAllowPartial(ctx, req, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			groups[rack.GetId().GetId()] = rack.GetRackGroupId().GetId()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read rack groups: %w", err)
+	}
+	return groups, nil
+}
+
 // GetMachinePositionInfo returns position information for the given machine IDs
 func (c *grpcClient) GetMachinePositionInfo(ctx context.Context, machineIds []string) ([]MachinePosition, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)

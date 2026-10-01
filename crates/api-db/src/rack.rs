@@ -131,6 +131,42 @@ pub async fn create(
     config: &RackConfig,
     expected_metadata: Option<&Metadata>,
 ) -> DatabaseResult<Rack> {
+    create_with_group(
+        txn,
+        rack_id,
+        rack_profile_id,
+        config,
+        expected_metadata,
+        None,
+    )
+    .await
+}
+
+/// Copies both identities from the same expected-rack snapshot at discovery.
+pub async fn create_from_expected(
+    txn: &mut PgConnection,
+    expected: &model::expected_rack::ExpectedRack,
+    config: &RackConfig,
+) -> DatabaseResult<Rack> {
+    create_with_group(
+        txn,
+        &expected.rack_id,
+        Some(&expected.rack_profile_id),
+        config,
+        Some(&expected.metadata),
+        expected.rack_group_id.as_ref(),
+    )
+    .await
+}
+
+async fn create_with_group(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+    rack_profile_id: Option<&RackProfileId>,
+    config: &RackConfig,
+    expected_metadata: Option<&Metadata>,
+    rack_group_id: Option<&carbide_uuid::rack::RackGroupId>,
+) -> DatabaseResult<Rack> {
     let controller_state = String::from("{\"state\":\"created\"}");
     let controller_state_outcome = String::from("{}");
     let default_metadata = Metadata::default();
@@ -140,8 +176,8 @@ pub async fn create(
         name => name.to_string(),
     };
     let version = ConfigVersion::initial();
-    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version)
-            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10) RETURNING *";
+    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version, rack_group_id)
+            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10, $11) RETURNING *";
     let rack: Rack = sqlx::query_as(query)
         .bind(rack_id)
         .bind(rack_profile_id)
@@ -153,6 +189,7 @@ pub async fn create(
         .bind(&src_metadata.description)
         .bind(sqlx::types::Json(&src_metadata.labels))
         .bind(version)
+        .bind(rack_group_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;

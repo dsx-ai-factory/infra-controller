@@ -177,6 +177,7 @@ async fn test_machine_creator_reconciles_machine_location_without_overwriting_ex
     let creator = machine_creator_with_info_provider(&env, provider.clone());
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
+        rack_group_id: None,
         rack_id: rack_id.clone(),
         rack_profile_id: RackProfileId::new(TEST_MACHINE_INFO_RACK_PROFILE_ID),
         metadata: Default::default(),
@@ -265,6 +266,7 @@ async fn test_machine_creator_retries_machine_location_enrichment_after_failure(
     let creator = machine_creator_with_info_provider(&env, provider.clone());
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let expected_rack = ExpectedRack {
+        rack_group_id: None,
         rack_id: rack_id.clone(),
         rack_profile_id: RackProfileId::new(TEST_MACHINE_INFO_RACK_PROFILE_ID),
         metadata: Default::default(),
@@ -379,6 +381,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
         txn.as_mut(),
         &ExpectedRack {
             rack_id,
+            rack_group_id: None,
             rack_profile_id: RackProfileId::new(TEST_MACHINE_INFO_RACK_PROFILE_ID),
             metadata: Default::default(),
         },

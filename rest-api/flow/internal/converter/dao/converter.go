@@ -94,8 +94,12 @@ func ComponentFrom(dao model.Component) *component.Component {
 	}
 
 	var nvlDomainID uuid.UUID
+	var nvlDomainExternalID *string
 	if dao.Rack != nil && dao.Rack.NVLDomainID != uuid.Nil {
 		nvlDomainID = dao.Rack.NVLDomainID
+		if dao.Rack.NVLDomain != nil {
+			nvlDomainExternalID = dao.Rack.NVLDomain.ExternalID
+		}
 	}
 
 	rackExternalID := ""
@@ -119,15 +123,16 @@ func ComponentFrom(dao model.Component) *component.Component {
 			TrayIndex: dao.TrayIndex,
 			HostID:    dao.HostID,
 		},
-		BmcsByType:     bmcsByType,
-		ComponentID:    cutil.GetValueOrZero(dao.ComponentID),
-		RackID:         dao.RackID,
-		RackExternalID: rackExternalID,
-		NVLDomainID:    nvlDomainID,
-		PowerState:     powerStateFromDAO(dao.PowerState),
-		Status:         dao.Status,
-		Health:         dao.Health,
-		LeakStatus:     dao.LeakStatus,
+		BmcsByType:          bmcsByType,
+		ComponentID:         cutil.GetValueOrZero(dao.ComponentID),
+		RackID:              dao.RackID,
+		RackExternalID:      rackExternalID,
+		NVLDomainID:         nvlDomainID,
+		NVLDomainExternalID: nvlDomainExternalID,
+		PowerState:          powerStateFromDAO(dao.PowerState),
+		Status:              dao.Status,
+		Health:              dao.Health,
+		LeakStatus:          dao.LeakStatus,
 	}
 }
 
@@ -137,11 +142,16 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 		return nil
 	}
 	modelName, description := rackMetadataFromDescription(dao.Description)
+	var domainExternalID *string
+	if dao.NVLDomain != nil {
+		domainExternalID = dao.NVLDomain.ExternalID
+	}
 
 	components := make([]component.Component, 0, len(dao.Components))
 	for _, c := range dao.Components {
 		converted := ComponentFrom(c)
 		converted.RackExternalID = cutil.GetValueOrZero(dao.ExternalID)
+		converted.NVLDomainExternalID = domainExternalID
 		if dao.NVLDomainID != uuid.Nil {
 			converted.NVLDomainID = dao.NVLDomainID
 		}
@@ -162,9 +172,10 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),
-		Components:  components,
-		NVLDomainID: dao.NVLDomainID,
-		Health:      dao.Health,
+		Components:          components,
+		NVLDomainID:         dao.NVLDomainID,
+		NVLDomainExternalID: domainExternalID,
+		Health:              dao.Health,
 	}
 }
 
@@ -203,7 +214,8 @@ func NVLDomainFrom(dao *model.NVLDomain) *nvldomain.NVLDomain {
 	}
 
 	return &nvldomain.NVLDomain{
-		Identifier: *identifier.New(dao.ID, dao.Name),
+		Identifier:    identifier.Identifier{ID: dao.ID, Name: dao.Name, ExternalID: cutil.GetValueOrZero(dao.ExternalID)},
+		NMXCClusterID: dao.NMXCClusterID,
 	}
 }
 
@@ -367,9 +379,15 @@ func NVLDomainTo(n *nvldomain.NVLDomain) *model.NVLDomain {
 		return nil
 	}
 
+	var externalID *string
+	if n.Identifier.ExternalID != "" {
+		externalID = &n.Identifier.ExternalID
+	}
 	return &model.NVLDomain{
-		ID:   n.Identifier.ID,
-		Name: n.Identifier.Name,
+		ID:            n.Identifier.ID,
+		Name:          n.Identifier.Name,
+		ExternalID:    externalID,
+		NMXCClusterID: n.NMXCClusterID,
 	}
 }
 

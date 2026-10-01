@@ -61,11 +61,13 @@ type Manager interface {
 	GetAllDrifts(ctx context.Context) ([]inventorystore.ComponentDrift, error)
 
 	// NVL Domain operations
+	GetNVLDomain(ctx context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error)
 	CreateNVLDomain(ctx context.Context, nvlDomain *nvldomain.NVLDomain) (uuid.UUID, error)
 	AttachRacksToNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, rackIDs []identifier.Identifier) error
 	DetachRacksFromNVLDomain(ctx context.Context, rackIDs []identifier.Identifier) error
-	GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination) ([]*nvldomain.NVLDomain, int32, error)
+	GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination, options ...nvldomain.ListOptions) ([]*nvldomain.NVLDomain, int32, error)
 	GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
+	GetRacksForNVLDomains(ctx context.Context, domainIDs []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error)
 }
 
 // ManagerImpl implements the Manager interface.
@@ -189,14 +191,24 @@ func (m *ManagerImpl) DetachRacksFromNVLDomain(ctx context.Context, rackIDs []id
 	return m.store.DetachRacksFromNVLDomain(ctx, rackIDs)
 }
 
+// GetNVLDomain resolves a domain by its typed identity.
+func (m *ManagerImpl) GetNVLDomain(ctx context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error) {
+	return m.store.GetNVLDomain(ctx, id)
+}
+
 // GetListOfNVLDomains lists NVL domains matching the given criteria.
-func (m *ManagerImpl) GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination) ([]*nvldomain.NVLDomain, int32, error) {
-	return m.store.GetListOfNVLDomains(ctx, info, pagination)
+func (m *ManagerImpl) GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination, options ...nvldomain.ListOptions) ([]*nvldomain.NVLDomain, int32, error) {
+	return m.store.GetListOfNVLDomains(ctx, info, pagination, options...)
 }
 
 // GetRacksForNVLDomain retrieves all racks belonging to an NVL domain.
 func (m *ManagerImpl) GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, withComponents bool) ([]*rack.Rack, error) {
 	return m.store.GetRacksForNVLDomain(ctx, nvlDomainID, withComponents)
+}
+
+// GetRacksForNVLDomains reads member racks for a domain page in one batch.
+func (m *ManagerImpl) GetRacksForNVLDomains(ctx context.Context, domainIDs []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error) {
+	return m.store.GetRacksForNVLDomains(ctx, domainIDs, withComponents)
 }
 
 // AddComponent creates a single component in the database and returns its UUID.

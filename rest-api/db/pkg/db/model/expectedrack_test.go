@@ -132,6 +132,51 @@ func testExpectedRackSetupSchema(t *testing.T, dbSession *db.Session) {
 	assert.Nil(t, err)
 }
 
+func TestExpectedRackDAO_UpdateMultiple(t *testing.T) {
+	ctx := context.Background()
+	session := testInitDB(t)
+	defer session.Close()
+	testExpectedRackSetupSchema(t, session)
+	user := TestBuildUser(t, session, "group-user", "group-org", []string{"admin"})
+	provider := TestBuildInfrastructureProvider(t, session, "group-provider", "group-org", user)
+	site := TestBuildSite(t, session, provider, "group-site", user)
+	dao := NewExpectedRackDAO(session)
+	for _, tc := range []struct {
+		name  string
+		group *string
+	}{
+		{name: "supplied", group: new("new-group")},
+		{name: "omitted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := []uuid.UUID{uuid.New(), uuid.New()}
+			_, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
+				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), CreatedBy: user.ID},
+				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), CreatedBy: user.ID},
+			})
+			if !assert.NoError(t, err) {
+				return
+			}
+			rows, err := dao.UpdateMultiple(ctx, nil, []ExpectedRackUpdateInput{
+				{ExpectedRackID: ids[0], RackGroupID: tc.group}, {ExpectedRackID: ids[1]},
+			})
+			if !assert.NoError(t, err) || !assert.Len(t, rows, 2) {
+				return
+			}
+			want := "old-group"
+			if tc.group != nil {
+				want = *tc.group
+			}
+			assert.Equal(t, &want, rows[0].RackGroupID)
+			assert.Equal(t, new("preserve-group"), rows[1].RackGroupID)
+			stored, err := dao.Get(ctx, nil, ids[1], nil, false)
+			if assert.NoError(t, err) {
+				assert.Equal(t, new("preserve-group"), stored.RackGroupID)
+			}
+		})
+	}
+}
+
 func TestExpectedRackDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)

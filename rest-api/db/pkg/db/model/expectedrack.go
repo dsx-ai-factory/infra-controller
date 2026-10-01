@@ -54,6 +54,7 @@ type ExpectedRack struct {
 	Site          *Site     `bun:"rel:belongs-to,join:site_id=id"`
 	RackID        string    `bun:"rack_id,notnull"`
 	RackProfileID string    `bun:"rack_profile_id,notnull"`
+	RackGroupID   *string   `bun:"rack_group_id"`
 	Name          string    `bun:"name,nullzero,notnull,default:''"`
 	Description   string    `bun:"description,nullzero,notnull,default:''"`
 	Labels        Labels    `bun:"labels,type:jsonb,nullzero,notnull,default:'{}'"`
@@ -68,6 +69,7 @@ type ExpectedRackCreateInput struct {
 	SiteID         uuid.UUID
 	RackID         string
 	RackProfileID  string
+	RackGroupID    *string
 	Name           string
 	Description    string
 	Labels         map[string]string
@@ -79,6 +81,7 @@ type ExpectedRackUpdateInput struct {
 	ExpectedRackID uuid.UUID
 	RackID         *string
 	RackProfileID  *string
+	RackGroupID    *string
 	Name           *string
 	Description    *string
 	Labels         map[string]string
@@ -106,6 +109,9 @@ func (er *ExpectedRack) ToProto() *corev1.ExpectedRack {
 		},
 	}
 
+	if er.RackGroupID != nil {
+		proto.RackGroupId = &corev1.RackGroupId{Id: *er.RackGroupID}
+	}
 	if len(er.Labels) > 0 {
 		proto.Metadata.Labels = er.Labels.ToProto()
 	}
@@ -129,6 +135,11 @@ func (er *ExpectedRack) FromProto(proto *corev1.ExpectedRack) {
 	}
 	if proto.RackProfileId != nil && proto.RackProfileId.Id != "" {
 		er.RackProfileID = proto.RackProfileId.Id
+	}
+	er.RackGroupID = nil
+	if proto.GetRackGroupId().GetId() != "" {
+		groupID := proto.RackGroupId.Id
+		er.RackGroupID = &groupID
 	}
 	if proto.Metadata != nil {
 		er.Name = proto.Metadata.Name
@@ -234,6 +245,7 @@ func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 			SiteID:        input.SiteID,
 			RackID:        input.RackID,
 			RackProfileID: input.RackProfileID,
+			RackGroupID:   input.RackGroupID,
 			Name:          input.Name,
 			Description:   input.Description,
 			Labels:        labels,
@@ -483,6 +495,20 @@ func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inp
 		Exec(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// Only supplied groups participate, so mixed batches preserve omitted values.
+	groupUpdates := make([]*ExpectedRack, 0, len(inputs))
+	for _, input := range inputs {
+		if input.RackGroupID != nil {
+			groupUpdates = append(groupUpdates, &ExpectedRack{ID: input.ExpectedRackID, RackGroupID: input.RackGroupID})
+		}
+	}
+	if len(groupUpdates) > 0 {
+		_, err = db.GetIDB(tx, erd.dbSession).NewUpdate().Model(&groupUpdates).Column("rack_group_id").Bulk().Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Fetch the updated expected racks

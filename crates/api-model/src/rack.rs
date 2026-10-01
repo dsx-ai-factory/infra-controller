@@ -19,7 +19,7 @@ use std::fmt::Display;
 
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -66,6 +66,8 @@ pub const LABEL_LOCATION_POSITION: &str = "location.position";
 pub struct Rack {
     pub id: RackId,
     pub rack_profile_id: Option<RackProfileId>,
+    /// External group identity copied from the expected rack at discovery.
+    pub rack_group_id: Option<RackGroupId>,
     pub config: RackConfig,
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
@@ -377,6 +379,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
         Ok(Rack {
             id: row.try_get("id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             config: config.0,
             controller_state: Versioned {
                 value: controller_state.0,
@@ -1278,6 +1281,7 @@ mod tests {
         Rack {
             id: RackId::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig {
                 maintenance_requested,
                 ..Default::default()

@@ -45,6 +45,7 @@ impl From<Rack> for rpc::forge::Rack {
 
         rpc::forge::Rack {
             id: Some(value.id),
+            rack_group_id: value.rack_group_id,
             rack_state: value.controller_state.value.to_string(),
             created: Some(Timestamp::from(value.created)),
             updated: Some(Timestamp::from(value.updated)),
