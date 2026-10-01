@@ -462,6 +462,8 @@ mod tests {
         host_interface_id: Option<String>,
     ) -> ManagedHostNetworkConfigResponse {
         ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             use_admin_network,
             admin_interface,
             tenant_interfaces,
