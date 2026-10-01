@@ -26,7 +26,7 @@ spec:
   selector:
     {{- include "nico-api.selectorLabels" . | nindent 4 }}
   ports:
-    - port: 443
+    - port: {{ .Values.externalService.port | default 443 }}
       targetPort: {{ .Values.service.grpc.port }}
       name: grpc
       protocol: TCP

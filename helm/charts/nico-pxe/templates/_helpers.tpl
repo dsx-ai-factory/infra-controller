@@ -104,3 +104,16 @@ selector:
   matchLabels:
     app.kubernetes.io/metrics: {{ .name }}
 {{- end }}
+
+{{/*
+Annotations for the external Services. Operator annotations override the
+built-in sharing annotation.
+*/}}
+{{- define "nico-pxe.externalAnnotations" -}}
+{{- $annotations := dict -}}
+{{- with .Values.externalService.sharedIpAnnotation -}}
+{{- $_ := set $annotations . (include "nico-pxe.name" $) -}}
+{{- end -}}
+{{- $annotations = mergeOverwrite $annotations (default dict .Values.externalService.annotations) -}}
+{{- toYaml $annotations -}}
+{{- end -}}

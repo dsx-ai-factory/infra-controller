@@ -1,0 +1,28 @@
+suite: External NTP Service traffic policy
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps Local on every per-replica Service by default
+    set:
+      replicas: 3
+      externalService:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: spec.ports[0]
+          value: { name: ntp, protocol: UDP, port: 123, targetPort: 123 }
+
+  - it: omits the policy when cleared so Kubernetes applies Cluster
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+        externalTrafficPolicy: ""
+    asserts:
+      - notExists:
+          path: spec.externalTrafficPolicy

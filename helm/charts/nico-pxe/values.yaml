@@ -174,7 +174,8 @@ serviceMonitor:
   scrapeTimeout: 25s
 
 ## External LoadBalancer Services (for bare-metal / MetalLB)
-## Creates nico-pxe-external (8080) and nico-pxe-external-80 (80→8080) with shared IP
+## Creates nico-pxe-external (port) and nico-pxe-external-80 (alternatePort),
+## both targeting container port 8080 and sharing one IP.
 externalService:
   enabled: false
   type: LoadBalancer
@@ -184,7 +185,18 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
+  # External HTTP ports. nico-pxe-external-80 is omitted when alternatePort
+  # is 0; the Service name does not change with the port.
+  port: 8080
+  alternatePort: 80
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods.
   externalTrafficPolicy: Local
+  # Annotation key that lets the two Services share an IP. Its value is the
+  # chart name. Change the key for a load-balancer controller that does not
+  # use MetalLB annotations, or set it to "" to omit the annotation. An
+  # annotations entry with the same key overrides the built-in value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
   annotations: {}
   # annotations:
   #   metallb.universe.tf/loadBalancerIPs: "10.x.x.x"

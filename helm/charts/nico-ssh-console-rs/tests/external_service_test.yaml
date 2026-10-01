@@ -1,0 +1,35 @@
+suite: External SSH console Service
+templates:
+  - external-service.yaml
+tests:
+  - it: exposes port 22 with the Kubernetes default traffic policy
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 22, targetPort: 22, name: ssh, protocol: TCP }
+      - notExists:
+          path: spec.externalTrafficPolicy
+      - notExists:
+          path: metadata.annotations
+
+  - it: overrides the external port and traffic policy and passes annotations through
+    set:
+      externalService:
+        enabled: true
+        port: 2222
+        externalTrafficPolicy: Local
+        annotations:
+          metallb.universe.tf/allow-shared-ip: "nico-shared"
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 2222, targetPort: 22, name: ssh, protocol: TCP }
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-shared

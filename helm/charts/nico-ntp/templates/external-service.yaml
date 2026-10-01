@@ -26,7 +26,9 @@ spec:
   ipFamilies:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  externalTrafficPolicy: Local
+  {{- with $.Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "nico-ntp.name" $ }}
     statefulset.kubernetes.io/pod-name: {{ include "nico-ntp.name" $ }}-{{ $i }}

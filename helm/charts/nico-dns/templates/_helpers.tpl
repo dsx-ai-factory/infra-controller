@@ -86,3 +86,19 @@ issuerRef:
   group: {{ .global.certificate.issuerRef.group }}
 secretName: {{ .name }}
 {{- end }}
+
+{{/*
+Annotations for the external Services of pod ordinal .index. Operator
+perPodAnnotations override the built-in sharing annotation.
+*/}}
+{{- define "nico-dns.externalAnnotations" -}}
+{{- $annotations := dict -}}
+{{- with .root.Values.externalService.sharedIpAnnotation -}}
+{{- $_ := set $annotations . (printf "%s-instance-%d" (include "nico-dns.name" $.root) $.index) -}}
+{{- end -}}
+{{- $perPod := .root.Values.externalService.perPodAnnotations -}}
+{{- if and $perPod (gt (len $perPod) .index) -}}
+{{- $annotations = mergeOverwrite $annotations (default dict (index $perPod .index)) -}}
+{{- end -}}
+{{- toYaml $annotations -}}
+{{- end -}}

@@ -585,7 +585,14 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
+  # External gRPC port. The backend target port stays service.grpc.port.
+  port: 443
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods.
   externalTrafficPolicy: Local
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here, for
+  # example metallb.universe.tf/allow-shared-ip: "<group>".
   annotations: {}
   # annotations:
   #   metallb.universe.tf/loadBalancerIPs: "10.x.x.x"

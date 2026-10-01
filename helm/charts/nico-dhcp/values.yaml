@@ -277,4 +277,10 @@ serviceMonitor:
 externalService:
   enabled: false
   type: LoadBalancer
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve relay
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here.
   annotations: {}

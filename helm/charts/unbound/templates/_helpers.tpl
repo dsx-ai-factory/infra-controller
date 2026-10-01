@@ -55,3 +55,16 @@ app.kubernetes.io/instance: nico-unbound
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/name: unbound
 {{- end }}
+
+{{/*
+Annotations for the external Services. Operator annotations override the
+built-in sharing annotation.
+*/}}
+{{- define "unbound.externalAnnotations" -}}
+{{- $annotations := dict -}}
+{{- with .Values.externalService.sharedIpAnnotation -}}
+{{- $_ := set $annotations . (printf "%s-external" (include "unbound.name" $)) -}}
+{{- end -}}
+{{- $annotations = mergeOverwrite $annotations (default dict .Values.externalService.annotations) -}}
+{{- toYaml $annotations -}}
+{{- end -}}

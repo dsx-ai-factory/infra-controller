@@ -1,4 +1,5 @@
 {{- if .Values.externalService.enabled }}
+{{- $annotations := include "nico-pxe.externalAnnotations" . | fromYaml }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,11 +9,10 @@ metadata:
   labels:
     {{- omit (include "nico-pxe.labels" . | fromYaml) "app.kubernetes.io/part-of" | toYaml | nindent 4 }}
     app.kubernetes.io/part-of: {{ include "nico-pxe.name" . }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "nico-pxe.name" . }}"
-    {{- with .Values.externalService.annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.ipFamilyPolicy }}
@@ -28,10 +28,11 @@ spec:
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:
-    - port: 8080
+    - port: {{ .Values.externalService.port | default 8080 }}
       targetPort: 8080
       name: http
       protocol: TCP
+{{- if .Values.externalService.alternatePort }}
 ---
 apiVersion: v1
 kind: Service
@@ -42,11 +43,10 @@ metadata:
   labels:
     {{- omit (include "nico-pxe.labels" . | fromYaml) "app.kubernetes.io/part-of" | toYaml | nindent 4 }}
     app.kubernetes.io/part-of: {{ include "nico-pxe.name" . }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "nico-pxe.name" . }}"
-    {{- with .Values.externalService.annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.ipFamilyPolicy }}
@@ -62,8 +62,9 @@ spec:
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:
-    - port: 80
+    - port: {{ .Values.externalService.alternatePort }}
       targetPort: 8080
       name: http
       protocol: TCP
+{{- end }}
 {{- end }}

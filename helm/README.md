@@ -289,6 +289,80 @@ nico-dns:
       - metallb.universe.tf/loadBalancerIPs: "10.x.x.2"   # pod-1
 ```
 
+#### Sharing External IPs
+
+By default every external Service keeps its own LoadBalancer IP, and the
+standard site layout uses ten IPs: API, DHCP, two DNS replicas, PXE, SSH
+console, three NTP replicas, and unbound. Sharing is optional. Nothing is
+shared unless a values file asks for it, and existing sites render the same
+Services on upgrade.
+
+Compatible Services can share one LoadBalancer IP, differentiated by protocol
+and port. Sharing is requested through the load-balancer controller's own
+annotations, so it works with any controller that supports them. The chart
+makes no assumption beyond passing the annotations through.
+
+- `nico-dns`, `nico-pxe`, and `unbound` add a built-in sharing annotation so
+  their own UDP and TCP (or port 80 and 8080) Services share one IP. The key is
+  `externalService.sharedIpAnnotation` (default
+  `metallb.universe.tf/allow-shared-ip`). Change it for a controller that uses
+  a different key, or set it to `""` to omit it. An operator annotation with
+  the same key overrides the built-in value, and the rendered Service never
+  contains a duplicate key.
+- Other charts pass `externalService.annotations` (or `perPodAnnotations`)
+  through unchanged. Add the controller's sharing annotation there to join a
+  group.
+- External ports are configurable where sharing may need them:
+  `nico-api.externalService.port` (443), `nico-pxe.externalService.port`
+  (8080), `nico-pxe.externalService.alternatePort` (80, `0` omits the second
+  Service), and `nico-ssh-console-rs.externalService.port` (22). Backend target
+  ports do not change. DNS, DHCP, and NTP keep their standard ports.
+- `externalService.externalTrafficPolicy` is configurable on each chart's
+  external Service. Defaults are unchanged: `Local` for `nico-api`, `nico-pxe`,
+  and `nico-ntp`, and the Kubernetes default (`Cluster`) elsewhere. The DHCPv6
+  relay Service (`nico-dhcp.v6ExternalService`) stays `Local`. `Local`
+  preserves client source IPs, and `Cluster` may SNAT them. MetalLB only lets a
+  `Local` Service share an IP with Services that select the same pods, so
+  `nico-api`, `nico-pxe`, and each NTP replica keep their own IPs unless you
+  switch them to `Cluster` deliberately.
+
+Two Services on one IP must not use the same protocol and port, so `unbound`
+and `nico-dns` cannot share an IP. Per-replica DNS and NTP endpoints stay
+separate, and sharing never collapses replicas.
+
+##### Eight-IP Example
+
+[`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml)
+is an overlay for your site values that fits the external Services into eight
+IPs with every port at its default. Apply it after your site values:
+
+```bash
+helm upgrade --install nico ./helm -n nico-system -f my-site-values.yaml -f examples/values-shared-external-ips.yaml
+```
+
+| Service, replica | Protocol and port | Shared IP group | Traffic policy and restriction |
+|------------------|-------------------|-----------------|--------------------------------|
+| nico-api | TCP 443 | own IP | Local, shares only with identical selectors |
+| nico-pxe | TCP 8080 and 80 | own IP, built-in `nico-pxe` key | Local, shares only with identical selectors |
+| nico-ssh-console-rs | TCP 22 | `nico-shared` | Cluster |
+| nico-dhcp | UDP 67 | `nico-shared` | Cluster, IP is the DHCP server identifier |
+| unbound | UDP and TCP 53 | `nico-shared` | Cluster, cannot share with nico-dns (port 53) |
+| nico-dns-0, nico-dns-1 | UDP and TCP 53 | one IP per replica | Cluster |
+| nico-ntp-0, nico-ntp-1, nico-ntp-2 | UDP 123 | one IP per replica | Local, shares only with identical selectors |
+
+The count covers the enabled external Services above, including the optional
+`nico-ntp` and `unbound` charts. It excludes the DHCPv6 relay VIP
+(`nico-dhcp.v6ExternalService`), the `nico-bmc-proxy` and
+`nico-machine-a-tron` external Services, which are disabled by default, and
+any ingress or observability VIPs installed outside this chart. Switching
+`nico-api` or `nico-pxe` to `Cluster` frees one more IP at the cost of client
+source IPs.
+
+The sharing rules above are MetalLB's. For another load-balancer controller,
+confirm its sharing annotation key, whether it supports IP sharing at all, and
+its `Local` policy rules before relying on this plan. If it does not share
+IPs, set `nico-pxe.externalService.alternatePort: 0` to keep PXE on one IP.
+
 ## Architecture
 
 ### Workload Summary
@@ -330,6 +404,7 @@ For reference configurations, see:
 
 - [`examples/values-minimal.yaml`](./examples/values-minimal.yaml) -- Minimal deployment with only the core services
 - [`examples/values-full.yaml`](./examples/values-full.yaml) -- Full deployment with all services and production settings
+- [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml) -- Overlay that fits the external Services into eight LoadBalancer IPs
 
 ## Migrating from Kustomize
 

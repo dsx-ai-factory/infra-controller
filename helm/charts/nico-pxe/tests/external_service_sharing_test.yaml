@@ -1,0 +1,88 @@
+suite: External PXE Service IP sharing and ports
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps the default ports, sharing annotation, and Local policy
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/allow-shared-ip: nico-pxe
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: spec.ports[0]
+          value: { port: 8080, targetPort: 8080, name: http, protocol: TCP }
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: nico-pxe-external-80
+        documentIndex: 1
+      - equal:
+          path: spec.ports[0]
+          value: { port: 80, targetPort: 8080, name: http, protocol: TCP }
+        documentIndex: 1
+
+  - it: lets operator annotations override the sharing key without duplicating it
+    set:
+      externalService:
+        enabled: true
+        annotations:
+          metallb.universe.tf/loadBalancerIPs: "10.0.0.11"
+          metallb.universe.tf/allow-shared-ip: "nico-shared"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/loadBalancerIPs: "10.0.0.11"
+            metallb.universe.tf/allow-shared-ip: nico-shared
+        documentIndex: 0
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-shared
+        documentIndex: 1
+
+  - it: renames the sharing annotation for other controllers
+    set:
+      externalService:
+        enabled: true
+        sharedIpAnnotation: metallb.io/allow-shared-ip
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.io/allow-shared-ip: nico-pxe
+
+  - it: overrides external ports while keeping the backend target port
+    set:
+      externalService:
+        enabled: true
+        port: 18080
+        alternatePort: 8081
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 18080, targetPort: 8080, name: http, protocol: TCP }
+        documentIndex: 0
+      - equal:
+          path: spec.ports[0]
+          value: { port: 8081, targetPort: 8080, name: http, protocol: TCP }
+        documentIndex: 1
+
+  - it: omits the second Service when alternatePort is 0
+    set:
+      externalService:
+        enabled: true
+        alternatePort: 0
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: nico-pxe-external

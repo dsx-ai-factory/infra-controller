@@ -1,0 +1,24 @@
+suite: External DHCP Service traffic policy
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps the Kubernetes default traffic policy
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - notExists:
+          path: spec.externalTrafficPolicy
+      - equal:
+          path: spec.ports[0]
+          value: { port: 67, targetPort: 67, name: udp, protocol: UDP }
+
+  - it: renders the configured traffic policy
+    set:
+      externalService:
+        enabled: true
+        externalTrafficPolicy: Local
+    asserts:
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local

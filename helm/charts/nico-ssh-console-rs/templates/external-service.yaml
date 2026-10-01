@@ -12,10 +12,13 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     {{- include "nico-ssh-console-rs.selectorLabels" . | nindent 4 }}
   ports:
-    - port: 22
+    - port: {{ .Values.externalService.port | default 22 }}
       targetPort: 22
       name: ssh
       protocol: TCP
