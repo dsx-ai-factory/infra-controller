@@ -157,7 +157,16 @@ impl DomainState {
             _ => self.allocate_id(),
         };
         let name = if name.is_empty() {
-            format!("partition-{id}")
+            // A generated name can collide with one a caller chose earlier,
+            // and names are a lookup key, so it is checked like any other.
+            let generated = format!("partition-{id}");
+            if self
+                .partitions()
+                .any(|partition| partition.name == generated)
+            {
+                return Err(PartitionError::NameInUse(generated));
+            }
+            generated
         } else {
             name.to_string()
         };
@@ -292,6 +301,7 @@ mod tests {
         scenarios!(run = |(name, uids, requested): (&str, Vec<u64>, Option<u32>)| {
             let mut domain = empty_domain();
             domain.create("taken", &[0x13], Some(7)).unwrap();
+            domain.create("partition-2", &[0x12], Some(9)).unwrap();
             domain.create(name, &uids, requested)
         };
             "ids are allocated from 1, skipping ids in use" {
@@ -306,8 +316,9 @@ mod tests {
                 ("p", vec![0x10], Some(7)) => FailsWith(PartitionError::IdInUse(7)),
             }
 
-            "names are unique" {
+            "names are unique, including generated ones" {
                 ("taken", vec![0x10], None) => FailsWith(PartitionError::NameInUse("taken".into())),
+                ("", vec![0x10], Some(2)) => FailsWith(PartitionError::NameInUse("partition-2".into())),
             }
 
             "GPUs must be in the domain and free" {

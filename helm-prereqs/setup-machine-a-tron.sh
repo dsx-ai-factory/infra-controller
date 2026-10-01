@@ -1219,6 +1219,7 @@ if $SKIP_NICO_CORE_CONFIG || $SKIP_NVLINK_CONFIG; then
 elif ! _controller_mode; then
     info "override mode has no per-switch NVOS addresses; NMX-C mock not configured"
 else
+    rm -f "$CM_JSON"
     CM_JSON="$(mktemp)"
     kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o json > "$CM_JSON" 2>/dev/null \
         || die "nico-api-site-config-files configmap not found"
@@ -1613,13 +1614,46 @@ cat > "$MERGED_VALUES" <<EOF
 image:
   repository: "${MAT_IMAGE_REPO}"
   tag: "${MAT_IMAGE_TAG}"
-# The SAN NICo verifies the hosted NMX-C mock against (Phase 5b); must match
-# [nvlink_config].nmx_c_tls_authority. Listed explicitly so an
-# NMXC_MOCK_AUTHORITY override and the chart's certificate cannot drift.
-certificate:
-  extraDnsNames:
-    - "${NMXC_MOCK_AUTHORITY}"
 EOF
+# The SAN NICo verifies the hosted NMX-C mock against (Phase 5b); must match
+# [nvlink_config].nmx_c_tls_authority. Helm replaces lists wholesale, so the
+# operator's own certificate.extraDnsNames are carried over rather than
+# overwritten, with the authority appended when absent.
+NMXC_MOCK_AUTHORITY="$NMXC_MOCK_AUTHORITY" python3 - "$VALUES_FILE" >> "$MERGED_VALUES" <<'PY'
+import os, re, sys
+authority = os.environ["NMXC_MOCK_AUTHORITY"]
+text = open(sys.argv[1]).read()
+names = []
+try:
+    import yaml
+    doc = yaml.safe_load(text) or {}
+    names = list((doc.get("certificate") or {}).get("extraDnsNames") or [])
+except ImportError:
+    # Dependency-free fallback: the `extraDnsNames:` list items directly under `certificate:`.
+    in_cert, in_list = False, False
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 0:
+            in_cert, in_list = raw.startswith("certificate:"), False
+            continue
+        if in_cert and re.match(r"\s*extraDnsNames\s*:", raw):
+            in_list = True
+            continue
+        if in_list:
+            m = re.match(r"\s*-\s*['\"]?([^'\"#]+)", raw)
+            if m:
+                names.append(m.group(1).strip())
+            else:
+                in_list = False
+if authority not in names:
+    names.append(authority)
+print("certificate:")
+print("  extraDnsNames:")
+for name in names:
+    print(f'    - "{name}"')
+PY
 # MAT_MULTIPOD=1: the values file defines its own pods map (mat-0..mat-N with
 # per-pod host counts and relay addresses); injecting the single-pod default
 # here would deep-merge a phantom extra pod on top of it. HOST_COUNT/DPU env
