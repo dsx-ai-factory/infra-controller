@@ -1,0 +1,50 @@
+---
+tags: ["current", "deployment", "dpu", "health", "networking", "provisioning", "rack-level-administration", "rest-api", "security", "telemetry"]
+---
+
+## NVIDIA Infra Controller v2.2 <Badge intent="launch">Current</Badge>
+
+NICo v2.2 expands site-scale provisioning, rack and NVLink domain operations, health history, and REST administration. It adds Discovery OS cloud-init, more control over DPU service rollout, and an opt-in path to manage Max-Q power through DPS.
+
+### Before upgrading from v2.1
+
+<Warning title="Flow deployment change">
+The Flow chart no longer bundles PSM or NSM. If the existing `flow/flow` Deployment or an active Flow Pod still contains either container, `setup.sh` stops before changing the cluster, even with `--skip-flow` or `--skip-rest`. Move any manager roles in use to RMS or an externally managed endpoint, follow the [manual Flow-only upgrade procedure](https://github.com/dsx-ai-factory/infra-controller/blob/release/v2.2/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm), and verify its rollout before rerunning setup.
+</Warning>
+
+The REST PostgreSQL StatefulSet now requests a 10Gi volume instead of 1Gi. On an existing installation, `setup.sh` recreates the StatefulSet when Kubernetes rejects the changed volume claim template, while preserving its running pod and PVC. The existing PVC remains 1Gi unless you expand it on a StorageClass that supports expansion. Follow the [2.1-to-2.2 upgrade note](../../docs/manuals/upgrade.md#21--22-nico-rest-postgres-volume-size) before upgrading.
+
+### Deployment and credentials
+
+- `helm-prereqs/setup.sh` can reconcile both a new installation and a supported in-place upgrade. The setup flow now provisions RMS, and the [upgrade guide](../../docs/manuals/upgrade.md) covers prerequisites, backups, verification, and rollback.
+- Temporal and Keycloak can optionally use dedicated databases on the shared `nico-pg-cluster`. Both `temporal.useHaPostgres` and `keycloak.useHaPostgres` default to `false`, so existing sites keep the standalone PostgreSQL target until they opt in. Existing data requires the [database migration procedure](https://github.com/dsx-ai-factory/infra-controller/blob/release/v2.2/helm-prereqs/README.md#consolidating-temporalkeycloak-onto-nico-pg-cluster).
+- The standard deployment can use a HashiCorp Vault namespace for Kubernetes authentication, token refresh, KV, and PKI requests through `VAULT_NAMESPACE`. Existing deployments without a namespace remain unchanged.
+
+### Host and DPU lifecycle
+
+- Discovery OS supports optional [cloud-init customization](../../docs/provisioning/discovery-os-cloud-init.md) for site-specific discovery and validation steps. Scout reports can also validate and reconcile boot-interface selection when Redfish UEFI PCI data is unavailable.
+- Managed switches and power shelves now have decommissioning workflows alongside the existing managed-host path. The workflows move hardware out of normal lifecycle management as a site is retired or rebuilt.
+- DPF-managed DPU service updates can wait for NICo confirmation that the DPU is running the expected software. Operators can inspect and release maintenance holds when automatic rollout is disabled or a host cannot reach Ready.
+- Site Explorer raises its default ingestion concurrency to values measured in a 4,500-host simulation. Sites with explicit values retain those settings.
+
+### Rack, power, and NVLink operations
+
+- REST clients can target one or several NVLink domains for power control and firmware updates. Flow resolves each domain to its current racks and creates the rack tasks; callers no longer need to enumerate those racks themselves.
+- Deployments without an external power coordinator can opt in to direct, authenticated DPS Max-Q power management. NICo then manages VPC resource groups and allocated machines' power profiles; direct DPS calls remain disabled by default.
+- Switch, power-shelf, rack, and machine health history is available through `nico-admin-cli`, and the Admin UI shows history for switches, power shelves, and racks. NMX-C domain state can also raise `NmxControllerHealth` alerts.
+
+### REST API and observability
+
+- Provider administrators can list DPU Machines at a site or look up one by ID. The direct lookup includes DPU network configuration only when `includeNetworkConfig=true`.
+- The site-wide Task endpoint lists tasks across racks and trays with stable pagination. REST instance creation can restrict placement by machine labels, and rack or tray firmware updates can include file-access authentication data.
+- Hardware-health collection adds optional switch leak-sensor gNMI telemetry, endpoint TCP reachability, NVIDIA OEM metrics, and switch last-reboot reasons.
+
+### Reliability fixes
+
+- The NVLink Manager can rotate a switch certificate that has already expired, closing the certificate-monitor limitation noted in v2.1.
+- DHCP uses a stable server identifier across pod restarts, and DPF provisioning recovers a reboot handshake that could stall the second DPU on a host.
+- Fleet-scale fixes reduce database connection pressure during ingestion, increase the PostgreSQL default for large sites, and give the REST site worker more memory headroom.
+
+<br /><br />
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>
