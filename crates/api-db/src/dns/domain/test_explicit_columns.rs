@@ -144,6 +144,36 @@ async fn exercise_domain_queries(
         serde_json::to_value(&domain)?
     );
 
+    // The tenant reserved-ID create, replay and delete paths prepare their own
+    // statements; Core reuses them across a live column-adding migration too.
+    let reserved_id: DomainId = uuid::Uuid::new_v4().into();
+    lock_id_exclusive(&mut txn, reserved_id).await?;
+    let reserved_input = NewDomain {
+        default_ttl: Some(ZoneTtl::try_from(450)?),
+        ..NewDomain::new("reserved.example.com")
+    };
+    let reserved = persist_reserved(reserved_input.clone(), reserved_id, &mut txn).await?;
+    assert_eq!(reserved.id, reserved_id);
+    assert_eq!(reserved.name, reserved_input.name);
+    assert_eq!(reserved.default_ttl, reserved_input.default_ttl);
+    assert_eq!(reserved.deleted, None);
+    let (intent, is_reserved, create_ttl) = reserved_create_intent(&mut txn, reserved_id)
+        .await?
+        .expect("the reserved create intent is retained");
+    assert!(is_reserved);
+    assert_eq!(create_ttl, reserved_input.default_ttl);
+    assert_eq!(
+        serde_json::to_value(&intent)?,
+        serde_json::to_value(&reserved)?
+    );
+    let locked = find_by_uuid_for_delete(&mut txn, reserved_id)
+        .await?
+        .expect("the reserved domain is found for deletion");
+    assert_eq!(
+        serde_json::to_value(&locked)?,
+        serde_json::to_value(&reserved)?
+    );
+
     // Leave an empty table so `persist_first` inserts on both passes. The
     // connection retains its prepared statements after the rollback.
     txn.rollback().await?;
