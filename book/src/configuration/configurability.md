@@ -736,7 +736,7 @@ These don't fit any sub-section but show up in production tuning:
 | Field | Default | When to touch |
 |-------|---------|---------------|
 | `max_database_connections` | `1000` | Drop when running multiple `nico-api` replicas to avoid saturating Postgres `max_connections`. |
-| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. See the dedicated section for configuration and service overrides. |
+| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. The nico-api chart exposes `enabled` as `apiAdmissionControl.enabled`. See the dedicated section for configuration and service overrides. |
 | `max_find_by_ids` | `100` | Increase if scripts paginate batch lookups; raise the API-side limit to match the client. |
 | `compute_allocation_enforcement` | `WarnOnly` | Switch to `Enforce` once tenant compute pools are sized correctly — flips over-allocation from a warning to a refusal. |
 | `bmc_session_lockout_threshold` | `3` | Number of consecutive 401/403s from a BMC before NICo stops session-token logins for that BMC. Raise on environments with flaky BMC firmware. |
@@ -780,7 +780,9 @@ Service overrides are keyed by the exact SPIFFE service identifier (for
 example, `scout`), and may give trusted internal services a different share
 without exceeding the global bounds. Tune the global and per-client limits
 after scale testing. Set `enabled = false` only as a rollback escape hatch.
-For field-level defaults and validation rules, see
+The nico-api chart exposes it as `apiAdmissionControl.enabled` (default
+`true`). A site config overlay that sets the same key takes precedence over
+the chart value. For field-level defaults and validation rules, see
 [`ApiAdmissionControlConfig`](../../../crates/api-core/src/cfg/README.md#apiadmissioncontrolconfig).
 
 ### FNN routing profiles and prefix filters

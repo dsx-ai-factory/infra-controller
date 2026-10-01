@@ -81,8 +81,12 @@ fn firmware_entry_matches_host_hw_type(
     match hw_type {
         DellPowerEdgeR750 => vendor.contains("dell") && model.contains("r750"),
         DellPowerEdgeR760Bf4 => vendor.contains("dell") && model.contains("r760"),
-        WiwynnGB200Nvl => vendor.contains("wiwynn") && model.contains("gb200"),
-        LenovoGB300Nvl => vendor.contains("lenovo") && model.contains("gb300"),
+        WiwynnGB200Nvl => {
+            (vendor.contains("wiwynn") || vendor.contains("nvidia")) && model.contains("gb200")
+        }
+        LenovoGB300Nvl => {
+            vendor.contains("lenovo") && (model.contains("gb300") || model == "hg635n_v2")
+        }
         NvidiaDgxGb300 => vendor.contains("nvidia") && model.contains("gb300"),
         NvidiaDgxVr => vendor.contains("nvidia") && model.contains("dgx vr"),
         SupermicroGb300Nvl => vendor.contains("supermicro") && model.contains("gb300"),
@@ -876,5 +880,93 @@ impl MachineHandle {
 
     pub(super) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
+    }
+}
+
+#[cfg(test)]
+mod firmware_catalog_tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn gb300_matches_host_and_hgx_model_names() {
+        check_values(
+            [
+                Check {
+                    scenario: "host system model",
+                    input: ("LenovoAMI", "HG635N_V2"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "HGX system model",
+                    input: ("LenovoAMI", "GB300 1CPU:2GPU Board PC"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Lenovo platform",
+                    input: ("Lenovo", "ThinkSystem HS350X V3"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different GB300 vendor",
+                    input: ("Nvidia", "GB300"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::LenovoGB300Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn gb200_matches_explored_vendor_and_retains_configured_vendor() {
+        check_values(
+            [
+                Check {
+                    scenario: "explored Nvidia vendor",
+                    input: ("Nvidia", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "configured Wiwynn vendor",
+                    input: ("Wiwynn", "GB200 NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "case and separator normalization",
+                    input: ("NVIDIA", "GB200-NVL"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "different Nvidia platform",
+                    input: ("Nvidia", "GB300 NVL"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "different vendor",
+                    input: ("Dell", "GB200 NVL"),
+                    expect: false,
+                },
+            ],
+            |(vendor, model)| {
+                firmware_entry_matches_host_hw_type(
+                    bmc_mock::HardwareType::WiwynnGB200Nvl,
+                    &rpc::forge::DesiredFirmwareVersionEntry {
+                        vendor: vendor.to_string(),
+                        model: model.to_string(),
+                        component_versions: Default::default(),
+                    },
+                )
+            },
+        );
     }
 }

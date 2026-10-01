@@ -3330,6 +3330,9 @@ func (f *spectrumXInventoryFixture) reportInventory(t *testing.T, deviceInstance
 type reportedAttachment struct {
 	deviceInstance uint32
 	attachmentType corev1.SpxAttachmentType
+	// ovs, when set, is reported as the attachment_ovs config. A nil OvnNetworkName
+	// within it reports the OVN network name as absent.
+	ovs *corev1.SpxAttachmentOvs
 }
 
 // reportAttachments drives one UpdateInstancesInDB iteration with fully specified attachment
@@ -3344,6 +3347,7 @@ func (f *spectrumXInventoryFixture) reportAttachments(t *testing.T, entries []re
 			Device:         testSpectrumXDevice,
 			DeviceInstance: entry.deviceInstance,
 			AttachmentType: entry.attachmentType,
+			AttachmentOvs:  entry.ovs,
 		})
 	}
 
@@ -3512,5 +3516,32 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		persisted := fx.get(t, sxa.ID)
 		assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, persisted.Status)
 		assert.Nil(t, persisted.MacAddress, "a Physical report must not supply the OVS attachment's MAC")
+	})
+
+	// attachment_ovs is client-owned config echoed back whole, so an omitted
+	// ovn_network_name means the mapping was removed. The row must drop the stale value
+	// rather than carry it forward and re-send it to Core on a later unrelated PATCH,
+	// even as the rest of the OVS config (the bridge) is applied and the row goes Ready.
+	t.Run("clears a removed OVN network name while applying the rest of an OVS config", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.typedAttachment(t, 0, cdbm.SpectrumXAttachmentTypeOVS, cdbm.SpectrumXAttachmentStatusPending)
+		_, err := fx.sxaDAO.Update(context.Background(), nil, cdbm.SpectrumXAttachmentUpdateInput{
+			SpectrumXAttachmentID: sxa.ID,
+			BridgeName:            cutil.GetPtr("br-spx0"),
+			OvnNetworkName:        cutil.GetPtr("net-old"),
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, fx.reportAttachments(t, []reportedAttachment{
+			{deviceInstance: 0, attachmentType: corev1.SpxAttachmentType_OVS, ovs: &corev1.SpxAttachmentOvs{BridgeName: "br-new"}},
+		}, []*corev1.InstanceSpxAttachmentStatus{
+			{},
+		}, corev1.SyncState_SYNCED))
+
+		persisted := fx.get(t, sxa.ID)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, persisted.Status)
+		require.NotNil(t, persisted.BridgeName)
+		assert.Equal(t, "br-new", *persisted.BridgeName, "the reported bridge must be applied")
+		assert.Nil(t, persisted.OvnNetworkName, "an omitted ovn_network_name must clear the stale persisted value")
 	})
 }

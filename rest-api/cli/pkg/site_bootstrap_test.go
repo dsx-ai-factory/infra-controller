@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -190,61 +192,149 @@ func TestBootstrapScalarEqual(t *testing.T) {
 	}
 }
 
+func TestBootstrapResourceAPI_NormalizePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		category string
+		resource map[string]any
+		expected map[string]any
+	}{
+		{
+			name:     "CIDR text changes but metadata stays exact",
+			category: "vpcPrefixes",
+			resource: map[string]any{
+				"prefix":      "2001:0DB8:0000:0001:0000:0000:0000:0000/64",
+				"description": "2001:0DB8:0000:0001:0000:0000:0000:0000/64",
+			},
+			expected: map[string]any{
+				"prefix":      "2001:db8:0:1::/64",
+				"description": "2001:0DB8:0000:0001:0000:0000:0000:0000/64",
+			},
+		},
+		{
+			name:     "host bits are not masked",
+			category: "vpcPrefixes",
+			resource: map[string]any{"prefix": "2001:0DB8:0000:0001:0000:0000:0000:0001/64"},
+			expected: map[string]any{"prefix": "2001:db8:0:1::1/64"},
+		},
+		{
+			name:     "address text changes but separate length stays exact",
+			category: "siteIpBlocks",
+			resource: map[string]any{
+				"prefix":       "2001:0DB8:0000:0000:0000:0000:0000:0000",
+				"prefixLength": 48,
+			},
+			expected: map[string]any{
+				"prefix":       "2001:db8::",
+				"prefixLength": 48,
+			},
+		},
+		{
+			name:     "unparseable prefix stays exact",
+			category: "vpcPrefixes",
+			resource: map[string]any{"prefix": "not-a-prefix"},
+			expected: map[string]any{"prefix": "not-a-prefix"},
+		},
+		{
+			name:     "another resource category stays exact",
+			category: "instances",
+			resource: map[string]any{"prefix": "2001:0DB8:0000:0001:0000:0000:0000:0000/64"},
+			expected: map[string]any{"prefix": "2001:0DB8:0000:0001:0000:0000:0000:0000/64"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := maps.Clone(test.resource)
+			api := bootstrapResourceAPI{category: test.category}
+
+			assert.Equal(t, test.expected, api.normalizePrefix(test.resource))
+			assert.Equal(t, original, test.resource)
+		})
+	}
+}
+
 func TestBootstrapSitePrerequisitesCreatesAndReusesResources(t *testing.T) {
-	api := newBootstrapTestAPI()
-	api.addSite("provider-org", "test-site")
-	api.put("provider-org", "ipblock", map[string]any{
-		"id":           "site-ipblock-1",
-		"name":         "site-fabric-ipv4-10-0-0-0-16",
-		"siteId":       "site-1",
-		"routingType":  "DatacenterOnly",
-		"prefix":       "10.0.0.0",
-		"prefixLength": 16,
-	})
-	server := httptest.NewServer(api)
-	t.Cleanup(server.Close)
+	tests := []struct {
+		name string
+		ipv6 bool
+	}{
+		{name: "IPv4 replay"},
+		{name: "IPv6 replay by ID", ipv6: true},
+	}
 
-	manifest := completeBootstrapTestManifest()
-	client := NewClient(server.URL, "original-org", "token", nil, false)
-	var progress bytes.Buffer
-	bootstrap := newTestSiteBootstrap(t, client, manifest, &progress)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := newBootstrapTestAPI()
+			api.addSite("provider-org", "test-site")
+			api.addSiteIPBlock("provider-org")
+			manifest := completeBootstrapTestManifest()
+			if test.ipv6 {
+				manifest.SiteIPBlocks.Match["prefix"] = "2001:0DB8:0000:0000:0000:0000:0000:0000"
+				manifest.SiteIPBlocks.Match["prefixLength"] = 48
+				manifest.Allocations["network"].Request["allocationConstraints"].([]any)[0].(map[string]any)["constraintValue"] = 64
+				manifest.VPCPrefixes["tenant"].Request["prefix"] = "2001:0DB8:0000:0001:0000:0000:0000:0000/64"
+				delete(manifest.VPCPrefixes["tenant"].Request, "prefixLength")
+				siteIPBlock := api.get("provider-org", "ipblock", "site-ipblock-1")
+				siteIPBlock["name"] = "site-fabric-ipv6-2001-db8-48"
+				siteIPBlock["prefix"] = "2001:db8::"
+				siteIPBlock["prefixLength"] = 48
+				api.put("provider-org", "ipblock", siteIPBlock)
+			}
+			server := httptest.NewServer(api)
+			t.Cleanup(server.Close)
 
-	require.NoError(t, bootstrap.apply())
-	assert.Equal(t, "original-org", client.Org)
-	require.NotEmpty(t, api.getOrder)
-	assert.Equal(t, "provider-org/service-account/current", api.getOrder[0])
-	assert.Equal(t, []string{
-		"provider-org/instance/type",
-		"provider-org/allocation",
-		"tenant-org/vpc",
-		"tenant-org/vpc-prefix",
-		"tenant-org/instance",
-	}, api.postOrder)
-	assert.Equal(t, "provider-id", manifest.Provider.ID)
-	assert.Equal(t, "tenant-id", manifest.Tenant.ID)
-	assert.Equal(t, "site-1", manifest.Site.ID)
-	assert.Equal(t, "site-ipblock-1", manifest.SiteIPBlocks.ID)
-	assert.Equal(t, "instance-type-1", manifest.InstanceTypes["compute"].ID)
-	assert.Equal(t, "allocation-1", manifest.Allocations["network"].ID)
-	assert.Equal(t, "vpc-1", manifest.VPCs["tenant"].ID)
-	assert.Equal(t, "vpc-prefix-1", manifest.VPCPrefixes["tenant"].ID)
-	assert.Equal(t, "instance-1", manifest.Instances["worker"].ID)
+			client := NewClient(server.URL, "original-org", "token", nil, false)
+			var progress bytes.Buffer
+			bootstrap := newTestSiteBootstrap(t, client, manifest, &progress)
 
-	vpcPrefixRequest := api.postRequest("tenant-org/vpc-prefix")
-	assert.Equal(t, "vpc-1", vpcPrefixRequest["vpcId"])
-	assert.Equal(t, "tenant-ipblock-1", vpcPrefixRequest["ipBlockId"])
-	instanceRequest := api.postRequest("tenant-org/instance")
-	assert.Equal(t, "tenant-id", instanceRequest["tenantId"])
-	assert.Equal(t, "instance-type-1", instanceRequest["instanceTypeId"])
-	assert.Equal(t, "vpc-1", instanceRequest["vpcId"])
+			require.NoError(t, bootstrap.apply())
+			assert.Equal(t, "original-org", client.Org)
+			require.NotEmpty(t, api.getOrder)
+			assert.Equal(t, "provider-org/service-account/current", api.getOrder[0])
+			assert.Equal(t, []string{
+				"provider-org/instance/type",
+				"provider-org/allocation",
+				"tenant-org/vpc",
+				"tenant-org/vpc-prefix",
+				"tenant-org/instance",
+			}, api.postOrder)
+			assert.Equal(t, "provider-id", manifest.Provider.ID)
+			assert.Equal(t, "tenant-id", manifest.Tenant.ID)
+			assert.Equal(t, "site-1", manifest.Site.ID)
+			assert.Equal(t, "site-ipblock-1", manifest.SiteIPBlocks.ID)
+			assert.Equal(t, "instance-type-1", manifest.InstanceTypes["compute"].ID)
+			assert.Equal(t, "allocation-1", manifest.Allocations["network"].ID)
+			assert.Equal(t, "vpc-1", manifest.VPCs["tenant"].ID)
+			assert.Equal(t, "vpc-prefix-1", manifest.VPCPrefixes["tenant"].ID)
+			assert.Equal(t, "instance-1", manifest.Instances["worker"].ID)
 
-	firstPostCount := len(api.postOrder)
-	progress.Reset()
-	bootstrap = newTestSiteBootstrap(t, client, manifest, &progress)
-	require.NoError(t, bootstrap.apply())
-	assert.Len(t, api.postOrder, firstPostCount)
-	assert.Contains(t, progress.String(), "reused site test-site (site-1)")
-	assert.Contains(t, progress.String(), "reused instance worker-1 (instance-1)")
+			vpcPrefixRequest := api.postRequest("tenant-org/vpc-prefix")
+			assert.Equal(t, "vpc-1", vpcPrefixRequest["vpcId"])
+			assert.Equal(t, "tenant-ipblock-1", vpcPrefixRequest["ipBlockId"])
+			if test.ipv6 {
+				assert.Equal(t, "2001:0DB8:0000:0001:0000:0000:0000:0000/64", vpcPrefixRequest["prefix"])
+				assert.Equal(t, "2001:db8:0:1::/64", api.get("tenant-org", "vpc-prefix", "vpc-prefix-1")["prefix"])
+			}
+			instanceRequest := api.postRequest("tenant-org/instance")
+			assert.Equal(t, "tenant-id", instanceRequest["tenantId"])
+			assert.Equal(t, "instance-type-1", instanceRequest["instanceTypeId"])
+			assert.Equal(t, "vpc-1", instanceRequest["vpcId"])
+
+			requestedPrefix := manifest.VPCPrefixes["tenant"].Request["prefix"]
+			sitePrefix := manifest.SiteIPBlocks.Match["prefix"]
+			firstPostCount := len(api.postOrder)
+			progress.Reset()
+			bootstrap = newTestSiteBootstrap(t, client, manifest, &progress)
+			err := bootstrap.apply()
+			assert.Len(t, api.postOrder, firstPostCount)
+			assert.Equal(t, requestedPrefix, manifest.VPCPrefixes["tenant"].Request["prefix"])
+			assert.Equal(t, sitePrefix, manifest.SiteIPBlocks.Match["prefix"])
+			require.NoError(t, err)
+			assert.Contains(t, progress.String(), "reused site test-site (site-1)")
+			assert.Contains(t, progress.String(), "reused instance worker-1 (instance-1)")
+		})
+	}
 }
 
 func TestBootstrapSitePrerequisitesRecoversWhenRecordedIDIsMissing(t *testing.T) {
@@ -655,6 +745,17 @@ func (api *bootstrapTestAPI) ServeHTTP(response http.ResponseWriter, request *ht
 		id := fmt.Sprintf("%s-%d", prefix, api.nextIDByKey[key])
 		item := cloneBootstrapTestMap(body)
 		item["id"] = id
+		if collection == "vpc-prefix" {
+			cidr, ok := item["prefix"].(string)
+			if ok {
+				parsed, err := netip.ParsePrefix(cidr)
+				if err != nil {
+					http.Error(response, fmt.Sprintf("invalid prefix: %v", err), http.StatusBadRequest)
+					return
+				}
+				item["prefix"] = parsed.String()
+			}
+		}
 		if collection == "allocation" {
 			constraints, _ := item["allocationConstraints"].([]any)
 			for index, rawConstraint := range constraints {

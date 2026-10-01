@@ -30,9 +30,9 @@ use tera::Tera;
 use tower_http::services::ServeDir;
 use tower_layer::Layer;
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer as _};
 
 mod common;
 mod config;
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    setup_tracing()?;
+    let tracing = setup_tracing()?;
 
     let static_path = std::path::Path::new(&opts.static_dir);
     if !&static_path.exists() {
@@ -166,6 +166,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    // Flush completed spans after the connection drain finishes or times out.
+    tracing.shutdown().await;
+
     Ok(())
 }
 
@@ -185,14 +188,12 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received, draining in-flight requests");
 }
 
-/// Installs the tracing subscriber that emits logs in the fleet's logfmt
-/// format, tagged with the `nico-pxe` component, plus the log-events counting
-/// layer that feeds the fleet-standard `carbide_log_events_total` counter.
-/// Matches the other carbide binaries: an `INFO` default with the usual
-/// dependency caps, overridable via `RUST_LOG`. The counter is bound to the
-/// meter by `log_events::register` in `main`, once the provider exists.
-fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter = EnvFilter::builder()
+/// Installs the tracing subscriber: logfmt logs, the `carbide_log_events_total`
+/// counter and OTLP span export. Log levels default to `INFO` and follow
+/// `RUST_LOG`. `main` shuts down the returned value to send the last spans.
+fn setup_tracing() -> Result<carbide_instrument::otlp_tracing::Tracing, Box<dyn std::error::Error>>
+{
+    let log_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
         .add_directive("hyper=warn".parse()?)
@@ -201,19 +202,24 @@ fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
         .add_directive("rustls=warn".parse()?)
         .add_directive("tokio_util::codec=warn".parse()?);
 
-    // Counts every log line into carbide_log_events_total from startup; the
-    // counts are exposed once main() installs the meter provider. The env
-    // filter sits on the registry as a global filter so the counting layer and
-    // the logfmt output see exactly the same events.
+    // Filter each log layer separately so RUST_LOG does not limit span export.
+    let (span_layer, tracing) = carbide_instrument::otlp_tracing::setup(
+        carbide_instrument::otlp_tracing::Config::new("nico-pxe"),
+    );
+
+    // Counts log lines from startup. `main` binds the counter to the meter later.
     let log_events = carbide_instrument::LogEventsMetric::new("nico-pxe");
     tracing_subscriber::registry()
-        .with(log_events.layer())
+        .with(log_events.layer().with_filter(log_filter.clone()))
+        .with(span_layer)
         .with(
             logfmt::layer()
-                .with_event_fields([logfmt::EventField::with_default("component", "nico-pxe")]),
+                .with_event_fields([logfmt::EventField::with_default("component", "nico-pxe")])
+                .with_filter(log_filter),
         )
-        .with(env_filter)
         .try_init()?;
 
-    Ok(())
+    tracing.report();
+
+    Ok(tracing)
 }

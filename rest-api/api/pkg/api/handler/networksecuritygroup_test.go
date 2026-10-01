@@ -24,9 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -127,11 +125,10 @@ func TestNewCreateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -221,7 +218,7 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -726,7 +723,6 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 			ec.SetParamValues(test.params.org)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 			err := csh.Handle(ec)
 
@@ -809,10 +805,9 @@ func TestNewGetAllNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -983,7 +978,7 @@ func TestNetworkSecurityGroupHandler_GetAll(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type params struct {
 		org  string
@@ -1155,7 +1150,6 @@ func TestNetworkSecurityGroupHandler_GetAll(t *testing.T) {
 			ec.SetParamValues(test.params.org)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -1227,10 +1221,9 @@ func TestNewGetNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1377,7 +1370,7 @@ func TestNetworkSecurityGroupHandler_Get(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type params struct {
 		org                    string
@@ -1479,7 +1472,6 @@ func TestNetworkSecurityGroupHandler_Get(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -1551,11 +1543,10 @@ func TestNewDeleteNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1664,7 +1655,7 @@ func TestNetworkSecurityGroupHandler_Delete(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -1874,7 +1865,6 @@ func TestNetworkSecurityGroupHandler_Delete(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dnsg.Handle(ec)
@@ -1925,11 +1915,10 @@ func TestNewUpdateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2083,7 +2072,7 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -2336,7 +2325,6 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 			err := unsgh.Handle(ec)
 

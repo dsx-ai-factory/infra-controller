@@ -13,3 +13,15 @@ A rule describes how an operation executes. A schedule describes when to submit 
 Flow's interfaces are documented in the [generated gRPC reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/grpc-api.md). The rules guide also covers the Flow CLI. These interfaces are distinct from the REST API reference.
 
 Before operating hardware, review [Flow component-manager configuration](../../configuration/flow-component-manager.md) and the [Flow architecture](../../architecture/flow.md). For firmware-specific prerequisites and target parameters, see [Rack and Tray Firmware Updates](../firmware-updates/rack-component-firmware.md).
+
+## Inventory queries
+
+NVLink Domain topology is nullable when unavailable. Set `includeComponents=true` to include
+components; otherwise `components` is `null`. When requested but none are
+known, the Domain's component list is empty.
+
+Rack, Tray, and NVLink Domain list endpoints use deterministic pagination.
+When `orderBy` is omitted, results are ordered by name ascending with an
+immutable unique identifier as the tie-breaker. See
+[Rack-Level Administration](../../manuals/rack_level_admin.md#rest-api)
+for endpoint links.

@@ -2133,24 +2133,25 @@ func (x *TaskStats) GetRunningTaskCount() uint32 {
 }
 
 type Component struct {
-	state              protoimpl.MessageState    `protogen:"open.v1"`
-	Type               ComponentType             `protobuf:"varint,1,opt,name=type,proto3,enum=v1.ComponentType" json:"type,omitempty"`
-	Info               *DeviceInfo               `protobuf:"bytes,2,opt,name=info,proto3" json:"info,omitempty"`
-	FirmwareVersion    string                    `protobuf:"bytes,3,opt,name=firmware_version,json=firmwareVersion,proto3" json:"firmware_version,omitempty"`
-	Position           *RackPosition             `protobuf:"bytes,4,opt,name=position,proto3" json:"position,omitempty"`
-	Bmcs               []*BMCInfo                `protobuf:"bytes,5,rep,name=bmcs,proto3" json:"bmcs,omitempty"`
-	ComponentId        string                    `protobuf:"bytes,6,opt,name=component_id,json=componentId,proto3" json:"component_id,omitempty"` // Component's own ID from its source system (e.g., NICo machine_id for Compute)
-	RackId             *UUID                     `protobuf:"bytes,7,opt,name=rack_id,json=rackId,proto3" json:"rack_id,omitempty"`
-	PowerState         string                    `protobuf:"bytes,8,opt,name=power_state,json=powerState,proto3" json:"power_state,omitempty"` // Current power state (synced from external system by inventory loop)
-	Status             *ComponentOperationStatus `protobuf:"bytes,9,opt,name=status,proto3" json:"status,omitempty"`
-	LeakStatus         LeakStatus                `protobuf:"varint,10,opt,name=leak_status,json=leakStatus,proto3,enum=v1.LeakStatus" json:"leak_status,omitempty"` // Coolant leak detection status (set by the leak-detection loop)
-	NvlDomainId        *UUID                     `protobuf:"bytes,11,opt,name=nvl_domain_id,json=nvlDomainId,proto3" json:"nvl_domain_id,omitempty"`                // NVLink Domain containing this component's rack; omitted when unassigned
-	TaskStats          *TaskStats                `protobuf:"bytes,12,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`                        // Active Tasks that explicitly target this component.
-	RackExternalId     string                    `protobuf:"bytes,13,opt,name=rack_external_id,json=rackExternalId,proto3" json:"rack_external_id,omitempty"`
-	LeakHandlingStatus LeakHandlingStatus        `protobuf:"varint,14,opt,name=leak_handling_status,json=leakHandlingStatus,proto3,enum=v1.LeakHandlingStatus" json:"leak_handling_status,omitempty"` // Flow's leakage-handling status for this component.
-	Health             *HealthReport             `protobuf:"bytes,15,opt,name=health,proto3" json:"health,omitempty"`                                                                                 // Latest Core aggregate health snapshot mirrored by inventory sync.
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state               protoimpl.MessageState    `protogen:"open.v1"`
+	Type                ComponentType             `protobuf:"varint,1,opt,name=type,proto3,enum=v1.ComponentType" json:"type,omitempty"`
+	Info                *DeviceInfo               `protobuf:"bytes,2,opt,name=info,proto3" json:"info,omitempty"`
+	FirmwareVersion     string                    `protobuf:"bytes,3,opt,name=firmware_version,json=firmwareVersion,proto3" json:"firmware_version,omitempty"`
+	Position            *RackPosition             `protobuf:"bytes,4,opt,name=position,proto3" json:"position,omitempty"`
+	Bmcs                []*BMCInfo                `protobuf:"bytes,5,rep,name=bmcs,proto3" json:"bmcs,omitempty"`
+	ComponentId         string                    `protobuf:"bytes,6,opt,name=component_id,json=componentId,proto3" json:"component_id,omitempty"` // Component's own ID from its source system (e.g., NICo machine_id for Compute)
+	RackId              *UUID                     `protobuf:"bytes,7,opt,name=rack_id,json=rackId,proto3" json:"rack_id,omitempty"`
+	PowerState          string                    `protobuf:"bytes,8,opt,name=power_state,json=powerState,proto3" json:"power_state,omitempty"` // Current power state (synced from external system by inventory loop)
+	Status              *ComponentOperationStatus `protobuf:"bytes,9,opt,name=status,proto3" json:"status,omitempty"`
+	LeakStatus          LeakStatus                `protobuf:"varint,10,opt,name=leak_status,json=leakStatus,proto3,enum=v1.LeakStatus" json:"leak_status,omitempty"` // Coolant leak detection status (set by the leak-detection loop)
+	NvlDomainId         *UUID                     `protobuf:"bytes,11,opt,name=nvl_domain_id,json=nvlDomainId,proto3" json:"nvl_domain_id,omitempty"`                // NVLink Domain containing this component's rack; omitted when unassigned
+	TaskStats           *TaskStats                `protobuf:"bytes,12,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`                        // Active Tasks that explicitly target this component.
+	RackExternalId      string                    `protobuf:"bytes,13,opt,name=rack_external_id,json=rackExternalId,proto3" json:"rack_external_id,omitempty"`
+	LeakHandlingStatus  LeakHandlingStatus        `protobuf:"varint,14,opt,name=leak_handling_status,json=leakHandlingStatus,proto3,enum=v1.LeakHandlingStatus" json:"leak_handling_status,omitempty"` // Flow's leakage-handling status for this component.
+	Health              *HealthReport             `protobuf:"bytes,15,opt,name=health,proto3" json:"health,omitempty"`                                                                                 // Latest Core aggregate health snapshot mirrored by inventory sync.
+	NvlDomainExternalId *string                   `protobuf:"bytes,16,opt,name=nvl_domain_external_id,json=nvlDomainExternalId,proto3,oneof" json:"nvl_domain_external_id,omitempty"`                  // Owning rack's domain external ID (rack group ID).
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Component) Reset() {
@@ -2288,6 +2289,13 @@ func (x *Component) GetHealth() *HealthReport {
 	return nil
 }
 
+func (x *Component) GetNvlDomainExternalId() string {
+	if x != nil && x.NvlDomainExternalId != nil {
+		return *x.NvlDomainExternalId
+	}
+	return ""
+}
+
 type Rack struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	Info         *DeviceInfo            `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
@@ -2297,11 +2305,12 @@ type Rack struct {
 	TaskStats    *TaskStats             `protobuf:"bytes,5,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`            // All active Tasks on this rack, including component-scoped Tasks.
 	ExternalId   string                 `protobuf:"bytes,6,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
 	// Operability phase aggregated from component phases.
-	OperationStatus Phase         `protobuf:"varint,7,opt,name=operation_status,json=operationStatus,proto3,enum=v1.Phase" json:"operation_status,omitempty"`
-	Health          *HealthReport `protobuf:"bytes,8,opt,name=health,proto3" json:"health,omitempty"`                                            // Latest Core aggregate health snapshot mirrored by inventory sync.
-	RackProfileId   *string       `protobuf:"bytes,9,opt,name=rack_profile_id,json=rackProfileId,proto3,oneof" json:"rack_profile_id,omitempty"` // Core rack profile mirrored by expected inventory sync.
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	OperationStatus      Phase         `protobuf:"varint,7,opt,name=operation_status,json=operationStatus,proto3,enum=v1.Phase" json:"operation_status,omitempty"`
+	Health               *HealthReport `protobuf:"bytes,8,opt,name=health,proto3" json:"health,omitempty"`                                                              // Latest Core aggregate health snapshot mirrored by inventory sync.
+	RackProfileId        *string       `protobuf:"bytes,9,opt,name=rack_profile_id,json=rackProfileId,proto3,oneof" json:"rack_profile_id,omitempty"`                   // Core rack profile mirrored by expected inventory sync.
+	NvlDomainExternalIds []string      `protobuf:"bytes,10,rep,name=nvl_domain_external_ids,json=nvlDomainExternalIds,proto3" json:"nvl_domain_external_ids,omitempty"` // Public rack-group domain identities.
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Rack) Reset() {
@@ -2395,6 +2404,13 @@ func (x *Rack) GetRackProfileId() string {
 		return *x.RackProfileId
 	}
 	return ""
+}
+
+func (x *Rack) GetNvlDomainExternalIds() []string {
+	if x != nil {
+		return x.NvlDomainExternalIds
+	}
+	return nil
 }
 
 type Identifier struct {
@@ -3116,6 +3132,8 @@ func (x *ExternalRef) GetId() string {
 type NVLDomain struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Identifier    *Identifier            `protobuf:"bytes,1,opt,name=identifier,proto3" json:"identifier,omitempty"`
+	ExternalId    *string                `protobuf:"bytes,2,opt,name=external_id,json=externalId,proto3,oneof" json:"external_id,omitempty"`
+	NmxcClusterId *string                `protobuf:"bytes,3,opt,name=nmxc_cluster_id,json=nmxcClusterId,proto3,oneof" json:"nmxc_cluster_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3155,6 +3173,20 @@ func (x *NVLDomain) GetIdentifier() *Identifier {
 		return x.Identifier
 	}
 	return nil
+}
+
+func (x *NVLDomain) GetExternalId() string {
+	if x != nil && x.ExternalId != nil {
+		return *x.ExternalId
+	}
+	return ""
+}
+
+func (x *NVLDomain) GetNmxcClusterId() string {
+	if x != nil && x.NmxcClusterId != nil {
+		return *x.NmxcClusterId
+	}
+	return ""
 }
 
 type Pagination struct {
@@ -4576,6 +4608,8 @@ type NVLinkDomain struct {
 	Topology        *string                `protobuf:"bytes,3,opt,name=topology,proto3,oneof" json:"topology,omitempty"`
 	OperationStatus Phase                  `protobuf:"varint,4,opt,name=operation_status,json=operationStatus,proto3,enum=v1.Phase" json:"operation_status,omitempty"`
 	Components      []*Component           `protobuf:"bytes,5,rep,name=components,proto3" json:"components,omitempty"`
+	NmxcClusterId   *string                `protobuf:"bytes,6,opt,name=nmxc_cluster_id,json=nmxcClusterId,proto3,oneof" json:"nmxc_cluster_id,omitempty"`
+	RackGroupId     string                 `protobuf:"bytes,7,opt,name=rack_group_id,json=rackGroupId,proto3" json:"rack_group_id,omitempty"` // Same value as id: the domain's external ID.
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -4643,6 +4677,20 @@ func (x *NVLinkDomain) GetComponents() []*Component {
 		return x.Components
 	}
 	return nil
+}
+
+func (x *NVLinkDomain) GetNmxcClusterId() string {
+	if x != nil && x.NmxcClusterId != nil {
+		return *x.NmxcClusterId
+	}
+	return ""
+}
+
+func (x *NVLinkDomain) GetRackGroupId() string {
+	if x != nil {
+		return x.RackGroupId
+	}
+	return ""
 }
 
 type GetNVLinkDomainResponse struct {
@@ -14401,7 +14449,7 @@ const file_flow_proto_rawDesc = "" +
 	"\tTaskStats\x12,\n" +
 	"\x12waiting_task_count\x18\x01 \x01(\rR\x10waitingTaskCount\x12,\n" +
 	"\x12pending_task_count\x18\x02 \x01(\rR\x10pendingTaskCount\x12,\n" +
-	"\x12running_task_count\x18\x03 \x01(\rR\x10runningTaskCount\"\x98\x05\n" +
+	"\x12running_task_count\x18\x03 \x01(\rR\x10runningTaskCount\"\xed\x05\n" +
 	"\tComponent\x12%\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x11.v1.ComponentTypeR\x04type\x12\"\n" +
 	"\x04info\x18\x02 \x01(\v2\x0e.v1.DeviceInfoR\x04info\x12)\n" +
@@ -14421,7 +14469,9 @@ const file_flow_proto_rawDesc = "" +
 	"task_stats\x18\f \x01(\v2\r.v1.TaskStatsR\ttaskStats\x12(\n" +
 	"\x10rack_external_id\x18\r \x01(\tR\x0erackExternalId\x12H\n" +
 	"\x14leak_handling_status\x18\x0e \x01(\x0e2\x16.v1.LeakHandlingStatusR\x12leakHandlingStatus\x12(\n" +
-	"\x06health\x18\x0f \x01(\v2\x10.v1.HealthReportR\x06health\"\xa3\x03\n" +
+	"\x06health\x18\x0f \x01(\v2\x10.v1.HealthReportR\x06health\x128\n" +
+	"\x16nvl_domain_external_id\x18\x10 \x01(\tH\x00R\x13nvlDomainExternalId\x88\x01\x01B\x19\n" +
+	"\x17_nvl_domain_external_id\"\xda\x03\n" +
 	"\x04Rack\x12\"\n" +
 	"\x04info\x18\x01 \x01(\v2\x0e.v1.DeviceInfoR\x04info\x12(\n" +
 	"\blocation\x18\x02 \x01(\v2\f.v1.LocationR\blocation\x12-\n" +
@@ -14435,7 +14485,9 @@ const file_flow_proto_rawDesc = "" +
 	"externalId\x124\n" +
 	"\x10operation_status\x18\a \x01(\x0e2\t.v1.PhaseR\x0foperationStatus\x12(\n" +
 	"\x06health\x18\b \x01(\v2\x10.v1.HealthReportR\x06health\x12+\n" +
-	"\x0frack_profile_id\x18\t \x01(\tH\x00R\rrackProfileId\x88\x01\x01B\x12\n" +
+	"\x0frack_profile_id\x18\t \x01(\tH\x00R\rrackProfileId\x88\x01\x01\x125\n" +
+	"\x17nvl_domain_external_ids\x18\n" +
+	" \x03(\tR\x14nvlDomainExternalIdsB\x12\n" +
 	"\x10_rack_profile_id\":\n" +
 	"\n" +
 	"Identifier\x12\x18\n" +
@@ -14482,11 +14534,16 @@ const file_flow_proto_rawDesc = "" +
 	"identifier\"D\n" +
 	"\vExternalRef\x12%\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x11.v1.ComponentTypeR\x04type\x12\x0e\n" +
-	"\x02id\x18\x02 \x01(\tR\x02id\";\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\"\xb2\x01\n" +
 	"\tNVLDomain\x12.\n" +
 	"\n" +
 	"identifier\x18\x01 \x01(\v2\x0e.v1.IdentifierR\n" +
-	"identifier\":\n" +
+	"identifier\x12$\n" +
+	"\vexternal_id\x18\x02 \x01(\tH\x00R\n" +
+	"externalId\x88\x01\x01\x12+\n" +
+	"\x0fnmxc_cluster_id\x18\x03 \x01(\tH\x01R\rnmxcClusterId\x88\x01\x01B\x0e\n" +
+	"\f_external_idB\x12\n" +
+	"\x10_nmxc_cluster_id\":\n" +
 	"\n" +
 	"Pagination\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x05R\x06offset\x12\x14\n" +
@@ -14598,7 +14655,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x05total\x18\x02 \x01(\x05R\x05total\"Q\n" +
 	"\x16GetNVLinkDomainRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
-	"\x0fwith_components\x18\x02 \x01(\bR\x0ewithComponents\"\xc5\x01\n" +
+	"\x0fwith_components\x18\x02 \x01(\bR\x0ewithComponents\"\xaa\x02\n" +
 	"\fNVLinkDomain\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1f\n" +
@@ -14606,8 +14663,11 @@ const file_flow_proto_rawDesc = "" +
 	"\x10operation_status\x18\x04 \x01(\x0e2\t.v1.PhaseR\x0foperationStatus\x12-\n" +
 	"\n" +
 	"components\x18\x05 \x03(\v2\r.v1.ComponentR\n" +
-	"componentsB\v\n" +
-	"\t_topology\"C\n" +
+	"components\x12+\n" +
+	"\x0fnmxc_cluster_id\x18\x06 \x01(\tH\x01R\rnmxcClusterId\x88\x01\x01\x12\"\n" +
+	"\rrack_group_id\x18\a \x01(\tR\vrackGroupIdB\v\n" +
+	"\t_topologyB\x12\n" +
+	"\x10_nmxc_cluster_id\"C\n" +
 	"\x17GetNVLinkDomainResponse\x12(\n" +
 	"\x06domain\x18\x01 \x01(\v2\x10.v1.NVLinkDomainR\x06domain\"\xd0\x01\n" +
 	"\x1dGetListOfNVLinkDomainsRequest\x12'\n" +
@@ -16399,6 +16459,7 @@ func file_flow_proto_init() {
 	}
 	file_flow_proto_msgTypes[1].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[4].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[8].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[9].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[11].OneofWrappers = []any{
 		(*OperationTargetSpec_Racks)(nil),
@@ -16418,6 +16479,7 @@ func file_flow_proto_init() {
 		(*ComponentTarget_Id)(nil),
 		(*ComponentTarget_External)(nil),
 	}
+	file_flow_proto_msgTypes[21].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[24].OneofWrappers = []any{
 		(*Filter_RackField)(nil),
 		(*Filter_ComponentField)(nil),

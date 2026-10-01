@@ -23,16 +23,14 @@ import (
 // expectedInventoryBulkBase holds the dependencies shared by full-Site
 // Expected Inventory mutations.
 type expectedInventoryBulkBase struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 func newExpectedInventoryBulkBase(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) expectedInventoryBulkBase {
 	return expectedInventoryBulkBase{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -75,7 +73,7 @@ func validateDeleteAllSiteID(c echo.Context) (string, *cutil.APIError) {
 }
 
 func (b expectedInventoryBulkBase) deleteAll(c echo.Context, resource, method string, deleteDB func(context.Context, *cdb.Tx, uuid.UUID) error) error {
-	org, dbUser, ctx, logger, span := common.SetupHandler(resource, "DeleteAll", c, b.tracerSpan)
+	org, dbUser, ctx, logger, span := common.SetupHandler(resource, "DeleteAll", c)
 	if span != nil {
 		defer span.End()
 	}

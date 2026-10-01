@@ -173,6 +173,13 @@ pub struct BlueFieldSoftwareParams {
     pub pldm_fw_bundle: Option<BTreeMap<String, String>>,
 }
 
+impl InitDpfResourcesConfig {
+    /// Returns the platform profile selected for this initialization configuration.
+    pub fn deployment_type(&self) -> DpuDeploymentType {
+        self.deployment_type
+    }
+}
+
 impl Default for InitDpfResourcesConfig {
     fn default() -> Self {
         Self {

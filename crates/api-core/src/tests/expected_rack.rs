@@ -31,6 +31,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     .await;
     let rack_id: RackId = "rack-01".parse().unwrap();
     let request = forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some(rack_id.clone()),
         rack_profile_id: None,
         metadata: None,
@@ -68,6 +69,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     for supplied in [None, Some(RackProfileId::new("caller-profile-is-ignored"))] {
         let mut declaration = request.clone();
         declaration.rack_profile_id = supplied;
+        declaration.rack_group_id = Some(RackGroupId::new("caller-group-is-ignored"));
         env.api
             .replace_all_expected_racks(Request::new(forge::ExpectedRackList {
                 expected_racks: vec![declaration],
@@ -83,9 +85,11 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
             .unwrap()
             .into_inner();
         assert_eq!(stored.rack_profile_id.unwrap().as_str(), profile);
+        assert_eq!(stored.rack_group_id, group.rack_group_id);
     }
     // A failed replacement must preserve the predecessor declaration.
     let invalid = forge::ExpectedRack {
+        rack_group_id: None,
         rack_id: Some("unknown-rack".parse().unwrap()),
         ..request.clone()
     };
@@ -136,9 +140,23 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
         .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 
+    // The output-only group cannot override ambiguous membership on creation.
+    let mut declaration = request.clone();
+    declaration.rack_group_id = group.rack_group_id.clone();
+    let err = env
+        .api
+        .replace_all_expected_racks(Request::new(forge::ExpectedRackList {
+            expected_racks: vec![declaration],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("multiple expected rack groups"));
+
     // Metadata updates do not rederive a profile from changed group membership.
     let mut update = request;
     update.rack_profile_id = Some(RackProfileId::new("do-not-overwrite"));
+    update.rack_group_id = Some(RackGroupId::new("do-not-overwrite"));
     update.metadata = Some(forge::Metadata {
         name: "updated".into(),
         ..Default::default()
@@ -156,6 +174,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
         .unwrap()
         .into_inner();
     assert_eq!(stored.rack_profile_id.unwrap().as_str(), profile);
+    assert_eq!(stored.rack_group_id, group.rack_group_id);
     assert_eq!(stored.metadata.unwrap().name, "updated");
 
     let legacy_id = RackId::new("legacy-rack");
@@ -163,6 +182,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     db::expected_rack::create(
         &mut txn,
         &model::expected_rack::ExpectedRack {
+            rack_group_id: None,
             rack_id: legacy_id.clone(),
             rack_profile_id: RackProfileId::new("legacy-profile"),
             metadata: Default::default(),
@@ -173,6 +193,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     txn.commit().await.unwrap();
     env.api
         .update_expected_rack(Request::new(forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(legacy_id.clone()),
             rack_profile_id: None,
             metadata: Some(forge::Metadata {

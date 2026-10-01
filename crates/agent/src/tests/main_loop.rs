@@ -172,6 +172,8 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
 /// ordering comparison cases.
 fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     ManagedHostNetworkConfigResponse {
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         asn: 65_000,
         dhcp_servers: vec!["10.10.0.1".to_string(), "10.10.0.2".to_string()],
         vni_device: "vxlan48".to_string(),
@@ -254,6 +256,7 @@ enum RenderedInputChange {
     SiteFabricPrefix,
     SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminIpv6Prefix,
     TenantInterfaceVni,
     TenantInterfaceIp,
     TenantIpv6Prefix,
@@ -303,6 +306,14 @@ impl RenderedInputChange {
                     .as_mut()
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
+            }
+            Self::AdminIpv6Prefix => {
+                config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface")
+                    .addresses[0]
+                    .prefix = "2001:db8:1::/64".to_string();
             }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
             Self::TenantInterfaceIp => {
@@ -414,6 +425,14 @@ fn current_network_version_detects_rendered_input_changes() {
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
+        if matches!(change, RenderedInputChange::AdminIpv6Prefix) {
+            config.use_admin_network = true;
+            config
+                .admin_interface
+                .as_mut()
+                .expect("comparison fixture has an admin interface")
+                .is_l2_segment = true;
+        }
         let mut current = CurrentNetworkVersion::default();
         current.update_from(&config, None);
         change.apply(&mut config);
@@ -436,6 +455,8 @@ fn current_network_version_detects_rendered_input_changes() {
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Admin prefix replacement changes the SVI VRR/RA desired state.
+            RenderedInputChange::AdminIpv6Prefix => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
             // Prefix replacement must replace the advertised desired state.

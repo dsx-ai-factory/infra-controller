@@ -891,7 +891,7 @@ fn default_flavor_with_topology(
             containerd_config: None,
             grub: Some(get_default_grub()),
             host_network_interface_configs: None,
-            nvconfig: Some(vec![get_nvconfig(
+            nvconfig: Some(vec![get_bf3_nvconfig(
                 num_of_vfs,
                 pf_total_sf,
                 deployment_type,
@@ -1604,7 +1604,7 @@ fn get_bf4_astra_config_files(
 }
 
 /// Builds BF3 NVConfig with the validated site VF population and platform profile.
-fn get_nvconfig(
+fn get_bf3_nvconfig(
     num_of_vfs: u32,
     pf_total_sf: u32,
     deployment_type: DpuDeploymentType,
@@ -2151,7 +2151,7 @@ mod tests {
     #[test]
     fn gb200_bf3_nvconfig_appends_the_bounded_profile_in_order() {
         let parameters = |deployment_type| {
-            get_nvconfig(16, DEFAULT_PF_TOTAL_SF_RESERVED, deployment_type, true)
+            get_bf3_nvconfig(16, DEFAULT_PF_TOTAL_SF_RESERVED, deployment_type, true)
                 .parameters
                 .unwrap()
         };
@@ -3618,7 +3618,7 @@ mod tests {
 
     #[test]
     fn default_nvconfig_shape() {
-        let nv = get_nvconfig(
+        let nv = get_bf3_nvconfig(
             16,
             DEFAULT_PF_TOTAL_SF_RESERVED,
             DpuDeploymentType::Bf3,

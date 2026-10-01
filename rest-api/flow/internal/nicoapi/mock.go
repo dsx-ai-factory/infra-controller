@@ -339,6 +339,22 @@ func (c *mockClient) FindPowerShelfRuntimeStatuses(_ context.Context, shelfIds [
 	return out, nil
 }
 
+func (c *mockClient) FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error) {
+	details, err := c.GetAllExpectedRackDetails(ctx)
+	if err != nil {
+		return nil, err
+	}
+	groups := make(map[string]string)
+	for _, detail := range details {
+		for _, id := range rackIDs {
+			if id == detail.RackID {
+				groups[id] = detail.RackGroupID
+			}
+		}
+	}
+	return groups, nil
+}
+
 func (c *mockClient) FindRackHealthReports(_ context.Context, rackIds []string) (map[string]*types.HealthReport, error) {
 	out := make(map[string]*types.HealthReport, len(rackIds))
 	for _, id := range rackIds {

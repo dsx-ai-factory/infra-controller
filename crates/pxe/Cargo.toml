@@ -30,7 +30,7 @@ path = "src/main.rs"
 [dependencies]
 # [begin-local-dependencies]
 carbide-host-support = { path = "../host-support", default-features = false }
-carbide-instrument = { path = "../instrument" }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
 carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-tls = { path = "../tls" }
 carbide-utils = { path = "../utils", default-features = false }
@@ -39,6 +39,7 @@ carbide-rpc = { path = "../rpc" }
 carbide-uuid = { path = "../uuid" }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
+trace-propagation = { path = "../trace-propagation" }
 # [end-local-dependencies]
 
 axum = { workspace = true }
@@ -75,9 +76,11 @@ uuid = { features = ["v4", "serde"], workspace = true }
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
-carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing", "test-support"] }
 carbide-test-support = { path = "../test-support" }
+opentelemetry_sdk = { workspace = true }
 tempfile = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 [lints]
 workspace = true

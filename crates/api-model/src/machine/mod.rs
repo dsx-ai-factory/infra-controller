@@ -1598,6 +1598,7 @@ pub enum DecommissioningState {
     /// Powers the host back on after the cycle so OOB rediscovery can proceed.
     PoweringOnHost,
     /// Waiting for the pre-cycle OOB DHCP suppression to be acknowledged.
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
     WaitingForOobDhcpAcknowledgement,
     /// BMC DHCP is suppressed before the BMC factory reset.
     SuppressingBmcDhcp,
@@ -1606,6 +1607,7 @@ pub enum DecommissioningState {
         completed: HashSet<MachineId>,
     },
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
     WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device BMC and DPU credentials are being removed after factory reset.
     DeletingManagedCredentials,
@@ -1636,12 +1638,15 @@ pub enum DeconfiguringDpuState {
     Complete,
 }
 
-/// Sub-states of [`ManagedHostState::Reset`]: delete the tenant instance, then delete
-/// the DPF CRs and wait for them to drain before re-ingesting from DPU discovery.
+/// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
+/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
 pub enum ResetState {
+    /// Retains the Instance and its network resources until every topology DPU
+    /// acknowledges Admin networking, then deletes them before host cleanup.
+    /// A host without an Instance proceeds directly to `DeletingCrs`.
     DeletingInstance,
     /// Deletes the CRs and polls until they are gone. Registration refuses a CR that
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
@@ -1798,6 +1803,20 @@ pub enum ReadyBootConfigState {
             skip_serializing_if = "Option::is_none"
         )]
         post_lock_action: Option<ReadyBootConfigPostLockAction>,
+        /// Shared restoration deadline and verification requirement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery: Option<ReadyBootLockdownRecovery>,
+    },
+    /// Restore the full platform policy when BMC-only lockdown is insufficient.
+    /// Preserve the captured target and deferred action across the BIOS reboot.
+    RestoreFullLockdown {
+        /// Action deferred until the full security policy is restored.
+        post_lock_action: Option<ReadyBootConfigPostLockAction>,
+        /// Persisted boundary for the policy write, restart, boot wait or status poll.
+        stage: ReadyBootLockdownStage,
+        /// Carried across all restoration stages, including the final LockHost check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery: Option<ReadyBootLockdownRecovery>,
     },
     /// Automated convergence could not complete safely after lockdown was
     /// restored. The host remains unavailable until an operator changes its
@@ -1806,6 +1825,37 @@ pub enum ReadyBootConfigState {
     /// maintenance operation, which returns the host to
     /// [`ManagedHostState::Ready`].
     Failed { failure: String },
+}
+
+/// One total 90-minute restoration budget, using [`slas::BOOT_CONFIGURING`].
+/// Expiry requires operator intervention without more writes or restarts. A
+/// changed desired target does not re-arm it. Old states acquire their original
+/// state timestamp before any restoration effects. Older binaries ignore this
+/// metadata on recognized states, losing the deadline and strict final check.
+/// They cannot decode the new RestoreFullLockdown variant at all. Its writer
+/// gate defaults off until all readers are upgraded. Before an older-code
+/// rollback, disable new entries and drain both RestoreFullLockdown and LockHost
+/// states with recovery metadata. See the host firmware rollout guide.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ReadyBootLockdownRecovery {
+    pub started_at: DateTime<Utc>,
+    /// Once full-policy recovery was needed, unsupported status is not success.
+    #[serde(default)]
+    pub full_policy_required: bool,
+}
+
+/// Persist progress between polls. An external effect can repeat if its state commit fails.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadyBootLockdownStage {
+    /// Submit the full platform lockdown policy.
+    SetPolicy,
+    /// Wait until the BMC accepts a restart of the powered-on host.
+    Reboot,
+    /// Wait for the configured UEFI boot interval after the accepted restart.
+    WaitForUefiBoot,
+    /// Observe full lockdown before continuing boot-target verification.
+    PollStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2941,6 +2991,7 @@ impl Display for ReadyBootConfigState {
             Self::PollingBiosSetup { .. } => "PollingBiosSetup",
             Self::SetBootOrder { .. } => "SetBootOrder",
             Self::LockHost { .. } => "LockHost",
+            Self::RestoreFullLockdown { .. } => "RestoreFullLockdown",
             Self::Failed { .. } => "Failed",
         };
         f.write_str(name)
@@ -4135,6 +4186,7 @@ mod tests {
             "lockdown restoration defaults to the success path" {
                 r#"{"state":"lockhost"}"# => Yields(ReadyBootConfigState::LockHost {
                     post_lock_action: None,
+                    recovery: None,
                 }),
             }
 
@@ -4144,9 +4196,39 @@ mod tests {
                         post_lock_action: Some(ReadyBootConfigPostLockAction::Convergence {
                             failure: "stopped".to_string(),
                         }),
+                        recovery: None,
                     }),
             }
         );
+    }
+
+    #[test]
+    fn legacy_lockdown_recovery_defaults_and_new_metadata_round_trips() {
+        for json in [
+            r#"{"state":"lockhost"}"#,
+            r#"{"state":"restorefulllockdown","post_lock_action":null,"stage":"poll_status"}"#,
+        ] {
+            let mut state: ReadyBootConfigState = serde_json::from_str(json).unwrap();
+            let strict = matches!(state, ReadyBootConfigState::RestoreFullLockdown { .. });
+            match &mut state {
+                ReadyBootConfigState::LockHost { recovery, .. }
+                | ReadyBootConfigState::RestoreFullLockdown { recovery, .. } => {
+                    assert!(recovery.is_none());
+                    *recovery = Some(ReadyBootLockdownRecovery {
+                        started_at: Utc::now(),
+                        full_policy_required: strict,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                serde_json::from_value::<ReadyBootConfigState>(
+                    serde_json::to_value(&state).unwrap()
+                )
+                .unwrap(),
+                state
+            );
+        }
     }
 
     #[test]
@@ -4168,6 +4250,7 @@ mod tests {
                     scenario: "stale DPU network status returns to Prepare after cleanup",
                     input: ReadyBootConfigState::LockHost {
                         post_lock_action: Some(ReadyBootConfigPostLockAction::ReturnToPrepare),
+                        recovery: None,
                     },
                     expect: true,
                 },
@@ -4177,6 +4260,7 @@ mod tests {
                         post_lock_action: Some(ReadyBootConfigPostLockAction::Convergence {
                             failure: "BIOS job retries exhausted".to_string(),
                         }),
+                        recovery: None,
                     },
                     expect: true,
                 },
@@ -4187,6 +4271,18 @@ mod tests {
                             machine_id,
                             details: failure_details,
                         }),
+                        recovery: None,
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "full policy repair preserves its reboot boundary and deferred failure",
+                    input: ReadyBootConfigState::RestoreFullLockdown {
+                        post_lock_action: Some(ReadyBootConfigPostLockAction::Convergence {
+                            failure: "BIOS job retries exhausted".to_string(),
+                        }),
+                        stage: ReadyBootLockdownStage::WaitForUefiBoot,
+                        recovery: None,
                     },
                     expect: true,
                 },
@@ -4210,6 +4306,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ReadyBootConfigState::LockHost {
                 post_lock_action: Some(ReadyBootConfigPostLockAction::ReturnToPrepare),
+                recovery: None,
             })
             .unwrap(),
             serde_json::json!({

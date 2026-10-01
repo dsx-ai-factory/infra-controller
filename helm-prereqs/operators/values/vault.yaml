@@ -30,14 +30,24 @@ server:
   ## sealedcode=204  — sealed pods don't fail liveness (expected at startup).
   ## uninitcode=204  — uninitialized pods don't fail liveness (expected at
   ##                   first boot before vault operator init is run).
+  ## timeoutSeconds 10 / failureThreshold 5 - the chart defaults (3 s, 2) kill
+  ##                   a slow active node under load and it comes back sealed.
+  ##                   Readiness uses the same values: standbys forward traffic
+  ##                   to the active node, so marking it NotReady sheds no load
+  ##                   and churns endpoints. OnDelete: pods take the new probes
+  ##                   only once deleted and unsealed (docs/manuals/upgrade.md).
   ## -------------------------------------------------------------------------
   readinessProbe:
     enabled: true
     path: "/v1/sys/health?standbyok=true"
+    timeoutSeconds: 10
+    failureThreshold: 5
   livenessProbe:
     enabled: true
     path: "/v1/sys/health?sealedcode=204&uninitcode=204&standbyok=true"
     initialDelaySeconds: 60
+    timeoutSeconds: 10
+    failureThreshold: 5
 
   ## -------------------------------------------------------------------------
   ## Persistent storage — both PVCs use local-path-persistent (reclaimPolicy:
