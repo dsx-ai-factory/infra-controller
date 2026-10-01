@@ -5,6 +5,32 @@ standalone release in the `flow` namespace. `helm-prereqs/setup.sh` installs it
 in phase 7h; it is disabled by default in the umbrella chart
 (`nico-flow.enabled: false`).
 
+## Observability
+
+Flow exposes Prometheus metrics at `/metrics` on port `9360` by default. The
+Deployment and Service name this port `metrics`; override it with
+`ports.metrics` when required. Metrics include Go and process collectors plus
+completed gRPC request counts and handling duration.
+
+Configure tracing with `OTEL_*` variables in `extraEnv.flow` and injection
+annotations in `podAnnotations`. This example requires the OpenTelemetry
+Operator and the referenced Instrumentation and OpenTelemetryCollector resources:
+
+```yaml
+podAnnotations:
+  instrumentation.opentelemetry.io/inject-sdk: dsx-obs/default-instrumentation
+  sidecar.opentelemetry.io/inject: dsx-obs/default-sidecar
+extraEnv:
+  flow:
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://localhost:4317
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: grpc
+```
+
+ServiceMonitor, Grafana dashboard, and PrometheusRule resources are owned by
+the deployment environment rather than this application chart.
+
 ## Runtime configuration (`flowConfig`)
 
 Flow reads runtime settings from `/etc/flow/flowconfig.yaml`. The chart renders

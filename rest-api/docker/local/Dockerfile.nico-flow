@@ -52,6 +52,6 @@ COPY --from=builder --chown=nvs:nvs /app/flow /app/flow
 
 USER nvs
 
-EXPOSE 50051
+EXPOSE 50051 9360
 
 ENTRYPOINT ["/app/flow", "serve"]
