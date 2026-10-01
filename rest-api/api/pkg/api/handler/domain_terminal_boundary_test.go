@@ -43,8 +43,7 @@ func TestDomainCreateTerminalCoreReply_RetainsOneReservedIdentity(t *testing.T) 
 			require.NoError(t, err)
 			forwarded := f.expectCore(t, corev1.Forge_CreateDomain_FullMethodName, nil,
 				tp.NewNonRetryableApplicationError("Core rejected reserved name", tc.errorType, errors.New("Core rejected reserved name")))
-			f.expectCore(t, corev1.Forge_FindDomain_FullMethodName, &corev1.DomainList{}, nil)
-			f.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
+			cancelled := f.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, nil)
 			request := model.APIDomainCreateRequest{Name: "reserved.example.com", SiteID: f.site.ID.String()}
 			response := f.request(t, NewCreateDomainHandler(f.dbSession, f.scp).Handle, http.MethodPost, "/", "", request)
 			require.Equal(t, tc.httpStatus, response.Code, response.Body.String())
@@ -57,12 +56,20 @@ func TestDomainCreateTerminalCoreReply_RetainsOneReservedIdentity(t *testing.T) 
 			stored := storedRows[0]
 			require.Equal(t, cdbm.DomainStatusError, stored.Status)
 			require.Equal(t, coreRequest.GetReservedId().GetValue(), stored.ControllerDomainID.String())
+			// The rejection is staged durably, then the reserved ID is cancelled in
+			// Core before the row becomes Error (no name-based FindDomain lookup).
+			var cancelRequest corev1.DomainDeletionRequest
+			require.NoError(t, protojson.Unmarshal(cancelled.RequestJSON, &cancelRequest))
+			require.Equal(t, coreRequest.GetReservedId().GetValue(), cancelRequest.GetId().GetValue())
+			require.True(t, cancelRequest.GetCancelReservedId())
 			retry := f.request(t, NewCreateDomainHandler(f.dbSession, f.scp).Handle, http.MethodPost, "/", "", request)
 			require.Equal(t, http.StatusConflict, retry.Code, retry.Body.String())
 			after, err := cdbm.NewDomainDAO(f.dbSession).GetByID(t.Context(), nil, stored.ID, nil)
 			require.NoError(t, err)
 			require.Equal(t, stored.ControllerDomainID, after.ControllerDomainID)
-			f.siteClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
+			// Core sees only the reserved create and its cancellation; the retry is
+			// answered from the durable Error row without another Core call.
+			f.siteClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 2)
 		})
 	}
 }
