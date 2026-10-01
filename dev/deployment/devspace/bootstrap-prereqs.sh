@@ -158,6 +158,20 @@ metadata:
   name: forge-system
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: nico-ntp-client
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: nico-ntp
+  ports:
+    - name: ntp
+      port: 123
+      targetPort: 123
+      protocol: UDP
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: nico-system.nico.nico-pg-cluster.credentials
@@ -763,6 +777,7 @@ main() {
 
   install_cert_manager
   apply_core_objects
+  bash "${REPO_ROOT}/helm-prereqs/bootstrap_ssh_host_key.sh" "${NAMESPACE}"
   apply_local_postgres
   apply_local_vault
   load_admin_root_cert_pem

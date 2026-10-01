@@ -509,11 +509,15 @@ configure_kea_apparmor() {
     profile="/etc/apparmor.d/usr.sbin.${daemon}"
     [[ -e "${profile}" ]] || continue
 
-    log "Allowing ${daemon} tests to use temporary files and Cargo-built hooks"
+    log "Allowing ${daemon} tests and DevSpace to use development runtime paths"
     local_profile="/etc/apparmor.d/local/usr.sbin.${daemon}"
     {
       printf '# Managed by prepare-ubuntu-host-for-dev.sh\n'
       printf '/tmp/** rwk,\n'
+      # kind shares the host kernel, including the native Kea AppArmor profile.
+      printf '/run/kea/* rwk,\n'
+      printf '/usr/lib/kea/hooks/*.so mr,\n'
+      printf '/run/secrets/spiffe.io/** r,\n'
       printf '%s/target/debug/*.so mr,\n' "${REPO_DIR}"
       printf '%s/target/debug/deps/*.so mr,\n' "${REPO_DIR}"
       if [[ "${canonical_repo_dir}" != "${REPO_DIR}" ]]; then

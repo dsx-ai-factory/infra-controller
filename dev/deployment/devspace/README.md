@@ -35,11 +35,32 @@ By default this script assumes an empty cluster and will idempotently:
 - deploy the local Keycloak realm
 - share the Core CA with REST so the site agent can use mTLS with Core
 - create the Secrets and ConfigMaps that the Helm chart expects
+- create the SSH console host-key Secret if absent, preserving an existing key
+- create a cluster-local NTP Service for DHCP clients
 - write [`values.generated.yaml`](values.generated.yaml) for the app deploy step
 
 It is safe to re-run. It uses `helm upgrade --install`, `kubectl apply`, and Vault checks before writing mounts/roles/secrets.
 
 The bootstrap script is responsible for cluster-facing dependencies and generated wiring only. The repo deploy step does not install PostgreSQL, Vault, cert-manager, Temporal, or Keycloak.
+
+After deployment, DevSpace replaces the chart's DHCP address placeholders with
+the cluster-local DNS, NTP, and PXE Service IPv4 addresses. Explicitly configured
+addresses are preserved. It then waits for all Core Deployments, StatefulSets,
+and DaemonSets to roll out, and checks pod readiness and stable restart counts
+over twenty seconds. This also applies to the `core-only` profile. A missing
+executable or prerequisite now fails deployment instead of reporting success.
+
+On Ubuntu hosts with native Kea AppArmor profiles, containers in kind also inherit
+those profiles. `prepare-ubuntu-host-for-dev.sh` adds local development allowances
+for Kea runtime files (`/run/kea/*`), shared hooks (`/usr/lib/kea/hooks/*.so`), and
+read-only projected credentials (`/run/secrets/spiffe.io/**`). It reloads the
+profiles without disabling confinement. These host-level allowances also apply
+to native Kea processes using the same profiles.
+
+PXE runtime packaging is tracked separately in
+[PR #5584](https://github.com/dsx-ai-factory/infra-controller/pull/5584).
+Until an image providing the PXE executable is deployed, its failed rollout is
+reported by this health check; fixing the other services does not bypass it.
 
 ### Bring Your Own
 
@@ -234,7 +255,8 @@ docker build --pull=false -t build-container-localdev \
   -f "dev/docker/Dockerfile.build-container-${build_arch}" .
 docker build --pull=false -t nico-devspace-core-artifacts \
   -f dev/deployment/devspace/Dockerfile.core-artifacts .
-docker build -t "nico-api:<devspace-generated-tag>" -f dev/deployment/devspace/Dockerfile.api .
+docker build --build-arg KEA_VERSION="${kea_version}" \
+  -t "nico-api:<devspace-generated-tag>" -f dev/deployment/devspace/Dockerfile.api .
 docker build -t "nico-bmc-proxy:<devspace-generated-tag>" -f dev/deployment/devspace/Dockerfile.bmc-proxy .
 docker build -t "machine-a-tron:<devspace-generated-tag>" -f dev/deployment/devspace/Dockerfile.machine-a-tron .
 ```
