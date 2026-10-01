@@ -176,6 +176,79 @@ func TestSubnetAPIService_AttachVpcToSubnet(t *testing.T) {
 	require.Equal(t, map[string]any{"vpcId": "target-vpc-id", "allowReplace": false}, body)
 }
 
+func TestDomainSubnetAPIService_DocumentedErrorModels(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		message string
+		execute func(*APIClient) error
+	}{
+		{
+			name:    "get domain malformed ID",
+			status:  http.StatusBadRequest,
+			message: "Invalid Domain ID in URL",
+			execute: func(client *APIClient) error {
+				_, _, err := client.DNSDomainAPI.GetDomain(context.Background(), "tenant-org", "not-a-uuid").Execute()
+				return err
+			},
+		},
+		{
+			name:    "delete domain malformed ID",
+			status:  http.StatusBadRequest,
+			message: "Invalid Domain ID in URL",
+			execute: func(client *APIClient) error {
+				_, err := client.DNSDomainAPI.DeleteDomain(context.Background(), "tenant-org", "not-a-uuid").Execute()
+				return err
+			},
+		},
+		{
+			name:    "delete domain not deletable",
+			status:  http.StatusConflict,
+			message: "Domain is not available for deletion",
+			execute: func(client *APIClient) error {
+				_, err := client.DNSDomainAPI.DeleteDomain(context.Background(), "tenant-org", "domain-id").Execute()
+				return err
+			},
+		},
+		{
+			name:    "attach VPC without allowReplace",
+			status:  http.StatusConflict,
+			message: "Replacing the current Subnet VPC requires allowReplace",
+			execute: func(client *APIClient) error {
+				_, _, err := client.SubnetAPI.AttachVpcToSubnet(context.Background(), "tenant-org", "subnet-id").
+					SubnetAttachVpcRequest(*NewSubnetAttachVpcRequest("target-vpc-id")).
+					Execute()
+				return err
+			},
+		},
+		{
+			name:    "delete subnet with pending reassignment",
+			status:  http.StatusConflict,
+			message: "Subnet VPC reassignment is pending reconciliation",
+			execute: func(client *APIClient) error {
+				_, err := client.SubnetAPI.DeleteSubnet(context.Background(), "tenant-org", "subnet-id").Execute()
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &sdkContractTransport{
+				status:       tt.status,
+				responseBody: `{"source":"nico","message":"` + tt.message + `","data":null}`,
+			}
+			err := tt.execute(newSDKContractClient(transport))
+
+			var apiErr *GenericOpenAPIError
+			require.ErrorAs(t, err, &apiErr)
+			model, ok := apiErr.Model().(NICoAPIError)
+			require.True(t, ok, "status %d must decode a typed NICoAPIError", tt.status)
+			require.Equal(t, tt.message, model.GetMessage())
+		})
+	}
+}
+
 func TestSubnetCreateRequest_MarshalJSON(t *testing.T) {
 	subdomainID := "domain-id"
 	tests := []struct {

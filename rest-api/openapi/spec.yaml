@@ -3068,6 +3068,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Domain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3097,10 +3099,18 @@ paths:
       responses:
         '204':
           description: No Content
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The Domain is not in a deletable state, or it changed while deletion was being reserved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '412':
           $ref: '#/components/responses/GenericHttpError'
         '504':
@@ -4570,6 +4580,12 @@ paths:
           description: No Content
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A VPC reassignment for the Subnet is pending reconciliation. Retry deletion after the reassignment completes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific Subnet by ID.
 
@@ -4679,6 +4695,13 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: |-
+            The Subnet is already attached to a different VPC and `allowReplace` is not `true`, the Site cannot confirm a versioned tenant Subnet or reports a different VPC than REST (reconciliation required), the Tenant's Site association could not be confirmed while reserving the reassignment, the Subnet changed while the reassignment was being reserved, or a VPC reassignment is pending reconciliation. A pending reassignment is durable: do not interpret this response as a rollback. Retrieve the Subnet to observe the reconciled VPC before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '412':
           $ref: '#/components/responses/GenericHttpError'
         '504':
