@@ -11,10 +11,40 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
+
+func TestFilterMachinesBySpectrumXAttachments(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		machines    []cdbm.Machine
+		attachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
+		want        []cdbm.Machine
+	}{
+		{
+			name:     "no attachments preserve candidate order without a capability query",
+			machines: []cdbm.Machine{{ID: "second"}, {ID: "first"}},
+			want:     []cdbm.Machine{{ID: "second"}, {ID: "first"}},
+		},
+		{
+			name: "empty candidates do not query all inventory",
+			attachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			want: []cdbm.Machine{},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			machines, err := FilterMachinesBySpectrumXAttachments(context.Background(), nil, nil, test.machines, test.attachments)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, machines)
+		})
+	}
+}
 
 func TestGetSpectrumXCapabilitiesForMachines(t *testing.T) {
 	ctx := context.Background()
@@ -36,11 +66,41 @@ func TestGetSpectrumXCapabilitiesForMachines(t *testing.T) {
 	// Other machines, Instance Type summaries and same-name DPU capabilities
 	// must not contribute to a selected machine's SpectrumX eligibility.
 	for _, input := range []cdbm.MachineCapabilityCreateInput{
-		{MachineID: &machineA.ID, Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(2), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
-		{MachineID: &machineB.ID, Type: cdbm.MachineCapabilityTypeNetwork, Name: "BlueField-3", Count: cutil.GetPtr(1), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
-		{MachineID: &machineA.ID, Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(8), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU)},
-		{MachineID: &unrequested.ID, Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(8), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
-		{InstanceTypeID: &instanceType.ID, Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(8), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
+		{
+			MachineID:  &machineA.ID,
+			Type:       cdbm.MachineCapabilityTypeNetwork,
+			Name:       "ConnectX-8",
+			Count:      cutil.GetPtr(2),
+			DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX),
+		},
+		{
+			MachineID:  &machineB.ID,
+			Type:       cdbm.MachineCapabilityTypeNetwork,
+			Name:       "BlueField-3",
+			Count:      cutil.GetPtr(1),
+			DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX),
+		},
+		{
+			MachineID:  &machineA.ID,
+			Type:       cdbm.MachineCapabilityTypeNetwork,
+			Name:       "ConnectX-8",
+			Count:      cutil.GetPtr(8),
+			DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU),
+		},
+		{
+			MachineID:  &unrequested.ID,
+			Type:       cdbm.MachineCapabilityTypeNetwork,
+			Name:       "ConnectX-8",
+			Count:      cutil.GetPtr(8),
+			DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX),
+		},
+		{
+			InstanceTypeID: &instanceType.ID,
+			Type:           cdbm.MachineCapabilityTypeNetwork,
+			Name:           "ConnectX-8",
+			Count:          cutil.GetPtr(8),
+			DeviceType:     cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX),
+		},
 	} {
 		_, err = cdbm.NewMachineCapabilityDAO(dbSession).Create(ctx, tx, input)
 		require.NoError(t, err)
@@ -50,8 +110,15 @@ func TestGetSpectrumXCapabilitiesForMachines(t *testing.T) {
 		machineIDs []string
 		wantCounts map[string]int
 	}{
-		{name: "empty scope is not an unfiltered inventory query", wantCounts: map[string]int{}},
-		{name: "scoped capabilities stay grouped by machine", machineIDs: []string{machineA.ID, machineB.ID, "missing"}, wantCounts: map[string]int{machineA.ID: 2, machineB.ID: 1}},
+		{
+			name:       "empty scope is not an unfiltered inventory query",
+			wantCounts: map[string]int{},
+		},
+		{
+			name:       "scoped capabilities stay grouped by machine",
+			machineIDs: []string{machineA.ID, machineB.ID, "missing"},
+			wantCounts: map[string]int{machineA.ID: 2, machineB.ID: 1},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			capabilities, readErr := GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, test.machineIDs)

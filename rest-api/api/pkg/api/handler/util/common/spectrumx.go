@@ -17,7 +17,7 @@ import (
 )
 
 // GetSpectrumXCapabilitiesForMachines reads the inventory projection used for
-// eligibility, just like InfiniBand. Scope by machine rather than Instance Type:
+// eligibility. Scope by machine rather than Instance Type:
 // every selected machine must independently satisfy all requested attachments.
 func GetSpectrumXCapabilitiesForMachines(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, machineIDs []string) (map[string][]cdbm.MachineCapability, error) {
 	byMachineID := make(map[string][]cdbm.MachineCapability)
@@ -36,6 +36,30 @@ func GetSpectrumXCapabilitiesForMachines(ctx context.Context, tx *cdb.Tx, dbSess
 		}
 	}
 	return byMachineID, nil
+}
+
+// FilterMachinesBySpectrumXAttachments preserves candidate order and retains only
+// machines satisfying every attachment using the caller's inventory transaction.
+// An empty attachment list leaves candidates unchanged without querying capabilities.
+func FilterMachinesBySpectrumXAttachments(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, machines []cdbm.Machine, attachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest) ([]cdbm.Machine, error) {
+	if len(attachments) == 0 {
+		return machines, nil
+	}
+	machineIDs := make([]string, len(machines))
+	for i, machine := range machines {
+		machineIDs[i] = machine.ID
+	}
+	capabilities, err := GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, machineIDs)
+	if err != nil {
+		return nil, err
+	}
+	compatible := make([]cdbm.Machine, 0, len(machines))
+	for _, machine := range machines {
+		if cam.ValidateSpectrumXAttachmentsForMachine(capabilities[machine.ID], attachments) == nil {
+			compatible = append(compatible, machine)
+		}
+	}
+	return compatible, nil
 }
 
 // ValidateMachineSpectrumXAttachments checks one already-authorized machine

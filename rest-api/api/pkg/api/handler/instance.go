@@ -1441,6 +1441,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				if errors.As(err, &ibSelErr) {
 					return cutil.NewAPIError(http.StatusBadRequest, ibSelErr.Error(), ibSelErr.ValidationError())
 				}
+				if errors.Is(err, common.ErrSpectrumXMachineSelection) {
+					return cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+				}
 				if err == common.ErrInstanceTypeMachineNotFound {
 					return cutil.NewAPIError(http.StatusBadRequest,
 						"No Machines are available for specified Instance Type", nil)
@@ -3547,7 +3550,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// even after the corresponding capability disappears from inventory.
 	apiErr = common.ValidateMachineSpectrumXAttachments(ctx, nil, uih.dbSession, machine.ID, apiRequest.SpectrumXAttachments)
 	if apiErr != nil {
-		return c.JSON(apiErr.Code, apiErr)
+		return apiErr.Send(c)
 	}
 
 	// Values populated inside the transaction closure that are needed for the response.

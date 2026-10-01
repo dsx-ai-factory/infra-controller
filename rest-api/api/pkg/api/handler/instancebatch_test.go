@@ -74,7 +74,7 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 	instanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-label-filter-type", site, cdbm.InstanceStatusReady)
 
 	for i, failureDomain := range []string{"fd-a", "fd-a", "fd-b"} {
-		machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, provider.ID, site.ID, "nvlink-domain-1")
+		machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, provider.ID, site.ID, failureDomain)
 		machine.Labels = map[string]string{
 			"failure-domain": failureDomain,
 			"power-domain":   fmt.Sprintf("pd-%d", i),
@@ -85,6 +85,9 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		})
 		require.NoError(t, err)
 		testInstanceBuildMachineInstanceType(t, dbSession, machine, instanceType)
+		if i != 1 {
+			common.TestBuildMachineCapability(t, dbSession, &machine.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(1), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
+		}
 	}
 
 	tests := []struct {
@@ -92,6 +95,8 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		machineLabelSelector map[string]string
 		wantStatus           int
 		wantFailureDomain    string
+		spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest
+		wantMessage          string
 	}{
 		{
 			name:                 "insufficient matching capacity",
@@ -103,6 +108,35 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 			machineLabelSelector: map[string]string{"failure-domain": "fd-a"},
 			wantFailureDomain:    "fd-a",
 		},
+		{
+			name:                 "SpectrumX filter reports partial compatible capacity",
+			machineLabelSelector: map[string]string{"failure-domain": "fd-a"},
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Insufficient Machines with the requested SpectrumX capabilities: requested 2, compatible 1",
+		},
+		{
+			name:                 "empty candidate pool retains ordinary capacity error",
+			machineLabelSelector: map[string]string{"failure-domain": "missing"},
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Insufficient machines available: requested 2, available 0",
+		},
+		{
+			name: "SpectrumX filtering reports incompatible topology capacity",
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Topology optimization requires all 2 machines with the requested SpectrumX capabilities on same NVLink domain, but best domain only has 1 compatible",
+		},
 	}
 
 	for _, test := range tests {
@@ -113,11 +147,14 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 
 			machines, apiErr := allocateMachinesForBatch(
 				ctx, tx, dbSession, instanceType, 2, true,
-				test.machineLabelSelector, nil, zerolog.Nop(),
+				test.machineLabelSelector, test.spectrumXAttachments, zerolog.Nop(),
 			)
 			if test.wantStatus != 0 {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, test.wantStatus, apiErr.Code)
+				if test.wantMessage != "" {
+					assert.Equal(t, test.wantMessage, apiErr.Message)
+				}
 				return
 			}
 
@@ -1451,17 +1488,33 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 		compatible bool
 		status     int
 	}{
-		{name: "SpectrumX filters capacity before selecting the NVLink domain", compatible: true, status: http.StatusCreated},
-		{name: "SpectrumX insufficient compatible capacity leaves the batch unallocated", status: http.StatusConflict},
+		{
+			name:       "SpectrumX filters capacity before selecting the NVLink domain",
+			compatible: true,
+			status:     http.StatusCreated,
+		},
+		{
+			name:   "SpectrumX insufficient compatible capacity leaves the batch unallocated",
+			status: http.StatusConflict,
+		},
 	} {
 		var candidates []*cdbm.Machine
 		var compatibleIDs map[string]bool
 		var partition *cdbm.SpectrumXPartition
 		var siteClient *tmocks.Client
 		tests = append(tests, batchCase{
-			name: scenario.name, fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			name: scenario.name,
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
 			args: args{
-				reqData: &model.APIBatchInstanceCreateRequest{}, reqOrg: tnOrg, reqUser: tnu1, respCode: scenario.status,
+				reqData:  &model.APIBatchInstanceCreateRequest{},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: scenario.status,
 				prepareReq: func(t *testing.T, req *model.APIBatchInstanceCreateRequest) {
 					it := testInstanceBuildInstanceType(t, dbSession, ip, uuid.NewString(), st1, cdbm.InstanceStatusReady)
 					testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, it.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
@@ -1484,9 +1537,19 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 						common.TestBuildMachineCapability(t, dbSession, &machine.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, &count, cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
 					}
 					*req = model.APIBatchInstanceCreateRequest{
-						NamePrefix: "spectrumx-batch", Count: 2, TenantID: tn1.ID.String(), InstanceTypeID: it.ID.String(), VpcID: vpc1.ID.String(),
-						Interfaces: createInterfacesForCount(2, subnet1.ID.String()), IpxeScript: cutil.GetPtr("test script"),
-						SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{SpectrumXPartitionID: partition.ID.String(), Device: "ConnectX-8", DeviceInstance: cutil.GetPtr(0), AttachmentType: cdbm.SpectrumXAttachmentTypePhysical}},
+						NamePrefix:     "spectrumx-batch",
+						Count:          2,
+						TenantID:       tn1.ID.String(),
+						InstanceTypeID: it.ID.String(),
+						VpcID:          vpc1.ID.String(),
+						Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+						IpxeScript:     cutil.GetPtr("test script"),
+						SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+							SpectrumXPartitionID: partition.ID.String(),
+							Device:               "ConnectX-8",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						}},
 					}
 					siteClient = &tmocks.Client{}
 					previous := scp.IDClientMap[st1.ID.String()]
@@ -1498,11 +1561,30 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
 					siteClient.AssertExpectations(t)
+					if !scenario.compatible {
+						assert.Contains(t, rec.Body.String(), "Insufficient Machines with the requested SpectrumX capabilities: requested 2, compatible 0")
+						var response struct {
+							Source string `json:"source"`
+						}
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, "nico", response.Source)
+					}
+					machineIDs := make([]string, 0, len(candidates))
 					for _, candidate := range candidates {
+						machineIDs = append(machineIDs, candidate.ID)
 						machine, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, candidate.ID, nil, false)
 						require.NoError(t, readErr)
 						assert.Equal(t, compatibleIDs[candidate.ID], machine.IsAssigned)
+						if !scenario.compatible {
+							assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+							details, _, readErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{candidate.ID}}, cdbp.PageInput{})
+							require.NoError(t, readErr)
+							assert.Empty(t, details)
+						}
 					}
+					instances, _, readErr := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{MachineIDs: machineIDs}, cdbp.PageInput{}, nil)
+					require.NoError(t, readErr)
+					assert.Len(t, instances, len(compatibleIDs))
 					attachments, _, readErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).GetAll(ctx, nil, cdbm.SpectrumXAttachmentFilterInput{SpectrumXPartitionIDs: []uuid.UUID{partition.ID}}, cdbp.PageInput{}, nil)
 					require.NoError(t, readErr)
 					assert.Len(t, attachments, len(compatibleIDs))
@@ -1544,6 +1626,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
+			ec.Set(cutil.APINameContextKey, "nico")
 			err := bcih.Handle(ec)
 			if tt.args.afterHandle != nil {
 				require.NoError(t, err)

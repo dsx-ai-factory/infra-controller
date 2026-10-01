@@ -1628,7 +1628,10 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 
 	t.Run("capability inventory", func(t *testing.T) {
 		const device = "NVIDIA ConnectX-8 SuperNIC"
-		genericNetwork := &corev1.MachineCapabilityAttributesNetwork{Name: device, Count: 2}
+		genericNetwork := &corev1.MachineCapabilityAttributesNetwork{
+			Name:  device,
+			Count: 2,
+		}
 		cases := []struct {
 			name          string
 			capabilities  *corev1.MachineCapabilitiesSet
@@ -1639,7 +1642,11 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 				name: "reduces SpectrumX count without discovery info",
 				capabilities: &corev1.MachineCapabilitiesSet{Network: []*corev1.MachineCapabilityAttributesNetwork{
 					genericNetwork,
-					{Name: device, Count: 1, DeviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum()},
+					{
+						Name:       device,
+						Count:      1,
+						DeviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum(),
+					},
 				}},
 				wantCounts: map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 1},
 			},
