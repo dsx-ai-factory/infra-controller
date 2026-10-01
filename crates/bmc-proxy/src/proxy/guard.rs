@@ -32,12 +32,14 @@ use crate::metrics::{AuthContextMissing, PrincipalAllowListDenied, RequestAclDen
 use crate::proxy::{BmcProxyError, BmcProxyState};
 
 impl BmcProxyState {
-    pub(super) fn allows(&self, request: &Request<Body>) -> bool {
+    /// The caller's principal identifiers, when the ACL lets one of them send
+    /// `request`.
+    pub(super) fn authorized_caller(&self, request: &Request<Body>) -> Option<Vec<String>> {
         let Some(auth_context) = request.extensions().get::<AuthContext<()>>() else {
             emit(AuthContextMissing::RequestAcl {
                 method_label: request.method().into(),
             });
-            return false;
+            return None;
         };
 
         let principal_ids = request_principal_ids(auth_context);
@@ -54,9 +56,10 @@ impl BmcProxyState {
                 format!("{principal_ids:?}"),
                 request.uri().path().to_string(),
             ));
+            return None;
         }
 
-        allowed
+        Some(principal_ids)
     }
 }
 
@@ -206,7 +209,7 @@ mod tests {
         ];
         let metrics = MetricsCapture::start();
         let mut result = false;
-        let logs = capture_logs(|| result = state.allows(&request));
+        let logs = capture_logs(|| result = state.authorized_caller(&request).is_some());
 
         AuthorizationObservation {
             result,
@@ -279,7 +282,7 @@ mod tests {
         );
     }
 
-    /// `BmcProxyState::allows` owns the per-principal ACL boundary. An ordinary
+    /// `BmcProxyState::authorized_caller` owns the per-principal ACL boundary. An ordinary
     /// policy rejection moves the denial counter, while a missing `AuthContext`
     /// still rejects the request but moves only the middleware-error counter.
     #[test]
