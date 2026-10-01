@@ -67,59 +67,39 @@ type SiteConfig struct {
 type Site struct {
 	bun.BaseModel `bun:"table:site,alias:st"`
 
-	ID                            uuid.UUID                    `bun:"type:uuid,pk"`
-	Name                          string                       `bun:"name,notnull"`
-	DisplayName                   *string                      `bun:"display_name"`
-	Description                   *string                      `bun:"description"`
-	Org                           string                       `bun:"org,notnull"`
-	InfrastructureProviderID      uuid.UUID                    `bun:"infrastructure_provider_id,type:uuid,notnull"`
-	InfrastructureProvider        *InfrastructureProvider      `bun:"rel:belongs-to,join:infrastructure_provider_id=id"`
-	SiteControllerVersion         *string                      `bun:"site_controller_version"`
-	SiteAgentVersion              *string                      `bun:"site_agent_version"`
-	RegistrationToken             *string                      `bun:"registration_token"`
-	RegistrationTokenExpiration   *time.Time                   `bun:"registration_token_expiration"`
-	SerialConsoleHostname         *string                      `bun:"serial_console_hostname"`
-	IsSerialConsoleEnabled        bool                         `bun:"is_serial_console_enabled,notnull"`
-	SerialConsoleIdleTimeout      *int                         `bun:"serial_console_idle_timeout"`
-	SerialConsoleMaxSessionLength *int                         `bun:"serial_console_max_session_length"`
-	IsInfinityEnabled             bool                         `bun:"is_infinity_enabled,notnull"`
-	InventoryReceived             *time.Time                   `bun:"inventory_received"`
-	InventoryIntervalSeconds      *int                         `bun:"inventory_interval_seconds"`
-	SitePrefixInventoryProgress   *SitePrefixInventoryProgress `bun:"site_prefix_inventory_progress,type:jsonb"`
-	SitePrefixInventoryObservedAt *time.Time                   `bun:"site_prefix_inventory_observed_at"`
-	Status                        string                       `bun:"status,notnull"`
-	Created                       time.Time                    `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated                       time.Time                    `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted                       *time.Time                   `bun:"deleted,soft_delete"`
-	CreatedBy                     uuid.UUID                    `bun:"type:uuid,notnull"`
-	Location                      *SiteLocation                `bun:"location"` // since this is a json object, type of the column will be JSONB automatically
-	Contact                       *SiteContact                 `bun:"contact"`  // since this is a json object, type of the column will be JSONB automatically
-	AgentCertExpiry               *time.Time                   `bun:"agent_cert_expiry"`
-	Config                        *SiteConfig                  `bun:"config,type:jsonb"`
+	ID                            uuid.UUID               `bun:"type:uuid,pk"`
+	Name                          string                  `bun:"name,notnull"`
+	DisplayName                   *string                 `bun:"display_name"`
+	Description                   *string                 `bun:"description"`
+	Org                           string                  `bun:"org,notnull"`
+	InfrastructureProviderID      uuid.UUID               `bun:"infrastructure_provider_id,type:uuid,notnull"`
+	InfrastructureProvider        *InfrastructureProvider `bun:"rel:belongs-to,join:infrastructure_provider_id=id"`
+	SiteControllerVersion         *string                 `bun:"site_controller_version"`
+	SiteAgentVersion              *string                 `bun:"site_agent_version"`
+	RegistrationToken             *string                 `bun:"registration_token"`
+	RegistrationTokenExpiration   *time.Time              `bun:"registration_token_expiration"`
+	SerialConsoleHostname         *string                 `bun:"serial_console_hostname"`
+	IsSerialConsoleEnabled        bool                    `bun:"is_serial_console_enabled,notnull"`
+	SerialConsoleIdleTimeout      *int                    `bun:"serial_console_idle_timeout"`
+	SerialConsoleMaxSessionLength *int                    `bun:"serial_console_max_session_length"`
+	IsInfinityEnabled             bool                    `bun:"is_infinity_enabled,notnull"`
+	InventoryReceived             *time.Time              `bun:"inventory_received"`
+	InventoryIntervalSeconds      *int                    `bun:"inventory_interval_seconds"`
+	Status                        string                  `bun:"status,notnull"`
+	Created                       time.Time               `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated                       time.Time               `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted                       *time.Time              `bun:"deleted,soft_delete"`
+	CreatedBy                     uuid.UUID               `bun:"type:uuid,notnull"`
+	Location                      *SiteLocation           `bun:"location"` // since this is a json object, type of the column will be JSONB automatically
+	Contact                       *SiteContact            `bun:"contact"`  // since this is a json object, type of the column will be JSONB automatically
+	AgentCertExpiry               *time.Time              `bun:"agent_cert_expiry"`
+	Config                        *SiteConfig             `bun:"config,type:jsonb"`
 }
 
 type SiteLocation struct {
 	City    string `json:"city"`
 	State   string `json:"state"`
 	Country string `json:"country"`
-}
-
-// SitePrefixInventoryProgress records validated page receipts separately from
-// reconciliation, so a deferred operator replacement does not hide an old ID's absence.
-// Only the newest collection is retained. Receipt alone never establishes authority.
-type SitePrefixInventoryProgress struct {
-	ReportedAt time.Time                         `json:"reportedAt"`
-	ItemIDs    []string                          `json:"itemIds"`
-	FinalPage  int32                             `json:"finalPage"`
-	Pages      map[int32]SitePrefixInventoryPage `json:"pages"`
-}
-
-// SitePrefixInventoryPage is an immutable receipt and any identities whose
-// replacement must wait for complete-inventory processing.
-type SitePrefixInventoryPage struct {
-	Hash        string   `json:"hash"`
-	ItemIDs     []string `json:"itemIds"`
-	DeferredIDs []string `json:"deferredIds"`
 }
 
 type SiteContact struct {
@@ -196,7 +176,6 @@ type SiteUpdateInput struct {
 	IsInfinityEnabled             *bool
 	InventoryReceived             *time.Time
 	InventoryIntervalSeconds      *int
-	SitePrefixInventoryProgress   *SitePrefixInventoryProgress
 	Status                        *string
 	Location                      *SiteLocation
 	Contact                       *SiteContact
@@ -597,10 +576,6 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 	if input.InventoryIntervalSeconds != nil {
 		st.InventoryIntervalSeconds = input.InventoryIntervalSeconds
 		updatedFields = append(updatedFields, "inventory_interval_seconds")
-	}
-	if input.SitePrefixInventoryProgress != nil {
-		st.SitePrefixInventoryProgress = input.SitePrefixInventoryProgress
-		updatedFields = append(updatedFields, "site_prefix_inventory_progress")
 	}
 
 	if input.Status != nil {

@@ -2099,44 +2099,6 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 		})
 	}
 
-	t.Run("cutover marker is reloaded before both creation and cleanup", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		resources := setupSiteFabricIPBlockTest(t)
-		manager := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-		require.NoError(t, manager.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/24"}))
-		tx, err := cdb.BeginTx(ctx, resources.dbSession, nil)
-		require.NoError(t, err)
-		defer func() { _ = tx.Rollback() }()
-		var writerPID int
-		require.NoError(t, tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &writerPID))
-		_, err = tx.GetBunTx().NewUpdate().Model((*cdbm.Site)(nil)).
-			Set("site_prefix_inventory_observed_at = ?", time.Now()).Where("id = ?", resources.site.ID).Exec(ctx)
-		require.NoError(t, err)
-		done := make(chan error, 1)
-		go func() {
-			done <- manager.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.1.0.0/24"})
-		}()
-		require.Eventually(t, func() bool {
-			var waiters int
-			queryErr := resources.dbSession.DB.NewSelect().ColumnExpr("count(*)").TableExpr("pg_catalog.pg_stat_activity").
-				Where("? = ANY(pg_blocking_pids(pid))", writerPID).Scan(ctx, &waiters)
-			return queryErr == nil && waiters > 0
-		}, 5*time.Second, 10*time.Millisecond, "importer must reload Site after its pre-read")
-		require.NoError(t, tx.Commit())
-		require.NoError(t, <-done)
-		blocks, _, err := cdbm.NewIPBlockDAO(resources.dbSession).GetAll(ctx, nil,
-			cdbm.IPBlockFilterInput{SiteIDs: []uuid.UUID{resources.site.ID}}, cdbp.PageInput{}, nil)
-		require.NoError(t, err)
-		require.Len(t, blocks, 1)
-		require.Equal(t, "10.0.0.0", blocks[0].Prefix)
-		namespace := ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly,
-			resources.provider.ID.String(), resources.site.ID.String())
-		prefixes, err := ipam.NewIpamStorage(resources.dbSession.DB, nil).ReadAllPrefixCidrs(ctx, namespace)
-		require.NoError(t, err)
-		require.Equal(t, []string{"10.0.0.0/24"}, prefixes)
-	})
-
 	t.Run("logs removed and created IP Blocks only once they commit", func(t *testing.T) {
 		ctx := context.Background()
 		resources := setupSiteFabricIPBlockTest(t)

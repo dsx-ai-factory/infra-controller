@@ -1098,16 +1098,6 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			return derr
 		}
 
-		// Reload after the fabric lock. A delayed legacy execution must neither
-		// create nor remove roots after complete SitePrefix inventory takes over.
-		dbSite, derr = siteDAO.GetByIDForUpdate(ctx, tx, siteID)
-		if derr != nil {
-			return derr
-		}
-		if dbSite.SitePrefixInventoryObservedAt != nil {
-			return nil
-		}
-
 		ipamStorage := ipam.NewIpamStorage(mst.dbSession.DB, tx.GetBunTx())
 
 		existingIPBlocks, _, derr := ipBlockDAO.GetAll(
