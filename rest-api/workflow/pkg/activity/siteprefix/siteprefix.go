@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"slices"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -30,15 +29,14 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 	return ManageSitePrefix{dbSession: session}
 }
 
-// UpdateSitePrefixesInDB commits one validated page and its receipt atomically.
-// A deferred operator replacement records receipt but never steals an existing
-// identity. Publication, absence processing, and setting the cutover marker
-// belong to the subsequent complete-inventory implementation.
+// UpdateSitePrefixesInDB reconciles each reported prefix in its own transaction.
+// Publication, absence processing, and retiring the legacy importer belong to
+// the subsequent complete-inventory implementation.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("starting activity")
 
-	hash, err := validatePage(inventory)
+	err := validatePage(inventory)
 	if err != nil {
 		logger.Warn().Err(err).Msg("received invalid SitePrefix inventory")
 		return err
@@ -62,115 +60,32 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
 		page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
 
-	err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
-		// A lock collision returns to Temporal's bounded retry rather than
-		// holding a worker or transaction indefinitely.
-		err := tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), false)
-		if err != nil {
-			return err
-		}
-		lockedSite, err := siteDAO.GetByIDForUpdate(ctx, tx, siteID)
-		if err != nil {
-			return err
-		}
-		if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
-			return invalid("Site provider changed while acquiring inventory lock")
-		}
-		reportedAt := inventory.Timestamp.AsTime()
-		// Pages share the collection's start time and can arrive minutes apart.
-		// Only a newer accepted collection supersedes them, not elapsed age.
-		progress := lockedSite.SitePrefixInventoryProgress
-		if progress != nil && reportedAt.Before(progress.ReportedAt) {
-			logger.Info().Msg("skipping inventory superseded by a newer collection")
-			return nil
-		}
-		if progress == nil || reportedAt.After(progress.ReportedAt) {
-			progress = &cdbm.SitePrefixInventoryProgress{
-				ReportedAt: reportedAt,
-				ItemIDs:    slices.Clone(inventory.InventoryPage.ItemIds),
-				Pages:      make(map[int32]cdbm.SitePrefixInventoryPage),
-			}
-		}
-		if !slices.Equal(progress.ItemIDs, page.ItemIds) {
-			return invalid("SitePrefix collection changed its declared IDs")
-		}
-		previousReceipt, exists := progress.Pages[page.CurrentPage]
-		if exists {
-			if previousReceipt.Hash != hash {
-				return invalid("SitePrefix page retry changed its contents")
-			}
-			logger.Info().Msg("skipping previously reconciled inventory page")
-			return nil
-		}
-		ids := make([]string, 0, len(inventory.SitePrefixes))
-		for _, prefix := range inventory.SitePrefixes {
-			ids = append(ids, prefix.GetId().GetValue())
-		}
-		final := page.TotalPages == 0 || page.CurrentPage == page.TotalPages
-		if progress.FinalPage != 0 && (page.CurrentPage > progress.FinalPage ||
-			page.TotalPages > progress.FinalPage || (final && page.CurrentPage != progress.FinalPage)) {
-			return invalid("SitePrefix page conflicts with the final page")
-		}
-		for number, receipt := range progress.Pages {
-			if final && number > page.CurrentPage {
-				return invalid("SitePrefix final page precedes an accepted page")
-			}
-			for _, id := range ids {
-				if slices.Contains(receipt.ItemIDs, id) {
-					return invalid("SitePrefix %s appears in more than one page", id)
-				}
-			}
-			if len(receipt.ItemIDs) > 0 && len(ids) > 0 &&
-				((number < page.CurrentPage && receipt.ItemIDs[len(receipt.ItemIDs)-1] >= ids[0]) ||
-					(number > page.CurrentPage && ids[len(ids)-1] >= receipt.ItemIDs[0])) {
-				return invalid("SitePrefix pages are not ordered by ID")
-			}
-		}
-		finalPage := progress.FinalPage
-		if final {
-			finalPage = page.CurrentPage
-		}
-		if finalPage > 0 && len(progress.Pages)+1 == int(finalPage) {
-			var received []string
-			for number := int32(1); number <= finalPage; number++ {
-				if number == page.CurrentPage {
-					received = append(received, ids...)
-				} else {
-					received = append(received, progress.Pages[number].ItemIDs...)
-				}
-			}
-			if !slices.Equal(received, page.ItemIds) {
-				return invalid("complete SitePrefix collection does not match declared IDs")
-			}
-		}
-		receipt := cdbm.SitePrefixInventoryPage{Hash: hash, ItemIDs: ids, DeferredIDs: []string{}}
-		for _, prefix := range inventory.SitePrefixes {
-			deferred, err := manager.reconcile(ctx, tx, lockedSite, prefix)
+	for _, prefix := range inventory.SitePrefixes {
+		// Keep one prefix's REST identity, IPAM changes, and status detail atomic.
+		// A failed prefix must not roll back earlier prefixes in the page.
+		deferred, err := cdb.WithTxResult(ctx, manager.dbSession, func(tx *cdb.Tx) (bool, error) {
+			err := tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), false)
 			if err != nil {
-				logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
-					Msg("failed to reconcile SitePrefix in DB")
-				return err
+				return false, err
 			}
-			if deferred {
-				id := prefix.GetId().GetValue()
-				receipt.DeferredIDs = append(receipt.DeferredIDs, id)
-				logger.Warn().Str("Site Prefix ID", id).
-					Msg("Deferring operator SitePrefix replacement until complete inventory")
+			lockedSite, err := siteDAO.GetByIDForUpdate(ctx, tx, siteID)
+			if err != nil {
+				return false, err
 			}
+			if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
+				return false, invalid("Site provider changed while acquiring inventory lock")
+			}
+			return manager.reconcile(ctx, tx, lockedSite, prefix)
+		})
+		if err != nil {
+			logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
+				Msg("failed to reconcile SitePrefix in DB")
+			return err
 		}
-		if progress.Pages == nil {
-			progress.Pages = make(map[int32]cdbm.SitePrefixInventoryPage)
+		if deferred {
+			logger.Warn().Str("Site Prefix ID", prefix.GetId().GetValue()).
+				Msg("Deferring operator SitePrefix replacement until complete inventory")
 		}
-		progress.Pages[page.CurrentPage] = receipt
-		if final {
-			progress.FinalPage = page.CurrentPage
-		}
-		_, err = siteDAO.Update(ctx, tx, cdbm.SiteUpdateInput{SiteID: siteID, SitePrefixInventoryProgress: progress})
-		return err
-	})
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to reconcile SitePrefix inventory page")
-		return err
 	}
 	logger.Info().Msg("completing activity")
 	return nil
