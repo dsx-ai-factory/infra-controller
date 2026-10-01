@@ -27,23 +27,21 @@ import (
 
 // CreateDomainHandler creates a tenant-owned DNS Domain on one Site.
 type CreateDomainHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateDomainHandler returns a Domain creation handler.
 func NewCreateDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateDomainHandler {
 	return CreateDomainHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle creates a tenant-owned DNS Domain.
 func (cdh CreateDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Create", c, cdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -161,21 +159,19 @@ func (cdh CreateDomainHandler) Handle(c echo.Context) error {
 
 // GetAllDomainHandler lists tenant-owned DNS Domains.
 type GetAllDomainHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllDomainHandler returns a Domain list handler.
 func NewGetAllDomainHandler(dbSession *cdb.Session) GetAllDomainHandler {
 	return GetAllDomainHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
 // Handle lists tenant-owned DNS Domains, optionally limited to one authorized Site.
 func (gadh GetAllDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "GetAll", c, gadh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -265,21 +261,19 @@ func (gadh GetAllDomainHandler) Handle(c echo.Context) error {
 
 // GetDomainHandler retrieves one tenant-owned DNS Domain by its REST-local ID.
 type GetDomainHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetDomainHandler returns a single-Domain retrieval handler.
 func NewGetDomainHandler(dbSession *cdb.Session) GetDomainHandler {
 	return GetDomainHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
 // Handle retrieves one tenant-owned DNS Domain.
 func (gdh GetDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Get", c, gdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -317,23 +311,21 @@ func (gdh GetDomainHandler) Handle(c echo.Context) error {
 
 // DeleteDomainHandler deletes a tenant-owned DNS Domain from Core and its REST projection.
 type DeleteDomainHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteDomainHandler returns a Domain deletion handler.
 func NewDeleteDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteDomainHandler {
 	return DeleteDomainHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle deletes a tenant-owned DNS Domain.
 func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Delete", c, ddh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Domain", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

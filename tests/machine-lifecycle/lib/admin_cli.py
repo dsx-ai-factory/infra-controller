@@ -332,7 +332,7 @@ def get_machine_state(machine_id: str, allow_missing_machine: bool = False) -> s
 def get_machine_vendor(machine_id: str) -> str:
     """Get the vendor name of the specified machine."""
     result = run_admin_cli(["machine", "show", machine_id])
-    return result["discovery_info"]["dmi_data"]["sys_vendor"]
+    return result["status"]["discovery_info"]["dmi_data"]["sys_vendor"]
 
 
 def _get_machine_from_json(machine_id: str, machine_json: dict) -> dict | None:

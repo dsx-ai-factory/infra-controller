@@ -941,7 +941,8 @@ mod tests {
             mac_address: Some(DPA_MAC.to_string()),
             spx_partition_id: SpxPartitionId::new(),
             attachment_type: SpxAttachmentType::Physical,
-            virtual_function_id: None,
+            attachment_vf: None,
+            attachment_ovs: None,
         }
     }
 

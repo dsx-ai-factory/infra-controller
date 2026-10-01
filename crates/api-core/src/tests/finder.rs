@@ -44,13 +44,6 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         !status.interfaces.is_empty(),
         "status.interfaces must be populated for the host machine"
     );
-    #[allow(deprecated)]
-    {
-        assert_eq!(
-            host_machine.interfaces, status.interfaces,
-            "interfaces must equal status.interfaces"
-        );
-    }
 
     mh.instance_builer(&env)
         .single_interface_network_config(segment_id)

@@ -37,22 +37,67 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		assert.Equal(t, device, got.Device)
 		assert.Equal(t, uint32(2), got.DeviceInstance)
 		assert.Equal(t, corev1.SpxAttachmentType_Physical, got.AttachmentType)
-		assert.Nil(t, got.VirtualFunctionId, "an unset virtual function must stay unset on the wire")
+		assert.Nil(t, got.AttachmentVf, "an unset virtual function must stay unset on the wire")
 	})
 
-	// OVS maps onto Core's `Ovn`, which is the same attachment under its older name.
 	t.Run("carries a set virtual function", func(t *testing.T) {
 		sxa := &SpectrumXAttachment{
 			SpectrumXPartitionID: partitionID,
 			Device:               device,
-			AttachmentType:       SpectrumXAttachmentTypeOVS,
+			AttachmentType:       SpectrumXAttachmentTypeVirtual,
 			VirtualFunctionID:    cutil.GetPtr(3),
 		}
 
 		got := sxa.ToProto()
-		assert.Equal(t, corev1.SpxAttachmentType_Ovn, got.AttachmentType)
-		require.NotNil(t, got.VirtualFunctionId)
-		assert.Equal(t, uint32(3), *got.VirtualFunctionId)
+		assert.Equal(t, corev1.SpxAttachmentType_Virtual, got.AttachmentType)
+		require.NotNil(t, got.AttachmentVf)
+		assert.Equal(t, uint32(3), got.AttachmentVf.GetVfIndex())
+	})
+
+	// Core requires attachment_ovs for an OVS attachment: bridge_name is mandatory and
+	// ovn_network_name is optional, so both have to reach the wire from the persisted row.
+	t.Run("carries OVS bridge and network", func(t *testing.T) {
+		sxa := &SpectrumXAttachment{
+			SpectrumXPartitionID: partitionID,
+			Device:               device,
+			AttachmentType:       SpectrumXAttachmentTypeOVS,
+			BridgeName:           cutil.GetPtr("br-spx0"),
+			OvnNetworkName:       cutil.GetPtr("spx-net-a"),
+		}
+
+		got := sxa.ToProto()
+		assert.Equal(t, corev1.SpxAttachmentType_OVS, got.AttachmentType)
+		require.NotNil(t, got.AttachmentOvs)
+		assert.Equal(t, "br-spx0", got.AttachmentOvs.GetBridgeName())
+		assert.Equal(t, "spx-net-a", got.AttachmentOvs.GetOvnNetworkName())
+		assert.Nil(t, got.AttachmentVf, "an unset virtual function must stay unset on the wire")
+	})
+
+	// An omitted ovn_network_name has to stay unset on the wire rather than becoming an empty
+	// string, since Core distinguishes the two.
+	t.Run("carries OVS bridge without a network", func(t *testing.T) {
+		sxa := &SpectrumXAttachment{
+			SpectrumXPartitionID: partitionID,
+			Device:               device,
+			AttachmentType:       SpectrumXAttachmentTypeOVS,
+			BridgeName:           cutil.GetPtr("br-spx0"),
+		}
+
+		got := sxa.ToProto()
+		require.NotNil(t, got.AttachmentOvs)
+		assert.Equal(t, "br-spx0", got.AttachmentOvs.GetBridgeName())
+		assert.Nil(t, got.AttachmentOvs.OvnNetworkName, "an unset OVN network must stay unset on the wire")
+	})
+
+	// OVS metadata is meaningless for a Physical attachment and must not be emitted.
+	t.Run("omits OVS metadata for a non-OVS attachment", func(t *testing.T) {
+		sxa := &SpectrumXAttachment{
+			SpectrumXPartitionID: partitionID,
+			Device:               device,
+			AttachmentType:       SpectrumXAttachmentTypePhysical,
+		}
+
+		assert.Nil(t, sxa.ToProto().AttachmentOvs)
 	})
 
 	// API-side validation rejects an unknown type long before a row is written, so the
@@ -362,6 +407,30 @@ func TestSpectrumXAttachmentSQLDAO_Lifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, created)
+
+	// OVS metadata is client-supplied config, so it has to persist from create and read back
+	// unchanged rather than being filled in by inventory later.
+	ovsCreated, err := sxaDAO.Create(ctx, nil, SpectrumXAttachmentCreateInput{
+		InstanceID:           fx.instance.ID,
+		SiteID:               fx.site.ID,
+		SpectrumXPartitionID: fx.partition.ID,
+		Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+		DeviceInstance:       1,
+		AttachmentType:       SpectrumXAttachmentTypeOVS,
+		BridgeName:           cutil.GetPtr("br-spx0"),
+		OvnNetworkName:       cutil.GetPtr("spx-net-a"),
+		Status:               SpectrumXAttachmentStatusPending,
+		CreatedBy:            fx.user.ID,
+	})
+	require.NoError(t, err)
+	ovsReadback, err := sxaDAO.Get(ctx, nil, ovsCreated.ID, nil)
+	require.NoError(t, err)
+	require.NotNil(t, ovsReadback.BridgeName)
+	assert.Equal(t, "br-spx0", *ovsReadback.BridgeName)
+	require.NotNil(t, ovsReadback.OvnNetworkName)
+	assert.Equal(t, "spx-net-a", *ovsReadback.OvnNetworkName)
+	// Removed so the remaining single-row assertions below are unaffected.
+	require.NoError(t, sxaDAO.Delete(ctx, nil, ovsCreated.ID))
 
 	// Inventory writes the Site-allocated MAC, IP and the promotion to Ready.
 	updated, err := sxaDAO.Update(ctx, nil, SpectrumXAttachmentUpdateInput{

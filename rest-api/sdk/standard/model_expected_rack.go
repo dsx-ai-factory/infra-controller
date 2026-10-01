@@ -31,6 +31,8 @@ type ExpectedRack struct {
 	SiteId *string `json:"siteId,omitempty"`
 	// Identifier of the Rack Profile this rack conforms to
 	RackProfileId *string `json:"rackProfileId,omitempty"`
+	// External rack group ID selected and persisted at creation together with rackProfileId. Null for legacy rows without a recorded group; metadata updates preserve it.
+	RackGroupId NullableString `json:"rackGroupId,omitempty"`
 	// Human-readable name of the Expected Rack
 	Name *string `json:"name,omitempty"`
 	// Human-readable description of the Expected Rack
@@ -186,6 +188,49 @@ func (o *ExpectedRack) HasRackProfileId() bool {
 // SetRackProfileId gets a reference to the given string and assigns it to the RackProfileId field.
 func (o *ExpectedRack) SetRackProfileId(v string) {
 	o.RackProfileId = &v
+}
+
+// GetRackGroupId returns the RackGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedRack) GetRackGroupId() string {
+	if o == nil || IsNil(o.RackGroupId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.RackGroupId.Get()
+}
+
+// GetRackGroupIdOk returns a tuple with the RackGroupId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedRack) GetRackGroupIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RackGroupId.Get(), o.RackGroupId.IsSet()
+}
+
+// HasRackGroupId returns a boolean if a field has been set.
+func (o *ExpectedRack) HasRackGroupId() bool {
+	if o != nil && o.RackGroupId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRackGroupId gets a reference to the given NullableString and assigns it to the RackGroupId field.
+func (o *ExpectedRack) SetRackGroupId(v string) {
+	o.RackGroupId.Set(&v)
+}
+
+// SetRackGroupIdNil sets the value for RackGroupId to be an explicit nil
+func (o *ExpectedRack) SetRackGroupIdNil() {
+	o.RackGroupId.Set(nil)
+}
+
+// UnsetRackGroupId ensures that no value is present for RackGroupId, not even an explicit nil
+func (o *ExpectedRack) UnsetRackGroupId() {
+	o.RackGroupId.Unset()
 }
 
 // GetName returns the Name field value if set, zero value otherwise.
@@ -369,6 +414,9 @@ func (o ExpectedRack) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.RackProfileId) {
 		toSerialize["rackProfileId"] = o.RackProfileId
+	}
+	if o.RackGroupId.IsSet() {
+		toSerialize["rackGroupId"] = o.RackGroupId.Get()
 	}
 	if !IsNil(o.Name) {
 		toSerialize["name"] = o.Name

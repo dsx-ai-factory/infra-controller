@@ -768,16 +768,17 @@ def verify_machine_has_no_instance_type(test_config: Config) -> None:
             f"Machine {test_config.machine_under_test} was not found; cannot verify " +
             "its instance-type assignment."
         )
-    if "instance_type_id" not in machine:
+    config = machine.get("config")
+    if not isinstance(config, dict) or "instance_type_id" not in config:
         # Fail loud rather than treating a missing key as "unassigned" (None),
         # which would make this guard a silent no-op if the `machine show` shape
         # ever changed. A present key with value None is a valid unassigned tray.
         _error_and_exit(
             f"'machine show {test_config.machine_under_test}' response has no " +
-            f"'instance_type_id' field (keys: {sorted(machine)}); cannot verify " +
+            "'config.instance_type_id' field; cannot verify " +
             "the machine doesn't have an assigned instance type."
         )
-    current = machine.get("instance_type_id")
+    current = config["instance_type_id"]
     if current is not None:
         _error_and_exit(
             f"Machine {test_config.machine_under_test} is associated with instance " +

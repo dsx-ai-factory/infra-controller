@@ -21,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -38,19 +39,17 @@ const (
 
 // CreateSpectrumXPartitionHandler is the API Handler for creating a new SpectrumXPartition
 type CreateSpectrumXPartitionHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateSpectrumXPartitionHandler returns a handler for creating a SpectrumXPartition
 func NewCreateSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateSpectrumXPartitionHandler {
 	return CreateSpectrumXPartitionHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -66,7 +65,7 @@ func NewCreateSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPo
 // @Success 201 {object} model.APISpectrumXPartition
 // @Router /v2/org/{org}/nico/spectrumx-partition [post]
 func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Create", c, csxph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -252,17 +251,15 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 // GetAllSpectrumXPartitionHandler is the API Handler for retrieving all SpectrumXPartitions
 type GetAllSpectrumXPartitionHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllSpectrumXPartitionHandler returns a handler for retrieving all SpectrumXPartitions
 func NewGetAllSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Config) GetAllSpectrumXPartitionHandler {
 	return GetAllSpectrumXPartitionHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -284,7 +281,7 @@ func NewGetAllSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Conf
 // @Success 200 {object} []model.APISpectrumXPartition
 // @Router /v2/org/{org}/nico/spectrumx-partition [get]
 func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "GetAll", c, gasxph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -318,7 +315,7 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 	var siteIDs []uuid.UUID
 	siteIDStrs := qParams["siteId"]
 	if len(siteIDStrs) > 0 {
-		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs))
 		for _, siteIDStr := range siteIDStrs {
 			site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gasxph.dbSession)
 			if err != nil {
@@ -347,14 +344,14 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// The status parameter repeats to match more than one Status.
 	var statuses []string
 	qStatuses := qParams["status"]
 	if len(qStatuses) > 0 {
-		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses))
 		for _, status := range qStatuses {
 			if !cdbm.SpectrumXPartitionStatusMap[cdbm.SpectrumXPartitionStatus(status)] {
 				logger.Warn().Str("status", status).Msg("invalid value in status query")
@@ -429,17 +426,15 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 // GetSpectrumXPartitionHandler is the API Handler for retrieving a SpectrumXPartition
 type GetSpectrumXPartitionHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetSpectrumXPartitionHandler returns a handler for retrieving a SpectrumXPartition
 func NewGetSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Config) GetSpectrumXPartitionHandler {
 	return GetSpectrumXPartitionHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -456,7 +451,7 @@ func NewGetSpectrumXPartitionHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Success 200 {object} model.APISpectrumXPartition
 // @Router /v2/org/{org}/nico/spectrumx-partition/{spectrumXPartitionId} [get]
 func (gsxph GetSpectrumXPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Get", c, gsxph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -515,19 +510,17 @@ func (gsxph GetSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 // DeleteSpectrumXPartitionHandler is the API Handler for deleting a SpectrumXPartition
 type DeleteSpectrumXPartitionHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteSpectrumXPartitionHandler returns a handler for deleting a SpectrumXPartition
 func NewDeleteSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteSpectrumXPartitionHandler {
 	return DeleteSpectrumXPartitionHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -543,7 +536,7 @@ func NewDeleteSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPo
 // @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/spectrumx-partition/{spectrumXPartitionId} [delete]
 func (dsxph DeleteSpectrumXPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Delete", c, dsxph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SpectrumXPartition", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -30,6 +30,8 @@ use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
 mod test_create_domain;
+#[cfg(test)]
+mod test_explicit_columns;
 
 /// Validates a domain name according to DNS standards
 fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
@@ -160,7 +162,8 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
     let query = "INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
-                 VALUES ($1, $2, $3, $4) RETURNING *";
+                 VALUES ($1, $2, $3, $4)
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl";
     match persist_inner_with_metadata(&value, metadata_id, txn, query).await {
         Ok(Some(domain)) => Ok(domain),
         Ok(None) => Err(DatabaseError::NotFoundError {
@@ -215,7 +218,7 @@ pub async fn persist_first(
             INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
             SELECT $1, $2, $3, $4
             WHERE NOT EXISTS (SELECT name FROM domains)
-            RETURNING *";
+            RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl";
     persist_inner_with_metadata(value, metadata_id, txn, query).await
 }
 
@@ -258,7 +261,10 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
     filter: ObjectColumnFilter<'a, C>,
     include_deleted: bool,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM domains").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl FROM domains",
+    )
+    .filter(&filter);
     if !include_deleted {
         query.push(" AND deleted IS NULL");
     }
@@ -281,7 +287,8 @@ pub async fn find_longest_live_zone(
     txn: impl DbReader<'_>,
     candidates: &[String],
 ) -> Result<Option<Domain>, DatabaseError> {
-    let query = "SELECT * FROM domains
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
+                 FROM domains
                  WHERE deleted IS NULL
                    AND lower(rtrim(name, '.')) = ANY($1)
                  ORDER BY length(rtrim(name, '.')) DESC, name
@@ -316,7 +323,8 @@ pub async fn find_reverse_zone_by_normalized_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let query = "SELECT * FROM domains
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl
+                 FROM domains
                  WHERE lower(rtrim(name, '.')) = $1
                    AND deleted IS NULL
                    AND (
@@ -510,7 +518,7 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
                  WHERE id = $1
                    AND updated = $2
                    AND deleted IS NULL
-                 RETURNING *";
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(value.id)
         .bind(value.updated)
@@ -541,7 +549,7 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
                  WHERE id = $3
                    AND updated = $4
                    AND deleted IS NULL
-                 RETURNING *";
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id, reserved_create, create_default_ttl";
 
     sqlx::query_as::<_, DbDomain>(query)
         .bind(&value.name)

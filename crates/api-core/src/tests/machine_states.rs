@@ -66,8 +66,8 @@ use model::machine::{
     MachineLastRebootRequested, MachineLastRebootRequestedMode, MachineMaintenanceOperation,
     MachineState, MachineValidatingState, MachineValidationContext, ManagedHostState,
     MeasuringState, PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState,
-    SecureEraseBossState, SetBootOrderInfo, SetBootOrderState, SetSecureBootState,
-    SpdmMeasuringState, StateMachineArea, ValidationState,
+    ReadyBootLockdownRecovery, ReadyBootLockdownStage, SecureEraseBossState, SetBootOrderInfo,
+    SetBootOrderState, SetSecureBootState, SpdmMeasuringState, StateMachineArea, ValidationState,
 };
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterfaceTarget};
 use model::machine_validation::MachineValidationState;
@@ -3478,6 +3478,7 @@ async fn test_ready_boot_config_defers_dpu_restart_verification(pool: sqlx::PgPo
             post_lock_verification_retry_count: 0,
             boot_config_state: ReadyBootConfigState::LockHost {
                 post_lock_action: None,
+                recovery: None,
             },
         },
         "Prepare should continue with the synchronized snapshot",
@@ -3610,6 +3611,7 @@ async fn test_supermicro_ready_boot_config_stale_dpu_status_returns_to_prepare_a
     });
     let locking = boot_configuring(ReadyBootConfigState::LockHost {
         post_lock_action: Some(ReadyBootConfigPostLockAction::ReturnToPrepare),
+        recovery: None,
     });
 
     set_host_controller_state_stuck_in(&env, mh.host().id, &unlocking, 0).await;
@@ -3656,6 +3658,8 @@ async fn test_supermicro_ready_boot_config_stale_dpu_status_returns_to_prepare_a
         .unwrap();
     txn.commit().await.unwrap();
     let cleanup_checkpoint = env.redfish_sim.timepoint();
+    // Persist the shared recovery deadline before restoration effects.
+    env.run_machine_state_controller_iteration().await;
 
     env.run_machine_state_controller_iteration().await;
     let mut txn = env.db_txn().await;
@@ -3719,6 +3723,7 @@ async fn test_supermicro_ready_boot_config_uses_unlocked_verification(pool: sqlx
         post_lock_verification_retry_count: 0,
         boot_config_state: ReadyBootConfigState::LockHost {
             post_lock_action: None,
+            recovery: None,
         },
     };
 
@@ -3768,6 +3773,8 @@ async fn test_supermicro_ready_boot_config_uses_unlocked_verification(pool: sqlx
     // unlocked verification has advanced the controller to LockHost.
     env.redfish_sim.set_is_boot_order_setup(false);
     let lock_checkpoint = env.redfish_sim.timepoint();
+    // Persist the shared recovery deadline before restoration effects.
+    env.run_machine_state_controller_iteration().await;
 
     env.run_machine_state_controller_iteration().await;
 
@@ -3923,6 +3930,7 @@ async fn test_ready_converges_pending_desired_boot_interface(pool: sqlx::PgPool)
                     desired_boot_interface,
                     boot_config_state: ReadyBootConfigState::LockHost {
                         post_lock_action: None,
+                        recovery: None,
                     },
                     ..
                 } if *desired_version == pending.version
@@ -4013,6 +4021,7 @@ async fn test_ready_boot_config_skips_unlock_when_already_correct(pool: sqlx::Pg
             desired_version,
             boot_config_state: ReadyBootConfigState::LockHost {
                 post_lock_action: None,
+                recovery: None,
             },
             ..
         } if *desired_version == pending.version
@@ -4730,6 +4739,7 @@ async fn test_ready_boot_config_machine_failure_does_not_wait_for_redfish(pool: 
                 machine_id: mh.host().id.into(),
                 details: details.clone(),
             }),
+            recovery: None,
         },
     };
 
@@ -4759,6 +4769,10 @@ async fn test_ready_boot_config_machine_failure_does_not_wait_for_redfish(pool: 
 /// restore lockdown before directly re-reading the captured target.
 #[crate::sqlx_test]
 async fn test_ready_boot_config_lock_host_is_restart_safe(pool: sqlx::PgPool) {
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: true,
+    });
     let env = create_zero_dpu_test_env(pool).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
     let pending = set_pending_boot_interface(&env, &mh).await;
@@ -4769,6 +4783,7 @@ async fn test_ready_boot_config_lock_host_is_restart_safe(pool: sqlx::PgPool) {
         post_lock_verification_retry_count: 0,
         boot_config_state: ReadyBootConfigState::LockHost {
             post_lock_action: None,
+            recovery: recovery.clone(),
         },
     };
 
@@ -4816,6 +4831,10 @@ async fn test_ready_boot_config_lock_host_is_restart_safe(pool: sqlx::PgPool) {
 /// let later failure handling bypass lockdown restoration.
 #[crate::sqlx_test]
 async fn test_ready_boot_config_lock_host_waits_for_redfish_access(pool: sqlx::PgPool) {
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: true,
+    });
     let env = create_zero_dpu_test_env(pool).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
     let pending = set_pending_boot_interface(&env, &mh).await;
@@ -4825,6 +4844,7 @@ async fn test_ready_boot_config_lock_host_waits_for_redfish_access(pool: sqlx::P
         post_lock_verification_retry_count: 0,
         boot_config_state: ReadyBootConfigState::LockHost {
             post_lock_action: None,
+            recovery: recovery.clone(),
         },
     };
 
@@ -4858,20 +4878,261 @@ async fn test_ready_boot_config_lock_host_waits_for_redfish_access(pool: sqlx::P
     );
 }
 
+/// Set the exact identity used to authorize Ready full-lockdown recovery.
+async fn set_ready_lockdown_platform(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    vendor: Option<bmc_vendor::BMCVendor>,
+    model: Option<&str>,
+) {
+    let mut txn = env.db_txn().await;
+    let bmc_ip = mh.host().bmc_ip(&mut txn).await.unwrap();
+    let endpoint = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![bmc_ip])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut report = endpoint.report;
+    report.vendor = vendor;
+    report.model = model.map(str::to_owned);
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            bmc_ip,
+            endpoint.report_version,
+            &report,
+            endpoint.waiting_for_explorer_refresh,
+            txn.as_mut(),
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+}
+
+/// An upgraded reader must not write the new variant before rollout opt-in.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_disabled_keeps_legacy_state(pool: sqlx::PgPool) {
+    let env = create_zero_dpu_test_env(pool).await;
+    assert!(
+        !env.config
+            .machine_state_controller
+            .full_lockdown_recovery_enabled
+    );
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("HG635N_V2"),
+    )
+    .await;
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let state = ManagedHostState::BootConfiguring {
+        desired_version: pending.version,
+        desired_boot_interface: pending.value.clone(),
+        post_lock_verification_retry_count: 1,
+        boot_config_state: ReadyBootConfigState::LockHost {
+            post_lock_action: Some(ReadyBootConfigPostLockAction::ReturnToPrepare),
+            recovery: Some(ReadyBootLockdownRecovery {
+                started_at: Utc::now(),
+                full_policy_required: false,
+            }),
+        },
+    };
+    set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    env.redfish_sim.set_lockdown_bmc_applies(false);
+    let checkpoint = env.redfish_sim.timepoint();
+    for _ in 0..2 {
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &state);
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+        assert!(matches!(host.controller_state_outcome.as_ref(),
+            Some(PersistentStateHandlerOutcome::Error { err, .. })
+                if err.contains("Full-lockdown recovery is disabled")
+        ));
+    }
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .is_empty()
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|s| *s == libredfish::EnabledDisabled::Disabled)
+    );
+}
+
+/// Unsupported identity must block both new entries and already-persisted effects.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_rejects_unsupported_platform(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config
+        .machine_state_controller
+        .full_lockdown_recovery_enabled = true;
+    let env =
+        create_zero_dpu_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let replacement = set_pending_boot_interface(&env, &mh).await;
+    for (scenario, vendor, model) in [
+        (
+            "different Lenovo restart semantics",
+            Some(bmc_vendor::BMCVendor::Lenovo),
+            Some("SR650 V4"),
+        ),
+        (
+            "matching vendor only",
+            Some(bmc_vendor::BMCVendor::LenovoAMI),
+            Some("different model"),
+        ),
+        (
+            "matching model only",
+            Some(bmc_vendor::BMCVendor::Lenovo),
+            Some("HG635N_V2"),
+        ),
+        ("missing identity", None, None),
+        ("missing endpoint", None, None),
+    ] {
+        if scenario == "missing endpoint" {
+            let mut txn = env.db_txn().await;
+            let bmc_ip = mh.host().bmc_ip(&mut txn).await.unwrap();
+            sqlx::query("DELETE FROM explored_endpoints WHERE address = $1")
+                .bind(bmc_ip)
+                .execute(txn.as_mut())
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        } else {
+            set_ready_lockdown_platform(&env, &mh, vendor, model).await;
+        }
+        for stage in [
+            None,
+            Some(ReadyBootLockdownStage::SetPolicy),
+            Some(ReadyBootLockdownStage::Reboot),
+        ] {
+            let recovery = Some(ReadyBootLockdownRecovery {
+                started_at: Utc::now(),
+                full_policy_required: stage.is_some(),
+            });
+            let post_lock_action = Some(ReadyBootConfigPostLockAction::Convergence {
+                failure: "original failure".to_string(),
+            });
+            let persisted = stage.is_some();
+            let state = ManagedHostState::BootConfiguring {
+                desired_version: pending.version,
+                desired_boot_interface: pending.value.clone(),
+                post_lock_verification_retry_count: 1,
+                boot_config_state: match stage {
+                    Some(stage) => ReadyBootConfigState::RestoreFullLockdown {
+                        post_lock_action,
+                        stage,
+                        recovery,
+                    },
+                    None => ReadyBootConfigState::LockHost {
+                        post_lock_action,
+                        recovery,
+                    },
+                },
+            };
+            set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+            env.redfish_sim
+                .set_lockdown(libredfish::EnabledDisabled::Disabled);
+            env.redfish_sim.set_lockdown_bmc_applies(false);
+            let checkpoint = env.redfish_sim.timepoint();
+            let client_calls = env.redfish_sim.create_client_calls().len();
+            env.run_machine_state_controller_iteration().await;
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            assert_eq!(host.current_state(), &state, "{scenario}");
+            assert_eq!(
+                host.pending_boot_interface_config_version(),
+                Some(replacement.version)
+            );
+            assert!(
+                matches!(host.controller_state_outcome.as_ref(),
+                    Some(PersistentStateHandlerOutcome::Error { err, .. })
+                        if err.contains("platform is unknown or unsupported")
+                ),
+                "{scenario}: {:?}",
+                host.controller_state_outcome
+            );
+            assert!(
+                env.redfish_sim
+                    .actions_since(&checkpoint)
+                    .all_hosts()
+                    .is_empty(),
+                "{scenario}"
+            );
+            assert!(
+                env.redfish_sim
+                    .lockdown_states()
+                    .iter()
+                    .all(|s| *s == libredfish::EnabledDisabled::Disabled),
+                "{scenario}"
+            );
+            if persisted {
+                assert_eq!(
+                    env.redfish_sim.create_client_calls().len(),
+                    client_calls,
+                    "{scenario}"
+                );
+            }
+        }
+    }
+}
+
 /// A successful Redfish write is not sufficient evidence that lockdown was
 /// actually restored. Keep the desired version pending in LockHost until a
 /// direct status read confirms the policy.
 #[crate::sqlx_test]
 async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(pool: sqlx::PgPool) {
-    let env = create_zero_dpu_test_env(pool).await;
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: false,
+    });
+    let mut config = get_config();
+    config
+        .machine_state_controller
+        .full_lockdown_recovery_enabled = true;
+    let env =
+        create_zero_dpu_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("HG635N_V2"),
+    )
+    .await;
     let pending = set_pending_boot_interface(&env, &mh).await;
+    let mut reachability = env.reachability_params;
+    reachability.uefi_boot_wait = Duration::minutes(1);
+    let handler = MachineStateHandlerBuilder::builder()
+        .hardware_models(env.config.get_firmware_config())
+        .reachability_params(reachability)
+        .attestation_enabled(env.attestation_enabled)
+        .dpu_enable_secure_boot(env.config.dpu_config.dpu_enable_secure_boot)
+        .power_options_config(env.config.power_manager_options.clone().into())
+        .build();
+    env.override_machine_state_controller_handler(handler).await;
     let locking = ManagedHostState::BootConfiguring {
         desired_version: pending.version,
         desired_boot_interface: pending.value.clone(),
         post_lock_verification_retry_count: 0,
         boot_config_state: ReadyBootConfigState::LockHost {
             post_lock_action: None,
+            recovery: recovery.clone(),
         },
     };
 
@@ -4887,7 +5148,23 @@ async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(poo
 
     let mut txn = env.db_txn().await;
     let host = mh.host().db_machine(&mut txn).await;
-    assert_eq!(host.current_state(), &locking);
+    let repair_state = |stage| ManagedHostState::BootConfiguring {
+        desired_version: pending.version,
+        desired_boot_interface: pending.value.clone(),
+        post_lock_verification_retry_count: 0,
+        boot_config_state: ReadyBootConfigState::RestoreFullLockdown {
+            post_lock_action: None,
+            stage,
+            recovery: recovery.clone().map(|mut progress| {
+                progress.full_policy_required = true;
+                progress
+            }),
+        },
+    };
+    assert_eq!(
+        host.current_state(),
+        &repair_state(ReadyBootLockdownStage::SetPolicy)
+    );
     assert_eq!(
         host.pending_boot_interface_config_version(),
         Some(pending.version),
@@ -4901,6 +5178,761 @@ async fn test_ready_boot_config_waits_for_observed_lockdown_before_verifying(poo
             .iter()
             .any(|action| matches!(action, RedfishSimAction::IsBootOrderSetup { .. })),
         "final boot inspection must wait until lockdown is observed: {actions:?}"
+    );
+    // Each side effect has its own persisted boundary. Ordinary polling must
+    // neither restage BIOS nor issue repeated restarts.
+    for stage in [
+        ReadyBootLockdownStage::Reboot,
+        ReadyBootLockdownStage::WaitForUefiBoot,
+    ] {
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &repair_state(stage));
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+    }
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(
+        host.current_state(),
+        &repair_state(ReadyBootLockdownStage::WaitForUefiBoot)
+    );
+    drop(txn);
+    set_host_controller_state_stuck_in(
+        &env,
+        mh.host().id,
+        &repair_state(ReadyBootLockdownStage::WaitForUefiBoot),
+        60,
+    )
+    .await;
+    env.run_machine_state_controller_iteration().await;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    for _ in 0..2 {
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &repair_state(ReadyBootLockdownStage::PollStatus)
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+    }
+    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(
+                action,
+                RedfishSimAction::Power(libredfish::SystemPowerControl::ForceRestart)
+            ))
+            .count(),
+        1,
+        "full policy repair must reboot once, never in its status poll: {actions:?}"
+    );
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let mut restored = locking;
+    if let ManagedHostState::BootConfiguring {
+        boot_config_state:
+            ReadyBootConfigState::LockHost {
+                recovery: Some(progress),
+                ..
+            },
+        ..
+    } = &mut restored
+    {
+        progress.full_policy_required = true;
+    }
+    assert_eq!(host.current_state(), &restored);
+    assert_eq!(
+        host.pending_boot_interface_config_version(),
+        Some(pending.version)
+    );
+    // LockHost still owns final boot-target verification after security recovery.
+}
+
+/// Legacy recovery rows inherit their original age. Expiry is enforced before
+/// any Redfish call and survives a new desired target or externally repaired policy.
+#[crate::sqlx_test]
+async fn test_ready_boot_lockdown_deadline_parks_without_effects(pool: sqlx::PgPool) {
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let replacement = set_pending_boot_interface(&env, &mh).await;
+    let action = Some(ReadyBootConfigPostLockAction::Convergence {
+        failure: "original convergence failure".to_string(),
+    });
+    let mut states = vec![ReadyBootConfigState::LockHost {
+        post_lock_action: action.clone(),
+        recovery: None,
+    }];
+    states.extend(
+        [
+            ReadyBootLockdownStage::SetPolicy,
+            ReadyBootLockdownStage::Reboot,
+            ReadyBootLockdownStage::WaitForUefiBoot,
+            ReadyBootLockdownStage::PollStatus,
+        ]
+        .map(|stage| ReadyBootConfigState::RestoreFullLockdown {
+            post_lock_action: action.clone(),
+            stage,
+            recovery: None,
+        }),
+    );
+    for boot_config_state in states {
+        let mut expected = ManagedHostState::BootConfiguring {
+            desired_version: pending.version,
+            desired_boot_interface: pending.value.clone(),
+            post_lock_verification_retry_count: 1,
+            boot_config_state,
+        };
+        set_host_controller_state_stuck_in(&env, mh.host().id, &expected, 91).await;
+        let mut txn = env.db_txn().await;
+        let started_at = mh
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .state
+            .version
+            .timestamp();
+        drop(txn);
+        env.redfish_sim
+            .set_lockdown(libredfish::EnabledDisabled::Disabled);
+        let client_calls = env.redfish_sim.create_client_calls().len();
+        let checkpoint = env.redfish_sim.timepoint();
+
+        // Initialization is a persisted boundary with no external effects.
+        env.run_machine_state_controller_iteration().await;
+        if let ManagedHostState::BootConfiguring {
+            boot_config_state, ..
+        } = &mut expected
+        {
+            let strict = matches!(
+                boot_config_state,
+                ReadyBootConfigState::RestoreFullLockdown { .. }
+            );
+            match boot_config_state {
+                ReadyBootConfigState::LockHost { recovery, .. }
+                | ReadyBootConfigState::RestoreFullLockdown { recovery, .. } => {
+                    *recovery = Some(ReadyBootLockdownRecovery {
+                        started_at,
+                        full_policy_required: strict,
+                    });
+                }
+                _ => unreachable!(),
+            }
+        }
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            mh.host().db_machine(&mut txn).await.current_state(),
+            &expected
+        );
+        drop(txn);
+        for _ in 0..2 {
+            // Recreate the handler to ensure the budget comes from persisted state.
+            let handler = MachineStateHandlerBuilder::builder()
+                .hardware_models(env.config.get_firmware_config())
+                .reachability_params(env.reachability_params)
+                .attestation_enabled(env.attestation_enabled)
+                .dpu_enable_secure_boot(env.config.dpu_config.dpu_enable_secure_boot)
+                .power_options_config(env.config.power_manager_options.clone().into())
+                .build();
+            env.override_machine_state_controller_handler(handler).await;
+            env.run_machine_state_controller_iteration().await;
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            assert_eq!(host.current_state(), &expected);
+            assert_eq!(
+                host.pending_boot_interface_config_version(),
+                Some(replacement.version)
+            );
+            assert!(matches!(
+                host.controller_state_outcome.as_ref(),
+                Some(PersistentStateHandlerOutcome::Error { err, .. })
+                    if err.contains("manual intervention required") && err.contains("5400 second budget")
+            ));
+            // Even external repair must not silently re-arm an expired budget.
+            env.redfish_sim
+                .set_lockdown(libredfish::EnabledDisabled::Enabled);
+        }
+        assert_eq!(env.redfish_sim.create_client_calls().len(), client_calls);
+        assert!(
+            env.redfish_sim
+                .actions_since(&checkpoint)
+                .all_hosts()
+                .is_empty()
+        );
+    }
+}
+
+/// A full-policy recovery cannot fall back to the unsupported-vendor shortcut
+/// during its final LockHost check. A later successful read can still finish.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_requires_final_security_observation(pool: sqlx::PgPool) {
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    env.redfish_sim.set_is_bios_setup(true);
+    env.redfish_sim.set_is_boot_order_setup(true);
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    for error in [
+        libredfish::RedfishError::NotSupported("status disappeared".to_string()),
+        libredfish::RedfishError::GenericError {
+            error: "transient security read failure".to_string(),
+        },
+    ] {
+        let pending = set_pending_boot_interface(&env, &mh).await;
+        let state = ManagedHostState::BootConfiguring {
+            desired_version: pending.version,
+            desired_boot_interface: pending.value.clone(),
+            post_lock_verification_retry_count: 0,
+            boot_config_state: ReadyBootConfigState::LockHost {
+                post_lock_action: None,
+                recovery: Some(ReadyBootLockdownRecovery {
+                    started_at: Utc::now(),
+                    full_policy_required: true,
+                }),
+            },
+        };
+        set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+        env.redfish_sim.fail_next_lockdown_status(error);
+        let checkpoint = env.redfish_sim.timepoint();
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &state);
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+        assert!(matches!(host.controller_state_outcome.as_ref(),
+            Some(PersistentStateHandlerOutcome::Error { err, .. }) if err.contains("required full lockdown status")
+        ));
+        assert!(
+            env.redfish_sim
+                .actions_since(&checkpoint)
+                .all_hosts()
+                .is_empty()
+        );
+        drop(txn);
+
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &ManagedHostState::Ready);
+        assert_eq!(host.pending_boot_interface_config_version(), None);
+    }
+}
+
+/// A skipped restart, failed power read, or rejected restart must retain the
+/// persisted reboot boundary until a later iteration submits the restart.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_retries_unsubmitted_restart(pool: sqlx::PgPool) {
+    use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
+
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: true,
+    });
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    // New entries are disabled by default, but supported persisted recovery must drain.
+    assert!(
+        !env.config
+            .machine_state_controller
+            .full_lockdown_recovery_enabled
+    );
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("HG635N_V2"),
+    )
+    .await;
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let state = |stage| ManagedHostState::BootConfiguring {
+        desired_version: pending.version,
+        desired_boot_interface: pending.value.clone(),
+        post_lock_verification_retry_count: 0,
+        boot_config_state: ReadyBootConfigState::RestoreFullLockdown {
+            post_lock_action: None,
+            stage,
+            recovery: recovery.clone(),
+        },
+    };
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let bmc_ip = host.bmc_addr().unwrap().ip().to_string();
+    drop(txn);
+    let client = env
+        .redfish_sim
+        .create_client(&bmc_ip, None, RedfishAuth::Anonymous, None)
+        .await
+        .unwrap();
+
+    enum RestartBlocker {
+        PoweredOff,
+        PowerReadError,
+        RestartPostError,
+    }
+    for (scenario, blocker) in [
+        ("powered off", RestartBlocker::PoweredOff),
+        ("power read error", RestartBlocker::PowerReadError),
+        ("restart POST error", RestartBlocker::RestartPostError),
+    ] {
+        set_host_controller_state_stuck_in(
+            &env,
+            mh.host().id,
+            &state(ReadyBootLockdownStage::Reboot),
+            0,
+        )
+        .await;
+        let expected_error = match blocker {
+            RestartBlocker::PoweredOff => {
+                client
+                    .power(libredfish::SystemPowerControl::ForceOff)
+                    .await
+                    .unwrap();
+                None
+            }
+            RestartBlocker::PowerReadError => {
+                let error = "transient lockdown power read failure";
+                env.redfish_sim.fail_next_power_state_read(error);
+                Some(error)
+            }
+            RestartBlocker::RestartPostError => {
+                assert_eq!(
+                    client.get_power_state().await.unwrap(),
+                    libredfish::PowerState::On
+                );
+                let error = "transient lockdown restart POST failure";
+                env.redfish_sim
+                    .fail_next_power_action(libredfish::SystemPowerControl::ForceRestart, error);
+                Some(error)
+            }
+        };
+        let mut txn = env.db_txn().await;
+        let previous_reboot = mh
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .status
+            .last_reboot_requested;
+        drop(txn);
+        let checkpoint = env.redfish_sim.timepoint();
+
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(ReadyBootLockdownStage::Reboot),
+            "{scenario}"
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+        assert_eq!(
+            host.status.last_reboot_requested, previous_reboot,
+            "{scenario}"
+        );
+        if let Some(expected_error) = expected_error {
+            assert!(matches!(
+                host.controller_state_outcome.as_ref(),
+                Some(PersistentStateHandlerOutcome::Error { err, .. })
+                    if err.contains(expected_error)
+            ));
+        } else {
+            assert!(matches!(
+                host.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { .. })
+            ));
+        }
+        drop(txn);
+        let expected_actions = if matches!(blocker, RestartBlocker::RestartPostError) {
+            vec![RedfishSimAction::PowerFailed(
+                libredfish::SystemPowerControl::ForceRestart,
+            )]
+        } else {
+            vec![]
+        };
+        assert_eq!(
+            env.redfish_sim.actions_since(&checkpoint).all_hosts(),
+            expected_actions,
+            "{scenario}: no restart effect may be applied on the failed pass",
+        );
+
+        // Both errors are one-shot. A powered-off host recovers when power is
+        // restored externally; the controller must still submit its restart.
+        if matches!(blocker, RestartBlocker::PoweredOff) {
+            client
+                .power(libredfish::SystemPowerControl::On)
+                .await
+                .unwrap();
+        }
+        let checkpoint = env.redfish_sim.timepoint();
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(ReadyBootLockdownStage::WaitForUefiBoot)
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(pending.version)
+        );
+        assert_ne!(host.status.last_reboot_requested, previous_reboot);
+        let successful_reboot = host.status.last_reboot_requested;
+        drop(txn);
+        // Advancing the boot wait must not submit the already accepted restart again.
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(ReadyBootLockdownStage::PollStatus),
+            "{scenario}"
+        );
+        assert_eq!(
+            host.status.last_reboot_requested, successful_reboot,
+            "{scenario}"
+        );
+        assert_eq!(
+            env.redfish_sim.actions_since(&checkpoint).all_hosts(),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            )],
+            "{scenario}: retry must apply exactly one restart",
+        );
+    }
+}
+
+/// A failure first observed after staging lockdown must still complete the
+/// outstanding restart and boot wait before the machine can enter Failed.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_captures_new_failure_without_skipping_restart(
+    pool: sqlx::PgPool,
+) {
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: true,
+    });
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    // New entries are disabled by default, but supported persisted recovery must drain.
+    assert!(
+        !env.config
+            .machine_state_controller
+            .full_lockdown_recovery_enabled
+    );
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("HG635N_V2"),
+    )
+    .await;
+    let mut reachability = env.reachability_params;
+    reachability.uefi_boot_wait = Duration::minutes(1);
+    let handler = MachineStateHandlerBuilder::builder()
+        .hardware_models(env.config.get_firmware_config())
+        .reachability_params(reachability)
+        .attestation_enabled(env.attestation_enabled)
+        .dpu_enable_secure_boot(env.config.dpu_config.dpu_enable_secure_boot)
+        .power_options_config(env.config.power_manager_options.clone().into())
+        .build();
+    env.override_machine_state_controller_handler(handler).await;
+
+    for (scenario, failure_stage) in [
+        ("before restart", ReadyBootLockdownStage::Reboot),
+        ("during boot wait", ReadyBootLockdownStage::WaitForUefiBoot),
+        ("during policy poll", ReadyBootLockdownStage::PollStatus),
+    ] {
+        let mut txn = env.db_txn().await;
+        db::machine::clear_failure_details(&mh.host().id.into(), &mut txn)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        let pending = set_pending_boot_interface(&env, &mh).await;
+        let details = FailureDetails {
+            cause: FailureCause::Discovery {
+                err: format!("host failed {scenario} during lockdown recovery"),
+            },
+            failed_at: Utc::now(),
+            source: FailureSource::StateMachine,
+        };
+        let state = |stage, capture_failure: bool| ManagedHostState::BootConfiguring {
+            desired_version: pending.version,
+            desired_boot_interface: pending.value.clone(),
+            post_lock_verification_retry_count: 1,
+            boot_config_state: ReadyBootConfigState::RestoreFullLockdown {
+                post_lock_action: capture_failure.then(|| ReadyBootConfigPostLockAction::Machine {
+                    machine_id: mh.host().id.into(),
+                    details: details.clone(),
+                }),
+                stage,
+                recovery: recovery.clone(),
+            },
+        };
+        set_host_controller_state_stuck_in(
+            &env,
+            mh.host().id,
+            &state(ReadyBootLockdownStage::Reboot, false),
+            0,
+        )
+        .await;
+        // An already visible policy must not skip a persisted restart or boot wait.
+        env.redfish_sim
+            .set_lockdown(libredfish::EnabledDisabled::Enabled);
+        let restart_checkpoint = env.redfish_sim.timepoint();
+        if failure_stage != ReadyBootLockdownStage::Reboot {
+            // The late-failure cases have actually submitted their restart.
+            env.run_machine_state_controller_iteration().await;
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            assert_eq!(
+                host.current_state(),
+                &state(ReadyBootLockdownStage::WaitForUefiBoot, false),
+                "{scenario}"
+            );
+        }
+        if failure_stage == ReadyBootLockdownStage::PollStatus {
+            set_host_controller_state_stuck_in(
+                &env,
+                mh.host().id,
+                &state(ReadyBootLockdownStage::WaitForUefiBoot, false),
+                2,
+            )
+            .await;
+            env.run_machine_state_controller_iteration().await;
+            // A false observation must preserve polling after the failure is captured.
+            env.redfish_sim
+                .set_lockdown(libredfish::EnabledDisabled::Disabled);
+        }
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(failure_stage.clone(), false),
+            "{scenario}"
+        );
+        let previous_reboot = host.status.last_reboot_requested;
+        db::machine::update_failure_details(&host, &mut txn, details.clone())
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        let replacement = set_pending_boot_interface(&env, &mh).await;
+        let failure_checkpoint = env.redfish_sim.timepoint();
+
+        // First failure capture must retain the persisted stage, original target and retry count.
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(failure_stage.clone(), true),
+            "{scenario}"
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(replacement.version)
+        );
+        assert_eq!(
+            host.status.last_reboot_requested, previous_reboot,
+            "{scenario}"
+        );
+        drop(txn);
+
+        let wait_stage = if failure_stage == ReadyBootLockdownStage::Reboot {
+            env.run_machine_state_controller_iteration().await;
+            ReadyBootLockdownStage::WaitForUefiBoot
+        } else {
+            failure_stage.clone()
+        };
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &state(wait_stage.clone(), true),
+            "{scenario}"
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(replacement.version)
+        );
+        let wait_reason = if wait_stage == ReadyBootLockdownStage::WaitForUefiBoot {
+            "Waiting for UEFI boot after full lockdown restoration"
+        } else {
+            "Waiting for full lockdown policy after reboot"
+        };
+        assert!(
+            matches!(
+                host.controller_state_outcome.as_ref(),
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason.contains(wait_reason)
+            ),
+            "{scenario}: {:?}",
+            host.controller_state_outcome
+        );
+        if failure_stage != ReadyBootLockdownStage::Reboot {
+            assert_eq!(
+                host.status.last_reboot_requested, previous_reboot,
+                "{scenario}"
+            );
+            assert!(
+                env.redfish_sim
+                    .actions_since(&failure_checkpoint)
+                    .all_hosts()
+                    .is_empty(),
+                "{scenario}: failure capture and polling must not replay actions"
+            );
+        }
+        drop(txn);
+
+        if wait_stage == ReadyBootLockdownStage::WaitForUefiBoot {
+            set_host_controller_state_stuck_in(
+                &env,
+                mh.host().id,
+                &state(ReadyBootLockdownStage::WaitForUefiBoot, true),
+                2,
+            )
+            .await;
+            env.run_machine_state_controller_iteration().await;
+        }
+        env.redfish_sim
+            .set_lockdown(libredfish::EnabledDisabled::Enabled);
+        // PollStatus -> LockHost -> deferred Failed, without another restart.
+        for _ in 0..2 {
+            env.run_machine_state_controller_iteration().await;
+        }
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &ManagedHostState::Failed {
+                details,
+                machine_id: mh.host().id.into(),
+                retry_count: 0,
+            },
+            "{scenario}"
+        );
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(replacement.version)
+        );
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&restart_checkpoint)
+                .all_hosts(),
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ),],
+            "{scenario}: exactly one accepted restart across the entire recovery"
+        );
+    }
+}
+
+/// A new operator target must not interrupt security cleanup or discard an
+/// independent machine failure that has already been captured.
+#[crate::sqlx_test]
+async fn test_ready_boot_full_lockdown_preserves_failure_and_captured_target(pool: sqlx::PgPool) {
+    let recovery = Some(ReadyBootLockdownRecovery {
+        started_at: Utc::now(),
+        full_policy_required: true,
+    });
+    let env = create_zero_dpu_test_env(pool).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    // New entries are disabled by default, but supported persisted recovery must drain.
+    assert!(
+        !env.config
+            .machine_state_controller
+            .full_lockdown_recovery_enabled
+    );
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("HG635N_V2"),
+    )
+    .await;
+    let pending = set_pending_boot_interface(&env, &mh).await;
+    let details = FailureDetails {
+        cause: FailureCause::Discovery {
+            err: "independent host failure".to_string(),
+        },
+        failed_at: Utc::now(),
+        source: FailureSource::StateMachine,
+    };
+    let state = |stage| ManagedHostState::BootConfiguring {
+        desired_version: pending.version,
+        desired_boot_interface: pending.value.clone(),
+        post_lock_verification_retry_count: 1,
+        boot_config_state: ReadyBootConfigState::RestoreFullLockdown {
+            post_lock_action: Some(ReadyBootConfigPostLockAction::Machine {
+                machine_id: mh.host().id.into(),
+                details: details.clone(),
+            }),
+            stage,
+            recovery: recovery.clone(),
+        },
+    };
+    set_host_controller_state_stuck_in(
+        &env,
+        mh.host().id,
+        &state(ReadyBootLockdownStage::SetPolicy),
+        0,
+    )
+    .await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    db::machine::update_failure_details(&host, &mut txn, details.clone())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let replacement = set_pending_boot_interface(&env, &mh).await;
+    for stage in [
+        ReadyBootLockdownStage::Reboot,
+        ReadyBootLockdownStage::WaitForUefiBoot,
+        ReadyBootLockdownStage::PollStatus,
+    ] {
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &state(stage));
+        assert_eq!(
+            host.pending_boot_interface_config_version(),
+            Some(replacement.version)
+        );
+    }
+    env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(
+        host.current_state(),
+        &ManagedHostState::Failed {
+            details,
+            machine_id: mh.host().id.into(),
+            retry_count: 0,
+        }
+    );
+    assert_eq!(
+        host.pending_boot_interface_config_version(),
+        Some(replacement.version)
     );
 }
 

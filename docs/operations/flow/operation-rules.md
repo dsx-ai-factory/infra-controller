@@ -51,7 +51,7 @@ batch file.
 
 | Field     | Type     | Required | Description                        |
 |-----------|----------|----------|------------------------------------|
-| `version` | string   | no       | Schema version. Defaults to `"v1"` |
+| `version` | string   | no       | Schema version. Omission or an empty string selects `"v1"`; other versions are rejected on read and write. |
 | `steps` | array | no | Omission or an empty array is accepted. Define steps explicitly for a custom sequence. |
 
 ### Step fields
@@ -71,6 +71,13 @@ The validator accepts all six component types. The service only registers
 component managers for Compute, NVSwitch, and PowerShelf; accepting a rule
 does not establish runtime support for ToRSwitch, UMS, or CDU. Execution also
 requires the selected manager to support each action.
+
+`max_parallel` partitions batchable component actions into sequential batches. All
+batches of an action finish before the next action starts. Each `Sleep` action
+runs once, not once per batch. `VerifyReachability` runs once but batches its
+status requests. This limit is per step, not rack-wide; steps in the same stage
+still run in parallel. See [Operation Rule Execution](../../development/flow/operation-rule-execution.md)
+for internal action scopes and replay compatibility.
 
 ### Retry policy fields
 
@@ -548,12 +555,33 @@ Flow selects an explicit `rule_id` first, then a rack-specific rule association,
 Stages run in order. A failed stage stops the task; earlier stages are not rolled back. Steps for component types absent from the rack are skipped. Activity retries can repeat external calls. The child-workflow execution timeout includes the configured retry budget, declared pre/post action timeouts, and a scheduling buffer; it is not equal to the step timeout.
 
 When `retry` is omitted, activities default to three attempts, but the child
-workflow budget counts only one attempt. With no step timeout or pre/post
-action timeouts, the child budget is 32 minutes, while each activity attempt
+workflow budget counts only one attempt per main-action batch. With unlimited
+parallelism and no step timeout or pre/post action timeouts, the child budget
+is 32 minutes, while each activity attempt
 can take 20 minutes. The child deadline can therefore stop execution before
 all three attempts finish.
 
 For Temporal workflow and activity details, see [Operation Rule Execution](../../development/flow/operation-rule-execution.md).
+
+## REST power operations
+
+Rack and tray power requests accept `On`, `Off`, `Cycle`, `ForceOff`,
+`ForceCycle`, and `ACPowerCycle`. Use these canonical values in new clients;
+exact lowercase forms remain accepted for compatibility.
+
+`ACPowerCycle` removes and restores AC power. With the default operation rule,
+it applies only to compute trays; NVSwitch and power-shelf trays are not
+AC-cycled. Viking systems (DGX H100) do not support this operation.
+
+A successful request returns task IDs, not the result of the hardware operation.
+Poll [Retrieve a Task](api:GET/v2/org/:org/nico/task/:id) for each ID until it
+reaches `Succeeded`, `Failed`, or `Terminated`. NICo Core validates platform
+support: a rejected AC power cycle fails the task, with details in `message`
+and, when available, `report.error`.
+
+Use the [Rack power](api:PATCH/v2/org/:org/nico/rack/:id/power) or
+[Tray power](api:PATCH/v2/org/:org/nico/tray/:id/power) endpoint for one target;
+the corresponding batch endpoints support selecting multiple targets.
 
 ## CLI Usage
 

@@ -63,10 +63,6 @@ where
     ID: HostMachineIdSubtypeTrait,
     DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
-    // from_rpc_machine() will first try to read from m.status.interfaces
-    // and fall back to the deprecated m.interfaces only if status is absent
-    // or if status.interfaces yields zero DPU ids
-    #[allow(deprecated)]
     pub(in crate::tests) fn from_rpc_machine(m: &rpc::Machine, api: Arc<Api>) -> Self {
         TestAnyManagedHost {
             id: m
@@ -76,24 +72,12 @@ where
                 .expect("MachineId should be a StableHostMachineId"),
             dpu_ids: m
                 .status
-                .as_ref()
-                .map(|s| {
-                    s.interfaces
-                        .iter()
-                        .filter_map(|i| i.attached_dpu_machine_id)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|ids| !ids.is_empty())
-                .unwrap_or_else(|| {
-                    m.interfaces
-                        .iter()
-                        .filter_map(|i| i.attached_dpu_machine_id)
-                        .collect()
-                })
-                .into_iter()
+                .iter()
+                .flat_map(|status| status.interfaces.iter())
+                .filter_map(|interface| interface.attached_dpu_machine_id)
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<DpuMachineId>, _>>()
-                .expect("attachec_dpu_machine_id should be a valid DpuMachineId"),
+                .expect("attached_dpu_machine_id should be a valid DpuMachineId"),
             api,
         }
     }

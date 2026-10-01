@@ -123,6 +123,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 				SiteID:         siteID,
 				RackID:         reported.RackID,
 				RackProfileID:  reported.RackProfileID,
+				RackGroupID:    reported.RackGroupID,
 				Name:           reported.Name,
 				Description:    reported.Description,
 				Labels:         reported.Labels,
@@ -145,6 +146,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 
 		// update if any field differs
 		if cur.RackProfileID != reported.RackProfileID ||
+			(reported.RackGroupID != nil && !reflect.DeepEqual(cur.RackGroupID, reported.RackGroupID)) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
 			!reflect.DeepEqual(cur.Labels, reported.Labels) {
@@ -157,6 +159,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			_, uerr := erDAO.Update(ctx, nil, cdbm.ExpectedRackUpdateInput{
 				ExpectedRackID: cur.ID,
 				RackProfileID:  &reported.RackProfileID,
+				RackGroupID:    reported.RackGroupID,
 				Name:           &reported.Name,
 				Description:    &reported.Description,
 				Labels:         labels,

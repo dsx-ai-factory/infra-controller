@@ -40,14 +40,14 @@ func TestValidateNVLinkDomainID(t *testing.T) {
 }
 
 func TestAPINVLinkDomain_FromProto(t *testing.T) {
-	tests := []struct{ name, topology string }{
-		{name: "Flow topology preserved", topology: "CUSTOM_TOPOLOGY_NVIDIA"},
+	tests := []struct{ name, topology, domainName string }{
+		{name: "Flow topology preserved", topology: "CUSTOM_TOPOLOGY_NVIDIA", domainName: "nvl5-gp1"},
 		{name: "unavailable"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &flowv1.NVLinkDomain{
-				Id: "rack-01", Name: "nvl5-gp1",
+				Id: "group-01", RackGroupId: "group-01", NmxcClusterId: new("59202b81-65fb-45ec-b3b8-91ab0ad3f34a"), Name: tc.domainName,
 				OperationStatus: flowv1.Phase_PHASE_READY,
 			}
 			if tc.topology != "" {
@@ -55,8 +55,10 @@ func TestAPINVLinkDomain_FromProto(t *testing.T) {
 			}
 			d := &APINVLinkDomain{}
 			d.FromProto(r, true)
-			assert.Equal(t, "rack-01", d.ID)
-			assert.Equal(t, "nvl5-gp1", d.Name)
+			assert.Equal(t, "group-01", d.ID)
+			assert.Equal(t, d.ID, d.RackGroupID)
+			assert.Equal(t, r.NmxcClusterId, d.NMXCClusterID)
+			assert.Equal(t, tc.domainName, d.Name)
 			assert.Equal(t, "Ready", d.OperationStatus)
 			assert.NotNil(t, d.Components)
 			if tc.topology == "" {
@@ -69,6 +71,9 @@ func TestAPINVLinkDomain_FromProto(t *testing.T) {
 			require.NoError(t, err)
 			assert.Contains(t, string(data), `"components":[]`)
 			assert.Contains(t, string(data), `"topology":`)
+			if tc.domainName == "" {
+				assert.Contains(t, string(data), `"name":""`)
+			}
 		})
 	}
 }

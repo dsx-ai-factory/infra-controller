@@ -16,7 +16,6 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/proto"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
@@ -169,7 +168,6 @@ func TestManageMachine_DeleteMachineHealthReportOnSite(t *testing.T) {
 	assert.Error(t, err)
 }
 
-//nolint:staticcheck // Asserting the deprecated fields were cleared means reading them.
 func Test_pruneMachineForPublish(t *testing.T) {
 	events := func(versions ...string) []*corev1.MachineEvent {
 		out := []*corev1.MachineEvent{}
@@ -196,21 +194,13 @@ func Test_pruneMachineForPublish(t *testing.T) {
 		check   func(*testing.T, *corev1.Machine)
 	}{
 		{
-			name: "clears the deprecated twins and keeps status and config",
+			name: "keeps status and config",
 			machine: &corev1.Machine{
-				Id:             &corev1.MachineId{Id: "machine-1"},
-				Health:         &corev1.HealthReport{Source: "deprecated"},
-				Capabilities:   &corev1.MachineCapabilitiesSet{},
-				UpdateComplete: true,
-				HwSku:          proto.String("deprecated-sku"),
-				Status:         &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
-				Config:         &corev1.MachineConfig{},
+				Id:     &corev1.MachineId{Id: "machine-1"},
+				Status: &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
+				Config: &corev1.MachineConfig{},
 			},
 			check: func(t *testing.T, machine *corev1.Machine) {
-				assert.Nil(t, machine.Health)
-				assert.Nil(t, machine.Capabilities)
-				assert.Nil(t, machine.HwSku)
-				assert.False(t, machine.UpdateComplete)
 				// The replacements the REST layer actually reads have to survive.
 				assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
 				assert.NotNil(t, machine.GetConfig())

@@ -37,7 +37,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -299,7 +298,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 	tscWithNICoDenied.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// NICo is strict about changes in capabilities and allowing
 	// instance type updates, so we sort before sending the data nico.
@@ -555,7 +554,6 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(ip.Org)
 			ec.Set("user", ipu)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := cith.Handle(ec); (err != nil) != tt.wantErr {
@@ -810,7 +808,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1406,7 +1404,6 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gaith.Handle(ec)
@@ -1570,7 +1567,7 @@ func TestGetInstanceTypeHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1798,7 +1795,6 @@ func TestGetInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gith.Handle(ec)
@@ -1960,7 +1956,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 	tscWithNICoDenied.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2452,7 +2448,6 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err = uith.Handle(ec)
@@ -2639,7 +2634,7 @@ func TestDeleteInstanceTypeHandler_Handle(t *testing.T) {
 		"DeleteInstanceType", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2785,7 +2780,6 @@ func TestDeleteInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dith.Handle(ec)
@@ -2832,11 +2826,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	scp := sc.NewClientPool(tcfg)
 
 	cith := CreateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewCreateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, cith) {
@@ -2844,10 +2837,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gaith := GetAllInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetAllInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gaith) {
@@ -2855,10 +2847,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gith := GetInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gith) {
@@ -2866,11 +2857,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	uith := UpdateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewUpdateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, uith) {
@@ -2878,11 +2868,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	dith := DeleteInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewDeleteInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, dith) {

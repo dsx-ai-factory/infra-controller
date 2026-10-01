@@ -88,14 +88,16 @@ struct DpuMachineInfo<'a> {
 }
 
 /// Generate element containing all information needed to write a Machine Host.
-#[allow(deprecated)]
 fn get_host_machine_info<'a>(
     machines: &'a [&'a ::rpc::Machine],
 ) -> HashMap<&'a str, HostMachineInfo<'a>> {
     let mut machine_element: HashMap<&'a str, HostMachineInfo> = HashMap::new();
 
     for machine in machines {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
+        let primary_interface = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.interfaces.iter().find(|x| x.primary_interface));
 
         if let Some(primary_interface) = primary_interface {
             let hostname = primary_interface.hostname.as_str();
@@ -110,8 +112,9 @@ fn get_host_machine_info<'a>(
                     dpu_machine_id: primary_dpu.map(Into::into),
                     primary_dpu_machine_id: primary_dpu.map(Into::into),
                     all_dpu_machine_ids: machine
-                        .interfaces
+                        .status
                         .iter()
+                        .flat_map(|status| status.interfaces.iter())
                         .filter_map(|x| x.attached_dpu_machine_id.map(Into::into))
                         .collect(),
                 },
@@ -128,15 +131,16 @@ fn get_host_machine_info<'a>(
 }
 
 /// Generate element containing all information needed to write a Machine Host.
-#[allow(deprecated)]
 fn get_dpu_machine_info<'a>(
     machines: &'a [&'a ::rpc::Machine],
 ) -> HashMap<&'a str, DpuMachineInfo<'a>> {
     let mut machine_element: HashMap<&'a str, DpuMachineInfo> = HashMap::new();
 
     for machine in machines {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
-
+        let primary_interface = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.interfaces.iter().find(|x| x.primary_interface));
         if let Some(primary_interface) = primary_interface {
             let hostname = primary_interface.hostname.as_str();
             let address = primary_interface.address[0].as_str();
@@ -155,7 +159,6 @@ fn get_dpu_machine_info<'a>(
 }
 
 /// Generate element containing all information needed to write a BMC Host.
-#[allow(deprecated)]
 fn get_bmc_info<'a>(
     machines: &[&'a ::rpc::Machine],
     managed_hosts: &'a [ExploredManagedHost],
@@ -176,17 +179,18 @@ fn get_bmc_info<'a>(
         };
 
         let hostname = machine
-            .interfaces
-            .iter()
-            .find_map(|x| {
-                if x.primary_interface {
-                    Some(x.hostname.as_str())
-                } else {
-                    None
-                }
+            .status
+            .as_ref()
+            .and_then(|status| {
+                status.interfaces.iter().find_map(|x| {
+                    if x.primary_interface {
+                        Some(x.hostname.as_str())
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or("Not Found");
-
         bmc_element.insert(
             format!("{hostname}-bmc"),
             BmcInfo {

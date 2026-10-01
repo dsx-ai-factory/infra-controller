@@ -44,10 +44,9 @@
 //! harmless to the rest of the simulation.
 //!
 //! ### Activation event
-//! All staged firmware is applied on `BmcEvent::PowerOn`.  This is an explicit
-//! simulation simplification: real UEFI updates trigger a host restart while
-//! real BMC updates trigger `Manager.Reset` (currently a no-op in bmc-mock).
-//! Per-component activation events can be added in a follow-up.
+//! A BMC reset applies only completed host BMC firmware. Host power-on applies
+//! all completed staged firmware, preserving the simulated cold-boot behavior.
+//! UEFI firmware cannot activate on a BMC-only reset.
 //!
 //! ### Non-destructive queue
 //! `pending_upgrades` is an `IndexMap<component_id, target_version>` (ordered,
@@ -113,20 +112,23 @@ pub(crate) const MULTIPART_UPLOAD_PATH: &str = "/redfish/v1/UpdateService/upload
 
 pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const FW_INVENTORY_ID: &str = "{fw_inventory_id}";
-    r.route(&resource().odata_id, get(get_update_service::<C>))
-        .route(
-            &simple_update_target(),
-            post(update_firmware_simple_update::<C>),
-        )
-        .route(MULTIPART_UPLOAD_PATH, post(update_firmware_multipart::<C>))
-        .route(
-            &redfish::software_inventory::firmware_inventory_collection().odata_id,
-            get(get_firmware_inventory_collection::<C>),
-        )
-        .route(
-            &redfish::software_inventory::firmware_inventory_resource(FW_INVENTORY_ID).odata_id,
-            get(get_firmware_inventory_resource::<C>),
-        )
+    r.route(
+        &resource().odata_id,
+        get(get_update_service::<C>).post(update_firmware_multipart::<C>),
+    )
+    .route(
+        &simple_update_target(),
+        post(update_firmware_simple_update::<C>),
+    )
+    .route(MULTIPART_UPLOAD_PATH, post(update_firmware_multipart::<C>))
+    .route(
+        &redfish::software_inventory::firmware_inventory_collection().odata_id,
+        get(get_firmware_inventory_collection::<C>),
+    )
+    .route(
+        &redfish::software_inventory::firmware_inventory_resource(FW_INVENTORY_ID).odata_id,
+        get(get_firmware_inventory_resource::<C>),
+    )
 }
 
 /// Default delay before a simulated firmware task transitions to Completed.
@@ -154,6 +156,7 @@ pub(crate) struct UpdateServiceConfig {
     pub(crate) task_completion_jitter: Duration,
     /// Which push URI to advertise in the UpdateService GET response.
     pub(crate) advertise_multipart_push_uri: bool,
+    pub(crate) advertise_legacy_http_push_uri: bool,
     /// Inventory ID for the host BMC firmware entry.  `None` means this
     /// platform has no host firmware simulation (e.g. switches, power shelves).
     pub(crate) host_bmc_inventory_id: Option<String>,
@@ -169,6 +172,7 @@ impl Default for UpdateServiceConfig {
             task_completion_delay: DEFAULT_TASK_COMPLETION_DELAY,
             task_completion_jitter: DEFAULT_TASK_COMPLETION_JITTER,
             advertise_multipart_push_uri: true,
+            advertise_legacy_http_push_uri: false,
             host_bmc_inventory_id: None,
             host_uefi_inventory_id: None,
         }
@@ -271,6 +275,7 @@ pub struct UpdateServiceState {
     task_completion_jitter: Duration,
     /// Which push URIs this platform advertises in the UpdateService GET response.
     pub(crate) advertise_multipart_push_uri: bool,
+    pub(crate) advertise_legacy_http_push_uri: bool,
     /// Inventory ID for the host BMC firmware entry.  `None` means no host
     /// firmware simulation for this platform (e.g. switches, power shelves).
     pub host_bmc_inventory_id: Option<String>,
@@ -294,6 +299,7 @@ impl UpdateServiceState {
             task_completion_delay: config.task_completion_delay,
             task_completion_jitter: config.task_completion_jitter,
             advertise_multipart_push_uri: config.advertise_multipart_push_uri,
+            advertise_legacy_http_push_uri: config.advertise_legacy_http_push_uri,
             host_bmc_inventory_id: config.host_bmc_inventory_id,
             host_uefi_inventory_id: config.host_uefi_inventory_id,
         }
@@ -478,25 +484,37 @@ impl UpdateServiceState {
     /// Only fires for components that have completed tasks (the gate that prevents
     /// initial-boot power-on from applying staged versions prematurely).
     ///
-    /// **Simulation simplification**: all staged versions are applied here
-    /// regardless of component type.  In reality, UEFI updates require a host
-    /// restart and BMC updates require `Manager.Reset`; those are currently
-    /// no-ops in bmc-mock.  Per-component activation events can be added later.
+    /// Host power-on applies all staged components. A BMC-only reset uses
+    /// `apply_staged_bmc_firmware` so it cannot activate UEFI firmware.
     ///
     /// Completed tasks are pruned from the map after their firmware is applied
     /// so the map does not grow without bound in long-running load tests.
     /// Successfully applied components are also removed from `pending_upgrades`
     /// so a subsequent peek returns the next entry in the ordered map.
     pub(crate) fn apply_staged_firmware(&self) {
+        self.apply_staged_component(None);
+    }
+
+    /// Activate only completed host BMC firmware on a BMC reset.
+    pub(crate) fn apply_staged_bmc_firmware(&self) {
+        if let Some(id) = self.host_bmc_inventory_id.as_deref() {
+            self.apply_staged_component(Some(id));
+        }
+    }
+
+    fn apply_staged_component(&self, component: Option<&str>) {
+        let applies = |task: &FirmwareTask| {
+            task.state == TaskState::Completed && component.is_none_or(|id| task.component_id == id)
+        };
         // Collect component IDs of completed tasks and prune them from the map.
         let completed_components: Vec<String> = {
             let mut tasks = self.tasks.write().unwrap();
             let completed: Vec<String> = tasks
                 .values()
-                .filter(|t| t.state == TaskState::Completed)
+                .filter(|t| applies(t))
                 .map(|t| t.component_id.clone())
                 .collect();
-            tasks.retain(|_, t| t.state != TaskState::Completed);
+            tasks.retain(|_, t| !applies(t));
             completed
         };
 
@@ -559,6 +577,9 @@ async fn get_update_service<C: Callbacks>(State(state): State<BmcState<C>>) -> R
         .firmware_inventory(&redfish::software_inventory::firmware_inventory_collection());
     if us.advertise_multipart_push_uri {
         b = b.multipart_http_push_uri(MULTIPART_UPLOAD_PATH);
+    }
+    if us.advertise_legacy_http_push_uri {
+        b = b.apply_patch(json!({ "HttpPushUri": resource().odata_id }));
     }
     b.build().into_ok_response()
 }
@@ -1088,7 +1109,26 @@ mod tests {
         axum::Router,
         crate::bmc_state::BmcState<crate::test_support::TestCallbacks>,
     ) {
-        let info = host_info(HardwareType::GenericAmi);
+        make_platform_router(
+            HardwareType::GenericAmi,
+            bmc_current,
+            bmc_desired,
+            uefi_current,
+            uefi_desired,
+        )
+    }
+
+    fn make_platform_router(
+        hw_type: HardwareType,
+        bmc_current: &str,
+        bmc_desired: &str,
+        uefi_current: Option<&str>,
+        uefi_desired: Option<&str>,
+    ) -> (
+        axum::Router,
+        crate::bmc_state::BmcState<crate::test_support::TestCallbacks>,
+    ) {
+        let info = host_info(hw_type);
         let info = if let crate::MachineInfo::Host(mut h) = info {
             h.initial_host_firmware = Some(HostFirmwareVersions {
                 bmc: Some(bmc_current.into()),
@@ -1205,6 +1245,221 @@ mod tests {
         )
         .await;
         assert_eq!(inv["Version"], "24.10.00");
+    }
+
+    #[tokio::test]
+    async fn lenovo_gb300_requires_full_lockdown_to_restore_bios_policy() {
+        use libredfish::{EnabledDisabled, Endpoint, RedfishClientPool};
+        let (router, _) = make_platform_router(
+            HardwareType::LenovoGB300Nvl,
+            "bmc-old",
+            "bmc-new",
+            None,
+            None,
+        );
+        let (_server, url) = crate::test_support::serve_https("gb300-lockdown", router);
+        let client = RedfishClientPool::builder()
+            .danger_accept_invalid_certs()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .create_client(Endpoint {
+                host: url.host_str().unwrap().to_owned(),
+                port: url.port(),
+                user: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+        client.lockdown_bmc(EnabledDisabled::Enabled).await.unwrap();
+        let status = client.lockdown_status().await.unwrap();
+        assert!(
+            !status.is_fully_enabled(),
+            "BMC-only command must leave BIOS USB unlocked: {status:?}"
+        );
+        client.lockdown(EnabledDisabled::Enabled).await.unwrap();
+        let status = client.lockdown_status().await.unwrap();
+        assert!(
+            status.is_fully_enabled(),
+            "full policy must restore BIOS and BMC: {status:?}"
+        );
+    }
+
+    /// Exercise the same legacy client used by the Core controller, including
+    /// its LenovoGB300 multipart rejection. This verifies the mock's raw-push
+    /// compatibility, not support for this endpoint on physical Lenovo hardware.
+    #[tokio::test]
+    async fn lenovo_gb300_legacy_client_raw_push_activates_bmc() {
+        use libredfish::model::service_root::RedfishVendor;
+        use libredfish::model::update_service::ComponentType;
+        use libredfish::{Endpoint, RedfishClientPool, RedfishError};
+
+        let (router, state) = make_platform_router(
+            HardwareType::LenovoGB300Nvl,
+            "bmc-old",
+            "bmc-new",
+            Some("uefi-old"),
+            Some("uefi-new"),
+        );
+        let bios_before = get_json(&router, "/redfish/v1/Systems/System_0").await["BiosVersion"]
+            .as_str()
+            .expect("Lenovo System_0 must report its BIOS version")
+            .to_owned();
+        let system_router = router.clone();
+        let received = StdArc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let router = router.layer(axum::middleware::from_fn(
+            move |request: Request<axum::body::Body>, next: axum::middleware::Next| {
+                let captured = captured.clone();
+                async move {
+                    if request.method() == Method::POST
+                        && request.uri().path() == "/redfish/v1/UpdateService"
+                    {
+                        let (parts, body) = request.into_parts();
+                        let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+                        *captured.lock().unwrap() = bytes.to_vec();
+                        next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                            .await
+                    } else {
+                        next.run(request).await
+                    }
+                }
+            },
+        ));
+        let (_server, url) = crate::test_support::serve_https("gb300-http-push", router);
+        let client = RedfishClientPool::builder()
+            .danger_accept_invalid_certs()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .create_client(Endpoint {
+                host: url.host_str().unwrap().to_owned(),
+                port: url.port(),
+                user: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            client.std_redfish().vendor,
+            Some(RedfishVendor::LenovoGB300)
+        );
+        assert_eq!(
+            client.get_update_service().await.unwrap().http_push_uri,
+            "/redfish/v1/UpdateService",
+        );
+        let artifact = tempfile::NamedTempFile::new().unwrap();
+        let payload = b"mock firmware payload, not a physical firmware image";
+        std::fs::write(artifact.path(), payload).unwrap();
+        assert!(matches!(
+            client
+                .update_firmware_multipart(
+                    artifact.path(),
+                    true,
+                    Duration::from_secs(5),
+                    ComponentType::BMC,
+                )
+                .await,
+            Err(RedfishError::NotSupported(_))
+        ));
+        assert!(received.lock().unwrap().is_empty());
+        let task = client
+            .update_firmware(tokio::fs::File::open(artifact.path()).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(&*received.lock().unwrap(), payload);
+        state.update_service_state.complete_all_tasks_for_test();
+        assert_eq!(
+            serde_json::to_value(client.get_task(&task.id).await.unwrap()).unwrap()["TaskState"],
+            "Completed"
+        );
+        let inventory = || {
+            state
+                .update_service_state
+                .find_firmware_inventory("BMC")
+                .unwrap()
+        };
+        assert_eq!(inventory()["Version"], "bmc-old");
+        client.bmc_reset(None).await.unwrap();
+        assert_eq!(inventory()["Version"], "bmc-new");
+        assert_eq!(
+            state.update_service_state.find_firmware_inventory("UEFI"),
+            None,
+            "Lenovo exposes BIOS on System_0, not a synthetic firmware inventory entry"
+        );
+        assert_eq!(
+            get_json(&system_router, "/redfish/v1/Systems/System_0").await["BiosVersion"],
+            bios_before,
+            "BMC activation must leave the host BIOS unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn gb200_upgrades_bmc_and_uefi_independently() {
+        let (hw_type, bmc_id, uefi_id) = (HardwareType::WiwynnGB200Nvl, "FW_BMC_0", "HGX_FW_CPU_0");
+        for multipart in [false, true] {
+            let (router, state) = make_platform_router(
+                hw_type,
+                "bmc-old",
+                "bmc-new",
+                Some("uefi-old"),
+                Some("uefi-new"),
+            );
+            let bmc_path = format!("/redfish/v1/UpdateService/FirmwareInventory/{bmc_id}");
+            let uefi_path = format!("/redfish/v1/UpdateService/FirmwareInventory/{uefi_id}");
+            let service = get_json(&router, "/redfish/v1/UpdateService").await;
+            assert_eq!(service["MultipartHttpPushUri"], MULTIPART_UPLOAD_PATH);
+            state.on_event(&crate::bmc_state::BmcEvent::PowerOn);
+            assert_eq!(get_json(&router, &bmc_path).await["Version"], "bmc-old");
+            assert_eq!(get_json(&router, &uefi_path).await["Version"], "uefi-old");
+
+            for (path, old, new) in [
+                (&bmc_path, "bmc-old", "bmc-new"),
+                (&uefi_path, "uefi-old", "uefi-new"),
+            ] {
+                let response = if multipart {
+                    post_empty(&router, MULTIPART_UPLOAD_PATH).await
+                } else {
+                    router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(Method::POST)
+                                .uri(simple_update_target())
+                                .header("Content-Type", "application/json")
+                                .body(axum::body::Body::from(
+                                    serde_json::json!({"Targets": [path]}).to_string(),
+                                ))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(response.status(), StatusCode::ACCEPTED, "{hw_type:?}");
+                let task_path = response.headers()["Location"].to_str().unwrap().to_owned();
+                assert_eq!(get_json(&router, &task_path).await["TaskState"], "Running");
+                let reset = "/redfish/v1/Managers/BMC_0/Actions/Manager.Reset";
+                assert_eq!(post_empty(&router, reset).await.status(), StatusCode::OK);
+                assert_eq!(get_json(&router, path).await["Version"], old);
+                state.update_service_state.complete_all_tasks_for_test();
+                assert_eq!(
+                    get_json(&router, &task_path).await["TaskState"],
+                    "Completed"
+                );
+                assert_eq!(get_json(&router, path).await["Version"], old);
+                assert_eq!(post_empty(&router, reset).await.status(), StatusCode::OK);
+                if path == &uefi_path {
+                    assert_eq!(get_json(&router, path).await["Version"], old);
+                    state.on_event(&crate::bmc_state::BmcEvent::PowerOn);
+                }
+                assert_eq!(get_json(&router, path).await["Version"], new);
+                if path == &bmc_path {
+                    assert_eq!(get_json(&router, &uefi_path).await["Version"], "uefi-old");
+                }
+            }
+            assert_eq!(get_json(&router, &bmc_path).await["Version"], "bmc-new");
+            assert_eq!(get_json(&router, &uefi_path).await["Version"], "uefi-new");
+        }
     }
 
     #[tokio::test]

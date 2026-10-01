@@ -491,11 +491,27 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetListOfNVLinkDomainsRequest"><span class="badge">M</span>GetListOfNVLinkDomainsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetListOfNVLinkDomainsResponse"><span class="badge">M</span>GetListOfNVLinkDomainsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.GetListOfRacksRequest"><span class="badge">M</span>GetListOfRacksRequest</a>
                 </li>
 
                 <li>
                   <a href="#v1.GetListOfRacksResponse"><span class="badge">M</span>GetListOfRacksResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainRequest"><span class="badge">M</span>GetNVLinkDomainRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainResponse"><span class="badge">M</span>GetNVLinkDomainResponse</a>
                 </li>
 
                 <li>
@@ -648,6 +664,10 @@
 
                 <li>
                   <a href="#v1.NVLDomainTargets"><span class="badge">M</span>NVLDomainTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.NVLinkDomain"><span class="badge">M</span>NVLinkDomain</a>
                 </li>
 
                 <li>
@@ -1736,6 +1756,13 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><a href="#v1.HealthReport">HealthReport</a></td>
                   <td></td>
                   <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Owning rack&#39;s domain external ID (rack group ID). </p></td>
                 </tr>
 
             </tbody>
@@ -3762,6 +3789,82 @@ backend applies the update. </p></td>
 
 
 
+        <h3 id="v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>info</td>
+                  <td><a href="#v1.StringQueryInfo">StringQueryInfo</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>order_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domains</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.GetListOfRacksRequest">GetListOfRacksRequest</h3>
         <p></p>
 
@@ -3800,6 +3903,13 @@ backend applies the update. </p></td>
                   <td><p>Defaults to name ascending. Rack UUID ascending breaks equal-field ties. </p></td>
                 </tr>
 
+                <tr>
+                  <td>with_external_id_only</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -3827,6 +3937,61 @@ backend applies the update. </p></td>
                 <tr>
                   <td>total</td>
                   <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domain</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -5008,6 +5173,20 @@ accept this flag. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -5040,6 +5219,13 @@ accept this flag. </p></td>
                 </tr>
 
                 <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
                   <td>component_types</td>
                   <td><a href="#v1.ComponentType">ComponentType</a></td>
                   <td>repeated</td>
@@ -5068,6 +5254,72 @@ accept this flag. </p></td>
                   <td><a href="#v1.NVLDomainTarget">NVLDomainTarget</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.NVLinkDomain">NVLinkDomain</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>name</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>topology</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation_status</td>
+                  <td><a href="#v1.Phase">Phase</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>components</td>
+                  <td><a href="#v1.Component">Component</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_group_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Same value as id: the domain&#39;s external ID. </p></td>
                 </tr>
 
             </tbody>
@@ -6973,6 +7225,20 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><a href="#v1.HealthReport">HealthReport</a></td>
                   <td></td>
                   <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_profile_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Core rack profile mirrored by expected inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_ids</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p>Public rack-group domain identities. </p></td>
                 </tr>
 
             </tbody>
@@ -9732,6 +9998,20 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
                 <td>GetRacksForNVLDomain</td>
                 <td><a href="#v1.GetRacksForNVLDomainRequest">GetRacksForNVLDomainRequest</a></td>
                 <td><a href="#v1.GetRacksForNVLDomainResponse">GetRacksForNVLDomainResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetNVLinkDomain</td>
+                <td><a href="#v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</a></td>
+                <td><a href="#v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetListOfNVLinkDomains</td>
+                <td><a href="#v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</a></td>
+                <td><a href="#v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</a></td>
                 <td><p></p></td>
               </tr>
 
