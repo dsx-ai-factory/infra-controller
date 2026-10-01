@@ -168,7 +168,28 @@ async fn test_unreferenced_domain_delete_is_idempotent(pool: PgPool) {
 async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(pool: PgPool) {
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     let domain_name = "2.0.192.in-addr.arpa".to_string();
-    let domain_id = create_domain(&env, &domain_name).await;
+    // The Domain API rejects reverse zones, so the reverse-zone lock used to
+    // hold deletion open needs a compatibility row as network lifecycle (or
+    // a pre-existing deployment) persists it, not an API-created domain.
+    let rejected = env
+        .api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: domain_name.clone(),
+            default_ttl: None,
+            reserved_id: None,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code(), Code::InvalidArgument);
+    let mut fixture_txn = env.pool.begin().await.unwrap();
+    let domain_id = db::dns::domain::persist(
+        model::dns::NewDomain::new(domain_name.clone()),
+        fixture_txn.as_mut(),
+    )
+    .await
+    .unwrap()
+    .id;
+    fixture_txn.commit().await.unwrap();
     let segment_id = NetworkSegmentId::new();
 
     let mut reverse_zone_blocker = env.api.txn_begin().await.unwrap();
