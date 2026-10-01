@@ -113,7 +113,10 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 
 		dpuExtensionService := existingDpuExtensionServiceIDMap[controllerDpuExtensionService.ServiceId]
 		if dpuExtensionService == nil {
-			dpuExtensionService = mde.createOrUpdateDpuExtensionServiceFromSite(ctx, site, controllerDpuExtensionService)
+			dpuExtensionService, err = mde.createOrUpdateDpuExtensionServiceFromSite(ctx, site, controllerDpuExtensionService)
+			if err != nil {
+				return err
+			}
 			if dpuExtensionService == nil {
 				continue
 			}
@@ -304,15 +307,15 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 }
 
 // createOrUpdateDpuExtensionServiceFromSite creates a REST DPU Extension Service from Site
-// inventory, or undeletes and refreshes a matching soft-deleted row. It returns nil when
-// recovery is skipped or fails.
+// inventory, or undeletes and refreshes a matching soft-deleted row. It returns nil, nil
+// when recovery is intentionally skipped and an error when the activity should retry.
 //
 //nolint:cyclop,funlen,gocognit,nestif // Recovery is intentionally kept as one transactional flow.
 func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 	ctx context.Context,
 	site *cdbm.Site,
 	controllerDpuExtensionService *corev1.DpuExtensionService,
-) *cdbm.DpuExtensionService {
+) (*cdbm.DpuExtensionService, error) {
 	logger := log.With().
 		Str("Activity", "UpdateDpuExtensionServicesInDB").
 		Str("Site ID", site.ID.String()).
@@ -323,14 +326,14 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 	if err != nil {
 		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: failed to parse ID, not a valid UUID %s", controllerDpuExtensionService.GetServiceId())
 
-		return nil
+		return nil, nil
 	}
 
 	org := controllerDpuExtensionService.GetTenantOrganizationId()
 	if org == "" {
 		logger.Warn().Msg("unable to create DPU Extension Service found on Site: service is reporting empty Tenant organization ID")
 
-		return nil
+		return nil, nil
 	}
 
 	serviceType := cdbm.DpuExtensionServiceServiceTypeKubernetesPod
@@ -348,7 +351,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		if targetErr != nil || dpuTarget == nil {
 			logger.Warn().Err(targetErr).Msg("unable to create DPU Extension Service found on Site: DPF Helm chart is missing a valid DPU target")
 
-			return nil
+			return nil, nil
 		}
 
 		status = cdbm.DpuExtensionServiceStatusPending
@@ -361,7 +364,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 	default:
 		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: unsupported service type %s", controllerDpuExtensionService.GetServiceType())
 
-		return nil
+		return nil, nil
 	}
 
 	name := controllerDpuExtensionService.GetServiceName()
@@ -434,10 +437,10 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 
 		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
 		// the same fallback name.
-		lockErr := transaction.TryAcquireAdvisoryLock(
+		lockErr := transaction.AcquireAdvisoryLock(
 			ctx,
 			cdb.GetAdvisoryLockIDFromString("dpu-extension-service-recovery-"+tenant.ID.String()),
-			nil,
+			true,
 		)
 		if lockErr != nil {
 			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to acquire Tenant recovery lock, DB error: %w", lockErr)
@@ -630,10 +633,10 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to create or undelete DPU Extension Service from Site inventory")
 
-		return nil
+		return nil, err
 	}
 
-	return result.dpuExtensionService
+	return result.dpuExtensionService, nil
 }
 
 // NewManageDpuExtensionService returns a new ManageDpuExtensionService activity
