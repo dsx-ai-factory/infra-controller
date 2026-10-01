@@ -450,6 +450,7 @@ func bringUpStateFromPb(
 type ExpectedRackDetail struct {
 	RackID        string
 	RackProfileID string
+	RackGroupID   string
 	Name          string
 	Description   string
 	Labels        map[string]string
@@ -537,6 +538,7 @@ func metadataToGo(md *corev1.Metadata) (name, description string, labels map[str
 func expectedRackDetailFromPb(er *corev1.ExpectedRack) ExpectedRackDetail {
 	d := ExpectedRackDetail{
 		RackProfileID: er.GetRackProfileId().GetId(),
+		RackGroupID:   er.GetRackGroupId().GetId(),
 	}
 	if er.GetRackId() != nil {
 		d.RackID = er.GetRackId().GetId()

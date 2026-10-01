@@ -687,10 +687,7 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	// Get rack ID
 	at.RackID = comp.GetRackExternalId()
 
-	if comp.GetNvlDomainId() != nil {
-		domainID := comp.GetNvlDomainId().GetId()
-		at.NVLinkDomainID = &domainID
-	}
+	at.NVLinkDomainID = comp.NvlDomainExternalId
 }
 
 // NewAPITray creates an APITray from the Flow protobuf Component

@@ -76,9 +76,9 @@ pub use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 pub use repository::{DpfRepository, KubeRepository};
 pub use sdk::{
     DpfSdk, DpfSdkBuilder, DpuProvisioningSource, NoLabels, ResourceLabeler, build_deployment,
-    build_effective_dpu_interfaces, build_service_configuration, build_service_interface,
-    build_service_nad, build_service_template, calculate_pf_total_sf, dpu_cr_name,
-    dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
+    build_deployment_dpu_interfaces, build_effective_dpu_interfaces, build_service_configuration,
+    build_service_interface, build_service_nad, build_service_template, calculate_pf_total_sf,
+    dpu_cr_name, dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
 };
 pub use service_vpc_slot::ServiceVpcSlots;
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};

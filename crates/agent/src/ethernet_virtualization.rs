@@ -30,7 +30,7 @@ use ::rpc::forge::{
     self as rpc, FlatInterfaceConfig, ManagedHostNetworkConfigResponse,
     NetworkSecurityGroupRuleAction, NetworkSecurityGroupRuleProtocol,
 };
-use carbide_network::ip::prefix::{IpNet, aggregate};
+use carbide_network::ip::prefix::{IpNet, Ipv6Net, aggregate};
 use carbide_network::virtualization::{VpcVirtualizationType, build_dual_stack_list};
 use eyre::WrapErr;
 use mac_address::MacAddress;
@@ -422,6 +422,65 @@ fn tenant_ipv6_router_advertisement(
     })
 }
 
+/// Returns Core's authoritative IPv6 address-list entry, when present.
+fn canonical_ipv6_address(interface: &FlatInterfaceConfig) -> Option<&rpc::InterfaceAddressConfig> {
+    interface
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+}
+
+/// Parses and network-normalizes the segment prefix in a canonical V6 entry.
+fn normalized_ipv6_segment_prefix(address: &rpc::InterfaceAddressConfig) -> Option<Ipv6Net> {
+    let Ok(IpNet::V6(prefix)) = address.prefix.parse() else {
+        return None;
+    };
+    Some(prefix.trunc())
+}
+
+/// Selects Core's authoritative segment prefix, falling back to the deprecated
+/// sidecar only when the canonical V6 entry is absent.
+fn ipv6_segment_prefix(interface: &FlatInterfaceConfig, legacy_fallback: &str) -> Option<String> {
+    let Some(address) = canonical_ipv6_address(interface) else {
+        return Some(legacy_fallback.to_owned());
+    };
+    normalized_ipv6_segment_prefix(address).map(|prefix| prefix.to_string())
+}
+
+/// Builds stateful RA inputs for the existing primary-DPU admin VLAN SVI.
+///
+/// The canonical address entry keeps the host `/128` distinct from the
+/// containing segment so the host route cannot become the advertised prefix.
+fn admin_ipv6_router_advertisement(
+    virtualization_type: VpcVirtualizationType,
+    interface: &FlatInterfaceConfig,
+    address: &rpc::InterfaceAddressConfig,
+    rdnss_servers: &[Ipv6Addr],
+) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
+    // The caller supplies admin ports only on the primary DPU. Keep the
+    // render-side guard for the FNN L2 SVI that can actually emit RA.
+    if virtualization_type != VpcVirtualizationType::Fnn || !interface.is_l2_segment {
+        return None;
+    }
+
+    let prefix = normalized_ipv6_segment_prefix(address)?;
+    let host_address = address.ip.parse::<Ipv6Addr>().ok()?;
+    let interface_prefix = address.interface_prefix.parse::<Ipv6Net>().ok()?;
+
+    if interface_prefix.prefix_len() != 128
+        || interface_prefix.network() != host_address
+        || !prefix.contains(&host_address)
+    {
+        return None;
+    }
+
+    Some(nvue::Ipv6RouterAdvertisementConfig {
+        prefix: prefix.to_string(),
+        mode: nvue::Ipv6RouterAdvertisementMode::Stateful,
+        rdnss_servers: rdnss_servers.to_vec(),
+    })
+}
+
 /// Update the NVUE network config, returning whether NVUE applied a change.
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
@@ -457,15 +516,14 @@ pub(super) async fn update_nvue(
             .admin_interface
             .as_ref()
             .ok_or_else(|| eyre::eyre!("missing admin_interface"))?;
+        let admin_ipv6 = canonical_ipv6_address(admin_interface);
         vec![nvue::VlanConfig {
             vlan_id: admin_interface.vlan_id,
             network: admin_interface.interface_prefix.clone().unwrap_or_default(),
             ip: admin_interface.ip.clone().unwrap_or_default(),
-            ipv6_vlan_config: admin_interface.ipv6_interface_config.as_ref().map(|v6| {
-                nvue::Ipv6VlanConfig {
-                    network: v6.interface_prefix.clone(),
-                    ip: v6.ip.clone(),
-                }
+            ipv6_vlan_config: admin_ipv6.map(|ipv6| nvue::Ipv6VlanConfig {
+                network: ipv6.interface_prefix.clone(),
+                ip: ipv6.ip.clone(),
             }),
         }]
     } else {
@@ -501,19 +559,14 @@ pub(super) async fn update_nvue(
                 .admin_interface
                 .as_ref()
                 .ok_or_else(|| eyre::eyre!("missing admin_interface"))?;
+            let admin_ipv6 = canonical_ipv6_address(admin_interface);
             vec![nvue::PortConfig {
                 interface_name: physical_name,
                 is_phy: true,
                 host_ip: admin_interface.ip.clone().unwrap_or_default(),
                 host_route: admin_interface.interface_prefix.clone().unwrap_or_default(),
-                host_ipv6: admin_interface
-                    .ipv6_interface_config
-                    .as_ref()
-                    .map(|v6| v6.ip.clone()),
-                host_ipv6_route: admin_interface
-                    .ipv6_interface_config
-                    .as_ref()
-                    .map(|v6| v6.interface_prefix.clone()),
+                host_ipv6: admin_ipv6.map(|ipv6| ipv6.ip.clone()),
+                host_ipv6_route: admin_ipv6.map(|ipv6| ipv6.interface_prefix.clone()),
                 vlan: admin_interface.vlan_id as u16,
                 vni: if nc.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn
                 {
@@ -529,12 +582,17 @@ pub(super) async fn update_nvue(
                     None
                 },
                 gateway_cidr: admin_interface.gateway.clone().unwrap_or_default(),
-                ipv6_port_config: admin_interface.ipv6_interface_config.as_ref().map(|v6| {
-                    nvue::Ipv6PortConfig {
-                        gateway_cidr: v6.interface_prefix.clone(),
-                        svi_ip: v6.svi_ip.clone(),
-                        router_advertisement: None,
-                    }
+                ipv6_port_config: admin_ipv6.map(|ipv6| nvue::Ipv6PortConfig {
+                    gateway_cidr: normalized_ipv6_segment_prefix(ipv6)
+                        .map(|prefix| prefix.to_string())
+                        .unwrap_or_default(),
+                    svi_ip: ipv6.svi_ip.clone(),
+                    router_advertisement: admin_ipv6_router_advertisement(
+                        vpc_virtualization_type,
+                        admin_interface,
+                        ipv6,
+                        &rdnss_servers,
+                    ),
                 }),
                 vpc_prefixes: admin_interface.vpc_prefixes.clone(),
                 vpc_peer_prefixes: admin_interface.vpc_peer_prefixes.clone(),
@@ -601,17 +659,7 @@ pub(super) async fn update_nvue(
                     // authoritative prefix. Only configs without a V6 entry
                     // retain the legacy sidecar mapping during upgrades.
                     let gateway_cidr =
-                        match net.addresses.iter().find(|address| {
-                            address.address_family == i32::from(rpc::AddressFamily::V6)
-                        }) {
-                            Some(address) => match address.prefix.parse::<IpNet>() {
-                                Ok(IpNet::V6(prefix)) => {
-                                    format!("{}/{}", prefix.network(), prefix.prefix_len())
-                                }
-                                _ => String::new(),
-                            },
-                            None => v6.interface_prefix.clone(),
-                        };
+                        ipv6_segment_prefix(net, &v6.interface_prefix).unwrap_or_default();
                     nvue::Ipv6PortConfig {
                         gateway_cidr,
                         svi_ip: v6.svi_ip.clone(),
@@ -2007,6 +2055,51 @@ mod tests {
         }
     }
 
+    /// Provides matching canonical and deprecated dual-stack admin projections.
+    ///
+    /// Keeping both projections realistic makes mapping and reconciliation
+    /// tests detect accidental reuse of the host `/128` as the segment CIDR.
+    #[allow(deprecated)]
+    fn dual_stack_admin_interface() -> rpc::FlatInterfaceConfig {
+        rpc::FlatInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical.into(),
+            vlan_id: 123,
+            vni: 5555,
+            vpc_vni: 7777,
+            gateway: Some("10.217.4.65/26".to_string()),
+            ip: Some("10.217.4.70".to_string()),
+            interface_prefix: Some("10.217.4.70/32".to_string()),
+            prefix: Some("10.217.4.64/26".to_string()),
+            svi_ip: Some("10.217.4.66/26".to_string()),
+            is_l2_segment: true,
+            ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
+                ip: "2001:db8:100::70".to_string(),
+                interface_prefix: "2001:db8:100::70/128".to_string(),
+                svi_ip: Some("2001:db8:100::66/64".to_string()),
+            }),
+            addresses: vec![
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V4.into(),
+                    gateway: Some("10.217.4.65/26".to_string()),
+                    ip: "10.217.4.70".to_string(),
+                    interface_prefix: "10.217.4.70/32".to_string(),
+                    prefix: "10.217.4.64/26".to_string(),
+                    svi_ip: Some("10.217.4.66/26".to_string()),
+                    ..Default::default()
+                },
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8:100::70".to_string(),
+                    interface_prefix: "2001:db8:100::70/128".to_string(),
+                    prefix: "2001:db8:100::/64".to_string(),
+                    svi_ip: Some("2001:db8:100::66/64".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
     /// Verifies managed-host loopbacks preserve optional IPv6 and reject invalid families.
     ///
     /// This keeps family validation at the NVUE rendering boundary.
@@ -2575,13 +2668,19 @@ esac
         .await?;
         let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
         let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
-        let interface =
-            &docs.as_sequence().expect("two YAML documents")[1]["set"]["interface"]["pf0hpf_if"];
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let interface = &set["interface"]["pf0hpf_if"];
         let ip = &interface["ip"];
 
         // The DPU derives ::0/127 from the prefix; ::1/128 remains the tenant route.
         assert!(!ip["address"]["2001:db8::/127"].is_null());
         assert!(ip["address"]["2001:db8::1/128"].is_null());
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_host_to_overlay_flood_prevention"]
+                .is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
         let frr_snippet = docs.as_sequence().expect("two YAML documents")[1]["set"]["system"]
             ["config"]["snippet"]["frr.conf"]
             .as_str()
@@ -2589,8 +2688,406 @@ esac
         assert!(
             frr_snippet.contains("interface pf0hpf_if vrf vpc_1025186")
                 && frr_snippet.contains("ipv6 nd prefix 2001:db8::/127 no-autoconfig")
-                && frr_snippet.contains("ipv6 nd managed-config-flag")
+                && frr_snippet
+                    .lines()
+                    .any(|line| line.trim() == "ipv6 nd managed-config-flag")
         );
+        assert!(
+            !frr_snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd managed-config-flag")
+        );
+        Ok(())
+    }
+
+    /// Proves tenant L2 keeps its IPv6 SVI/VRR state without enabling RA at
+    /// the full response-through-`update_nvue` wiring boundary.
+    /// Agent-generated tenant RA belongs only on routed interfaces; advertising on a shared
+    /// L2 segment could make hosts select a DPU as an unintended IPv6 default router.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn slaac_tenant_l2_renders_vrr_without_router_advertisement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config =
+            netconf(VpcVirtualizationType::Fnn, 32, 24, false, None, true, false);
+        let interface = &mut network_config.tenant_interfaces[1];
+        interface.ipv6_interface_config = Some(rpc::FlatInterfaceIpv6Config {
+            ip: String::new(),
+            interface_prefix: "2001:db8:185::/64".to_string(),
+            svi_ip: Some("2001:db8:185::2/64".to_string()),
+        });
+        interface.addresses.push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            interface_prefix: "2001:db8:185::/64".to_string(),
+            prefix: "2001:db8:185::/64".to_string(),
+            svi_ip: Some("2001:db8:185::2/64".to_string()),
+            ..Default::default()
+        });
+
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+        super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )
+        .await?;
+
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert!(set["system"]["config"]["snippet"].is_null());
+        assert!(!set["interface"]["vlan185"]["ip"]["address"]["2001:db8:185::2/64"].is_null());
+        assert!(
+            !set["interface"]["vlan185"]["ip"]["vrr"]["address"]["2001:db8:185::/64"].is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
+        Ok(())
+    }
+
+    /// Verifies a realistic dual-stack admin response drives the existing SVI,
+    /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
+    /// Host routes must be originated and withdrawn with that state so routed reachability follows it.
+    #[tokio::test]
+    async fn stateful_admin_ipv6_reconciles_svi_ra_and_rdnss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        network_config.use_admin_network = true;
+        network_config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        network_config.admin_interface = Some(dual_stack_admin_interface());
+
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Render the populated response through the complete update path.
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let vlan = &set["interface"]["vlan123"];
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("admin RA should render an FRR snippet");
+
+        // The segment configures VRR and PIO while the host /128 is not
+        // reinterpreted as the segment CIDR.
+        assert!(!vlan["ip"]["address"]["2001:db8:100::66/64"].is_null());
+        assert!(!vlan["ip"]["vrr"]["address"]["2001:db8:100::/64"].is_null());
+        assert!(vlan["ip"]["vrr"]["address"]["2001:db8:100::70/128"].is_null());
+
+        // Both host routes must exist locally before BGP can originate them into EVPN.
+        let admin_router = &set["vrf"]["vpc_7777"]["router"];
+        for (prefix, family) in [
+            // Adding IPv6 must preserve the existing IPv4 route and origination.
+            ("10.217.4.70/32", "ipv4-unicast"),
+            // IPv6 originates the individual host, not the shared admin segment.
+            ("2001:db8:100::70/128", "ipv6-unicast"),
+        ] {
+            assert_eq!(
+                admin_router["static"][prefix],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                    "address-family: {family}\nvia:\n  vlan123:\n    type: interface\n"
+                ))?
+            );
+            assert_eq!(
+                admin_router["bgp"]["address-family"][family]["network"],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!("{prefix}: {{}}\n"))?
+            );
+        }
+
+        // EVPN origination must not bypass the disabled underlay export policy.
+        assert!(
+            set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]
+                ["65002"]
+                .is_null()
+        );
+
+        // Stateful RA targets the VLAN SVI, sets M=1/O=1/A=0, and advertises
+        // only the IPv6 service resolvers with finite lifetimes.
+        assert!(snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(!snippet.contains("interface pf0hpf_if vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:100::/64 no-autoconfig"));
+        assert!(snippet.contains("ipv6 nd ra-lifetime 1800"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+        assert!(
+            !snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd managed-config-flag")
+        );
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd other-config-flag")
+        );
+        assert!(
+            !snippet
+                .lines()
+                .any(|line| line.trim() == "no ipv6 nd other-config-flag")
+        );
+        assert_eq!(
+            snippet
+                .lines()
+                .filter(|line| line.contains("ipv6 nd rdnss"))
+                .collect::<Vec<_>>(),
+            [
+                " ipv6 nd rdnss 2001:db8::53 1800",
+                " ipv6 nd rdnss 2001:db8::54 1800",
+            ]
+        );
+
+        // The existing IPv4 and two directional IPv6 containment policies are
+        // attached at the host-facing admin boundary.
+        let interface_acl = &set["interface"]["pf0hpf_if"]["acl"];
+        assert_eq!(
+            interface_acl["dhcp_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("inbound: {}\n")?
+        );
+        assert_eq!(
+            interface_acl["admin_ipv6_host_to_overlay_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("inbound: {}\n")?
+        );
+        assert_eq!(
+            interface_acl["admin_ipv6_overlay_to_host_flood_prevention"],
+            serde_yaml::from_str::<serde_yaml::Value>("outbound: {}\n")?
+        );
+
+        // Replacing VLAN, VRF, prefix, host, SVI, and resolver inputs must
+        // produce only the replacement desired state.
+        let admin_interface = network_config
+            .admin_interface
+            .as_mut()
+            .expect("fixture should contain an admin interface");
+        admin_interface.vlan_id = 124;
+        admin_interface.vni = 6666;
+        admin_interface.vpc_vni = 8888;
+        admin_interface.vpc_routing_profile = Some(rpc::RoutingProfile {
+            leak_tenant_host_routes_to_underlay: true, // Export the host /128.
+            ..Default::default()
+        });
+        // Leave the deprecated sidecar stale: every admin IPv6 render input
+        // must come from the authoritative address entry below.
+        let canonical = admin_interface
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6");
+        canonical.ip = "2001:db8:200::80".to_string();
+        canonical.interface_prefix = "2001:db8:200::80/128".to_string();
+        canonical.prefix = "2001:db8:200::/64".to_string();
+        canonical.svi_ip = Some("2001:db8:200::66/64".to_string());
+        let replacement_services = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec!["2001:db8:ffff::53".parse().unwrap()],
+        };
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &replacement_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let replacement = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let replacement_docs: serde_yaml::Value = serde_yaml::from_str(&replacement)?;
+        let replacement_set =
+            &replacement_docs.as_sequence().expect("two YAML documents")[1]["set"];
+        let replacement_snippet = replacement_set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("replacement admin RA should render an FRR snippet");
+        assert!(replacement_snippet.contains("interface vlan124 vrf vpc_8888"));
+        assert!(replacement_snippet.contains("ipv6 nd prefix 2001:db8:200::/64 no-autoconfig"));
+        assert!(replacement_snippet.contains("ipv6 nd rdnss 2001:db8:ffff::53 1800"));
+        assert!(
+            !replacement_set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"]
+                .is_null()
+        );
+        assert!(
+            !replacement_set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"]
+                .is_null()
+        );
+        // Route installation, origination, and permitted export must follow the new host and VLAN.
+        let replacement_router = &replacement_set["vrf"]["vpc_8888"]["router"];
+        assert_eq!(
+            replacement_router["static"]["2001:db8:200::80/128"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv6-unicast\nvia:\n  vlan124:\n    type: interface\n"
+            )?
+        );
+        assert_eq!(
+            replacement_router["bgp"]["address-family"]["ipv6-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:200::80/128: {}\n")?
+        );
+        assert_eq!(
+            replacement_set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]
+                ["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:200::80/128: {}\n")?
+        );
+        let replacement_neighbors =
+            &replacement_set["vrf"]["vpc_8888"]["router"]["bgp"]["neighbor"];
+        assert!(replacement_neighbors["2001:db8:100::70"].is_null());
+        assert_eq!(
+            replacement_neighbors["2001:db8:200::80"]["peer-group"].as_str(),
+            Some("tenant")
+        );
+        assert_eq!(
+            replacement_neighbors["2001:db8:200::80"]["passive-mode"].as_str(),
+            Some("on")
+        );
+        for stale in [
+            "interface vlan123 vrf vpc_7777",
+            "2001:db8:100::/64",
+            "2001:db8:100::70",
+            "2001:db8::53",
+            "2001:db8::54",
+        ] {
+            assert!(
+                !replacement.contains(stale),
+                "stale admin RA input: {stale}"
+            );
+        }
+
+        // Removing IPv6 resolver membership from the replacement state keeps
+        // RA/SVI desired state while withdrawing the complete RDNSS list.
+        let ipv4_only_services = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec!["192.0.2.53".parse().unwrap()],
+        };
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &ipv4_only_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let without_rdnss = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let without_rdnss_docs: serde_yaml::Value = serde_yaml::from_str(&without_rdnss)?;
+        let without_rdnss_set = &without_rdnss_docs
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        let without_rdnss_snippet = without_rdnss_set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("admin RA should remain without RDNSS");
+        assert!(without_rdnss_snippet.contains("ipv6 nd prefix 2001:db8:200::/64 no-autoconfig"));
+        assert!(!without_rdnss_snippet.contains("ipv6 nd rdnss"));
+        assert!(
+            !without_rdnss_set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"]
+                .is_null()
+        );
+        assert!(
+            !without_rdnss_set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"]
+                .is_null()
+        );
+
+        // Removing the authoritative IPv6 projection withdraws the complete
+        // RA/RDNSS and SVI state even while the deprecated sidecar remains.
+        let admin_interface = network_config
+            .admin_interface
+            .as_mut()
+            .expect("fixture should contain an admin interface");
+        admin_interface
+            .addresses
+            .retain(|address| address.address_family != i32::from(rpc::AddressFamily::V6));
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &ipv4_only_services,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert!(set["system"]["config"]["snippet"].is_null());
+        assert!(set["interface"]["vlan124"]["ip"]["address"]["2001:db8:200::66/64"].is_null());
+        assert!(set["interface"]["vlan124"]["ip"]["vrr"]["address"]["2001:db8:200::/64"].is_null());
+
+        // Withdrawal removes IPv6 routing and export while preserving IPv4 on the new VLAN.
+        let admin_router = &set["vrf"]["vpc_8888"]["router"];
+        assert!(admin_router["static"]["2001:db8:200::80/128"].is_null());
+        assert!(admin_router["bgp"]["address-family"]["ipv6-unicast"]["network"].is_null());
+        assert!(
+            set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]
+                ["65002"]
+                .is_null()
+        );
+        assert_eq!(
+            admin_router["static"]["10.217.4.70/32"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv4-unicast\nvia:\n  vlan124:\n    type: interface\n"
+            )?
+        );
+        assert_eq!(
+            admin_router["bgp"]["address-family"]["ipv4-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("10.217.4.70/32: {}\n")?
+        );
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_host_to_overlay_flood_prevention"]
+                .is_null()
+        );
+        assert!(
+            set["interface"]["pf0hpf_if"]["acl"]["admin_ipv6_overlay_to_host_flood_prevention"]
+                .is_null()
+        );
+        assert!(set["acl"]["admin_ipv6_host_to_overlay_flood_prevention"].is_null());
+        assert!(set["acl"]["admin_ipv6_overlay_to_host_flood_prevention"].is_null());
         Ok(())
     }
 
@@ -3818,6 +4315,114 @@ esac
         );
     }
 
+    /// Verifies authoritative prefix normalization, legacy fallback, and the
+    /// malformed-data precedence needed during mixed-version upgrades.
+    #[test]
+    fn ipv6_segment_prefix_falls_back_only_when_authoritative_data_is_absent() {
+        use carbide_test_support::value_scenarios;
+
+        let mut canonical = dual_stack_admin_interface();
+        canonical
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = "2001:db8:100::70/64".to_string();
+        let mut legacy = canonical.clone();
+        legacy
+            .addresses
+            .retain(|address| address.address_family != i32::from(rpc::AddressFamily::V6));
+        let mut empty_authoritative = canonical.clone();
+        empty_authoritative
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = String::new();
+        let legacy_prefix = "2001:db8:ffff::/64";
+
+        value_scenarios!(run = |interface: rpc::FlatInterfaceConfig| {
+                ipv6_segment_prefix(&interface, legacy_prefix)
+            };
+            "authoritative segment" {
+                // Host bits in an authoritative prefix are normalized before rendering.
+                canonical => Some("2001:db8:100::/64".to_string()),
+            }
+            "legacy response" {
+                // Only an absent canonical V6 entry permits the sidecar fallback.
+                legacy => Some(legacy_prefix.to_string()),
+            }
+            "empty authoritative segment" {
+                // Present but empty new data must not be reinterpreted as legacy data.
+                empty_authoritative => None,
+            }
+        );
+    }
+
+    /// Verifies admin RA accepts only an FNN VLAN with a contained host `/128`.
+    /// Primary-DPU/admin-mode gating remains at its sole production call site.
+    #[test]
+    #[allow(deprecated)]
+    fn admin_ipv6_router_advertisement_requires_valid_admin_host_projection() {
+        use carbide_test_support::value_scenarios;
+
+        let valid = dual_stack_admin_interface();
+        let mut canonical_only = valid.clone();
+        canonical_only.ipv6_interface_config = None;
+        let mut invalid_host_route = valid.clone();
+        invalid_host_route
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .interface_prefix = "2001:db8:100::/64".to_string();
+        let mut outside_segment = valid.clone();
+        outside_segment
+            .addresses
+            .iter_mut()
+            .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
+            .expect("fixture should contain canonical IPv6")
+            .prefix = "2001:db8:200::/64".to_string();
+        let resolvers = vec!["2001:db8::53".parse().unwrap()];
+
+        value_scenarios!(run = |(virtualization_type, interface)| {
+                let address = canonical_ipv6_address(&interface)
+                    .expect("test interface should contain canonical IPv6");
+                admin_ipv6_router_advertisement(
+                    virtualization_type,
+                    &interface,
+                    address,
+                    &resolvers,
+                )
+                .map(|advertisement| (
+                    advertisement.prefix,
+                    advertisement.mode,
+                    advertisement.rdnss_servers,
+                ))
+            };
+            "valid FNN admin SVI" {
+                // Canonical host and prefix data alone enable stateful RA on the VLAN.
+                (VpcVirtualizationType::Fnn, canonical_only) => Some((
+                    "2001:db8:100::/64".to_string(),
+                    nvue::Ipv6RouterAdvertisementMode::Stateful,
+                    resolvers.clone(),
+                )),
+            }
+            "non-FNN admin interface" {
+                // ETV has no supported admin VPC SVI RA path.
+                (VpcVirtualizationType::EthernetVirtualizer, valid) => None,
+            }
+            "non-host interface prefix" {
+                // A /64 cannot stand in for the allocated host route.
+                (VpcVirtualizationType::Fnn, invalid_host_route) => None,
+            }
+            "host outside segment" {
+                // An unrelated segment must never be advertised for this host.
+                (VpcVirtualizationType::Fnn, outside_segment) => None,
+            }
+        );
+    }
+
     fn validate_dhcp_config(received: DhcpConfig, expected: DhcpConfig) {
         assert_eq!(received.lease_time_secs, expected.lease_time_secs);
         assert_eq!(received.renewal_time_secs, expected.renewal_time_secs);
@@ -3924,7 +4529,8 @@ esac
                 rpc::InterfaceAddressConfig {
                     address_family: rpc::AddressFamily::V6.into(),
                     ip: "2001:db8::123".to_string(),
-                    interface_prefix: "2001:db8::/64".to_string(),
+                    interface_prefix: "2001:db8::123/128".to_string(),
+                    prefix: "2001:db8::/64".to_string(),
                     ..Default::default()
                 },
             ],
@@ -4181,6 +4787,20 @@ esac
         validate_dhcp_config(dhcp_config_received, dhcp_config);
 
         let dhcp_host_config: HostConfig = serde_yaml::from_str(&super::read_limited(i.path())?)?;
+        assert_eq!(
+            dhcp_host_config
+                .host_ip_addresses
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["vlan1"]
+        );
+        let admin_ipv6 = dhcp_host_config.host_ip_addresses["vlan1"]
+            .ipv6
+            .as_ref()
+            .expect("admin DHCP host entry should contain IPv6");
+        assert_eq!(admin_ipv6.address, Some("2001:db8::123".parse().unwrap()));
+        assert_eq!(admin_ipv6.prefix, "2001:db8::123/128");
         validate_host_config(
             dhcp_host_config,
             HostConfig::try_from(network_config.clone(), "pf0hpf_sf", "pf0vf", "_sf", true)?,

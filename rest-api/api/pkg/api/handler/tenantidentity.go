@@ -47,17 +47,15 @@ func payloadHash(m proto.Message) (string, error) {
 
 // CreateOrUpdateTenantIdentityConfigHandler handles PUT /tenant-identity/config.
 type CreateOrUpdateTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateTenantIdentityConfigHandler returns a new CreateOrUpdateTenantIdentityConfigHandler.
 func NewCreateOrUpdateTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateOrUpdateTenantIdentityConfigHandler {
 	return CreateOrUpdateTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -76,7 +74,7 @@ func NewCreateOrUpdateTenantIdentityConfigHandler(dbSession *cdb.Session, scp *s
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [put]
 func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "CreateOrUpdate", c, umich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -188,17 +186,15 @@ func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) er
 
 // GetTenantIdentityConfigHandler handles GET /tenant-identity/config.
 type GetTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetTenantIdentityConfigHandler returns a new GetTenantIdentityConfigHandler.
 func NewGetTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetTenantIdentityConfigHandler {
 	return GetTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -213,7 +209,7 @@ func NewGetTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Success 200 {object} model.APITenantIdentityConfig
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [get]
 func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Get", c, gmich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -306,17 +302,15 @@ func (gmich GetTenantIdentityConfigHandler) Handle(c echo.Context) error {
 
 // DeleteTenantIdentityConfigHandler handles DELETE /tenant-identity/config.
 type DeleteTenantIdentityConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteTenantIdentityConfigHandler returns a new DeleteTenantIdentityConfigHandler.
 func NewDeleteTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteTenantIdentityConfigHandler {
 	return DeleteTenantIdentityConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -330,7 +324,7 @@ func NewDeleteTenantIdentityConfigHandler(dbSession *cdb.Session, scp *sc.Client
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [delete]
 func (dmich DeleteTenantIdentityConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Delete", c, dmich.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -420,17 +414,15 @@ func (dmich DeleteTenantIdentityConfigHandler) Handle(c echo.Context) error {
 
 // CreateOrUpdateTenantIdentityTokenDelegationHandler handles PUT /tenant-identity/token-delegation.
 type CreateOrUpdateTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateTenantIdentityTokenDelegationHandler returns a new CreateOrUpdateTenantIdentityTokenDelegationHandler.
 func NewCreateOrUpdateTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateOrUpdateTenantIdentityTokenDelegationHandler {
 	return CreateOrUpdateTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -449,7 +441,7 @@ func NewCreateOrUpdateTenantIdentityTokenDelegationHandler(dbSession *cdb.Sessio
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [put]
 func (utdh CreateOrUpdateTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "CreateOrUpdate", c, utdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -561,17 +553,15 @@ func (utdh CreateOrUpdateTenantIdentityTokenDelegationHandler) Handle(c echo.Con
 
 // GetTenantIdentityTokenDelegationHandler handles GET /tenant-identity/token-delegation.
 type GetTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetTenantIdentityTokenDelegationHandler returns a new GetTenantIdentityTokenDelegationHandler.
 func NewGetTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetTenantIdentityTokenDelegationHandler {
 	return GetTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -586,7 +576,7 @@ func NewGetTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.
 // @Success 200 {object} model.APITenantIdentityTokenDelegation
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [get]
 func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Get", c, gtdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -679,17 +669,15 @@ func (gtdh GetTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error
 
 // DeleteTenantIdentityTokenDelegationHandler handles DELETE /tenant-identity/token-delegation.
 type DeleteTenantIdentityTokenDelegationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteTenantIdentityTokenDelegationHandler returns a new DeleteTenantIdentityTokenDelegationHandler.
 func NewDeleteTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteTenantIdentityTokenDelegationHandler {
 	return DeleteTenantIdentityTokenDelegationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -703,7 +691,7 @@ func NewDeleteTenantIdentityTokenDelegationHandler(dbSession *cdb.Session, scp *
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation [delete]
 func (dtdh DeleteTenantIdentityTokenDelegationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Delete", c, dtdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentityTokenDelegation", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -793,19 +781,17 @@ func (dtdh DeleteTenantIdentityTokenDelegationHandler) Handle(c echo.Context) er
 
 // GetJWKSHandler handles GET /.well-known/jwks.json and the SPIFFE variant.
 type GetJWKSHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
-	kind       corev1.JwksKind
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	kind      corev1.JwksKind
 }
 
 // NewGetJWKSHandler returns a new GetJWKSHandler.
 func NewGetJWKSHandler(dbSession *cdb.Session, scp *sc.ClientPool, kind corev1.JwksKind) GetJWKSHandler {
 	return GetJWKSHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
-		kind:       kind,
+		dbSession: dbSession,
+		scp:       scp,
+		kind:      kind,
 	}
 }
 
@@ -919,17 +905,15 @@ func (gjwksh GetJWKSHandler) Handle(c echo.Context) error {
 
 // GetOpenIDConfigurationHandler handles GET /.well-known/openid-configuration.
 type GetOpenIDConfigurationHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetOpenIDConfigurationHandler returns a new GetOpenIDConfigurationHandler.
 func NewGetOpenIDConfigurationHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetOpenIDConfigurationHandler {
 	return GetOpenIDConfigurationHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -1026,17 +1010,15 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 
 // ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/re-encrypt.
 type ReencryptTenantIdentitySecretsHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewReencryptTenantIdentitySecretsHandler returns a new ReencryptTenantIdentitySecretsHandler.
 func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) ReencryptTenantIdentitySecretsHandler {
 	return ReencryptTenantIdentitySecretsHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -1054,7 +1036,7 @@ func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.Cl
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt [post]
 func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c, rtish.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

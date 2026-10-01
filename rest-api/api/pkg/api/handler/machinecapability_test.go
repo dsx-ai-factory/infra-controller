@@ -16,7 +16,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -78,7 +77,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 	common.TestBuildMachineCapability(t, dbSession, &m4.ID, nil, cdbm.MachineCapabilityTypeInfiniBand, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceType("")), nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type args struct {
 		siteID          *uuid.UUID
@@ -311,7 +310,6 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 				ec.Set("user", tt.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gamch.Handle(ec)

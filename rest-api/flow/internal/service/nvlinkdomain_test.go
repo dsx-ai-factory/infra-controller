@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
@@ -27,20 +29,46 @@ type domainReadInventory struct {
 	withComponents bool
 	info           dbquery.StringQueryInfo
 	pagination     *dbquery.Pagination
-	orderBy        *dbquery.OrderBy
+	descending     bool
 	externalOnly   bool
+	batchCalls     int
 }
 
-func (m *domainReadInventory) GetListOfRacks(_ context.Context, info dbquery.StringQueryInfo, _, _ *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents, externalOnly bool) ([]*rack.Rack, int32, error) {
-	m.info, m.pagination, m.orderBy = info, pagination, orderBy
-	m.withComponents, m.externalOnly = withComponents, externalOnly
-	return m.racks, 7, m.err
+func (m *domainReadInventory) GetNVLDomain(_ context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error) {
+	m.id = id
+	if m.err != nil {
+		return nil, m.err
+	}
+	if id.ExternalID == "missing" {
+		return nil, status.Error(codes.NotFound, "missing")
+	}
+	cluster := uuid.MustParse("10000000-0000-0000-0000-000000000001")
+	return &nvldomain.NVLDomain{Identifier: identifier.Identifier{ID: cluster, ExternalID: id.ExternalID}, NMXCClusterID: &cluster}, nil
+}
+
+func (m *domainReadInventory) GetListOfNVLDomains(_ context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination, options ...nvldomain.ListOptions) ([]*nvldomain.NVLDomain, int32, error) {
+	m.info, m.pagination = info, pagination
+	m.descending, m.externalOnly = options[0].Descending, options[0].ExternalOnly
+	if len(m.racks) == 0 {
+		return nil, 7, m.err
+	}
+	domain, _ := m.GetNVLDomain(context.Background(), identifier.Identifier{ExternalID: "group-01"})
+	return []*nvldomain.NVLDomain{domain}, 7, m.err
 }
 
 func (m *domainReadInventory) GetRacksForNVLDomain(_ context.Context, id identifier.Identifier, withComponents bool) ([]*rack.Rack, error) {
-	m.id = id
 	m.withComponents = withComponents
 	return m.racks, m.err
+}
+
+func (m *domainReadInventory) GetRacksForNVLDomains(_ context.Context, ids []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error) {
+	m.batchCalls++
+	m.withComponents = withComponents
+	members := make(map[uuid.UUID][]*rack.Rack)
+	for _, id := range ids {
+		members[id] = m.racks
+	}
+	return members, m.err
 }
 
 func TestFlowServerImpl_GetNVLinkDomain(t *testing.T) {
@@ -51,10 +79,10 @@ func TestFlowServerImpl_GetNVLinkDomain(t *testing.T) {
 		code           codes.Code
 		withComponents bool
 	}{
-		{name: "external ID", id: "Rack-01", count: 1},
-		{name: "include components", id: "Rack-01", count: 1, withComponents: true},
+		{name: "external ID", id: "group-01", count: 1},
+		{name: "include components", id: "group-01", count: 1, withComponents: true},
 		{name: "missing", id: "missing", code: codes.NotFound},
-		{name: "ambiguous legacy membership", id: "legacy", count: 2, code: codes.FailedPrecondition},
+		{name: "multiple member racks", id: "group-01", count: 2},
 		{name: "query failure", id: "rack", err: status.Error(codes.Internal, "unavailable"), code: codes.Internal},
 		{name: "blank", id: " ", code: codes.InvalidArgument},
 	} {
@@ -73,7 +101,10 @@ func TestFlowServerImpl_GetNVLinkDomain(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, identifier.Identifier{ExternalID: tc.id}, m.id)
 			assert.Equal(t, tc.withComponents, m.withComponents)
-			assert.Equal(t, "Rack-01", got.GetDomain().GetId())
+			assert.Equal(t, "group-01", got.GetDomain().GetId())
+			assert.Equal(t, "group-01", got.GetDomain().GetRackGroupId())
+			assert.Empty(t, got.GetDomain().GetName())
+			assert.NotEmpty(t, got.GetDomain().GetNmxcClusterId())
 			assert.Equal(t, "GB200_NVL72R1_C2G4", got.GetDomain().GetTopology())
 		})
 	}
@@ -114,23 +145,23 @@ func TestFlowServerImpl_GetListOfNVLinkDomains(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.EqualValues(t, 7, got.GetTotal())
+			assert.Equal(t, 1, m.batchCalls)
 			assert.True(t, m.externalOnly)
-			assert.Equal(t, tc.withComponents, m.withComponents)
+			if !tc.empty {
+				assert.Equal(t, tc.withComponents, m.withComponents)
+			}
 			assert.Equal(t, req.GetInfo().GetPatterns(), m.info.Patterns)
 			assert.True(t, m.info.UseOR)
 			assert.False(t, m.info.IsWildcard)
 			assert.EqualValues(t, 2, m.pagination.Offset)
 			assert.EqualValues(t, 1, m.pagination.Limit)
-			direction := "ASC"
-			if tc.order == "NAME_DESC" {
-				direction = "DESC"
-			}
-			assert.Equal(t, direction, string(m.orderBy.Direction))
+			assert.Equal(t, tc.order == "NAME_DESC", m.descending)
 			if tc.empty {
 				assert.Empty(t, got.GetDomains())
 			} else {
 				require.Len(t, got.GetDomains(), 1)
-				assert.Equal(t, "rack-01", got.GetDomains()[0].GetId())
+				assert.Equal(t, "group-01", got.GetDomains()[0].GetId())
+				assert.Empty(t, got.GetDomains()[0].GetName())
 				assert.Equal(t, "GB300_NVL72R1_C2G4", got.GetDomains()[0].GetTopology())
 			}
 		})

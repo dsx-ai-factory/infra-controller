@@ -44,7 +44,7 @@ tags:
       ### Creating Site-Level IP Blocks
       NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
 
-      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. While a new prefix overlaps a remaining Site IP Block, NICo makes no IP Block changes for the Site. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
 
       To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
@@ -3255,10 +3255,44 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The VPC ID is invalid, the VPC does not belong to the requested organization, its Site is not Registered, or it still has associated Subnets, VPC Prefixes, or Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                deletion-precondition-not-satisfied:
+                  value:
+                    source: nico
+                    message: Cannot delete VPC, one or more Subnets exist for this VPC
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another VPC power operation is in progress, or an Instance was associated with the VPC after the initial deletion checks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                power-operation-in-progress:
+                  value:
+                    source: nico
+                    message: Another power operation is already in progress for the VPC
+                    data: null
+        '412':
+          description: Deletion was rejected because certain preconditions were not satisfied.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
+          $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a specific VPC by ID.
+
+        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -8705,7 +8739,7 @@ paths:
                 release-pending:
                   value:
                     source: nico
-                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g has status: InUse that does not allow Instance creation'
                     data: null
                     retryable: true
                 validation-error:
@@ -8715,6 +8749,19 @@ paths:
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The request conflicts with an existing resource or operation, such as an already assigned machine or a power operation in progress for the VPC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                release-pending:
+                  value:
+                    source: nico
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    data: null
+                    retryable: true
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -8748,6 +8795,11 @@ paths:
         Create an Instance for Tenant.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        A request targeting an already assigned `machineId` returns HTTP 409. A `Ready` response does not
+        reserve the Machine: another request can assign it before creation is processed.
+        `allowUnhealthyMachine` does not bypass the assignment check. Honor the `retryable`
+        classification below before retrying, or select another available Machine.
 
         Machine-unavailable errors are retryable only when a unique current Instance
         belongs to this Tenant and is Terminating. Other current occupants are not
@@ -9971,7 +10023,7 @@ paths:
             type: string
           in: query
           name: nvLinkDomainId
-          description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the Rack external ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
+          description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
         - schema:
             type: string
             enum:
@@ -22803,6 +22855,16 @@ components:
             - integer
             - 'null'
           description: 'Virtual function the attachment uses. Not currently supported'
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          description: 'OVS bridge the attachment uses. Set only for an `OVS` attachment'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          description: 'OVN network the OVS attachment maps onto. Set only for an `OVS` attachment, and optional even then'
         macAddress:
           type:
             - string
@@ -25535,6 +25597,8 @@ components:
           deviceInstance: 3
           attachmentType: OVS
           virtualFunctionId: null
+          bridgeName: br-spx0
+          ovnNetworkName: spx-net-a
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
         spectrumXPartitionId:
@@ -25560,6 +25624,22 @@ components:
             - integer
             - 'null'
           description: Must be omitted, as virtual functions are not currently supported
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9_.-]+$'
+          description: 'OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 256
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: 'OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type'
       required:
         - spectrumXPartitionId
         - device
@@ -25598,7 +25678,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: Core-reported NVLink domain UUID associated with this Interface, not the Rack external ID returned by the Domain API.
+          description: Core-reported NVLink domain UUID associated with this Interface, not the rack group ID returned by the Domain API.
         deviceInstance:
           type: integer
           description: 'Index of the device, used to identify the GPU associated with this Interface'
@@ -25843,10 +25923,9 @@ components:
             Operability phase aggregated from tray operationStatus values.
         nvLinkDomainIds:
           type: array
-          description: Core-reported NVLink domain UUIDs containing this Rack, not the Rack external ID returned by the Domain API. Empty when the Rack is not assigned to a Core NVLink domain.
+          description: Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
           items:
             type: string
-            format: uuid
         location:
           $ref: '#/components/schemas/RackLocation'
           description: 'Physical or logical location of the Rack'
@@ -26156,8 +26235,7 @@ components:
           type:
             - string
             - 'null'
-          format: uuid
-          description: Core-reported NVLink domain UUID containing this Tray's Rack, not the Rack external ID returned by the Domain API. Null when the Rack is not assigned to a Core NVLink domain.
+          description: Domain external ID (rack group ID) containing this Tray's Rack. Null when no rack-group Domain is assigned.
         taskStats:
           $ref: '#/components/schemas/TaskStats'
         health:
@@ -26228,28 +26306,37 @@ components:
       title: NVLinkDomain
       type: object
       description: NVLink Domain inventory and its components.
-      required: [id, name, topology, operationStatus, components]
+      required: [id, name, rackGroupId, nmxcClusterId, topology, operationStatus, components]
       properties:
         id:
           type: string
-          description: Case-sensitive Domain ID, equal to its Rack external ID.
+          description: Case-sensitive Domain external ID, equal to its rack group ID.
+        rackGroupId:
+          type: string
+          description: Rack group ID, identical to id.
+        nmxcClusterId:
+          type: [string, 'null']
+          format: uuid
+          description: NMX-C cluster UUID observed on the group's switches. Null when no valid observation is available. Conflicting observations are logged and preserve the last valid cluster without interrupting inventory sync.
         name:
           type: string
-          description: Domain name, equal to its Rack name.
+          description: Domain display name. Empty for newly inventory-created Domains; inventory sync preserves existing names.
         topology:
           type: [string, 'null']
-          description: Rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable or unrecognized.
+          description: Common member-rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable, unrecognized, or inconsistent across member racks.
         operationStatus:
           type: string
-          description: Operability phase aggregated from the Rack components, not the Core lifecycle state.
+          description: Operability phase aggregated across member racks, not the Core lifecycle state.
         components:
           type: [array, 'null']
           items:
             $ref: '#/components/schemas/RackComponent'
           description: Components belonging to this Domain. Null when includeComponents is false; an empty array when requested but none are known.
       examples:
-        - id: rack-01
-          name: nvl5-gp1-jhb01
+        - id: group-01
+          rackGroupId: group-01
+          nmxcClusterId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          name: ''
           topology: GB200_NVL72R1_C2G4
           operationStatus: Ready
           components: []
@@ -30008,6 +30095,10 @@ components:
         rackProfileId:
           type: string
           description: Identifier of the Rack Profile this rack conforms to
+        rackGroupId:
+          type: [string, 'null']
+          description: External rack group ID selected and persisted at creation together with rackProfileId. Null for legacy rows without a recorded group; metadata updates preserve it.
+          example: group-01
         name:
           type: string
           description: Human-readable name of the Expected Rack
@@ -30032,7 +30123,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`

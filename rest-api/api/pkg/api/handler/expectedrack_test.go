@@ -72,6 +72,7 @@ func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *moc
 		}
 		for _, rack := range racks {
 			require.Empty(t, rack.GetRackProfileId().GetId(), "caller profile must not reach Core")
+			require.Nil(t, rack.RackGroupId, "Core must infer the group from rack membership")
 		}
 		if cancel, ok := mutationCtx.Value(readbackCancelKey{}).(context.CancelFunc); ok {
 			cancel()
@@ -88,11 +89,17 @@ func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *moc
 		for _, rack := range racks {
 			stored := proto.Clone(rack).(*corev1.ExpectedRack)
 			stored.RackProfileId = &corev1.RackProfileId{Id: derivedTestProfile}
+			if stored.RackGroupId == nil {
+				stored.RackGroupId = &corev1.RackGroupId{Id: "group-derived"}
+			}
 			if bulk {
 				stored.RackProfileId.Id += "_" + stored.GetRackId().GetId()
 			}
 			if stored.GetRackId().GetId() == "readback-empty-profile" {
 				stored.RackProfileId = nil
+			}
+			if stored.GetRackId().GetId() == "readback-empty-group" {
+				stored.RackGroupId = nil
 			}
 			result.ExpectedRacks = append(result.ExpectedRacks, stored)
 		}
@@ -371,6 +378,16 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadGateway,
 		},
 		{
+			name:        "missing Core group rolls back local create",
+			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-empty-group"},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadGateway,
+		},
+		{
 			name:        "expired mutation budget does not start readback",
 			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-starved"},
 			setupContext: func(c echo.Context) {
@@ -463,7 +480,7 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
-			if tt.requestBody.RackID == "readback-empty-profile" || tt.requestBody.RackID == "readback-starved" {
+			if tt.requestBody.RackID == "readback-empty-profile" || tt.requestBody.RackID == "readback-empty-group" || tt.requestBody.RackID == "readback-starved" {
 				count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedRack)(nil)).Where("rack_id = ?", tt.requestBody.RackID).Count(context.Background())
 				require.NoError(t, err)
 				assert.Zero(t, count)
@@ -480,6 +497,9 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 				stored, err := erDAO.Get(ctx, nil, response.ID, nil, false)
 				require.NoError(t, err)
 				assert.Equal(t, derivedTestProfile, stored.RackProfileID)
+				wantGroup := "group-derived"
+				assert.Equal(t, &wantGroup, response.RackGroupID)
+				assert.Equal(t, &wantGroup, stored.RackGroupID)
 				if tt.requestBody.Name != nil {
 					assert.Equal(t, *tt.requestBody.Name, response.Name, "Name in response should match request")
 				}
@@ -1784,7 +1804,7 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			err := handler.Handle(c)
 
 			if tt.expectedStatus == http.StatusOK && len(tt.requestBody.ExpectedRacks) > 0 {
-				assert.EqualValues(t, 1, profileUpdates.Load(), "profiles must be written in one batch")
+				assert.EqualValues(t, 2, profileUpdates.Load(), "profiles and groups each use one batch regardless of rack count")
 			} else {
 				assert.Zero(t, profileUpdates.Load(), "empty or invalid replacements must not write profiles")
 			}
@@ -1821,6 +1841,8 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 					stored, err := cdbm.NewExpectedRackDAO(dbSession).Get(ctx, nil, er.ID, nil, false)
 					require.NoError(t, err)
 					assert.Equal(t, er.RackProfileID, stored.RackProfileID)
+					assert.Equal(t, er.RackGroupID, stored.RackGroupID)
+					assert.Equal(t, new("group-derived"), er.RackGroupID)
 					if expected.Name != nil {
 						assert.Equal(t, *expected.Name, stored.Name)
 					}

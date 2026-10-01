@@ -9,7 +9,7 @@ allowing you to:
 
 - Test NICo without physical hardware
 - Simulate multiple hosts, DPUs, switches and power shelves
-- Perform load testing at scale (multiple pods, thousands of BMCs)
+- Perform load testing at scale (multiple pods, thousands of Baseboard Management Controllers (BMCs))
 - Run simulations alongside real hardware
 
 ## Namespace Configuration
@@ -32,11 +32,10 @@ a `Recreate` rollout, and by exposing no replica count value.
 
 ## Helm-Only Deployment
 
-The chart creates the Kubernetes resources that
-`helm-prereqs/setup-machine-a-tron.sh` otherwise creates: the namespace, its
-`nico.nvidia.com/managed` label, and the image pull Secret. Those resources need
-no setup script after helm-prereqs has installed the cert-manager ClusterIssuer
-and the External Secrets Operator (ESO):
+The chart is the complete deployment path. It creates the namespace, its
+`nico.nvidia.com/managed` label, and the image pull Secret after helm-prereqs
+has installed the cert-manager ClusterIssuer and the External Secrets Operator
+(ESO):
 
 - `global.namespaceOverride` with `createNamespace: true` creates the namespace
   and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
@@ -48,16 +47,21 @@ and the External Secrets Operator (ESO):
   `machines.rack-machines: null`) still gets the bare `[machines]` table that
   machine-a-tron requires at startup.
 
-The chart does not seed the site-default Vault credentials or write the NICo
-Core site configuration. Follow the
+The chart does not write the NICo Core site configuration or the site
+credentials. `siteCredentials` in helm-prereqs renders the site-wide BMC root
+and the Unified Extensible Firmware Interface (UEFI) defaults. Refer to
+[Site Credentials Secret](../../../helm-prereqs/README.md#site-credentials-secret).
+The Core values carry `bmc_proxy`, `allow_insecure_discovery`, and the simulated
+networks, with `helm-prereqs/values/nico-core-simulation.yaml` as the template.
+Refer to the
 [deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
-those steps.
+both modes.
 
 The chart reads the site-wide BMC root password from the `nico-site-credentials`
 Secret with a Helm `lookup` and pins every mock BMC to it. Install that Secret
-(`siteCredentials` in helm-prereqs) before the chart. Without the Secret the
-chart omits both password lines and the mocks keep their factory passwords, so
-enable `siteCredentials` in helm-prereqs for the multipod and scale profiles.
+before the chart. Without the Secret the chart omits both password lines and
+the mocks keep their factory passwords, so enable `siteCredentials` in
+helm-prereqs for the multipod and scale profiles.
 `machineATron.siteCredentialsSecret` names the Secret, its namespace, and the
 `credentials.yaml` key whose `bmc_site_wide_root.password` entry is read.
 `machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
@@ -214,15 +218,19 @@ Simple but **incompatible with real hardware**.
 helm upgrade --install nico ./helm \
   --set global.namespaceOverride=nico-system \
   --set nico-machine-a-tron.enabled=true \
-  --set nico-machine-a-tron.pods.default.machines.rack-machines.hostCount=10 \
-  --set nico-machine-a-tron.pods.default.machines.rack-machines.dpuPerHostCount=2
+  --set nico-machine-a-tron.pods.mat-0.machines.rack-machines.hostCount=10 \
+  --set nico-machine-a-tron.pods.mat-0.machines.rack-machines.dpuPerHostCount=2
 ```
+
+The example extends the chart's default `mat-0` pod. A pod under another key
+adds a second pod, which the chart rejects unless `mat-k8s-controller` is
+enabled.
 
 **NICo Site Config:**
 
 ```toml
 [site_explorer]
-bmc_proxy = "nico-machine-a-tron-default-bmc-mock.nico-system.svc.cluster.local:1266"
+bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
 ```
 
 The port defaults to 1266 and must match the `service.bmcMock.port` value if
@@ -282,6 +290,26 @@ mat-k8s-controller:
   enabled: true
   config:
     insecureSkipVerify: true  # For self-signed certs in dev
+```
+
+Check the rendered machine groups before deploying. Helm deep-merges values
+files, so the chart's example group survives unless the values file nulls it
+(`rack-machines: null`), and the count must equal the groups in the file.
+`helm template` has no cluster access, so its render omits the
+`host_bmc_password` and `dpu_bmc_password` lines that the site credentials
+lookup adds on install. Install with a low API request rate when the release
+creates hundreds of Services or the cluster is reached through a tunnel. With
+the values above, chart resources land in `nico-system`, and `-n nico-mat` sets
+only the Helm release namespace. The labeled `nico-system` namespace and its
+`machine-a-tron-pull` Secret must exist, or pass the flags from
+[Helm-Only Deployment](#helm-only-deployment) that make the chart create them
+in the effective resource namespace:
+
+```bash
+helm template nico-machine-a-tron ./helm/charts/nico-machine-a-tron -f my-values.yaml \
+  | grep -c '^ *\[machines\.'
+helm upgrade --install nico-machine-a-tron ./helm/charts/nico-machine-a-tron \
+  -n nico-mat --create-namespace --qps 15 --burst-limit 30 -f my-values.yaml
 ```
 
 ### How It Works
@@ -349,14 +377,21 @@ adds a dynamic target UDP port for IPMI access.
   neither allocates nor validates and for which kube-proxy programs
   forwarding rules on every node, so an overlap silently collides with a
   dynamically allocated clusterIP or hides the real destination. This is a
-  hard requirement: `helm-prereqs/setup-machine-a-tron.sh` checks every BMC
-  network it deploys (the `SCALE_OOB_PREFIX` segment and the network of each
-  `bmcDhcpRelayAddress` in the selected values file) against the ServiceCIDR
-  and refuses an overlap, and it stops when it cannot determine the
-  ServiceCIDR unless `SCALE_SERVICE_CIDRS` names it or
-  `SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1` accepts the risk. A direct Helm
-  install must verify it before deploying because neither the chart nor the
-  controller checks it.
+  hard requirement that neither the chart nor the controller checks. Run
+  `helm-prereqs/check-mat-service-cidr.py` against the values file before
+  every `helm upgrade --install`. It resolves each `bmcDhcpRelayAddress` to
+  its `[networks.*]` prefix in the Core values file or a rendered site config,
+  reads the ServiceCIDR from the cluster (`SCALE_SERVICE_CIDRS` overrides it),
+  and exits nonzero on an overlap, an unresolved relay, an unknown
+  ServiceCIDR, or a Controller Mode values file without `pods`, which would
+  inherit the chart's default group. `SCALE_BMC_PREFIXES` names the network of
+  a relay the site config does not declare yet.
+
+  ```bash
+  python3 helm-prereqs/check-mat-service-cidr.py my-values.yaml \
+    --site-config helm-prereqs/values/nico-core-simulation.yaml
+  ```
+
 - DHCP relay mode (see DHCP Relay Mode) is the exception: NICo resolves the
   BMC network from the DHCP relay address, which in that mode is each pod's
   relay Service clusterIP, so the BMC network must contain the relay
@@ -692,6 +727,22 @@ recreated once, moving the address from `clusterIP` to `externalIPs`. While the
 BMC network still overlaps the ServiceCIDR, a recreated Service can be allocated
 another published BMC IP as its clusterIP and is recreated again on a later
 pass; the controller logs one warning per pass while this happens.
+
+### Invalid Peer Certificate After a Site Reprovision
+
+```text
+invalid peer certificate: BadSignature
+```
+
+A reprovision recreates the site CA. cert-manager does not reissue a
+certificate that has not expired, and the per-pod `<release>-<pod>-tls`
+Secrets survive `helm uninstall`, so machine-a-tron keeps presenting a
+certificate from the old CA. Delete the issued Secrets and let cert-manager
+reissue them:
+
+```bash
+kubectl -n <namespace> delete secret -l controller.cert-manager.io/fao=true
+```
 
 ### No instances discovered
 

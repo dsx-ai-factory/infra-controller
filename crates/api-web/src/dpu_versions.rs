@@ -14,10 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Flat `rpc::forge::Machine` fields are deprecated in favour of `status`/`config`
-// sub-messages, but this module must still read them until the REST API is migrated.
-// See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
 
 use std::sync::Arc;
 
@@ -59,14 +55,15 @@ impl From<forgerpc::Machine> for Row {
             Some((state, _)) => state.to_owned(),
             None => machine.state,
         };
+        let status = machine.status.unwrap_or_default();
 
         Row {
             dpu_machine_id: machine.id.map(|id| id.to_string()).unwrap_or_default(),
-            host_machine_id: machine
+            host_machine_id: status
                 .associated_host_machine_id
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
-            dpu_type: machine
+            dpu_type: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dmi_data.as_ref())
@@ -84,7 +81,7 @@ impl From<forgerpc::Machine> for Row {
                         .map(|c| c.version.clone())
                 })
                 .unwrap_or_default(),
-            firmware_version: machine
+            firmware_version: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dpu_info.as_ref())
@@ -95,7 +92,7 @@ impl From<forgerpc::Machine> for Row {
                 .as_ref()
                 .and_then(|bmc| bmc.firmware_version.clone())
                 .unwrap_or_default(),
-            bios_version: machine
+            bios_version: status
                 .discovery_info
                 .as_ref()
                 .and_then(|di| di.dmi_data.as_ref())

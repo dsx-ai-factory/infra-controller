@@ -10,12 +10,13 @@ import (
 	"encoding/hex"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -162,19 +163,16 @@ type OperatingSystemSiteAssociationDAO interface {
 type OperatingSystemSiteAssociationSQLDAO struct {
 	dbSession *db.Session
 	OperatingSystemSiteAssociationDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new OperatingSystemSiteAssociation from the given parameters
 func (ossasd OperatingSystemSiteAssociationSQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
 	input OperatingSystemSiteAssociationCreateInput,
-) (*OperatingSystemSiteAssociation, error) {
+) (_ *OperatingSystemSiteAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.Create")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.Create")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
 
 	ossa := &OperatingSystemSiteAssociation{
 		ID:                uuid.New(),
@@ -201,14 +199,11 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) Create(
 
 // GetByID returns a OperatingSystemSiteAssociation by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*OperatingSystemSiteAssociation, error) {
+func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *OperatingSystemSiteAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.GetByID")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "id", id.String())
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.GetByID")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("id", id.String()))
 
 	ossa := &OperatingSystemSiteAssociation{}
 
@@ -231,15 +226,12 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByID(ctx context.Context, 
 
 // GetByOperatingSystemIDAndSiteID returns an OperatingSystemSiteAssociation by OperatingSystemID and SiteID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByOperatingSystemIDAndSiteID(ctx context.Context, tx *db.Tx, OperatingSystemID uuid.UUID, siteID uuid.UUID, includeRelations []string) (*OperatingSystemSiteAssociation, error) {
+func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByOperatingSystemIDAndSiteID(ctx context.Context, tx *db.Tx, OperatingSystemID uuid.UUID, siteID uuid.UUID, includeRelations []string) (_ *OperatingSystemSiteAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.GetByOperatingSystemIDAndSiteID")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "operating_system_id", OperatingSystemID.String())
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "site_id", siteID.String())
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.GetByOperatingSystemIDAndSiteID")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("operating_system_id", OperatingSystemID.String()))
+	cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("site_id", siteID.String()))
 
 	ossa := &OperatingSystemSiteAssociation{}
 
@@ -264,31 +256,25 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) GetByOperatingSystemIDAndSite
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in OperatingSystemSiteAssociationOrderByDefault in ascending order
-func (ossasd OperatingSystemSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]OperatingSystemSiteAssociation, int, error) {
+func (ossasd OperatingSystemSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) (_ []OperatingSystemSiteAssociation, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.GetAll")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.GetAll")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
 
 	ossas := []OperatingSystemSiteAssociation{}
 
 	query := db.GetIDB(tx, ossasd.dbSession).NewSelect().Model(&ossas)
 	if filter.OperatingSystemIDs != nil {
 		query = query.Where("ossa.operating_system_id IN (?)", bun.In(filter.OperatingSystemIDs))
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "operating_system_id", filter.OperatingSystemIDs)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("ossa.site_id IN (?)", bun.In(filter.SiteIDs))
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.Versions != nil {
 		query = query.Where("ossa.version IN (?)", bun.In(filter.Versions))
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "version", filter.Versions)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("ossa.status IN (?)", bun.In(filter.Statuses))
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "status", filter.Statuses)
 	}
 
 	for _, relation := range includeRelations {
@@ -376,13 +362,11 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) GenerateAndUpdateVersion(ctx 
 // Update updates specified fields of an existing OperatingSystemSiteAssociation
 func (ossasd OperatingSystemSiteAssociationSQLDAO) Update(
 	ctx context.Context, tx *db.Tx, input OperatingSystemSiteAssociationUpdateInput,
-) (*OperatingSystemSiteAssociation, error) {
+) (_ *OperatingSystemSiteAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.Update")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "id", input.OperatingSystemSiteAssociationID.String())
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.Update")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("id", input.OperatingSystemSiteAssociationID.String()))
 
 	ossa := &OperatingSystemSiteAssociation{
 		ID: input.OperatingSystemSiteAssociationID,
@@ -393,32 +377,31 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) Update(
 	if input.OperatingSystemID != nil {
 		ossa.OperatingSystemID = *input.OperatingSystemID
 		updatedFields = append(updatedFields, "operating_system_id")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "operating_system_id", input.OperatingSystemID.String())
+		cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("operating_system_id", input.OperatingSystemID.String()))
 	}
 	if input.SiteID != nil {
 		ossa.SiteID = *input.SiteID
 		updatedFields = append(updatedFields, "site_id")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "site_id", input.SiteID.String())
+		cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("site_id", input.SiteID.String()))
 	}
 	if input.Version != nil {
 		ossa.Version = input.Version
 		updatedFields = append(updatedFields, "version")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "version", *input.Version)
+		cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("version", *input.Version))
 	}
 	if input.Status != nil {
 		ossa.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		ossa.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 	if input.ControllerState != nil {
 		ossa.ControllerState = input.ControllerState
 		updatedFields = append(updatedFields, "controller_state")
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "controller_state", *input.ControllerState)
+		cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("controller_state", *input.ControllerState))
 	}
 
 	if len(updatedFields) > 0 {
@@ -441,13 +424,11 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) Update(
 // Delete deletes an OperatingSystemSiteAssociation by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (ossasd OperatingSystemSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ossasd OperatingSystemSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, OperatingSystemSiteAssociationDAOSpan := ossasd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemSiteAssociationDAO.Delete")
-	if OperatingSystemSiteAssociationDAOSpan != nil {
-		defer OperatingSystemSiteAssociationDAOSpan.End()
-		ossasd.tracerSpan.SetAttribute(OperatingSystemSiteAssociationDAOSpan, "id", id.String())
-	}
+	ctx, OperatingSystemSiteAssociationDAOSpan := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.Delete")
+	defer func() { cotel.EndSpan(OperatingSystemSiteAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(OperatingSystemSiteAssociationDAOSpan, attribute.String("id", id.String()))
 
 	ossa := &OperatingSystemSiteAssociation{
 		ID: id,
@@ -464,7 +445,6 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) Delete(ctx context.Context, t
 // NewOperatingSystemSiteAssociationDAO returns a new OperatingSystemSiteAssociationDAO
 func NewOperatingSystemSiteAssociationDAO(dbSession *db.Session) OperatingSystemSiteAssociationDAO {
 	return &OperatingSystemSiteAssociationSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

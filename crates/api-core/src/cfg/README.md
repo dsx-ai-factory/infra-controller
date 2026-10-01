@@ -643,6 +643,7 @@ Extends `StateControllerConfig` with:
 | `waiting_for_measurements_timeout` | `Duration` | `4h` | How long a host may remain in WaitingForMeasurements before being escalated to Failed. |
 | `uefi_boot_wait` | `Duration` | `5m` | Wait time for UEFI boot completion after host reboot. |
 | `max_bios_config_retries` | `u32` | `3` | Shared retry budget for automated host boot-configuration convergence across BIOS recovery and boot-order verification. |
+| `full_lockdown_recovery_enabled` | `bool` | `false` | Allows new full-lockdown recovery entries for explored BMC vendor `LenovoAMI` and model `HG635N_V2`. Supported recovery already in progress continues when disabled. Enable only after all machine-state readers support the recovery state; see [full-lockdown recovery rollout](../../../../docs/operations/firmware-updates/host-firmware.md#full-lockdown-recovery-rollout) for rollout and rollback requirements. |
 | `polling_bios_setup_stuck_threshold` | `Duration` | `15m` | Time in PollingBiosSetup with `is_bios_setup == false` before recovery escalation. |
 | `boot_interface_observation_interval` | `Duration` | `10m` | Positive time between successful Redfish observations of an already-verified boot interface. |
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |

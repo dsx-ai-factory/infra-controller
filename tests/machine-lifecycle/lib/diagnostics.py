@@ -39,6 +39,8 @@ _MACHINE_FIELDS = (
     "state",
     "state_version",
     "state_reason",
+)
+_MACHINE_STATUS_FIELDS = (
     "failure_details",
     "health",
     "health_sources",
@@ -95,6 +97,13 @@ def _selected_fields(value: Any, fields: Iterable[str]) -> dict[str, Any] | None
     if not isinstance(value, Mapping):
         return None
     return {field: value[field] for field in fields if field in value}
+
+
+def _selected_machine_fields(value: Any) -> dict[str, Any] | None:
+    selected = _selected_fields(value, _MACHINE_FIELDS)
+    if selected is not None:
+        selected["status"] = _selected_fields(value.get("status"), _MACHINE_STATUS_FIELDS)
+    return selected
 
 
 def _record_error(snapshot: dict[str, Any], source: str, error: Exception) -> None:
@@ -354,9 +363,14 @@ def _collect_timeout_diagnostics(
                 timeout=DIAGNOSTIC_PROBE_TIMEOUT_SECONDS,
             ),
         )
-        snapshot["machines"][machine_id] = _selected_fields(machine, _MACHINE_FIELDS)
+        snapshot["machines"][machine_id] = _selected_machine_fields(machine)
         if machine_id in resolved_dpu_ids and machine_id not in snapshot["dpus"]:
-            snapshot["dpus"][machine_id] = _selected_fields(machine, _DPU_FIELDS)
+            dpu = _selected_fields(machine, ("state",))
+            if dpu is not None:
+                # Keep the diagnostic DPU summary shape used by managed-host show.
+                dpu["machine_id"] = machine_id
+                dpu.update(_selected_fields(machine.get("status"), _DPU_FIELDS) or {})
+            snapshot["dpus"][machine_id] = dpu
 
     for dpu_id in resolved_dpu_ids:
         network_config = _probe(

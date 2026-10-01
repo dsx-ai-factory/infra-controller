@@ -139,6 +139,8 @@ type APIExpectedRack struct {
 	RackID string `json:"rackId"`
 	// RackProfileID identifies the rack profile this rack conforms to
 	RackProfileID string `json:"rackProfileId"`
+	// RackGroupID is the external group selected at creation; legacy rows may have no group.
+	RackGroupID *string `json:"rackGroupId"`
 	// Name is the optional human-readable name of the expected rack
 	Name string `json:"name"`
 	// Description is the optional human-readable description of the expected rack
@@ -163,6 +165,7 @@ func NewAPIExpectedRack(dbModel *cdbm.ExpectedRack) *APIExpectedRack {
 		SiteID:        dbModel.SiteID,
 		RackID:        dbModel.RackID,
 		RackProfileID: dbModel.RackProfileID,
+		RackGroupID:   dbModel.RackGroupID,
 		Name:          dbModel.Name,
 		Description:   dbModel.Description,
 		Labels:        APILabels(dbModel.Labels),

@@ -667,12 +667,31 @@ impl CurrentNetworkVersion {
         // rendering.
         config.enable_dhcp = false;
 
-        // Tenant IPv6 addresses can feed routed RA or an L2 SVI's VRR address,
-        // while admin family-neutral fields remain non-rendering inputs.
+        // Fetch-time address normalization mirrors the admin V6 host `/128`
+        // and SVI into the compatibility sidecar before this fingerprint is
+        // built. The canonical segment prefix is the only distinct address-list
+        // render input; V4 address-list entries do not feed HBN rendering.
+        let renders_admin_ipv6 = config.use_admin_network
+            && config.is_primary_dpu
+            && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
         if let Some(admin_interface) = &mut config.admin_interface {
-            admin_interface.addresses.clear();
+            if renders_admin_ipv6 {
+                admin_interface.addresses.retain(|address| {
+                    address.address_family == i32::from(::rpc::forge::AddressFamily::V6)
+                });
+                for address in &mut admin_interface.addresses {
+                    address.ip.clear();
+                    address.interface_prefix.clear();
+                    address.gateway = None;
+                    address.svi_ip = None;
+                    address.tenant_vrf_loopback_ip = None;
+                }
+            } else {
+                admin_interface.addresses.clear();
+            }
         }
 
+        // Tenant IPv6 addresses can feed routed RA or an L2 SVI's VRR address.
         let renders_tenant_ipv6 = !config.use_admin_network
             && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
         for interface in &mut config.tenant_interfaces {

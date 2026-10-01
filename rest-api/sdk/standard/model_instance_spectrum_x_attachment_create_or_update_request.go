@@ -34,6 +34,10 @@ type InstanceSpectrumXAttachmentCreateOrUpdateRequest struct {
 	AttachmentType string `json:"attachmentType"`
 	// Must be omitted, as virtual functions are not currently supported
 	VirtualFunctionId NullableInt32 `json:"virtualFunctionId,omitempty"`
+	// OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type
+	BridgeName NullableString `json:"bridgeName,omitempty" validate:"regexp=^[a-zA-Z0-9_.-]+$"`
+	// OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type
+	OvnNetworkName NullableString `json:"ovnNetworkName,omitempty" validate:"regexp=^[a-zA-Z0-9_-]+$"`
 }
 
 type _InstanceSpectrumXAttachmentCreateOrUpdateRequest InstanceSpectrumXAttachmentCreateOrUpdateRequest
@@ -198,6 +202,92 @@ func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) UnsetVirtualFunctionI
 	o.VirtualFunctionId.Unset()
 }
 
+// GetBridgeName returns the BridgeName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) GetBridgeName() string {
+	if o == nil || IsNil(o.BridgeName.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.BridgeName.Get()
+}
+
+// GetBridgeNameOk returns a tuple with the BridgeName field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) GetBridgeNameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.BridgeName.Get(), o.BridgeName.IsSet()
+}
+
+// HasBridgeName returns a boolean if a field has been set.
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) HasBridgeName() bool {
+	if o != nil && o.BridgeName.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetBridgeName gets a reference to the given NullableString and assigns it to the BridgeName field.
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) SetBridgeName(v string) {
+	o.BridgeName.Set(&v)
+}
+
+// SetBridgeNameNil sets the value for BridgeName to be an explicit nil
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) SetBridgeNameNil() {
+	o.BridgeName.Set(nil)
+}
+
+// UnsetBridgeName ensures that no value is present for BridgeName, not even an explicit nil
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) UnsetBridgeName() {
+	o.BridgeName.Unset()
+}
+
+// GetOvnNetworkName returns the OvnNetworkName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) GetOvnNetworkName() string {
+	if o == nil || IsNil(o.OvnNetworkName.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.OvnNetworkName.Get()
+}
+
+// GetOvnNetworkNameOk returns a tuple with the OvnNetworkName field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) GetOvnNetworkNameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.OvnNetworkName.Get(), o.OvnNetworkName.IsSet()
+}
+
+// HasOvnNetworkName returns a boolean if a field has been set.
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) HasOvnNetworkName() bool {
+	if o != nil && o.OvnNetworkName.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetOvnNetworkName gets a reference to the given NullableString and assigns it to the OvnNetworkName field.
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) SetOvnNetworkName(v string) {
+	o.OvnNetworkName.Set(&v)
+}
+
+// SetOvnNetworkNameNil sets the value for OvnNetworkName to be an explicit nil
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) SetOvnNetworkNameNil() {
+	o.OvnNetworkName.Set(nil)
+}
+
+// UnsetOvnNetworkName ensures that no value is present for OvnNetworkName, not even an explicit nil
+func (o *InstanceSpectrumXAttachmentCreateOrUpdateRequest) UnsetOvnNetworkName() {
+	o.OvnNetworkName.Unset()
+}
+
 func (o InstanceSpectrumXAttachmentCreateOrUpdateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -214,6 +304,12 @@ func (o InstanceSpectrumXAttachmentCreateOrUpdateRequest) ToMap() (map[string]in
 	toSerialize["attachmentType"] = o.AttachmentType
 	if o.VirtualFunctionId.IsSet() {
 		toSerialize["virtualFunctionId"] = o.VirtualFunctionId.Get()
+	}
+	if o.BridgeName.IsSet() {
+		toSerialize["bridgeName"] = o.BridgeName.Get()
+	}
+	if o.OvnNetworkName.IsSet() {
+		toSerialize["ovnNetworkName"] = o.OvnNetworkName.Get()
 	}
 	return toSerialize, nil
 }

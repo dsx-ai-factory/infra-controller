@@ -33,7 +33,8 @@ use super::reachability::reconcile_reachability_collectors;
 use super::spawn::{spawn_collectors_for_endpoint, switch_supports_nmxc_subscription};
 use crate::HealthError;
 use crate::config::Configurable;
-use crate::endpoint::{BmcEndpoint, EndpointSource};
+use crate::endpoint::{BmcEndpoint, EndpointSnapshot, EndpointSource};
+use crate::inventory::InventoryRefreshFailed;
 use crate::sharding::ShardManager;
 use crate::sink::DataSink;
 
@@ -73,8 +74,11 @@ pub async fn run_discovery_iteration(
     let iteration_start = Instant::now();
 
     let fetch_start = Instant::now();
-    let endpoints = match endpoint_source.fetch_bmc_hosts().await {
-        Ok(v) => v,
+    let EndpointSnapshot {
+        endpoints,
+        inventory,
+    } = match endpoint_source.fetch_snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!(error = ?e, "Could not fetch endpoints");
             return Err(e);
@@ -90,6 +94,29 @@ pub async fn run_discovery_iteration(
         .filter(|ep| shard_manager.should_monitor(ep))
         .cloned()
         .collect();
+
+    match inventory {
+        Ok(Some(inventory)) => {
+            let sharded_racks = inventory
+                .racks
+                .into_iter()
+                .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            let sharded_inventory_components = inventory
+                .components
+                .into_iter()
+                .filter(|component| shard_manager.should_monitor_key(component.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            ctx.inventory_metrics
+                .reconcile(&sharded_racks, &sharded_inventory_components);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            carbide_instrument::emit(InventoryRefreshFailed {
+                error: error.to_string(),
+            });
+        }
+    }
 
     // Resolve machine identity before collectors start when possible. Shared
     // write-once state propagates the result to running collectors and caches
@@ -201,6 +228,7 @@ pub async fn run_discovery_iteration(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use carbide_instrument::testing::capture_logs_async;
     use carbide_uuid::rack::RackId;
@@ -210,8 +238,8 @@ mod tests {
     use crate::config::{Config, Configurable, NmxtCollectorConfig, ReachabilityCollectorConfig};
     use crate::endpoint::test_support::endpoint_with_creds;
     use crate::endpoint::{
-        BmcAddr, BmcCredentials, EndpointMetadata, StaticEndpointSource, SwitchData,
-        SwitchEndpointRole,
+        BmcAddr, BmcCredentials, ComponentInventory, EndpointMetadata, InventorySnapshot,
+        RackInventory, StaticEndpointSource, SwitchData, SwitchEndpointRole,
     };
     use crate::limiter::NoopLimiter;
     use crate::metrics::MetricsManager;
@@ -282,6 +310,125 @@ mod tests {
             })),
             None,
         ))
+    }
+
+    struct SuccessfulThenFailedInventorySource {
+        successful_snapshot_returned: AtomicBool,
+        rack: RackInventory,
+        component: ComponentInventory,
+    }
+
+    impl EndpointSource for SuccessfulThenFailedInventorySource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+            Box::pin(async move {
+                let inventory = if self
+                    .successful_snapshot_returned
+                    .swap(true, Ordering::SeqCst)
+                {
+                    Err(HealthError::GenericError(
+                        "simulated inventory refresh failure".to_string(),
+                    ))
+                } else {
+                    Ok(Some(InventorySnapshot {
+                        racks: vec![self.rack.clone()],
+                        components: vec![self.component.clone()],
+                    }))
+                };
+
+                Ok(EndpointSnapshot {
+                    endpoints: Vec::new(),
+                    inventory,
+                })
+            })
+        }
+    }
+
+    fn inventory_exposition(exposition: &str) -> Vec<&str> {
+        exposition
+            .lines()
+            .filter(|line| {
+                line.contains("_component_inventory_info")
+                    || line.contains("_rack_nvlink_domain_info")
+                    || line.contains("_rack_session_start_time_seconds")
+                    || line.contains("_inventory_last_success_time_seconds")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn failed_inventory_refresh_retains_last_successful_snapshot() {
+        let rack_id = RackId::new("rack-inventory-retention");
+        let source: Arc<dyn EndpointSource> = Arc::new(SuccessfulThenFailedInventorySource {
+            successful_snapshot_returned: AtomicBool::new(false),
+            rack: RackInventory {
+                rack_id: rack_id.clone(),
+                created_seconds: Some(1_800_000_000),
+                created_nanos: Some(123_000_000),
+            },
+            component: ComponentInventory {
+                rack_id,
+                metadata: EndpointMetadata::Switch(SwitchData {
+                    id: None,
+                    serial: "switch-retained-after-failure".to_string(),
+                    slot_number: Some(1),
+                    tray_index: None,
+                    nvlink_domain_uuid: None,
+                    endpoint_role: SwitchEndpointRole::Bmc,
+                    is_primary: false,
+                    nmxc_enabled: false,
+                    nmxt_enabled: false,
+                }),
+                bmc_mac: Some(MacAddress::from_str("02:00:00:00:00:41").unwrap()),
+            },
+        });
+        let metrics_manager = Arc::new(
+            MetricsManager::new("inventory_retention_iteration")
+                .expect("metrics manager should start"),
+        );
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics_manager.clone(),
+            Arc::new(config),
+        )
+        .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("successful inventory iteration should complete");
+        let before_failure = metrics_manager.export_metrics().unwrap();
+        let inventory_before_failure = inventory_exposition(&before_failure);
+        assert!(before_failure.contains("carbide_hardware_health_component_inventory_info{"));
+        assert!(
+            before_failure.contains("carbide_hardware_health_rack_session_start_time_seconds{")
+        );
+        assert!(
+            before_failure.contains("carbide_hardware_health_inventory_last_success_time_seconds")
+        );
+
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("collector discovery should continue after inventory failure");
+        let after_failure = metrics_manager.export_metrics().unwrap();
+
+        assert_eq!(
+            inventory_exposition(&after_failure),
+            inventory_before_failure,
+            "failed inventory refresh must retain component, rack, and last-success series"
+        );
     }
 
     #[tokio::test]

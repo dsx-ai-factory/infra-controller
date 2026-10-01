@@ -211,6 +211,14 @@ impl Bmc for RedfishBmc {
         self.finish("get", result)
     }
 
+    async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(
+        &self,
+        id: &ODataId,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.poll(id).await;
+        self.finish("poll", result)
+    }
+
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
@@ -876,6 +884,70 @@ mod tests {
             ),
             sensitive_values,
         )
+    }
+
+    #[tokio::test]
+    async fn task_poll_preserves_pending_responses_and_redacts_http_failures() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let app = Router::new()
+            .route("/pending", get(|| async { StatusCode::ACCEPTED }))
+            .route(
+                "/failed",
+                get(|| async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "credential secret rejected",
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let credentials = BmcCredentials::new("root".to_string(), "secret".to_string());
+        let sensitive_values = sensitive_values(&credentials);
+
+        let bmc = RedfishBmc::new(
+            InnerRedfishBmc::with_custom_headers(
+                SpanIsolatedHttpClient::new(RedfishReqwestClient::new().unwrap()),
+                Url::parse(&format!("http://{address}")).unwrap(),
+                credentials,
+                CacheSettings::with_capacity(1),
+                HeaderMap::new(),
+            ),
+            sensitive_values,
+        );
+
+        let pending = bmc
+            .poll::<()>(&ODataId::from("/pending".to_string()))
+            .await
+            .unwrap();
+
+        let ModificationResponse::Task(task) = pending else {
+            panic!("202 must preserve the pending task");
+        };
+
+        assert_eq!(task.location.0.to_string(), "/pending");
+
+        let error = bmc
+            .poll::<()>(&ODataId::from("/failed".to_string()))
+            .await
+            .unwrap_err();
+
+        let BmcError::InvalidResponse { status, text, .. } = error else {
+            panic!("HTTP failure must preserve its status and sanitized body");
+        };
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!text.contains("secret"));
+        assert!(text.contains("rejected"));
+
+        server.abort();
+
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     /// Verifies nv-redfish removes plaintext, full Basic header, and bare

@@ -62,6 +62,7 @@ async fn derive_expected_rack(
         )));
     }
     request.rack_profile_id = Some(profile_id);
+    request.rack_group_id = Some(group.rack_group_id.clone());
     request.try_into().map_err(CarbideError::from)
 }
 
@@ -116,7 +117,7 @@ pub(crate) async fn delete_expected_rack(
     Ok(Response::new(()))
 }
 
-/// Updates metadata while preserving the profile selected when the rack was created.
+/// Updates metadata while preserving the profile and group selected at creation.
 pub(crate) async fn update_expected_rack(
     api: &Api,
     request: Request<rpc::ExpectedRack>,
@@ -135,6 +136,7 @@ pub(crate) async fn update_expected_rack(
             id: rack_id.to_string(),
         })?;
     request.rack_profile_id = Some(existing.rack_profile_id);
+    request.rack_group_id = existing.rack_group_id;
     let rack: ExpectedRack = request.try_into().map_err(CarbideError::from)?;
 
     db_expected_rack::update(&mut txn, &rack)

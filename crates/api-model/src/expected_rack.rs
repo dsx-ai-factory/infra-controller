@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use serde::Deserialize;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -94,6 +94,9 @@ pub struct ExpectedRack {
     /// the rack hardware type, topology, and rack capabilities.
     pub rack_profile_id: RackProfileId,
 
+    /// External group selected together with the profile on creation.
+    pub rack_group_id: Option<RackGroupId>,
+
     /// User-defined metadata for the rack. Physical-chassis and
     /// physical-location attributes are recorded as well-known label keys
     /// on this Metadata (see api-model::rack for the well-known keys).
@@ -113,6 +116,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedRack {
         Ok(ExpectedRack {
             rack_id: row.try_get("rack_id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             metadata,
         })
     }
