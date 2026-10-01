@@ -323,20 +323,25 @@ type InfiniBandPartitionClearInput struct {
 	Mtu                     bool
 	EnableSharp             bool
 	Labels                  bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // InfiniBandPartitionFilterInput input parameters for Filter method
 type InfiniBandPartitionFilterInput struct {
-	InfiniBandPartitionIDs []uuid.UUID
-	Names                  []string
-	SiteIDs                []uuid.UUID
-	TenantOrgs             []string
-	TenantIDs              []uuid.UUID
-	Statuses               []string
-	SearchQuery            *string
-	PartitionNames         []string
-	PartitionKeys          []string
-	SharpEnabled           *bool
+	InfiniBandPartitionIDs   []uuid.UUID
+	ControllerIBPartitionIDs []uuid.UUID
+	Names                    []string
+	SiteIDs                  []uuid.UUID
+	TenantOrgs               []string
+	TenantIDs                []uuid.UUID
+	Statuses                 []string
+	SearchQuery              *string
+	PartitionNames           []string
+	PartitionKeys            []string
+	SharpEnabled             *bool
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*InfiniBandPartition)(nil)
@@ -421,6 +426,9 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	ibps := []InfiniBandPartition{}
 
 	query := db.GetIDB(tx, ibpsd.dbSession).NewSelect().Model(&ibps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.Names != nil {
 		query = query.Where("ibp.name IN (?)", bun.In(filter.Names))
 	}
@@ -441,6 +449,10 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	}
 	if filter.InfiniBandPartitionIDs != nil {
 		query = query.Where("ibp.id IN (?)", bun.In(filter.InfiniBandPartitionIDs))
+	}
+
+	if filter.ControllerIBPartitionIDs != nil {
+		query = query.Where("ibp.controller_ib_partition_id IN (?)", bun.In(filter.ControllerIBPartitionIDs))
 	}
 
 	if filter.PartitionKeys != nil {
@@ -677,10 +689,22 @@ func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 		updatedFields = append(updatedFields, "labels")
 	}
 
+	if input.Deleted {
+		ibp.Deleted = nil
+
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ibpsd.dbSession).NewUpdate().Model(ibp).Column(updatedFields...).Where("id = ?", ibp.ID).Exec(ctx)
+		query := db.GetIDB(tx, ibpsd.dbSession).NewUpdate().Model(ibp).Column(updatedFields...).Where("id = ?", ibp.ID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
