@@ -155,6 +155,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 		}},
 		{"Site deletion commits before reconciliation", func(t *testing.T, f fixture) { checkSiteDeletion(t, f, false) }},
 		{"reconciliation commits before Site deletion", func(t *testing.T, f fixture) { checkSiteDeletion(t, f, true) }},
+		{"allocation creation can finish while inventory waits for its root", checkAllocationCreation},
 		{"operator creates root and IPAM", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
@@ -448,6 +449,50 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { tt.check(t, setup(t)) })
 	}
+	for _, replacementFirst := range []bool{false, true} {
+		name := "resize lifecycle before replacement"
+		if replacementFirst {
+			name = "resize replacement before lifecycle"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := setup(t)
+			root := f.root(t, true)
+			ids := []string{root.SitePrefixID.String(), uuid.NewString()}
+			slices.Sort(ids)
+			oldIndex := 0
+			if replacementFirst {
+				oldIndex = 1
+			}
+			root.SitePrefixID = cutil.GetPtr(uuid.MustParse(ids[oldIndex]))
+			_, err := f.session.DB.NewUpdate().Model(root).Column("site_prefix_id").WherePK().Exec(ctx)
+			require.NoError(t, err)
+			old := testPrefix()
+			old.Id.Value = ids[oldIndex]
+			old.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			replacement := testPrefix()
+			replacement.Id.Value = ids[1-oldIndex]
+			replacement.Config.Prefix = "10.0.0.0/25"
+			inventory := testInventory(old)
+			inventory.SitePrefixes = []*corev1.SitePrefix{old, replacement}
+			if replacementFirst {
+				inventory.SitePrefixes = []*corev1.SitePrefix{replacement, old}
+			}
+			inventory.InventoryPage.ItemIds = ids
+			inventory.InventoryPage.TotalItems = 2
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, root.ID, blocks[0].ID)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, blocks[0].Status)
+			receipt := f.inventorySite(t).SitePrefixInventoryProgress.Pages[1]
+			require.Equal(t, ids, receipt.ItemIDs)
+			require.Equal(t, []string{replacement.Id.Value}, receipt.DeferredIDs)
+			tx, err := cdb.BeginTx(ctx, f.session, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			require.ErrorContains(t, ipam.LockAndValidateParentIPBlockForAllocation(ctx, tx, f.session, root), "not Ready")
+		})
+	}
 
 	for _, change := range []struct {
 		name      string
@@ -503,6 +548,61 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 	}
 }
 
+func checkAllocationCreation(t *testing.T, f fixture) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := f.root(t, true)
+	tx, err := cdb.BeginTx(ctx, f.session, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	require.NoError(t, ipam.LockAndValidateParentIPBlockForAllocation(ctx, tx, f.session, root))
+	var allocatorPID int
+	require.NoError(t, tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocatorPID))
+	prefix := testPrefix()
+	prefix.Id.Value = root.SitePrefixID.String()
+	prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+	done := make(chan error, 1)
+	go func() { done <- f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)) }()
+	completed := false
+	defer func() {
+		cancel()
+		_ = tx.Rollback()
+		if !completed {
+			<-done
+		}
+	}()
+	require.Eventually(t, func() bool {
+		var waiters int
+		err := f.session.DB.NewSelect().ColumnExpr("count(*)").TableExpr("pg_catalog.pg_stat_activity").
+			Where("? = ANY(pg_blocking_pids(pid))", allocatorPID).
+			Where("query LIKE ?", "%\"ip_block\"%FOR UPDATE%").Scan(ctx, &waiters)
+		return err == nil && waiters > 0
+	}, 5*time.Second, 10*time.Millisecond, "inventory must hold Site while waiting for allocation's root")
+	_, insertErr := cdbm.NewIPBlockDAO(f.session).Create(ctx, tx, cdbm.IPBlockCreateInput{
+		Name: "allocated-child", Prefix: root.Prefix, PrefixLength: 25,
+		SiteID: f.site.ID, InfrastructureProviderID: f.site.InfrastructureProviderID, TenantID: &f.tenant.ID,
+		RoutingType: root.RoutingType, ProtocolVersion: root.ProtocolVersion,
+		Status: cdbm.IPBlockStatusReady, CreatedBy: &f.site.CreatedBy,
+	})
+	var commitErr error
+	if insertErr == nil {
+		commitErr = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	inventoryErr := <-done
+	completed = true
+	require.NoError(t, insertErr)
+	require.NoError(t, commitErr)
+	require.NoError(t, inventoryErr)
+	require.Len(t, f.blocks(t), 2)
+	updated, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, root.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, cdbm.IPBlockStatusDeleting, updated.Status)
+	require.Len(t, f.inventorySite(t).SitePrefixInventoryProgress.Pages, 1)
+}
+
 // Pause after acquiring the Site row lock, without timing-dependent sleeps.
 type siteLockHook struct {
 	entered chan struct{}
@@ -515,7 +615,7 @@ func (hook *siteLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) co
 }
 
 func (hook *siteLockHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
-	if event.Err == nil && strings.Contains(event.Query, "FROM \"site\" AS \"st\"") && strings.Contains(event.Query, "FOR UPDATE") {
+	if event.Err == nil && strings.Contains(event.Query, "FROM \"site\" AS \"st\"") && strings.Contains(event.Query, "FOR NO KEY UPDATE") {
 		hook.once.Do(func() {
 			close(hook.entered)
 			select {
