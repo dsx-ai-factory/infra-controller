@@ -900,10 +900,12 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 	}
 
 	tests := []struct {
-		name    string
-		setup   func(t *testing.T, state *recoveryState)
-		wantNil bool
-		check   func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService)
+		name        string
+		setup       func(t *testing.T, state *recoveryState)
+		callContext func() context.Context
+		wantNil     bool
+		wantErr     bool
+		check       func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService)
 	}{
 		{
 			name: "selects another recovered suffix when candidate name is also used",
@@ -1110,6 +1112,17 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 			},
 			wantNil: true,
 		},
+		{
+			name:  "returns transaction cancellation for activity retry",
+			setup: func(_ *testing.T, _ *recoveryState) {},
+			callContext: func() context.Context {
+				callCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				return callCtx
+			},
+			wantNil: true,
+			wantErr: true,
+		},
 	}
 
 	for _, testCase := range tests {
@@ -1144,8 +1157,18 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 
 			testCase.setup(t, state)
 
-			got := state.manager.createOrUpdateDpuExtensionServiceFromSite(ctx, state.site, state.controllerService)
+			callCtx := ctx
+			if testCase.callContext != nil {
+				callCtx = testCase.callContext()
+			}
+
+			got, err := state.manager.createOrUpdateDpuExtensionServiceFromSite(callCtx, state.site, state.controllerService)
 			assert.Equal(t, testCase.wantNil, got == nil)
+			if testCase.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 
 			if testCase.check != nil {
 				testCase.check(t, state, got)
