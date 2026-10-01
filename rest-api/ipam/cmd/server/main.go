@@ -18,6 +18,9 @@ import (
 	"os"
 	"strings"
 
+	"time"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/metal-stack/v"
 	"github.com/urfave/cli/v2"
@@ -25,6 +28,24 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run returns an exit code instead of calling log.Fatalf so the deferred
+// trace flush runs on every exit path.
+func run() int {
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-ipam")
+	if otelErr != nil {
+		log.Printf("failed to initialize tracing: %v", otelErr)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Printf("failed to shut down tracing: %v", err)
+		}
+	}()
 
 	app := &cli.App{
 		Name:    "go-ipam server",
@@ -375,11 +396,12 @@ func main() {
 		},
 	}
 
-	err := app.Run(os.Args)
-	if err != nil {
-		log.Fatalf("Error in cli: %v", err)
+	if err := app.Run(os.Args); err != nil {
+		log.Printf("Error in cli: %v", err)
+		return 1
 	}
 
+	return 0
 }
 
 func mongoURI(host, port string) string {

@@ -17,7 +17,6 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 )
 
@@ -291,8 +290,6 @@ func TestMachineSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -493,8 +490,6 @@ func TestMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -703,8 +698,6 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1263,8 +1256,6 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1613,8 +1604,6 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -1767,8 +1756,6 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1860,8 +1847,6 @@ func TestMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2358,8 +2343,6 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2541,4 +2524,34 @@ func TestMachine_ToMetadataUpdateRequestProto(t *testing.T) {
 		req := m.ToMetadataUpdateRequestProto(labels)
 		assert.Equal(t, "stored-name", req.Metadata.Name)
 	})
+}
+
+func TestMachine_StatusForAssignment(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      string
+		wasAssigned bool
+		assigned    bool
+		coreState   string
+		want        string
+	}{
+		{"claim Ready", MachineStatusReady, false, true, "", MachineStatusInUse},
+		{"unassigned Ready", MachineStatusReady, false, false, "", MachineStatusReady},
+		{"release observed Ready", MachineStatusInUse, true, false, ControllerMachineStateReady, MachineStatusReady},
+		{"release before Core readiness", MachineStatusInUse, true, false, "Assigned/Ready", MachineStatusInUse},
+		{"release without inventory", MachineStatusInUse, true, false, "", MachineStatusInUse},
+		{"assigned error", MachineStatusError, false, true, ControllerMachineStateReady, MachineStatusError},
+		{"release during maintenance", MachineStatusMaintenance, true, false, ControllerMachineStateReady, MachineStatusMaintenance},
+		{"assigned cleanup", MachineStatusInitializing, true, true, "WaitingForCleanup", MachineStatusInitializing},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := Machine{Status: tc.status, IsAssigned: tc.wasAssigned}
+			if tc.coreState != "" {
+				machine.Metadata = &SiteControllerMachine{Machine: &corev1.Machine{State: tc.coreState}}
+			}
+			assert.Equal(t, tc.want, machine.StatusForAssignment(tc.assigned))
+			assert.Equal(t, tc.status, machine.Status, "projection must not mutate the snapshot")
+		})
+	}
 }

@@ -7,13 +7,18 @@ Services for mock BMC endpoints.
 
 - Auto-discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true`
   label
-- Creates ClusterIP Services with BMC IP for each mock BMC; a host or DPU
-  that has not reported a BMC IP yet gets its Service once the IP is known
+- Creates a ClusterIP Service per mock BMC with the BMC IP published as
+  `spec.externalIPs` outside the ServiceCIDR and the pod CIDR (the
+  [chart README Requirements section](../../../helm/charts/nico-machine-a-tron/README.md#requirements)
+  lists every network the BMC range must stay clear of); the clusterIP is
+  allocated by the apiserver, and a host or DPU that has not reported a BMC IP
+  yet is skipped until the IP is known
 - Supports Redfish (TCP 443), IPMI (UDP 623), and per-machine SSH ports
 - IPMI and SSH ports are dynamically added when machine-a-tron reports their endpoints in status
-- Creates a ClusterIP Service with the NVOS IP for each simulated NVLink switch
-  once it has one, forwarding the NMX-C port (TCP 9370) to machine-a-tron's
-  hosted NMX-C mock
+- Creates a Service per simulated NVLink switch once it has an NVOS lease,
+  publishing the NVOS IP as `spec.externalIPs` under the same network
+  requirements as the BMC IPs and forwarding the NMX-C port (TCP 9370) to
+  machine-a-tron's hosted NMX-C mock
 - Multi-pod deployments with pod-specific routing
 - Automatic cleanup of stale Services
 - Publishes the discovered machine-a-tron identities over a pod-local
@@ -208,17 +213,26 @@ Created Services have:
 - `ipmi` (UDP) - Present only when machine-a-tron reports `bmc.ipmi` in status
 - `ssh` (TCP) - Present only when machine-a-tron reports `bmc.ssh` in status
 
+**Spec:**
+
+- `type: ClusterIP` with the `clusterIP` allocated by the apiserver
+- `externalIPs: [<BMC IP>]` - externalIPs are not drawn from the ServiceCIDR, so
+  when the BMC network is outside the ServiceCIDR and the pod CIDR a BMC lease
+  cannot collide with a dynamically allocated clusterIP or a pod IP, and they
+  are mutable, so a lease change is an in-place update
+
 ### Switch NVOS Services
 
 A device with `device_kind: switch` and an `nvos_ip` in status additionally
-gets a `mat-nvos-<id>` Service whose ClusterIP is the NVOS IP, labelled
-`mat-machine-type: nvos` and annotated `nvidia-infra-controller/mat-nvos-ip`.
-Its single port, `nmxc` (TCP 9370), targets the same bmc-mock listen port as
-the BMC Service: NICo resolves a rack's NMX-C controller from a switch's NVOS
-address, and machine-a-tron's hosted NMX-C mock answers on its bmc-mock
-listener, selecting the rack by the address the request was sent to. The NVOS
-(underlay) DHCP segment must lie inside the cluster's ServiceCIDR, as the BMC
-segment already must.
+gets a `mat-nvos-<id>` Service labelled `mat-machine-type: nvos` and annotated
+`nvidia-infra-controller/mat-nvos-ip`, with the NVOS IP published as
+`externalIPs` and an apiserver-allocated clusterIP, exactly like the BMC
+Service. Its single port, `nmxc` (TCP 9370), targets the same bmc-mock listen
+port as the BMC Service: NICo resolves a rack's NMX-C controller from a
+switch's NVOS address, and machine-a-tron's hosted NMX-C mock answers on its
+bmc-mock listener, selecting the rack by the address the request was sent to.
+The NVOS (underlay) network must therefore satisfy the same requirements as
+the BMC network: outside the ServiceCIDR, the pod CIDR, and the node network.
 
 ## Development
 
@@ -230,20 +244,7 @@ make run KUBECONFIG="$HOME/.kube/config"
 
 ## Troubleshooting
 
-### ClusterIP already allocated
-
-BMC IP is outside ServiceCIDR or already in use.
-
-**Solutions:**
-
-1. Reserve a ServiceCIDR for machine-a-tron (K8s 1.29+)
-2. Use a CIDR within the cluster's ServiceCIDR
-3. Delete conflicting Services
-
-### ClusterIP change detected
-
-BMC IP changed but ClusterIP is immutable. Controller will delete and recreate
-the Service.
+See the [chart README Troubleshooting section](../../../helm/charts/nico-machine-a-tron/README.md#troubleshooting).
 
 ## Architecture
 

@@ -23,6 +23,7 @@ use tonic_client_wrapper::codegen;
 const PROTO_FILES: &[&str] = &[
     "proto/codegen/v1/machine_id_types.proto",
     "proto/common.proto",
+    "proto/console_log.proto",
     "proto/scout_firmware_upgrade.proto",
     "proto/forge.proto",
     "proto/machine_discovery.proto",

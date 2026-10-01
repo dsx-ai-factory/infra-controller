@@ -115,6 +115,56 @@ pub async fn find(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
+/// Whether decommissioning must still wait for this endpoint to acknowledge DHCP suppression.
+/// An acknowledgement or an expected static IP without DHCP history satisfies the wait.
+/// Missing interface records do not establish DHCP history. If a MAC has several
+/// interfaces, every record must have a null `last_dhcp` before bypassing the wait.
+pub async fn is_dhcp_acknowledgement_pending(
+    db: impl DbReader<'_>,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    const QUERY: &str = r"
+        SELECT NOT EXISTS (
+            SELECT 1 FROM bmc_suppressions
+            WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3
+                AND acknowledged_at IS NOT NULL
+        ) AND NOT (
+            EXISTS (
+                SELECT 1 FROM machine_interfaces
+                WHERE mac_address = $1 AND last_dhcp IS NULL
+            ) AND NOT EXISTS (
+                SELECT 1 FROM machine_interfaces
+                WHERE mac_address = $1 AND last_dhcp IS NOT NULL
+            ) AND (
+                EXISTS (
+                    SELECT 1 FROM expected_machines
+                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_machines,
+                        LATERAL jsonb_array_elements(host_nics) AS interface
+                    WHERE interface->>'mac_address' = $4
+                        AND interface->>'fixed_ip' IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_switches
+                    WHERE (bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL)
+                        OR ($1 = ANY(nvos_mac_addresses) AND nvos_ip_address IS NOT NULL)
+                ) OR EXISTS (
+                    SELECT 1 FROM expected_power_shelves
+                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
+                )
+            )
+        )";
+
+    sqlx::query_scalar(QUERY)
+        .bind(mac_address)
+        .bind(BmcSuppressionSubsystem::Dhcp)
+        .bind(BmcSuppressionSource::Decommissioning)
+        .bind(mac_address.to_string())
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
 /// Returns every BMC suppression for `subsystem`.
 pub async fn find_all_by_subsystem(
     db: impl DbReader<'_>,
@@ -307,6 +357,164 @@ mod tests {
             subsystem,
             source: DECOMMISSIONING,
             reason: reason.to_string(),
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn dhcp_acknowledgement_bypass_requires_expected_static_ip_and_no_dhcp_history(
+        pool: sqlx::PgPool,
+    ) {
+        let mut txn = pool.begin().await.unwrap();
+        sqlx::query(
+            r#"INSERT INTO expected_machines
+                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address, host_nics)
+            VALUES
+                ('static-machine', '02:00:00:00:00:01', 'root', 'password', '192.0.2.1',
+                 $1),
+                ('dynamic-machine', '02:00:00:00:00:06', 'root', 'password', NULL, '[]'),
+                ('missing-interface', '02:00:00:00:00:07', 'root', 'password', '192.0.2.7', '[]'),
+                ('observed-dhcp', '02:00:00:00:00:08', 'root', 'password', '192.0.2.8', '[]'),
+                ('mixed-history', '02:00:00:00:00:09', 'root', 'password', '192.0.2.9', '[]')"#,
+        )
+        .bind(sqlx::types::Json(serde_json::json!([
+            {"mac_address": mac(2), "fixed_ip": "192.0.2.2"},
+            {"mac_address": mac(12), "fixed_ip": null},
+            {"mac_address": mac(14), "fixed_ip": "192.0.2.14"},
+            {"mac_address": "invalid-mac", "fixed_ip": "192.0.2.99"},
+        ])))
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO expected_switches
+                (serial_number, bmc_mac_address, bmc_username, bmc_password,
+                 bmc_ip_address, nvos_mac_addresses, nvos_ip_address)
+            VALUES
+                ('static-switch', '02:00:00:00:00:03', 'root', 'password',
+                 '192.0.2.3', ARRAY['02:00:00:00:00:04'::macaddr], '192.0.2.4'),
+                ('dynamic-nvos', '02:00:00:00:00:0d', 'root', 'password',
+                 '192.0.2.13', ARRAY['02:00:00:00:00:0b'::macaddr], NULL)",
+        )
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO expected_power_shelves
+                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address)
+            VALUES ('static-shelf', '02:00:00:00:00:05', 'root', 'password', '192.0.2.5')",
+        )
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        let segment_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ('dhcp-wait-test', 'V1-T0', 'underlay') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        for last in [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14] {
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (segment_id, mac_address, primary_interface, hostname, last_dhcp)
+                 VALUES ($1, $2, false, 'dhcp-wait-test',
+                    CASE WHEN $3 THEN now() ELSE NULL END)",
+            )
+            .bind(segment_id)
+            .bind(mac(last))
+            .bind(last == 8)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        }
+        let other_segment_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ('other-dhcp-wait-test', 'V1-T0', 'underlay') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO machine_interfaces
+                (segment_id, mac_address, primary_interface, hostname, last_dhcp)
+             VALUES ($1, $2, false, 'other-dhcp-wait-test', now())",
+        )
+        .bind(other_segment_id)
+        .bind(mac(9))
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        for (scenario, last, bypass) in [
+            ("expected machine BMC", 1, true),
+            ("expected machine interface", 2, true),
+            ("serialized MAC with hex letters", 14, true),
+            ("expected switch BMC", 3, true),
+            ("expected switch NVOS", 4, true),
+            ("expected power shelf BMC", 5, true),
+            ("expected BMC without a static IP", 6, false),
+            ("missing interface is not null DHCP history", 7, false),
+            ("static IP with observed DHCP", 8, false),
+            ("one interface has DHCP history", 9, false),
+            ("no expected declaration", 10, false),
+            ("static BMC does not exempt dynamic NVOS", 11, false),
+            ("fixed IP on a different machine interface", 12, false),
+        ] {
+            assert_eq!(
+                super::is_dhcp_acknowledgement_pending(txn.as_mut(), mac(last))
+                    .await
+                    .unwrap(),
+                !bypass,
+                "{scenario}",
+            );
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn dhcp_wait_uses_decommissioning_acknowledgement(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        for (scenario, last, subsystem, source, acknowledged, pending) in [
+            (
+                "unacknowledged request",
+                1,
+                DHCP,
+                DECOMMISSIONING,
+                false,
+                true,
+            ),
+            (
+                "acknowledged request",
+                2,
+                DHCP,
+                DECOMMISSIONING,
+                true,
+                false,
+            ),
+            (
+                "other subsystem",
+                3,
+                SITE_EXPLORER,
+                DECOMMISSIONING,
+                true,
+                true,
+            ),
+            ("other source", 4, DHCP, ROTATION, true, true),
+        ] {
+            let mut input = upsert_input(last, subsystem, scenario);
+            input.source = source;
+            upsert(txn.as_mut(), &input).await.unwrap();
+            if acknowledged {
+                acknowledge(txn.as_mut(), mac(last), subsystem)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                super::is_dhcp_acknowledgement_pending(txn.as_mut(), mac(last))
+                    .await
+                    .unwrap(),
+                pending,
+                "{scenario}",
+            );
         }
     }
 

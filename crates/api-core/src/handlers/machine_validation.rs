@@ -607,6 +607,29 @@ pub(crate) async fn get_machine_validation_attempt(
     )))
 }
 
+pub(crate) async fn find_machine_validation_attempts(
+    api: &Api,
+    request: tonic::Request<rpc::MachineValidationAttemptSearchFilter>,
+) -> Result<tonic::Response<rpc::MachineValidationAttemptList>, Status> {
+    log_request_data(&request);
+    let req = request.into_inner();
+    let run_item_id = req
+        .run_item_id
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("run item id"))?;
+    let run_item_id = MachineValidationRunItemId::from(
+        uuid::Uuid::try_from(run_item_id).map_err(CarbideError::from)?,
+    );
+    let attempts = db::machine_validation_execution::find_attempts_by_run_item_id(
+        &api.database_connection,
+        &run_item_id,
+    )
+    .await?;
+    Ok(tonic::Response::new(rpc::MachineValidationAttemptList {
+        attempts: attempts.into_iter().map(Into::into).collect(),
+    }))
+}
+
 pub(crate) async fn append_machine_validation_attempt_log(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationAttemptLogAppendRequest>,

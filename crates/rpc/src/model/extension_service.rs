@@ -22,7 +22,8 @@ use model::extension_service::{
     ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
     ExtensionServiceObservabilityConfigTypeLogging,
     ExtensionServiceObservabilityConfigTypePrometheus, ExtensionServiceSnapshot,
-    ExtensionServiceType, ExtensionServiceVersionInfo,
+    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcAddressFamily,
+    ServiceVpcInterfaceRequirement,
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -33,7 +34,10 @@ use crate::forge as rpc;
 const MAX_OBSERVABILITY_CONFIG_NAME: usize = 64;
 const MAX_OBSERVABILITY_PROPERTY_LEN: usize = 128;
 
-static PROM_ENDPOINT_BAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z0-9:\-]+").unwrap());
+// Allow bracketed IPv6 and dotted hosts; exclude quotes and whitespace from single-quoted YAML targets.
+// Keep in sync with rest-api/api/pkg/api/model/dpuextensionservice.go.
+static PROM_ENDPOINT_BAD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[^a-zA-Z0-9:\-.\[\]]+").unwrap());
 static LOG_PATH_BAD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z0-9\-\_\/\.\@]+").unwrap());
 
 impl From<ExtensionServiceType> for rpc::DpuExtensionServiceType {
@@ -64,12 +68,57 @@ impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTa
     }
 }
 
+impl From<ServiceVpcAddressFamily> for rpc::ServiceVpcAddressFamily {
+    fn from(address_family: ServiceVpcAddressFamily) -> Self {
+        match address_family {
+            ServiceVpcAddressFamily::Ipv4 => Self::Ipv4,
+            ServiceVpcAddressFamily::Ipv6 => Self::Ipv6,
+        }
+    }
+}
+
 impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
     fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
         match target {
             rpc::DpuExtensionServiceDpuTarget::Primary => Self::Primary,
             rpc::DpuExtensionServiceDpuTarget::AllActive => Self::AllActive,
             rpc::DpuExtensionServiceDpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl TryFrom<rpc::ServiceVpcInterfaceRequirement> for ServiceVpcInterfaceRequirement {
+    type Error = RpcDataConversionError;
+
+    fn try_from(requirement: rpc::ServiceVpcInterfaceRequirement) -> Result<Self, Self::Error> {
+        let address_family = rpc::ServiceVpcAddressFamily::try_from(requirement.address_family)
+            .map_err(|_| {
+                RpcDataConversionError::InvalidValue(
+                    "service_vpc_interfaces.address_family".to_string(),
+                    requirement.address_family.to_string(),
+                )
+            })?;
+        Ok(Self {
+            // The Rust type has no unspecified variant because every declared
+            // service interface must choose one supported family.
+            address_family: match address_family {
+                rpc::ServiceVpcAddressFamily::Ipv4 => ServiceVpcAddressFamily::Ipv4,
+                rpc::ServiceVpcAddressFamily::Ipv6 => ServiceVpcAddressFamily::Ipv6,
+                rpc::ServiceVpcAddressFamily::Unspecified => {
+                    return Err(RpcDataConversionError::InvalidValue(
+                        "service_vpc_interfaces.address_family".to_string(),
+                        "unspecified".to_string(),
+                    ));
+                }
+            },
+        })
+    }
+}
+
+impl From<ServiceVpcInterfaceRequirement> for rpc::ServiceVpcInterfaceRequirement {
+    fn from(requirement: ServiceVpcInterfaceRequirement) -> Self {
+        Self {
+            address_family: rpc::ServiceVpcAddressFamily::from(requirement.address_family) as i32,
         }
     }
 }
@@ -152,6 +201,11 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
                 snapshot.lifecycle_state_version,
                 snapshot.lifecycle_state_outcome,
             )),
+            service_vpc_interfaces: snapshot
+                .service_vpc_interfaces
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -278,12 +332,48 @@ impl TryFrom<rpc::DpuExtensionServiceObservabilityConfig> for ExtensionServiceOb
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::{FailsWith, Yields};
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{Case, check_cases, scenarios};
 
     use super::*;
     use crate::forge::dpu_extension_service_observability_config::Config;
     use crate::forge::{self as rpc};
 
+    /// Verifies the public wire accepts IPv4 and IPv6 while rejecting missing or
+    /// newer unknown family values instead of choosing a default.
+    #[test]
+    fn service_vpc_requirement_family_conversion_is_strict() {
+        // Both explicit families remain representable even when activation is unavailable.
+        assert_eq!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv4
+        );
+        assert_eq!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv6
+        );
+
+        // Unspecified and unknown values cannot silently choose a deployment family.
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Unspecified as i32,
+            })
+            .is_err()
+        );
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: i32::MAX,
+            })
+            .is_err()
+        );
+    }
     fn observability_config(
         name: Option<String>,
         config: Option<Config>,
@@ -346,6 +436,27 @@ mod tests {
 
     #[test]
     fn observability_config_from_rpc() {
+        // Preserve target text, including IPv6 brackets, through RPC conversion.
+        check_cases(
+            ["[::1]:9090", "192.0.2.10:9090", "metrics.example.com:9090"].map(|endpoint| Case {
+                scenario: endpoint,
+                input: observability_config(None, Some(prometheus(endpoint))),
+                expect: Yields(ExtensionServiceObservabilityConfig {
+                    name: None,
+                    config: ExtensionServiceObservabilityConfigType::Prometheus(
+                        ExtensionServiceObservabilityConfigTypePrometheus {
+                            endpoint: endpoint.to_string(),
+                            scrape_interval_seconds: 30,
+                        },
+                    ),
+                }),
+            }),
+            |config| {
+                ExtensionServiceObservabilityConfig::try_from(config)
+                    .map_err(|error| error.to_string())
+            },
+        );
+
         let max_name = Some("a".repeat(MAX_OBSERVABILITY_CONFIG_NAME));
         let max_endpoint = format!(
             "localhost:8080{}",
@@ -403,7 +514,21 @@ mod tests {
                     max_name.clone(),
                     Some(prometheus("localhost/metrics")),
                 ) => FailsWith(
-                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+                observability_config(
+                    None,
+                    Some(prometheus("[::1]:9090'")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
+                        .to_string(),
+                ),
+                observability_config(
+                    None,
+                    Some(prometheus("[::1]:9090\n")),
+                ) => FailsWith(
+                    r"invalid value characters that match the pattern `[^a-zA-Z0-9:\-.\[\]]+` are invalid for DpuExtensionServiceObservability.config.endpoint"
                         .to_string(),
                 ),
             }

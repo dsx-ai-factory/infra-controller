@@ -31,7 +31,7 @@ use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport, 
 use sqlx::PgPool;
 
 use crate::endpoint_lock::{EndpointExplorationGuard, EndpointExplorationLocks};
-use crate::{EndpointExplorer, enrich_endpoint_exploration_report};
+use crate::{EndpointExplorer, attester_inventory, enrich_endpoint_exploration_report};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointExplorationServiceError {
@@ -242,7 +242,9 @@ impl EndpointExplorationService {
             )
             .await?
             {
-                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::Applied(()) => {
+                    attester_inventory::record(&report, &mut txn).await?;
+                }
                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                     return Err(EndpointExplorationServiceError::ConcurrentModification {
                         kind: "explored_endpoint",

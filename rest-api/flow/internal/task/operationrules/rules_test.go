@@ -581,6 +581,45 @@ func TestRuleDefinition_Validate(t *testing.T) {
 	})
 }
 
+func TestMarshalRuleDefinition(t *testing.T) {
+	tests := []struct {
+		name        string
+		version     string
+		wantVersion string
+		wantErr     string
+	}{
+		{
+			name:        "missing version uses current version",
+			wantVersion: CurrentRuleDefinitionVersion,
+		},
+		{
+			name:        "current version is preserved",
+			version:     CurrentRuleDefinitionVersion,
+			wantVersion: CurrentRuleDefinitionVersion,
+		},
+		{
+			name:    "unsupported version is rejected",
+			version: "v999",
+			wantErr: "unsupported rule definition version: v999",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := MarshalRuleDefinition(RuleDefinition{Version: tt.version})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			var got RuleDefinition
+			require.NoError(t, json.Unmarshal(raw, &got))
+			assert.Equal(t, tt.wantVersion, got.Version)
+		})
+	}
+}
+
 func TestRuleDefinition_HasApplicableStep(t *testing.T) {
 	ruleDef := &RuleDefinition{Steps: []SequenceStep{
 		{ComponentType: devicetypes.ComponentTypeNVSwitch},

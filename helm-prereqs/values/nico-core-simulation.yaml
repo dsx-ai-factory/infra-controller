@@ -1,0 +1,670 @@
+## =============================================================================
+## nico-core-simulation.yaml - values for: helm upgrade --install nico ./helm
+## on a machine-a-tron simulation site.
+##
+## SITE TEMPLATE - a copy of nico-core.yaml with the simulation-only settings
+## filled in. Populate the same site-specific blanks (hostname, VIPs, DNS
+## domain, VLAN and VNI pools) before use. Differences from nico-core.yaml:
+##   - allow_insecure_discovery = true, because every simulated machine shares
+##     the machine-a-tron pod IP. Never use this file with real hardware.
+##   - [site_explorer] throughput knobs for thousands of mock BMCs.
+##   - [machine_state_controller.controller] max_concurrency = 100.
+##   - nico-api.apiAdmissionControl.enabled: false, because every simulated
+##     agent shares one client identity.
+##   - [networks.simulated-oob], [networks.simulated-admin] and
+##     [networks.simulated-underlay]: the DHCP relay targets of the
+##     machine-a-tron values files in this directory.
+##   - [pools.lo-ip] and [pools.fnn-asn] sized for 4,500 hosts x 2 DPUs.
+##   - [nvlink_config] pointed at the NMX-C mock machine-a-tron hosts, verified
+##     against the mat-mock.nvidia.com SAN on the machine-a-tron certificates.
+##   - [dpf] enabled and nico-api.dpf.rbacCreate: true for the DPF simulator
+##     (dev/k8s/dpf-sim-controller), which replaces the DPF operator here.
+##   - datacenter_asn declared in the root table, where nico-api reads it.
+##
+## Declare networks and pools here before nico-api first starts. A declared
+## network or pool is created when nico-api first sees it and is not re-applied
+## after a change. Network creation is skipped on sites with several forward
+## DNS domains unless initial_domain_name names one. On an established site
+## use nico-admin-cli network-segment create and resource-pool grow instead.
+##
+## Install order: deploy the DPF simulator first, then run
+##   ./setup.sh --skip-dpf --core-values values/nico-core-simulation.yaml
+## from this directory. The simulator install
+##   make -C dev/k8s/dpf-sim-controller deploy IMG=<registry>/dpf-sim-controller:<tag>
+## installs the DPF CRDs and creates dpf-operator-system. The Makefile default
+## image is a local name no cluster can pull.
+## Image registry and tag are injected at install time via --set flags:
+##   --set global.image.repository=<your-registry>/nvmetal-carbide
+##   --set global.image.tag=<tag>
+## In setup.sh these come from NICO_IMAGE_REGISTRY and NICO_CORE_IMAGE_TAG.
+## =============================================================================
+
+global:
+  image:
+    repository: ""    # set via --set global.image.repository (NICO_IMAGE_REGISTRY env var)
+    tag: ""           # set via --set global.image.tag (NICO_CORE_IMAGE_TAG env var)
+    pullPolicy: IfNotPresent
+
+  ## setup.sh creates a secret named `imagepullsecret` in nico-system from
+  ## REGISTRY_PULL_SECRET (host nvcr.io). Reference that name here.
+  imagePullSecrets:
+    - name: imagepullsecret
+
+  ## SPIFFE cert settings - vault-nico-issuer is configured by nico-prereqs
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+
+  spiffe:
+    trustDomain: nico.local
+
+## ---------------------------------------------------------------------------
+## nico-api - site-specific config and hostname
+##
+## hostname: external hostname for the nico-api service (DNS / load-balancer
+##           entry point). Used for TLS SAN and API URL generation.
+##
+## siteConfig: TOML block consumed by nico-api at startup. Every field
+##   below must be present (or explicitly commented out) so operators know
+##   what is available. Replace placeholder values with real site data.
+## ---------------------------------------------------------------------------
+nico-api:
+  hostname: ""   # REQUIRED: external nico-api hostname (e.g. api-<site>.<domain>)
+
+  ## Trust admin-CLI client certs minted from the site CA (CN=site-root) so admin-cli works
+  ## with NO manual ConfigMap edit. Pair with helm-prereqs vault.nicoCliClientRole.
+  ## "site-root" is the CN of the cert-manager site root created by nico-prereqs - generic, keep as-is.
+  ## This issuer-CN entry is what authorizes admin-CLI certs; the cert's OU only names the group.
+  auth:
+    additionalIssuerCns:
+      - "site-root"
+
+  ## Rack management - chart defaults enable both switches (RMS connectivity
+  ## and the component manager with rms backends). Override vendors or add
+  ## test profiles in siteConfig. Chart defaults cover standard mTLS (SPIFFE
+  ## auto-discovery - no extra mounts).
+  ##
+  ## Sites WITHOUT rack management (no RMS deployed, no DPF rack operations)
+  ## must opt out explicitly, otherwise carbide-api initializes the component
+  ## manager and RMS client against an unreachable endpoint:
+  # componentManager:
+  #   enabled: false
+  # rms:
+  #   enabled: false
+  ##
+  ## Sites WITH rack management that need non-standard vendors or a test
+  ## profile can override individual fields via siteConfig (Figment merges
+  ## per-key, so only changed values need to be restated):
+  # siteConfig:
+  #   nicoApiSiteConfig: |
+  #     [rack_profiles.NVL72.rack_capabilities.compute]
+  #     vendor = "Lenovo"   # override compute vendor only
+  #     count = 18          # required; override only if rack uses non-standard count
+
+  ## MetalLB VIP for the nico-api LoadBalancer service.
+  ## Must be an IP within your external IPAddressPool (values/metallb-config.yaml).
+  ## This IP must resolve from your external DNS to the hostname above.
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: nico-api external VIP
+
+  ## TLS cert SANs.
+  ##
+  ## The chart auto-includes `nico-api.<release-ns>.svc.cluster.local` and the
+  ## short DNS name. Add every external hostname clients use here, so the
+  ## TLS handshake validates the cert against whichever name was used to
+  ## reach the service. For dual-deployment compatibility with existing DPU
+  ## agents (which are hardcoded to look up `carbide-api.forge`) include the
+  ## `.forge` aliases below. See helm-prereqs/README.md → "DPU compatibility
+  ## DNS (.forge zone)" for the full hostname list.
+  certificate:
+    extraDnsNames:
+      - ""                             # REQUIRED: your external hostname (match nico-api.hostname above)
+      - "carbide-api.forge"            # legacy hardcoded lookup in deployed DPU agents
+      - "nico-api.forge"               # renamed-binary alias (dual naming)
+      - "carbide-api.forge-system.svc.cluster.local"  # legacy cluster-internal name from forged kustomize
+
+  ## Role and RoleBinding for nico-api in dpf-operator-system. setup.sh sets
+  ## this only when it installs DPF, so a simulation site sets it here. The
+  ## namespace must exist before the install: make -C dev/k8s/dpf-sim-controller
+  ## deploy IMG=<registry>/dpf-sim-controller:<tag> creates it with the DPF CRDs.
+  dpf:
+    rbacCreate: true
+
+  ## Every simulated agent presents the same client identity, so the per-client
+  ## admission limits reject the whole fleet at once. Simulation only.
+  apiAdmissionControl:
+    enabled: false
+
+  siteConfig:
+    enabled: true
+    nicoApiSiteConfig: |
+      # -----------------------------------------------------------------------
+      # Site identity - REQUIRED: fill in your site's values.
+      # -----------------------------------------------------------------------
+      sitename = ""                              # REQUIRED: short site identifier
+      initial_domain_name = ""                   # REQUIRED: base DNS domain for the site
+      attestation_enabled = false
+      max_concurrent_machine_updates = 20
+      # Every simulated machine shares the machine-a-tron pod IP, so discovery
+      # cannot match callers by source address. Simulation only.
+      allow_insecure_discovery = true
+      # ASN of the physical datacenter, used by FNN route targets. Replace
+      # 4266030000 with your site's value. A root key, so it must stay above
+      # the first [table] header.
+      datacenter_asn = 4266030000
+
+      # -----------------------------------------------------------------------
+      # DHCP servers reachable from this site - REQUIRED: your nico-dhcp VIP(s).
+      # -----------------------------------------------------------------------
+      dhcp_servers = []                          # REQUIRED: e.g. ["<dhcp-vip>"]
+
+      # -----------------------------------------------------------------------
+      # BGP route servers - NICo Core has no FRR subchart; disabled by default.
+      # Re-enable + point at FRR VIPs if FRR is deployed out-of-band and DPU
+      # data-plane fabric BGP is required.
+      # -----------------------------------------------------------------------
+      route_servers = []
+      enable_route_servers = false
+
+      # -----------------------------------------------------------------------
+      # site_fabric_prefixes: prefixes that ARE part of the site fabric.
+      # site_fabric_null_routes: optional FNN blackholes; omitted means
+      # site_fabric_prefixes, all retained tenant SitePrefixes, and retiring
+      # operator roots with retained VpcPrefixes or VPC-attached direct prefixes.
+      # Inherited roots are collapsed. Explicit lists preserve distinct CIDRs.
+      # Under mutual isolation, they must cover every retained tenant root;
+      # [] is valid only without tenant roots. Open isolation does not install
+      # these routes or require coverage.
+      # deny_prefixes: prefixes instances must NOT reach (OOB, ctrl-plane, underlay).
+      # -----------------------------------------------------------------------
+      site_fabric_prefixes = []                  # REQUIRED: your fabric CIDR(s)
+      # site_fabric_null_routes = []             # OPTIONAL: see coverage requirement above
+      deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
+
+      # -----------------------------------------------------------------------
+      # Site explorer - periodic background scan of site inventory.
+      # Throughput knobs for thousands of mock BMCs (build defaults 100 / 360 /
+      # 100). Raise explorations_per_run only with cycle-completion measurements:
+      # identification and machine creation run at the end of a completed cycle.
+      # -----------------------------------------------------------------------
+      [site_explorer]
+      run_interval = "30s"
+      concurrent_explorations = 400
+      explorations_per_run = 360
+      machines_created_per_run = 100
+      # Override and shared-proxy modes route every Redfish call through one
+      # machine-a-tron Service. Leave bmc_proxy unset in Controller Mode, where
+      # site-explorer dials each BMC Service directly.
+      # bmc_proxy = "nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local:1266"
+
+      # -----------------------------------------------------------------------
+      # Machine + BOM validation
+      # -----------------------------------------------------------------------
+      [machine_validation_config]
+      enabled = true
+
+      [bom_validation]
+      enabled = true
+      ignore_unassigned_machines = true
+
+      # -----------------------------------------------------------------------
+      # IP / integer pools - nico-api allocates from these ranges.
+      # The lo-ip range below is the simulated pool. Replace it only together
+      # with the machine-a-tron fleet size.
+      # A pool range is applied when nico-api first sees it. A later change
+      # logs a drift warning and is not applied. Grow an established pool with
+      # `nico-admin-cli resource-pool grow`.
+      # -----------------------------------------------------------------------
+      [pools.lo-ip]
+      type = "ipv4"
+      # One address per machine, hosts and DPUs alike. 16,382 addresses cover
+      # 4,500 hosts x 2 DPUs (13,500 machines).
+      ranges = [{ start = "10.103.0.1", end = "10.103.63.254" }]
+
+      [pools.vlan-id]
+      type = "integer"
+      ranges = []                                # REQUIRED: your VLAN ID range, e.g. [{ start = "100", end = "501" }]
+
+      [pools.vni]
+      type = "integer"
+      ranges = []                                # REQUIRED: your VXLAN VNI range, e.g. [{ start = "1024500", end = "1024800" }]
+
+      [pools.vpc-vni]
+      type = "integer"
+      # REQUIRED: your VPC VNI range. FNN sites: use the range allocated by your network team -
+      # must match the config on your FNN gateways and must NOT be expanded without coordinating
+      # with your network team. The range must also NOT include the fixed admin_vpc vpc_vni
+      # value set in [fnn.admin_vpc] below. Example for non-FNN: [{ start = "0", end = "100" }]
+      ranges = []
+
+      # -----------------------------------------------------------------------
+      # Networks - named L3 segments visible to nico-api.
+      # The three simulated segments are the DHCP relay targets of the
+      # machine-a-tron values files: bmcDhcpRelayAddress is the simulated-oob
+      # gateway and underlayDhcpRelayAddress the simulated-underlay gateway.
+      # Demand: simulated-oob and simulated-admin each need hosts x (1 + DPUs
+      # per host) addresses, simulated-underlay needs hosts x DPUs per host plus
+      # one per switch. A /18 leaves 16,382 addresses after the gateway and
+      # reserve_first = 1, enough for 4,500 hosts x 2 DPUs.
+      # In Controller Mode the BMC addresses are Service externalIPs, so the
+      # simulated-oob prefix must lie outside the cluster ServiceCIDR, pod CIDR
+      # and node network.
+      # -----------------------------------------------------------------------
+      [networks.simulated-oob]
+      type = "underlay"
+      prefix = "10.200.0.0/18"
+      gateway = "10.200.0.1"
+      mtu = 9000
+      reserve_first = 1
+
+      [networks.simulated-admin]
+      type = "admin"
+      prefix = "10.102.0.0/18"
+      gateway = "10.102.0.1"
+      mtu = 9000
+      reserve_first = 1
+
+      # DPU OOB and switch NVOS DHCP relay through this gateway. nico-api
+      # predicts DPU OOB interfaces on an underlay-typed segment and rejects
+      # DHCP relayed onto any other type, while host admin links stay on the
+      # admin segment above.
+      # Outside every default ServiceCIDR (kubeadm 10.96.0.0/12, kind
+      # 10.96.0.0/16, K3s 10.43.0.0/16): switch NVOS leases from this network
+      # are published as Service externalIPs for the NMX-C mock.
+      [networks.simulated-underlay]
+      type = "underlay"
+      prefix = "10.201.0.0/18"
+      gateway = "10.201.0.1"
+      mtu = 9000
+      reserve_first = 1
+
+      # -----------------------------------------------------------------------
+      # InfiniBand (disabled unless your site has an IB fabric)
+      # -----------------------------------------------------------------------
+      [ib_config]
+      enabled = false   # EXAMPLE - replace false with true to enable IB
+
+      # To enable InfiniBand, set enabled=true, then uncomment the following ib_fabrics.default lines,
+      # replace the example endpoint with your UFM VIP address, and configure
+      # a start-end PKey range. For sharded sites, ensure the range does not
+      # overlap any other shard.
+      # [ib_fabrics.default]
+      # endpoints = ["https://10.180.126.181:443"]  # EXAMPLE - replace with your UFM endpoint
+      # pkeys = [{ start = "9000", end = "11000" }] # EXAMPLE - replace with your site PKey range
+
+      # -----------------------------------------------------------------------
+      # NVLink (NMX-C mock hosted by machine-a-tron)
+      # -----------------------------------------------------------------------
+      # In controller mode NICo reaches each simulated rack's NMX-C mock at a
+      # switch NVOS address (a mat-nvos-* Service externalIP in the
+      # simulated-underlay network). The mock is served with machine-a-tron's
+      # own certificate, which carries mat-mock.nvidia.com as an extra SAN
+      # (nico-machine-a-tron certificate.extraDnsNames) and is issued by the
+      # same CA as nico-roots, so one authority verifies every rack and no
+      # client certificate is needed. Racks are reconciled once their switches
+      # report CONTROL_PLANE_STATE_CONFIGURED through the RMS mock.
+      [nvlink_config]
+      enabled = true
+      allow_insecure = false
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
+
+      # -----------------------------------------------------------------------
+      # Firmware management
+      # -----------------------------------------------------------------------
+      [firmware_global]
+      autoupdate = false
+      no_reset_retries = true
+
+      # -----------------------------------------------------------------------
+      # Machine state controller
+      # -----------------------------------------------------------------------
+      [machine_state_controller]
+      failure_retry_time = "90m"
+
+      # Parallel host and DPU state-machine tasks (build default 10). Values
+      # above 100 gain nothing: every work unit passes through the work-lock
+      # manager's 100-slot command buffer.
+      [machine_state_controller.controller]
+      max_concurrency = 100
+
+      # -----------------------------------------------------------------------
+      # FNN related configuration
+      # FNN support is mandatory for nico-api to function
+      # -----------------------------------------------------------------------
+
+      [fnn.admin_vpc]
+      enabled = true # Set to true when FNN is enabled on site.
+      # vpc_vni
+      vpc_vni = 61325 # Replace 61325 with the VNI that will be used for the admin VPC
+
+      #
+      # There are several fnn.routing_profiles defined below.
+      # Replace 4266030000 with the datcenter_asn
+      #
+      # Also, in the import and export route-targets, replace the example VNIs with the actual VNIs that will be used at the site for those purposes and then uncomment.
+
+      # The routing profile assigned to a tenant controls which routes are imported into that tenant's VRF and how routes from that tenant are tagged on export.  The routing profiles are defined with some default route-target imports and exports, but these will likely need to be customized for each site based on the RTs that are used at that site.
+      [fnn.routing_profiles.INTERNAL]
+      internal = true
+      tenant_leak_communities_accepted = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 11 },    # Replace 11 with actual vni to import the default route for internal tenants
+        { asn = 4266030000, vni = 101 },   # Replace 101 with actual vni to import the RT for jump hosts
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to import the RT for reaching FSC service VIPs
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50200 },  # Replace 50200 with actual vni to tag routes with the common internal RT
+      ]
+
+      [fnn.routing_profiles.MAINTENANCE]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 10 },    # Replace 10 with actual vni to import the default route for tenants
+        { asn = 4266030000, vni = 101 },   # Replace 101 with actual vni to import the RT for jump hosts
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to import the RT for reaching FSC service VIPs
+        { asn = 4266030000, vni = 121 },   # Replace 121 with actual vni to import the RT for SCP/breakfix routes
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50300 }, # Tag routes with the common breakfix RT; replace 50300 with actual vni to use for this purpose
+      ]
+
+      [fnn.routing_profiles.EXTERNAL]
+      internal = false
+      route_target_imports = [
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni.
+
+        # Do NOT import a default route for profiles when internal = false.
+        # It needs to be auto-inserted because there will be a 1:1 mapping between
+        # the tenant VNI and the VRF on the GWs that handle external tenants.
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50500 }, # Tag routes with the common external RT; replace 50500 with actual vni to use for this purpose
+      ]
+
+      # The only use-case for this right now is DPS.
+      [fnn.routing_profiles.PRIVILEGED_INTERNAL]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 11 },    # Import the default route for internal tenants; Replace 11 with actual vni
+        { asn = 4266030000, vni = 101 },   # Import the RT for jump hosts; Replace 101 with actual vni
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni
+        { asn = 4266030000, vni = 900 },   # Import the RT for BMCs for forge managed nodes; Replace 900 with actual vni
+        { asn = 4266030000, vni = 1002 },   # Import the RT for NVLINK switches; Replace 1002 with actual vni
+        { asn = 4266030000, vni = 1003 },   # Import the RT for powershelves; Replace 1003 with actual vni
+      ]
+      route_targets_on_exports = [
+        # Tag routes with the common site-controller route tag.
+        # The other leg of the routing for the 901 route-target import above.
+        # This is a bit of a hack.  We'd use it until we either have a new RT
+        # registered for this or until the grpc calls that DPS would need exist in Carbid
+        { asn = 4266030000, vni = 50100 }, # Replace 50100 with actual vni to use for this purpose; this is the RT for reaching FSC service VIPs
+        { asn = 4266030000, vni = 50200 },  # Tag routes with the common internal RT
+      ]
+
+      [fnn.admin_vpc.routing_profile]
+      internal = true
+      route_target_imports = [
+        { asn = 4266030000, vni = 10 }, # Import the default route for infra; Replace 10 with actual vni to import the default route for tenants
+        { asn = 4266030000, vni = 101 },   # Import the RT for jump hosts; Replace 101 with actual vni
+        { asn = 4266030000, vni = 50100 }, # Import the RT for reaching FSC service VIPs; Replace 50100 with actual vni to use for this purpose
+      ]
+      route_targets_on_exports = [
+        { asn = 4266030000, vni = 50400 },  # Tag routes with the common admin RT; replace 50400 with actual vni to use for this purpose
+      ]
+
+
+      [pools.fnn-asn]
+      type = "integer"
+      # One ASN per DPU. 18,000 ASNs cover 4,500 hosts x 2 DPUs with headroom.
+      ranges = [{ start = "4268060405", end = "4268078404" }]
+
+      [pools.vpc-dpu-lo]
+      type = "ipv4"
+      ranges = [
+        { start = "10.255.247.3", end = "10.255.247.255" },  # Default pool added from VpcVrfLoopbackPrefix 10.255.247.0/24
+      ]
+
+      # NOTE: [pools.vpc-vni] is defined in the required pools section above - set it there.
+      # It MUST NOT be expanded without coordinating with your network team and must match
+      # config on your FNN gateways.
+      #
+      [pools.external-vpc-vni]
+      type = "integer"
+      # Change 51008 and 51011 to the actual VNI values.
+      ranges = [
+        { start = "51008", end = "51011" },
+      ]
+
+      # -----------------------------------------------------------------------
+      # DPF - DPU provisioning via the DOCA Platform Framework.
+      # Enabled so simulated hosts leave dpuinit through the DPF simulator
+      # (dev/k8s/dpf-sim-controller), which replaces the operator on a
+      # simulation site. Run setup.sh with --skip-dpf. [dpf] is read at
+      # startup only. docker_image_pull_secret names the Secret that setup.sh
+      # phase 5b creates only when it installs DPF.
+      # -----------------------------------------------------------------------
+      [dpf]
+      enabled = true
+      docker_image_pull_secret = "nico-pull-secret"
+
+      # BF3 deployment defaults, shown for reference - these match the built-in
+      # defaults and only need uncommenting to override (e.g. a different BFB).
+      # BF4 is opt-in via an additional [dpf.deployments.bf4_generic] table;
+      # see docs/manuals/dpf.md §3.5.
+      #
+      # [dpf.deployments.bf3]
+      # bfb_url         = "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.2.2-125_26.02_ubuntu-24.04_64k_prod.bfb"
+      # flavor_name     = "carbide-dpu-flavor"
+      # deployment_name = "nico-deployment-v2"
+      # node_label_key  = "carbide.nvidia.com/controlled.node.v2"
+
+## ---------------------------------------------------------------------------
+## Service VIP assignments - MetalLB loadBalancerIPs
+##
+## Each NICo Core service that exposes a LoadBalancer needs a specific IP from
+## your MetalLB pool. Without these, MetalLB assigns IPs randomly from the
+## pool on each install - making DHCP relay, DNS, PXE, and API hostname DNS
+## records impossible to pre-configure.
+##
+## Rules:
+##   - IPs must be within a range defined in values/metallb-config.yaml
+##   - Internal pool (cluster-facing): DHCP, PXE, SSH console, NTP, DNS
+##   - External pool (client-facing):  nico-api
+##   - Each IP must be unique across all services
+##   - The nico-api IP must resolve from external DNS to the hostname above
+## ---------------------------------------------------------------------------
+
+nico-dhcp:
+  ## IPv6 is opt-in. Enable only after the pod network and relay IPv6 VIP are ready.
+  dhcp:
+    v6Enabled: false
+    v6ServerIdentifier: ""  # Required when enabled: stable, site-unique 12 hex digits.
+    v6DnsServers: ""
+    v6NtpServers: ""
+    v6ProvisioningServer: ""
+    v6RapidCommit: false
+  v6ExternalService:
+    enabled: false
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # Required only when this Service is enabled.
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    annotations:
+      ## REQUIRED: DHCP VIP (internal pool). Besides pinning the LoadBalancer
+      ## IP, this VIP is also auto-advertised to DHCP clients as the server
+      ## identifier (option 54) so BMC unicast renewals survive nico-dhcp pod
+      ## replacement (issue #3663). Override the advertised identifier
+      ## independently via nico-dhcp.config.kea.serverIdentifier if needed.
+      metallb.universe.tf/loadBalancerIPs: ""
+
+  ## DHCP hook libraries' advertised IPs.
+  ##
+  ## Kea's libdhcp hook writes these IPs into the DHCP response that DPUs
+  ## and bare-metal hosts receive on boot. They MUST be reachable on the
+  ## PXE / management network the DPU comes up on, and they MUST match
+  ## the externalService VIPs assigned to nico-dns / nico-ntp / nico-pxe.
+  ##
+  ## Leaving the chart defaults (127.0.0.1) causes DPU pre-ingestion failures:
+  ## clock divergence (no NTP) and unreachable API endpoint (no DNS).
+  ##
+  ## Cross-check: each value below should equal the corresponding
+  ## externalService loadBalancerIPs annotation in this file.
+  ##
+  ## DUAL-DEPLOYMENT NOTE (PR #2062): if the NICo API is installed under
+  ## the legacy `carbide-api` name on this site, ALSO set
+  ## `nico-dhcp.apiServiceName: carbide-api` (uncomment below).
+  # apiServiceName: carbide-api
+  config:
+    kea:
+      hookParameters:
+        # DPUs need a resolver that serves the .forge zone (carbide-api.forge etc.).
+        # nico-dns is authoritative-only and does NOT serve .forge, so hand DPUs
+        # the unbound VIP (must equal unbound.externalService VIP below).
+        nameservers: ""           # REQUIRED: unbound VIP (must serve .forge)
+        ntpServer: ""             # REQUIRED: nico-ntp per-pod VIPs, comma-separated
+        provisioningServer: ""    # REQUIRED: nico-pxe VIP
+
+nico-dns:
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    ## DNS uses perPodAnnotations because each replica gets its own VIP.
+    ## The chart creates separate UDP + TCP services per pod and uses
+    ## metallb.universe.tf/allow-shared-ip so both share the same IP.
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: DNS instance-0 VIP (external pool)
+      - metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: DNS instance-1 VIP (external pool)
+
+nico-pxe:
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: PXE VIP (internal pool)
+
+  ## Boot artifacts (ipxe.efi, BFB, OS images) - REQUIRED or DPU/host HTTP boot 404s and
+  ## falls back to the local OS (never re-images). These init containers populate the
+  ## /boot-artifacts/blobs/internal volume that nico-pxe serves at /public/blobs/internal.
+  ## Pin the images to the same build/registry as nvmetal-carbide.
+  ## NOTE: the aarch64 image ships /aarch64 + /apt (NOT /firmware) - copying a missing dir crash-loops the init.
+  bootArtifactContainers: []
+  # bootArtifactContainers:
+  #   - name: boot-artifacts-x86-64
+  #     image: <your-registry>/boot-artifacts-x86_64:<tag>
+  #     command: ["sh", "-c", "cp -r /x86_64 /boot-artifacts/blobs/internal"]
+  #   - name: boot-artifacts-aarch64
+  #     image: <your-registry>/boot-artifacts-aarch64:<tag>
+  #     command: ["sh", "-c", "cp -r /aarch64 /apt /boot-artifacts/blobs/internal"]
+
+  ## TLS cert SANs - DPU agents are hardcoded to fetch boot artifacts from
+  ## `carbide-pxe.forge` / `carbide-static-pxe.forge`. If the cert doesn't
+  ## include those names, BMC HttpBootUri / agent calls fail TLS validation.
+  certificate:
+    extraDnsNames:
+      - "carbide-pxe.forge"            # legacy hardcoded lookup in deployed DPU agents
+      - "nico-pxe.forge"               # renamed-binary alias (dual naming)
+      - "carbide-static-pxe.forge"     # legacy hardcoded lookup in host PXE loaders
+      - "carbide-pxe.forge-system.svc.cluster.local"  # legacy cluster-internal name
+
+nico-ssh-console-rs:
+  ## imagePullSecrets now inherited from global.imagePullSecrets (chart fix: this subchart
+  ## falls back to global). No per-subchart override needed.
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: SSH console VIP (internal pool)
+
+## ---------------------------------------------------------------------------
+## nico-ntp - chrony NTP servers
+##
+## Deploys a 3-replica chrony StatefulSet plus per-pod LoadBalancer Services.
+## Each replica gets a stable MetalLB VIP that DPUs and bare-metal hosts sync
+## against (advertised to them via nico-dhcp.config.kea.hookParameters.ntpServer
+## above). Enabled by default - DPU pre-ingestion fails on clock divergence.
+## ---------------------------------------------------------------------------
+nico-ntp:
+  externalService:
+    enabled: true    # must be explicitly enabled - defaults to false in chart
+    ## NTP uses perPodAnnotations - one VIP per replica so clients can reach
+    ## each NTP instance at a stable IP regardless of pod scheduling.
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: NTP instance-0 VIP (internal pool)
+      - metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: NTP instance-1 VIP (internal pool)
+      - metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: NTP instance-2 VIP (internal pool)
+
+## ---------------------------------------------------------------------------
+## nico-dsx-exchange-consumer - disabled until binary is included in image
+## ---------------------------------------------------------------------------
+nico-dsx-exchange-consumer:
+  enabled: false
+
+## ---------------------------------------------------------------------------
+## unbound - recursive DNS + DPU-compatibility .forge zone
+##
+## REQUIRED for DPU bring-up. Existing DPU agent binaries are hardcoded to
+## look up `carbide-pxe.forge`, `carbide-ntp.forge`, `carbide-api.forge`, etc.
+## Those names will not exist in cluster DNS, so they must be resolved by an
+## authoritative DNS server reachable from the OOB management network. This
+## chart deploys unbound with a `nico_forge_zone.conf` local-data block that
+## maps each legacy hostname to the corresponding MetalLB VIP assigned above.
+##
+## If you point your own external DNS at the same VIPs and serve the .forge
+## records there, you can leave this disabled. Otherwise enable it and fill
+## the VIPs to match the externalService.annotations entries above.
+## ---------------------------------------------------------------------------
+unbound:
+  enabled: true
+
+  ## unbound uses its own images (not global.image). These are fixed product
+  ## images (host nvcr.io, same `imagepullsecret` works) - set to the build
+  ## your site standardises on.
+  image:
+    repository: ""    # REQUIRED: unbound image repository
+    tag: ""           # REQUIRED: unbound image tag
+  exporterImage:
+    repository: ""    # REQUIRED: unbound_exporter image repository
+    tag: ""           # REQUIRED: unbound_exporter image tag
+
+  ## In-chart LoadBalancer VIP (chart fix) so DPUs reach unbound for .forge.
+  ## Must match nico-dhcp.config.kea.hookParameters.nameservers.
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # REQUIRED: unbound VIP (internal pool)
+
+  ## Upstream recursive forwarder. The chart default forwarders.conf is a broken
+  ## `patchme` placeholder; override it with your site's upstream resolver.
+  localConfig:
+    forwarders.conf: |
+      forward-zone:
+          name: .
+          forward-addr:       # REQUIRED: your upstream DNS resolver IP
+
+  ## DPU-compatibility .forge zone. Each entry becomes a `local-data ... IN A`
+  ## line. Serve both legacy carbide-* and new nico-* names under the same VIPs
+  ## (dual naming). Set every address to the matching service VIP above.
+  localData:
+    - name: carbide-api.forge
+      addresses: []          # REQUIRED: [nico-api VIP]
+    - name: nico-api.forge
+      addresses: []          # REQUIRED: [nico-api VIP]
+    - name: carbide-pxe.forge
+      addresses: []          # REQUIRED: [nico-pxe VIP]
+    - name: nico-pxe.forge
+      addresses: []          # REQUIRED: [nico-pxe VIP]
+    - name: carbide-static-pxe.forge
+      addresses: []          # REQUIRED: [nico-pxe VIP]
+    - name: carbide-ntp.forge
+      addresses: []          # REQUIRED: [nico-ntp VIPs]
+    - name: nico-ntp.forge
+      addresses: []          # REQUIRED: [nico-ntp VIPs]
+    - name: unbound.forge
+      addresses: []          # REQUIRED: [unbound VIP]

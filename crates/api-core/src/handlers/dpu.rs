@@ -21,7 +21,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use ::rpc::errors::RpcDataConversionError;
-use ::rpc::model::{RpcInto, RpcTryFrom};
+use ::rpc::model::RpcInto;
 use ::rpc::{common as rpc_common, forge as rpc};
 use carbide_dpf::{DpuDeploymentType, dpu_cr_name, dpu_node_cr_name};
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -188,8 +188,7 @@ async fn get_managed_host_network_config_inner(
         }
     };
 
-    let mut maybe_instance =
-        Option::<rpc::Instance>::rpc_try_from(snapshot.clone()).map_err(CarbideError::from)?;
+    let mut maybe_instance = super::instance::snapshot_to_optional_instance(snapshot.clone())?;
 
     let primary_dpu_snapshot = snapshot
         .host_snapshot
@@ -740,6 +739,10 @@ async fn get_managed_host_network_config_inner(
     let astra_config = get_astra_config(api, &snapshot).await?;
 
     let resp = rpc::ManagedHostNetworkConfigResponse {
+        // TODO(Service VPC): Populate these fields for the authenticated receiving
+        // DPU when managed-host responses include service networking.
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         instance_id: snapshot.instance.as_ref().map(|instance| instance.id),
         asn,
         dhcp_servers: api
@@ -755,6 +758,7 @@ async fn get_managed_host_network_config_inner(
             .iter()
             .map(|addr| addr.to_string())
             .collect(),
+        dhcpv6_server_preference: api.runtime_config.dhcpv6_server_preference.map(u32::from),
         // TODO: Automatically add the prefix(es?) from the IPv4 loopback
         // pool to deny_prefixes. The database stores the pool in an
         // exploded representation, so we either need to reconstruct the

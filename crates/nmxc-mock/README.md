@@ -19,11 +19,11 @@ selects the domain from the request's authority (the HTTP/2 `:authority`, or
 selects that rack. When only one rack is simulated it answers on any name, so
 a port-forward to the listener works without a per-address route.
 
-In Kubernetes, `mat-k8s-controller` creates a `ClusterIP` Service per
-simulated switch whose ClusterIP is the switch's leased NVOS address and whose
-port 9370 targets the bmc-mock listener, exactly as it already does for BMC
-addresses. The underlay (NVOS) DHCP segment must therefore lie inside the
-cluster's Service CIDR, as the BMC segment already must.
+In Kubernetes, `mat-k8s-controller` creates a Service per simulated switch
+that publishes the switch's leased NVOS address as `externalIPs` and forwards
+port 9370 to the bmc-mock listener, exactly as it already does for BMC
+addresses. The underlay (NVOS) DHCP segment must therefore stay outside the
+cluster's ServiceCIDR and pod CIDR, as the BMC segment already must.
 
 ## Pointing NICo at the mock
 

@@ -30,6 +30,7 @@ use crate::types::FirmwareUpdateOptions;
 #[derive(Debug, Clone, Default)]
 pub struct MockNvSwitchManager {
     certificate_batch_attempts: Option<Arc<AtomicUsize>>,
+    certificate_services: Arc<Mutex<Vec<Vec<i32>>>>,
     certificate_job_status: Option<ConfigureSwitchCertificateJobStatus>,
     password_rotation_enabled: bool,
     password_rotation_start_result: Option<MockPasswordRotationStartResult>,
@@ -51,6 +52,11 @@ impl MockNvSwitchManager {
         self.certificate_batch_attempts
             .as_ref()
             .map_or(0, |attempts| attempts.load(Ordering::Relaxed))
+    }
+
+    /// Returns the service lists submitted for individual switch certificates.
+    pub fn certificate_services(&self) -> Vec<Vec<i32>> {
+        self.certificate_services.lock().unwrap().clone()
     }
 
     /// Returns a mock configured with a certificate job status.
@@ -243,8 +249,13 @@ impl NvSwitchManager for MockNvSwitchManager {
         &self,
         _endpoint: &SwitchEndpoint,
         _domain_name: Option<&str>,
-        _services: Option<&[i32]>,
+        services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError> {
+        self.certificate_services
+            .lock()
+            .unwrap()
+            .push(services.unwrap_or_default().to_vec());
+
         Ok("mock-switch-cert-job".to_string())
     }
 

@@ -288,7 +288,7 @@ pub(crate) async fn start_runtime(
         dynamic_settings.bmc_proxy.clone(),
     );
 
-    let (rms_client, site_explorer_rms_client, switch_system_image_rms_api) =
+    let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
         match carbide_config.rms.api_url.clone() {
             Some(url) if !url.is_empty() => {
                 let rms_client_config = librms::client_config::RmsClientConfig::new(
@@ -309,11 +309,18 @@ pub(crate) async fn start_runtime(
                     librms::RmsClientPool::new(&site_explorer_rms_api_config)
                         .create_client()
                         .await;
+
+                let site_explorer_machine_info_provider = Arc::new(
+                    component_manager::rms::rms_machine_info_provider(site_explorer_rms_client),
+                )
+                    as Arc<dyn component_manager::MachineInfoProvider>;
+
                 let switch_system_image_rms_api =
                     Arc::new(librms::RackManagerApi::new(&rms_api_config));
+
                 (
                     Some(shared_rms_client),
-                    Some(site_explorer_rms_client),
+                    Some(site_explorer_machine_info_provider),
                     Some(switch_system_image_rms_api),
                 )
             }
@@ -632,6 +639,14 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -663,6 +678,7 @@ pub(crate) async fn start_runtime(
         component_manager,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
     });
 
     if carbide_config.listen_only {
@@ -672,7 +688,7 @@ pub(crate) async fn start_runtime(
         initialize_and_start_controllers(
             join_set,
             api_service.clone(),
-            site_explorer_rms_client,
+            site_explorer_machine_info_provider,
             meter.clone(),
             per_object_prometheus_registry,
             ipmi_tool.clone(),
@@ -850,11 +866,47 @@ async fn initialize_dpf_sdk(
         carbide_config.vmaas_config.as_ref(),
         carbide_config.dpu_config.num_of_vfs,
     )?;
-    let effective_interfaces = carbide_dpf::build_effective_dpu_interfaces(
+
+    // BF3 interface vector drops pf1hpf from the static interface list
+    // because the flavor hides port 2. However, if user has configured
+    // pf1 explicitly for VMaaS, we accept it for compatibility, but log
+    // a warning regards this.
+    if let Some(identity) = carbide_config
+        .vmaas_config
+        .as_ref()
+        .and_then(|config| config.bridging.as_ref())
+        .and_then(|bridging| {
+            bridging
+                .host_representor_intercept_bridging
+                .values()
+                .find_map(|interface| {
+                    let identity = interface.dpf_interface?;
+                    (identity.pf_id == 1).then_some(identity)
+                })
+        })
+    {
+        tracing::warn!(
+            controller_id = identity.controller_id,
+            pf_id = identity.pf_id,
+            "VMaaS intercept-bridging configuration added PF1 for BF3 although the BF3 flavor hides port 2"
+        );
+    }
+
+    // Build interfaces vector for each deployment type.
+    // For Astra we only build the static interfaces vector here, and
+    // the function resolve_initialization_inventory() adds the required
+    // xplane patch interfaces before it applies DPF CRs. In theory, we
+    // could have augmented the patch interfaces here also.
+    let bf3_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf3,
         carbide_config.dpu_config.num_of_vfs,
         intercept_bridging.as_ref(),
     );
-
+    let bf4_interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf4Generic,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging.as_ref(),
+    );
     let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
 
     let service_vpc_slots =
@@ -899,9 +951,8 @@ async fn initialize_dpf_sdk(
                 .resolved_services_for(deployment, deployment_type);
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => &effective_interfaces,
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
+                DpuDeploymentType::Bf4Generic => &bf4_interfaces,
             };
             let (service_vpc_slots, additional_managed_sf) = match deployment_type {
                 DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
@@ -1014,10 +1065,31 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
-    for (name, config) in init_configs {
-        sdk.create_initialization_objects(&config)
+    for (name, config) in &init_configs {
+        sdk.create_initialization_objects(config)
             .await
             .map_err(|err| eyre::eyre!("failed to initialize {name} DPF deployment: {err}"))?;
+    }
+
+    // Cleanup stale PF1 interfaces for BF3. For scoped deployment this is
+    // unconditional, for unscoped we only cleanup if BF4 is not present.
+    let bf4_configured = carbide_config.dpf.deployments.bf4_generic.is_some()
+        || carbide_config.dpf.deployments.bf4_astra.is_some();
+    let cleanup_configs = init_configs
+        .iter()
+        .filter(|(_, config)| {
+            matches!(
+                config.deployment_type(),
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            )
+        })
+        .map(|(_, config)| config)
+        .collect::<Vec<_>>();
+    if let Err(error) = sdk
+        .cleanup_stale_pf1_interfaces(&cleanup_configs, bf4_configured)
+        .await
+    {
+        tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
     }
 
     Ok(Some(Arc::new(DpfSdkOps::new(
@@ -1267,7 +1339,7 @@ impl<'a> SeedData<'a> {
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
-    site_explorer_rms_client: Option<Arc<dyn librms::RmsApi>>,
+    site_explorer_machine_info_provider: Option<Arc<dyn component_manager::MachineInfoProvider>>,
     meter: Meter,
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
@@ -1789,6 +1861,17 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build NetworkSegmentController");
 
+    StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(
+            crate::site_prefix_controller::SitePrefixReadiness {
+                vpc_isolation_behavior: carbide_config.vpc_isolation_behavior,
+            },
+        ))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())
@@ -1934,9 +2017,10 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
-                nmx_cluster_switch_mtls_services: carbide_config
-                    .rack_state_controller
-                    .effective_nmx_cluster_switch_mtls_services_as_i32(),
+                switch_mtls_services: carbide_config
+                    .switch_state_controller
+                    .switch_mtls_services
+                    .clone(),
                 firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
@@ -2077,7 +2161,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
-        site_explorer_rms_client,
+        site_explorer_machine_info_provider,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )

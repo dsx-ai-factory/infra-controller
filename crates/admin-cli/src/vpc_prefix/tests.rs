@@ -111,6 +111,29 @@ fn parse_show_routes_to_show_variant() {
     );
 }
 
+#[test]
+fn contains_search_accepts_addresses_and_prefixes() {
+    scenarios!(
+        run = |value| {
+            parse_leaf::<Cmd>(&["vpc-prefix", "show", "--contains", value], &["show"])
+                .map(|matches| matches.get_one::<IpNet>("contains").map(ToString::to_string))
+                .map_err(|error| error.kind())
+        };
+        "IPv4 address" {
+            "192.0.2.5" => Yields(Some("192.0.2.5/32".to_string())),
+        }
+        "IPv6 address" {
+            "2001:db8::1234" => Yields(Some("2001:db8::1234/128".to_string())),
+        }
+        "CIDR prefix passes through unchanged" {
+            "2001:db8::/64" => Yields(Some("2001:db8::/64".to_string())),
+        }
+        "invalid prefix length" {
+            "2001:db8::/129" => FailsWith(clap::error::ErrorKind::ValueValidation),
+        }
+    );
+}
+
 // parse_create routes every valid `create` invocation to the Create variant,
 // reporting (vpc_id, prefix, name, vpc_prefix_id?, site_prefix_id?) so the
 // required-field and optional-id assertions each become a row.

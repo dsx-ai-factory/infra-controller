@@ -19,7 +19,6 @@ import (
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -124,7 +123,7 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -313,7 +312,6 @@ func TestOperatingSystemHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateOperatingSystemHandler{
@@ -552,7 +550,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -783,7 +781,6 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetAllOperatingSystemHandler{
@@ -949,7 +946,7 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1066,7 +1063,6 @@ func TestOperatingSystemHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetOperatingSystemHandler{
@@ -1512,7 +1508,7 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -1790,7 +1786,6 @@ func TestOperatingSystemHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateOperatingSystemHandler{
@@ -2047,7 +2042,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 	)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls
 	// to site(s).
@@ -2231,7 +2226,6 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient
@@ -2331,7 +2325,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
 	testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "own-ip")
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2363,7 +2357,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(provOrg)
 			ec.Set("user", provUser)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ch := CreateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, ch.Handle(ec))
@@ -2399,7 +2393,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-update", sharedProvUser.ID)
 	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-update", tnUser.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2444,7 +2438,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			uh := UpdateOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, uh.Handle(ec))
@@ -2480,7 +2474,7 @@ func TestOperatingSystemHandler_Delete_Ownership(t *testing.T) {
 	provOSShared := buildRawIpxeProviderOS(t, ctx, osDAO, sharedOrg, ip2.ID, "prov-os-shared-delete", sharedProvUser.ID)
 	tnOS := buildRawIpxeTenantOS(t, ctx, osDAO, sharedOrg, tn.ID, "tenant-os-delete", tnUser.ID)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2522,7 +2516,7 @@ func TestOperatingSystemHandler_Delete_Ownership(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dh := DeleteOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg, scp: scp}
 			require.NoError(t, dh.Handle(ec))
@@ -2616,7 +2610,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 	privTenant := testMachineBuildTenant(t, dbSession, privOrg, "vis-privileged-tenant")
 	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &privTenant.ID, privOrg, cdbm.TenantAccountStatusReady, privUser)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name          string
@@ -2678,8 +2672,7 @@ func TestOperatingSystemHandler_GetAll_Visibility(t *testing.T) {
 			ec.SetParamValues(tc.reqOrgName)
 			ec.Set("user", tc.user)
 
-			reqCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(reqCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			mh := GetAllOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
 			err := mh.Handle(ec)
@@ -2763,7 +2756,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	// D has no membership and is accessible only through the account default.
 	cdbm.TestBuildTenantSite(t, dbSession, privTenant, siteC, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, privUser)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -2861,8 +2854,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			ec.SetParamValues(tc.reqOrgName, tc.os.ID.String())
 			ec.Set("user", tc.user)
 
-			reqCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(reqCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gh := GetOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
 			err := gh.Handle(ec)

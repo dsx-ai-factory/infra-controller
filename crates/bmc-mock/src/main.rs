@@ -42,6 +42,7 @@ use mac_address::MacAddress;
 use tar_router::TarGzOption;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::Layer;
@@ -131,13 +132,12 @@ async fn start_libvirt_app(
         backend = ?StateBackend::Libvirt,
         "Using generated BMC mock",
     );
-    let callbacks = Arc::new(bmc_mock::libvirt::LibvirtCallbacks::new(
-        libvirt.into_config(),
-        &mut backend_tasks,
-    ));
+    let stop = CancellationToken::new();
+    let guard = stop.clone().drop_guard();
+    let (actor, callbacks) = bmc_mock::libvirt::LibvirtActor::new(libvirt.into_config(), guard);
     let (router, state) = bmc_mock::machine_router(
         &machine.machine_info(),
-        callbacks.clone(),
+        callbacks.into(),
         String::default(),
         bmc_behaviour.redfish_auth,
         MachineRouterOptions {
@@ -146,10 +146,7 @@ async fn start_libvirt_app(
             ..MachineRouterOptions::default()
         },
     );
-    callbacks
-        .bind_state(&state)
-        .await
-        .expect("libvirt backend must bind to generated BMC state");
+    actor.run(&state, &mut backend_tasks, stop).await?;
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
     } else {

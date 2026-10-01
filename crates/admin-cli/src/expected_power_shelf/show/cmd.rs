@@ -24,7 +24,7 @@ use rpc::forge::{ExpectedPowerShelf, ExpectedPowerShelfList, ExpectedPowerShelfR
 
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
-use crate::{async_write, async_writeln};
+use crate::{async_write, async_write_table_as_csv, async_writeln};
 
 enum ShowResult {
     Single(ExpectedPowerShelf),
@@ -36,34 +36,53 @@ enum RenderOutcome {
     TableRequired(ExpectedPowerShelfList),
 }
 
+// Keep the existing JSON and human-readable outputs unchanged. YAML uses the
+// same protobuf-shaped objects as JSON, but must not expose BMC credentials.
+fn redact_credentials(record: &mut ExpectedPowerShelf) {
+    if !record.bmc_password.is_empty() {
+        record.bmc_password = "***".to_string();
+    }
+}
+
 async fn render_show_result(
     result: ShowResult,
     output_format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> CarbideCliResult<RenderOutcome> {
-    match result {
-        ShowResult::Single(expected_power_shelf) => {
-            if output_format == OutputFormat::Json {
-                async_writeln!(
-                    output,
-                    "{}",
-                    serde_json::to_string_pretty(&expected_power_shelf)?
-                )?;
-            } else {
-                async_writeln!(output, "{:#?}", expected_power_shelf)?;
+    match (result, output_format) {
+        (ShowResult::Single(record), OutputFormat::Json) => {
+            async_writeln!(output, "{}", serde_json::to_string_pretty(&record)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::Single(mut record), OutputFormat::Yaml) => {
+            redact_credentials(&mut record);
+            async_write!(output, "{}", serde_yaml::to_string(&record)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::Single(record), OutputFormat::Csv) => {
+            // Reuse the list's table projection (and its field escaping) for a
+            // one-row CSV document. The caller fetches linked columns as usual.
+            Ok(RenderOutcome::TableRequired(ExpectedPowerShelfList {
+                expected_power_shelves: vec![record],
+            }))
+        }
+        (ShowResult::Single(record), OutputFormat::AsciiTable) => {
+            async_writeln!(output, "{:#?}", record)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::List(records), OutputFormat::Json) => {
+            async_writeln!(output, "{}", serde_json::to_string_pretty(&records)?)?;
+            Ok(RenderOutcome::Complete)
+        }
+        (ShowResult::List(mut records), OutputFormat::Yaml) => {
+            for record in &mut records.expected_power_shelves {
+                redact_credentials(record);
             }
+            async_write!(output, "{}", serde_yaml::to_string(&records)?)?;
             Ok(RenderOutcome::Complete)
         }
-        ShowResult::List(expected_power_shelves) if output_format == OutputFormat::Json => {
-            async_writeln!(
-                output,
-                "{}",
-                serde_json::to_string_pretty(&expected_power_shelves)?
-            )?;
-            Ok(RenderOutcome::Complete)
-        }
-        ShowResult::List(expected_power_shelves) => {
-            Ok(RenderOutcome::TableRequired(expected_power_shelves))
+        (ShowResult::List(records), OutputFormat::Csv | OutputFormat::AsciiTable) => {
+            Ok(RenderOutcome::TableRequired(records))
         }
     }
 }
@@ -132,6 +151,7 @@ pub(super) async fn show(
         &expected_power_shelves,
         &expected_bmc_ip_vs_ids,
         &expected_mi,
+        output_format,
     )
     .await?;
 
@@ -143,6 +163,7 @@ async fn convert_and_print_into_nice_table(
     expected_power_shelves: &::rpc::forge::ExpectedPowerShelfList,
     expected_discovered_machine_ids: &HashMap<String, String>,
     expected_discovered_machine_interfaces: &HashMap<MacAddress, ::rpc::forge::MachineInterface>,
+    output_format: OutputFormat,
 ) -> CarbideCliResult<()> {
     let mut table = Box::new(Table::new());
 
@@ -194,7 +215,11 @@ async fn convert_and_print_into_nice_table(
         ]);
     }
 
-    async_write!(output, "{}", table)?;
+    if output_format == OutputFormat::Csv {
+        async_write_table_as_csv!(output, table)?;
+    } else {
+        async_write!(output, "{}", table)?;
+    }
 
     Ok(())
 }
@@ -245,5 +270,137 @@ mod tests {
             json["expected_power_shelves"][0]["shelf_serial_number"],
             "shelf-1"
         );
+    }
+
+    #[tokio::test]
+    async fn yaml_output_is_one_redacted_document_for_single_list_and_empty() {
+        let mut record = expected_power_shelf();
+        record.bmc_password = "SYNTHETIC_BMC_SECRET".into();
+        record.metadata = Some(rpc::forge::Metadata {
+            name: "quoted \"name\"".into(),
+            description: "line one\nline two".into(),
+            ..Default::default()
+        });
+        let mut without_metadata = expected_power_shelf();
+        without_metadata.bmc_mac_address = "00:11:22:33:44:66".into();
+        for (result, is_single, is_empty) in [
+            (ShowResult::Single(record.clone()), true, false),
+            (
+                ShowResult::List(ExpectedPowerShelfList {
+                    expected_power_shelves: vec![record, without_metadata],
+                }),
+                false,
+                false,
+            ),
+            (
+                ShowResult::List(ExpectedPowerShelfList::default()),
+                false,
+                true,
+            ),
+        ] {
+            let mut captured = CapturedOutput::new();
+            let outcome = render_show_result(result, OutputFormat::Yaml, captured.writer())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, RenderOutcome::Complete));
+            let output = captured.into_bytes().await;
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(!text.contains("SYNTHETIC_BMC_SECRET"));
+            let yaml: Value = serde_yaml::from_str(text).unwrap();
+            let item = if is_single {
+                &yaml
+            } else {
+                &yaml["expected_power_shelves"][0]
+            };
+            if !is_empty {
+                assert_eq!(item["shelf_serial_number"], "shelf-1");
+                assert_eq!(item["bmc_password"], "***");
+                assert_eq!(item["metadata"]["description"], "line one\nline two");
+                if !is_single {
+                    assert!(yaml["expected_power_shelves"][1]["metadata"].is_null());
+                    assert_eq!(yaml["expected_power_shelves"][1]["bmc_password"], "");
+                }
+            } else {
+                assert_eq!(yaml["expected_power_shelves"].as_array().unwrap().len(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn csv_output_has_one_header_and_escaped_rows() {
+        let mut record = expected_power_shelf();
+        record.bmc_password = "SYNTHETIC_BMC_SECRET".into();
+        record.metadata = Some(rpc::forge::Metadata {
+            name: "quoted \"name\"".into(),
+            description: "line one,\nline two".into(),
+            ..Default::default()
+        });
+        let mut without_metadata = expected_power_shelf();
+        without_metadata.bmc_mac_address = "00:11:22:33:44:66".into();
+        for (result, row_count) in [
+            (ShowResult::Single(record.clone()), 1),
+            (
+                ShowResult::List(ExpectedPowerShelfList {
+                    expected_power_shelves: vec![record, without_metadata],
+                }),
+                2,
+            ),
+            (ShowResult::List(ExpectedPowerShelfList::default()), 0),
+        ] {
+            let mut captured = CapturedOutput::new();
+            let outcome = render_show_result(result, OutputFormat::Csv, captured.writer())
+                .await
+                .unwrap();
+            let RenderOutcome::TableRequired(records) = outcome else {
+                panic!("CSV must use the table projection");
+            };
+            convert_and_print_into_nice_table(
+                captured.writer(),
+                &records,
+                &HashMap::new(),
+                &HashMap::new(),
+                OutputFormat::Csv,
+            )
+            .await
+            .unwrap();
+            let output = captured.into_bytes().await;
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(!text.contains("SYNTHETIC_BMC_SECRET"));
+            let mut reader = csv::Reader::from_reader(output.as_slice());
+            let headers = reader.headers().unwrap().clone();
+            assert!(headers.iter().any(|header| header == "Description"));
+            let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows.len(), row_count);
+            if let Some(row) = rows.first() {
+                assert_eq!(
+                    row.get(
+                        headers
+                            .iter()
+                            .position(|header| header == "Description")
+                            .unwrap()
+                    ),
+                    Some("line one,\nline two")
+                );
+                assert_eq!(
+                    row.get(headers.iter().position(|header| header == "Name").unwrap()),
+                    Some("quoted \"name\"")
+                );
+            }
+            if row_count == 2 {
+                assert_eq!(
+                    rows[1].get(headers.iter().position(|header| header == "Name").unwrap()),
+                    Some("")
+                );
+                assert_eq!(
+                    rows[1].get(
+                        headers
+                            .iter()
+                            .position(|header| header == "Labels")
+                            .unwrap()
+                    ),
+                    Some("")
+                );
+            }
+        }
     }
 }

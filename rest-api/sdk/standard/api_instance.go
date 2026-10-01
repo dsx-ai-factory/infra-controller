@@ -213,6 +213,22 @@ Create an Instance for Tenant.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
+A request targeting an already assigned `machineId` returns HTTP 409. A `Ready` response does not
+reserve the Machine: another request can assign it before creation is processed.
+`allowUnhealthyMachine` does not bypass the assignment check. Honor the `retryable`
+classification below before retrying, or select another available Machine.
+
+Machine-unavailable errors are retryable only when a unique current Instance
+belongs to this Tenant and is Terminating. Other current occupants are not
+retryable. Missing or ambiguous associations remain unclassified. No retry
+delay is estimated for release-pending errors.
+
+Uncertain create outcomes return `retryable: false` and recovery instructions
+in `message`. Check the identified Instance and Site in REST. If the Instance
+is absent or its outcome is unclear, ask the Site operator to verify the Core
+allocation and workflow before creating again. An empty REST result does not
+rule out a Site allocation. Follow the same checks after a lost HTTP response.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateInstanceRequest
@@ -311,6 +327,17 @@ func (a *InstanceAPIService) CreateInstanceExecute(r ApiCreateInstanceRequest) (
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -323,6 +350,39 @@ func (a *InstanceAPIService) CreateInstanceExecute(r ApiCreateInstanceRequest) (
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

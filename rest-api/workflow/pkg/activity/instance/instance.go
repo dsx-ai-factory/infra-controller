@@ -580,6 +580,8 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						status = cwutil.GetPtr(cdbm.InterfaceStatusReady)
 					}
 
+					// A present report with no prefixes must clear stored values;
+					// a nil `IPPrefixes` input would preserve them.
 					_, updateErr := interfaceDAO.Update(ctx, nil, cdbm.InterfaceUpdateInput{
 						InterfaceID:          ifc.ID,
 						VpcPrefixID:          vpcPrefixID,
@@ -591,6 +593,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						InlineRoutingProfile: inlineRoutingProfile,
 						MacAddress:           macAddress,
 						IpAddresses:          ipAddresses,
+						IPPrefixes:           append([]string{}, interfaceStatus.Prefixes...),
 						Status:               status,
 					})
 					if updateErr != nil {
@@ -818,6 +821,34 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
+				// OVS metadata is client-owned config, so the Site status carries none of it;
+				// the reconciled value comes from the reported attachment config instead. Only
+				// a changed value is written, and only for an OVS attachment (attachment_ovs is
+				// nil otherwise), matching how the MAC, IP and VF fields are reconciled above.
+				var bridgeName *string
+				var ovnNetworkName *string
+				clearOvnNetworkName := false
+				if ovs := attachmentConfig.GetAttachmentOvs(); ovs != nil {
+					reportedBridgeName := ovs.GetBridgeName()
+					if sxa.BridgeName == nil || *sxa.BridgeName != reportedBridgeName {
+						bridgeName = &reportedBridgeName
+					}
+
+					// attachment_ovs is the client-owned config echoed back whole, so it is
+					// authoritative for ovn_network_name: a reported value is taken, and an
+					// omitted one means the mapping was removed and the persisted value must
+					// be cleared. Leaving it would report stale metadata and re-send the old
+					// mapping to Core on a later unrelated PATCH.
+					if ovs.OvnNetworkName != nil {
+						reportedOvnNetworkName := ovs.GetOvnNetworkName()
+						if sxa.OvnNetworkName == nil || *sxa.OvnNetworkName != reportedOvnNetworkName {
+							ovnNetworkName = &reportedOvnNetworkName
+						}
+					} else if sxa.OvnNetworkName != nil {
+						clearOvnNetworkName = true
+					}
+				}
+
 				var status *string
 				if controllerInstance.Status.SpxStatus.ConfigsSynced == corev1.SyncState_SYNCED {
 					isSpectrumXConfigSynced = true
@@ -826,23 +857,43 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
-				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && status == nil {
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && bridgeName == nil && ovnNetworkName == nil && status == nil && !clearOvnNetworkName {
 					continue
 				}
 
-				_, serr := sxaDAO.Update(
-					ctx,
-					nil,
-					cdbm.SpectrumXAttachmentUpdateInput{
-						SpectrumXAttachmentID: sxa.ID,
-						MacAddress:            macAddress,
-						IPAddress:             ipAddress,
-						VirtualFunctionID:     virtualFunctionID,
-						Status:                status,
-					},
-				)
-				if serr != nil {
-					slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+				if macAddress != nil || ipAddress != nil || virtualFunctionID != nil || bridgeName != nil || ovnNetworkName != nil || status != nil {
+					_, serr := sxaDAO.Update(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentUpdateInput{
+							SpectrumXAttachmentID: sxa.ID,
+							MacAddress:            macAddress,
+							IPAddress:             ipAddress,
+							VirtualFunctionID:     virtualFunctionID,
+							BridgeName:            bridgeName,
+							OvnNetworkName:        ovnNetworkName,
+							Status:                status,
+						},
+					)
+					if serr != nil {
+						slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+					}
+				}
+
+				// Update only writes provided values, so a removed ovn_network_name is
+				// cleared explicitly to drop the stale mapping.
+				if clearOvnNetworkName {
+					_, cerr := sxaDAO.Clear(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentClearInput{
+							SpectrumXAttachmentID: sxa.ID,
+							OvnNetworkName:        true,
+						},
+					)
+					if cerr != nil {
+						slogger.Error().Err(cerr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+					}
 				}
 			}
 		}
@@ -1433,8 +1484,14 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 // clearMachineIsAssigned is a utility function to set the isAssigned state in the machine to false
 // tx must be non-nil when calling this function
 func (mi ManageInstance) clearMachineIsAssigned(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machineID string) error {
+	// Serialize with allocation before reading the status that will be restored.
+	err := tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to take advisory lock on machine for update")
+		return err
+	}
 	mDAO := cdbm.NewMachineDAO(mi.dbSession)
-	machine, err := mDAO.GetByID(ctx, tx, machineID, nil, false)
+	machine, err := mDAO.GetByID(ctx, tx, machineID, nil, true)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve machine for instance from DB")
 		return err
@@ -1442,23 +1499,28 @@ func (mi ManageInstance) clearMachineIsAssigned(ctx context.Context, tx *cdb.Tx,
 	if !machine.IsAssigned {
 		return nil
 	}
-	// Acquire an advisory lock on the machine, the lock is released when transaction
-	// commits or rollsback
-	err = tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machine.ID), false)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to take advisory lock on machine for update")
-		return err
-	}
 	updateInput := cdbm.MachineUpdateInput{
 		MachineID:  machine.ID,
 		IsAssigned: cwutil.GetPtr(false),
+		Status:     cwutil.GetPtr(machine.StatusForAssignment(false)),
 	}
 	_, err = mDAO.Update(ctx, tx, updateInput)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to update machine isassigned in DB")
 		return err
 	}
-	return err
+	if machine.Status != *updateInput.Status {
+		_, err = cdbm.NewStatusDetailDAO(mi.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: machine.ID,
+			Status:   *updateInput.Status,
+			Message:  cwutil.GetPtr(cdbm.MachineStatusReadyMessage),
+		})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to create Machine status detail on release")
+			return err
+		}
+	}
+	return nil
 }
 
 // updateInstanceStatusInDB is helper function to write Instance status updates to DB

@@ -17,17 +17,19 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	tClient "go.temporal.io/sdk/client"
 
+	temporalEnums "go.temporal.io/api/enums/v1"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	temporalEnums "go.temporal.io/api/enums/v1"
 )
 
 // ~~~~~ Slot resolution helpers ~~~~~ //
@@ -112,21 +114,19 @@ func componentTargetSpecFromIDs(ids []string, componentType *string) *flowv1.Ope
 
 // GetTrayHandler is the API Handler for getting a Tray by ID
 type GetTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetTrayHandler initializes and returns a new handler for getting a Tray
 func NewGetTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetTrayHandler {
 	return GetTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -143,7 +143,7 @@ func NewGetTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Client
 // @Success 200 {object} model.APITray
 // @Router /v2/org/{org}/nico/tray/{id} [get]
 func (gth GetTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Get", c, gth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -212,7 +212,7 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	gth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Get the temporal client for the site
 	stc, err := gth.scp.GetClientByID(site.ID)
@@ -257,21 +257,19 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 
 // GetAllTrayHandler is the API Handler for getting all Trays
 type GetAllTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllTrayHandler initializes and returns a new handler for getting all Trays
 func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllTrayHandler {
 	return GetAllTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -295,7 +293,7 @@ func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Success 200 {array} model.APITray
 // @Router /v2/org/{org}/nico/tray [get]
 func (gath GetAllTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "GetAll", c, gath.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -378,6 +376,9 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
+	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.TrayDefaultOrderBy)
 	}
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.TrayOrderByFieldMap)))
 	if err != nil {
@@ -487,21 +488,19 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 
 // ValidateTrayHandler is the API Handler for validating a single Tray's components
 type ValidateTrayHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateTrayHandler initializes and returns a new handler for validating a Tray
 func NewValidateTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateTrayHandler {
 	return ValidateTrayHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -518,7 +517,7 @@ func NewValidateTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/{id}/validation [get]
 func (vth ValidateTrayHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Validate", c, vth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "Validate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -556,7 +555,7 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	vth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Get site ID from query param (required)
 	siteStrID := c.QueryParam("siteId")
@@ -636,21 +635,19 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 // ValidateTraysHandler is the API Handler for validating Trays with optional filters.
 // If no filter is specified, validates all trays in the Site.
 type ValidateTraysHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateTraysHandler initializes and returns a new handler for validating Trays
 func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateTraysHandler {
 	return ValidateTraysHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -673,7 +670,7 @@ func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/validation [get]
 func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "ValidateTrays", c, vtsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "ValidateTrays", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -800,27 +797,25 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 
 // UpdateTrayPowerStateHandler is the API Handler for power controlling a single Tray by ID
 type UpdateTrayPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateTrayPowerStateHandler initializes and returns a new handler for power controlling a Tray
 func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateTrayPowerStateHandler {
 	return UpdateTrayPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Tray identified by component ID (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -831,7 +826,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/tray/{id}/power [patch]
 func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControl", c, pcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControl", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -869,7 +864,7 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	pcth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdatePowerStateRequest{}
@@ -917,10 +912,10 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.State,
-		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", apiRequest.State, trayStrID), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, apiRequest.State,
+		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-update-%s-%s", model.PowerControlStateWorkflowToken(apiRequest.State), trayStrID), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", apiRequest.State).Msg("finishing API handler")
@@ -931,27 +926,25 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 // BatchUpdateTrayPowerStateHandler is the API Handler for power controlling Trays with optional filters
 type BatchUpdateTrayPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateTrayPowerStateHandler initializes and returns a new handler for batch power controlling Trays
 func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateTrayPowerStateHandler {
 	return BatchUpdateTrayPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Power control Trays
-// @Description Power control Trays with optional filters (on, off, cycle, forceoff, forcecycle). If no filter is specified, targets all trays in the Site.
+// @Description Power control Trays with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all trays in the Site.
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -961,7 +954,7 @@ func NewBatchUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/tray/power [patch]
 func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControlBatch", c, pctbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "PowerControlBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1047,10 +1040,10 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
-		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", request.State, common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
+		request.RuleID, request.OverrideReadinessCheck, fmt.Sprintf("tray-power-state-batch-update-%s-%s", model.PowerControlStateWorkflowToken(request.State), common.RequestHash(request.Filter)), "Tray")
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Str("State", request.State).Msg("finishing API handler")
@@ -1061,21 +1054,19 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 // UpdateTrayFirmwareHandler is the API Handler for upgrading firmware on a single Tray by ID
 type UpdateTrayFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateTrayFirmwareHandler initializes and returns a new handler for firmware upgrading a Tray
 func NewUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateTrayFirmwareHandler {
 	return UpdateTrayFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1092,7 +1083,7 @@ func NewUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/tray/{id}/firmware [patch]
 func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdate", c, futh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1130,12 +1121,12 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	futh.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := apiRequest.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating firmware update request data")
@@ -1176,12 +1167,12 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		},
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
 		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID,
 		apiRequest.RuleID, apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-update-%s", trayStrID), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")
@@ -1192,21 +1183,19 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 
 // BatchUpdateTrayFirmwareHandler is the API Handler for firmware upgrading Trays with optional filters
 type BatchUpdateTrayFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateTrayFirmwareHandler initializes and returns a new handler for batch firmware upgrading Trays
 func NewBatchUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateTrayFirmwareHandler {
 	return BatchUpdateTrayFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1222,7 +1211,7 @@ func NewBatchUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/tray/firmware [patch]
 func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdateBatch", c, futbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tray", "FirmwareUpdateBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1230,7 +1219,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	// Bind and validate the JSON body
 	var request model.APIBatchTrayFirmwareUpdateRequest
 	if err := c.Bind(&request); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
+		return firmwareRequestBindError(c, err)
 	}
 	if verr := request.Validate(); verr != nil {
 		logger.Warn().Err(verr).Msg("error validating batch tray firmware update request")
@@ -1308,12 +1297,12 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
-	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
+	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
 		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("tray-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Tray")
-	if err != nil {
-		return err
+	if proxyErr != nil {
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	logger.Info().Msg("finishing API handler")

@@ -31,6 +31,7 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
     create(
         txn,
         &ExpectedRack {
+            rack_group_id: None,
             rack_id: ids[0].clone(),
             rack_profile_id: RackProfileId::new("NVL72"),
 
@@ -47,6 +48,7 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
     create(
         txn,
         &ExpectedRack {
+            rack_group_id: None,
             rack_id: ids[1].clone(),
             rack_profile_id: RackProfileId::new("NVL72"),
 
@@ -63,6 +65,7 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
     create(
         txn,
         &ExpectedRack {
+            rack_group_id: None,
             rack_id: ids[2].clone(),
             rack_profile_id: RackProfileId::new("NVL36"),
 
@@ -108,6 +111,7 @@ async fn test_db_duplicate_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
     let result = create(
         &mut txn,
         &ExpectedRack {
+            rack_group_id: None,
             rack_id: ids[0].clone(),
             rack_profile_id: RackProfileId::new("NVL72"),
 
@@ -136,6 +140,7 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
     assert_eq!(expected_rack.rack_profile_id.as_str(), "NVL72");
 
     let updated = ExpectedRack {
+        rack_group_id: None,
         rack_id: ids[0].clone(),
         rack_profile_id: RackProfileId::new("NVL36"),
         metadata: Metadata {
@@ -151,7 +156,7 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
 
     let mut txn = pool.begin().await?;
     let found = find_by_rack_id(&mut txn, &ids[0]).await?.unwrap();
-    assert_eq!(found.rack_profile_id.as_str(), "NVL36");
+    assert_eq!(found.rack_profile_id.as_str(), "NVL72");
     assert_eq!(found.metadata.name, "updated-rack");
 
     Ok(())

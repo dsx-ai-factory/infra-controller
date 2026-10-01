@@ -4,8 +4,9 @@ kind: Service
 metadata:
   name: {{ include "nico-pxe.name" . }}-external
   namespace: {{ include "nico-pxe.namespace" . }}
+  {{/* Keep the external Service's part-of value without duplicating the helper's key. */}}
   labels:
-    {{- include "nico-pxe.labels" . | nindent 4 }}
+    {{- omit (include "nico-pxe.labels" . | fromYaml) "app.kubernetes.io/part-of" | toYaml | nindent 4 }}
     app.kubernetes.io/part-of: {{ include "nico-pxe.name" . }}
   annotations:
     metallb.universe.tf/allow-shared-ip: "{{ include "nico-pxe.name" . }}"
@@ -14,6 +15,13 @@ metadata:
     {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- if .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
   {{- end }}
@@ -30,8 +38,9 @@ kind: Service
 metadata:
   name: {{ include "nico-pxe.name" . }}-external-80
   namespace: {{ include "nico-pxe.namespace" . }}
+  {{/* Keep the external Service's part-of value without duplicating the helper's key. */}}
   labels:
-    {{- include "nico-pxe.labels" . | nindent 4 }}
+    {{- omit (include "nico-pxe.labels" . | fromYaml) "app.kubernetes.io/part-of" | toYaml | nindent 4 }}
     app.kubernetes.io/part-of: {{ include "nico-pxe.name" . }}
   annotations:
     metallb.universe.tf/allow-shared-ip: "{{ include "nico-pxe.name" . }}"
@@ -40,6 +49,13 @@ metadata:
     {{- end }}
 spec:
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- if .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
   {{- end }}

@@ -179,6 +179,10 @@
             <ul>
 
                 <li>
+                  <a href="#v1.ACPowerCycleRackRequest"><span class="badge">M</span>ACPowerCycleRackRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.AddComponentRequest"><span class="badge">M</span>AddComponentRequest</a>
                 </li>
 
@@ -487,11 +491,27 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetListOfNVLinkDomainsRequest"><span class="badge">M</span>GetListOfNVLinkDomainsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetListOfNVLinkDomainsResponse"><span class="badge">M</span>GetListOfNVLinkDomainsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.GetListOfRacksRequest"><span class="badge">M</span>GetListOfRacksRequest</a>
                 </li>
 
                 <li>
                   <a href="#v1.GetListOfRacksResponse"><span class="badge">M</span>GetListOfRacksResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainRequest"><span class="badge">M</span>GetNVLinkDomainRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainResponse"><span class="badge">M</span>GetNVLinkDomainResponse</a>
                 </li>
 
                 <li>
@@ -544,6 +564,18 @@
 
                 <li>
                   <a href="#v1.GetTasksByIDsResponse"><span class="badge">M</span>GetTasksByIDsResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthProbeAlert"><span class="badge">M</span>HealthProbeAlert</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthProbeSuccess"><span class="badge">M</span>HealthProbeSuccess</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthReport"><span class="badge">M</span>HealthReport</a>
                 </li>
 
                 <li>
@@ -632,6 +664,10 @@
 
                 <li>
                   <a href="#v1.NVLDomainTargets"><span class="badge">M</span>NVLDomainTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.NVLinkDomain"><span class="badge">M</span>NVLinkDomain</a>
                 </li>
 
                 <li>
@@ -1090,6 +1126,63 @@
         <h2 id="flow.proto">flow.proto</h2><a href="#title">Top</a>
       </div>
       <p></p>
+
+
+        <h3 id="v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>target_spec</td>
+                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
+                  <td></td>
+                  <td><p>Target racks or NVLink domains with an optional type filter, or specific components </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>optional task description </p></td>
+                </tr>
+
+                <tr>
+                  <td>queue_options</td>
+                  <td><a href="#v1.QueueOptions">QueueOptions</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td>optional</td>
+                  <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>override_readiness_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>When true, proceed with the AC power cycle even if one or more target
+components (or, for rack-scoped components, any host on the owning
+rack) are reported as not ready for the operation by their
+persisted ComponentOperationStatus. Intended for operator-supervised
+maintenance where tenant impact has been acknowledged out-of-band;
+the bypass is recorded in the server log. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
 
 
         <h3 id="v1.AddComponentRequest">AddComponentRequest</h3>
@@ -1656,6 +1749,20 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><a href="#v1.LeakHandlingStatus">LeakHandlingStatus</a></td>
                   <td></td>
                   <td><p>Flow&#39;s leakage-handling status for this component. </p></td>
+                </tr>
+
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Owning rack&#39;s domain external ID (rack group ID). </p></td>
                 </tr>
 
             </tbody>
@@ -3484,7 +3591,7 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending. Component UUID ascending breaks equal-field ties. </p></td>
                 </tr>
 
             </tbody>
@@ -3641,7 +3748,7 @@ backend applies the update. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by name ascending, then UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -3664,6 +3771,82 @@ backend applies the update. </p></td>
                 <tr>
                   <td>nvl_domains</td>
                   <td><a href="#v1.NVLDomain">NVLDomain</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>info</td>
+                  <td><a href="#v1.StringQueryInfo">StringQueryInfo</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>order_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domains</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
                 </tr>
@@ -3717,6 +3900,13 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
+                  <td><p>Defaults to name ascending. Rack UUID ascending breaks equal-field ties. </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_external_id_only</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -3747,6 +3937,61 @@ backend applies the update. </p></td>
                 <tr>
                   <td>total</td>
                   <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domain</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -4106,6 +4351,148 @@ and returns OperationRun.stats. </p></td>
 
 
 
+        <h3 id="v1.HealthProbeAlert">HealthProbeAlert</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_alert_since</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>message</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tenant_message</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>classifications</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthProbeSuccess">HealthProbeSuccess</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthReport">HealthReport</h3>
+        <p>HealthReport is Flow's latest synchronized snapshot of Core aggregate health.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>source</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>triggered_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>observed_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>successes</td>
+                  <td><a href="#v1.HealthProbeSuccess">HealthProbeSuccess</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>alerts</td>
+                  <td><a href="#v1.HealthProbeAlert">HealthProbeAlert</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.Identifier">Identifier</h3>
         <p></p>
 
@@ -4212,7 +4599,8 @@ and returns OperationRun.stats. </p></td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
                   <td><p>Optional. Omit for offset 0 and limit 100. When present, offset must be
-non-negative and limit must be greater than zero. </p></td>
+non-negative and limit must be greater than zero. Results are ordered by
+UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -4254,7 +4642,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRulesRequest">ListOperationRulesRequest</h3>
-        <p></p>
+        <p>Results are ordered by creation time descending, then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4330,7 +4718,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunTargetsRequest">ListOperationRunTargetsRequest</h3>
-        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p>
+        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p><p>Results are ordered by phase index, then the unique sequence index.</p>
 
 
           <table class="field-table">
@@ -4406,7 +4794,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunsRequest">ListOperationRunsRequest</h3>
-        <p>ListOperationRunsRequest lists operation runs, newest first by default.</p>
+        <p>ListOperationRunsRequest lists operation runs by creation time descending,</p><p>then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4564,7 +4952,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListTaskSchedulesRequest">ListTaskSchedulesRequest</h3>
-        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending.</p>
+        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending, then UUID ascending.</p>
 
 
           <table class="field-table">
@@ -4660,7 +5048,7 @@ non-negative and limit must be greater than zero. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by creation time descending, then UUID descending. </p></td>
                 </tr>
 
                 <tr>
@@ -4785,6 +5173,20 @@ accept this flag. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -4817,6 +5219,13 @@ accept this flag. </p></td>
                 </tr>
 
                 <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
                   <td>component_types</td>
                   <td><a href="#v1.ComponentType">ComponentType</a></td>
                   <td>repeated</td>
@@ -4845,6 +5254,72 @@ accept this flag. </p></td>
                   <td><a href="#v1.NVLDomainTarget">NVLDomainTarget</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.NVLinkDomain">NVLinkDomain</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>name</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>topology</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation_status</td>
+                  <td><a href="#v1.Phase">Phase</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>components</td>
+                  <td><a href="#v1.Component">Component</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_group_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Same value as id: the domain&#39;s external ID. </p></td>
                 </tr>
 
             </tbody>
@@ -6745,6 +7220,27 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>Operability phase aggregated from component phases. </p></td>
                 </tr>
 
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_profile_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Core rack profile mirrored by expected inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_ids</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p>Public rack-group domain identities. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7966,7 +8462,8 @@ bypass readiness checks or state-controller routing. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending for targeted components. Stable component and
+drift identities break equal-field ties before drift pagination. </p></td>
                 </tr>
 
             </tbody>
@@ -9407,6 +9904,13 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
               </tr>
 
               <tr>
+                <td>ACPowerCycleRack</td>
+                <td><a href="#v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</a></td>
+                <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
                 <td>GetComponentInfoByID</td>
                 <td><a href="#v1.GetComponentInfoByIDRequest">GetComponentInfoByIDRequest</a></td>
                 <td><a href="#v1.GetComponentInfoResponse">GetComponentInfoResponse</a></td>
@@ -9494,6 +9998,20 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
                 <td>GetRacksForNVLDomain</td>
                 <td><a href="#v1.GetRacksForNVLDomainRequest">GetRacksForNVLDomainRequest</a></td>
                 <td><a href="#v1.GetRacksForNVLDomainResponse">GetRacksForNVLDomainResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetNVLinkDomain</td>
+                <td><a href="#v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</a></td>
+                <td><a href="#v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetListOfNVLinkDomains</td>
+                <td><a href="#v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</a></td>
+                <td><a href="#v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</a></td>
                 <td><p></p></td>
               </tr>
 

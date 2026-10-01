@@ -6,6 +6,11 @@
 ## Enable/disable the controller
 enabled: false
 
+## Exactly one controller must manage a namespace. The Deployment is a fixed
+## single replica with a Recreate rollout, and there is deliberately no replica
+## count value: the controller has no leader election, so a second active pod
+## duplicates reconcile work and races on the same Services.
+
 ## Container image configuration.
 ##
 ## IMPORTANT: Production deployments must override these defaults.
@@ -75,7 +80,12 @@ rbac:
 gateway:
   enabled: false
 
-  ## HTTPS port of the UFM API and the probes; also the Service port
+  ## Bare IP address to bind. Set to "::" for IPv6; keep the IPv4 default
+  ## on hosts where IPv6 sockets are disabled.
+  listenIpAddress: "0.0.0.0"
+
+  ## HTTPS port of the UFM API, the RMS gRPC API and the probes; also the
+  ## Service port
   port: 8443
 
   ## Secret with a `token` key holding the UFM HTTP Basic credential. Empty

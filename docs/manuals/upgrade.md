@@ -14,7 +14,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **1b — postgres-operator** | `helmfile sync` issues `helm upgrade --install` — upgrades the release in place. Existing `PostgreSQL` CRs (including `nico-pg-cluster`) are untouched. |
 | **1c — MetalLB** | CRDs are applied server-side with `--force-conflicts`. Any Helm-owned CRDs from a prior install have their ownership labels stripped before sync, preventing deletion. `helmfile sync` upgrades the release. Existing `IPAddressPool`, `BGPPeer`, and `BGPAdvertisement` instances are preserved and re-applied (idempotent `kubectl apply`). Refer to [MetalLB CRD ownership](#20--21-metallb-crd-ownership-migration). |
 | **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. |
-| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet rolling-update leaves Vault pods running. |
+| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. |
 | **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
@@ -40,7 +40,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions via server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- DPF operator and DPUService images are updated to the new `NICO_DPF_VERSION`.
+- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: that release). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
 
 ## Pre-upgrade checklist
 
@@ -175,7 +175,7 @@ export NICO_CORE_IMAGE_TAG=v2.1.0                      # new Core tag
 export NICO_REST_IMAGE_TAG=v2.1.0                      # new REST tag
 ```
 
-If you are upgrading DPF as part of this release, the DPF version is read from `NICO_DPF_VERSION` (defaulting to the value baked into `setup.sh`). You do not normally need to set this explicitly unless your site uses a pinned version.
+If you are upgrading DPF as part of this release, the DPF version is the pinned `helm-prereqs/doca-platform` commit of the `setup.sh` you run: the submodule gitlink in a git checkout, or `helm-prereqs/doca-platform.pin` in the packaged `nico-prereqs` chart, which `setup.sh` clones at that commit. There is no version variable to set, and both paths install the same commit. Air-gapped sites that set `NICO_DPF_SRC` manage that checkout themselves: update it to the same commit (`git submodule status helm-prereqs/doca-platform`, or the sha in `doca-platform.pin`), because `setup.sh` installs whatever it contains and only warns when its HEAD differs from the pin. Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
 
 DPF is enabled by default, and on DPF sites two more variables are **required** — preflight raises hard errors when they are unset:
 
@@ -185,6 +185,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 ```
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
+
+### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
+
+Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
 
 ### Run the pre-flight check
 
@@ -288,7 +292,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phase | Typical duration |
 | ----- | ---------------- |
 | Phases 1–1c (storage, postgres-operator, MetalLB) | 2–5 min |
-| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized; only rolling update time) |
+| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized and its pods are not restarted) |
 | Phase 5 (ESO + nico-prereqs) | 1–3 min |
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
 | Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
@@ -397,7 +401,7 @@ helm template metallb metallb/metallb --version "${METALLB_VERSION}" \
 
 ### 2.0 → 2.1: DPF version update
 
-The default `NICO_DPF_VERSION` in `setup.sh` is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
+The `helm-prereqs/doca-platform` submodule pin is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
 
 DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs, all of which persist across the upgrade. In-flight DPU provisioning workflows may pause while the DPF operator restarts; they resume automatically when the new operator pod comes up.
 
@@ -405,9 +409,55 @@ DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs,
 
 NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent.
 
+### 2.1 → 2.2: NICo REST postgres volume size
+
+NICo 2.2 raises the `postgres` StatefulSet's `volumeClaimTemplates` storage request from 1Gi to 10Gi. Kubernetes forbids changing that field on an existing StatefulSet, so phase 7c of `setup.sh` deletes the StatefulSet with `--cascade=orphan` and re-applies it; the `postgres-0` pod and its `postgres-data-postgres-0` PVC are kept. The PVC of an upgraded site stays at 1Gi. It can be left as is, or grown in place if the StorageClass has `allowVolumeExpansion: true` and its storage provisioner supports expansion:
+
+```bash
+kubectl patch pvc postgres-data-postgres-0 -n postgres \
+    -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+```
+
 ### 2.2 → 2.3: Machine-a-Tron startupProbe Default
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
+
+### 2.2 → 2.3: Vault Probe Settings
+
+NICo 2.3 raises the Vault server probe `timeoutSeconds` from 3 to 10 and `failureThreshold` from 2 to 5 in `helm-prereqs/operators/values/vault.yaml`.
+
+For example, on a 250-rack site, the active node missed two 3-second liveness probes under load, was killed, came back sealed, and the standby nodes stayed leaderless.
+
+The Vault StatefulSet uses `updateStrategy: OnDelete`. This means that `helmfile sync` updates the pod template, but running pods keep the old probes until they are deleted. Phase 3 prints a warning naming the pods still running the previous revision. If the StatefulSet status cannot be read or has not caught up, the warning indicates that the revision could not be verified.
+
+After the upgrade finishes, find the active node, then roll the pods one at a time, standby nodes first, and the active node last. The active node is the pod whose `HA Mode` is `active`:
+
+```bash
+for pod in vault-0 vault-1 vault-2; do
+    echo -n "${pod}: "; kubectl exec -n vault "${pod}" -c vault -- vault status -tls-skip-verify | grep 'HA Mode'
+done
+```
+
+From the repository root, run the following commands for each standby in turn, and only then for the active node. Replace `<pod>` with the pod being rolled and `<active>` with the pod whose `HA Mode` is `active` at that point. A recreated pod starts sealed and is not Ready until it is unsealed, so the first wait is for `Running`:
+
+```bash
+kubectl delete pod -n vault <pod>
+kubectl wait pod/<pod> -n vault --for=jsonpath='{.status.phase}'=Running --timeout=300s
+helm-prereqs/unseal_vault.sh
+kubectl wait pod/<pod> -n vault --for=condition=Ready --timeout=300s
+kubectl -n vault get secret vaultroottoken -o jsonpath='{.data.token}' | base64 -d \
+    | kubectl exec -i -n vault <active> -c vault -- \
+        sh -c 'VAULT_TOKEN=$(cat) vault operator raft autopilot state -tls-skip-verify' \
+    | sed '/^Servers:/,$d'
+```
+
+The root token travels on standard input; it does not appear in the `kubectl exec` arguments that the API server records in audit events. The `sed` operation trims the output to the cluster summary: `Healthy`, `Failure Tolerance`, `Leader`, and `Voters`.
+
+`unseal_vault.sh` returns once `vault status` reports the pod unsealed. Unsealing only opens the pod's own storage, and does not show that the pod has rejoined the cluster as a healthy voter. Continue to the next pod only when `Healthy` is `true`, `Failure Tolerance` is `1` on a three-node cluster, and `<pod>` is listed under `Voters`.
+
+Right after the unseal, the summary can still show `Healthy` `false` and `Failure Tolerance` `0` until the leader hears from the pod. Rerun the check after a few seconds. A pod that comes back without its Raft data joins as a non-voter and appears under `Voters` only after autopilot promotes it. Deleting the next standby before the promotion can leave the three-node cluster below quorum. When the former active node is rolled, a standby has taken over; run the status loop again to find `<active>`.
+
+If `kubectl wait` reports the pod as not found, the StatefulSet has not recreated it yet. Run the wait again.
 
 ### 2.2 → 2.3: Kustomize deployment deprecated
 
@@ -424,7 +474,7 @@ for cert-manager, PostgreSQL, and Temporal are not affected.
 ## Rollback
 
 <Warning>
-Downgrades are **not a supported version move**. The [release and QA process](../development/release_and_qa_process.md) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
+Downgrades are **not a supported version move**. The [release policy](../../RELEASE.md#upgrade-and-downgrade-support) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
 </Warning>
 
 `setup.sh` does not have a built-in rollback mechanism. Rollback consists of:

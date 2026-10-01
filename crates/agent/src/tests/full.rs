@@ -883,6 +883,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     };
 
     let netconf = rpc::forge::ManagedHostNetworkConfigResponse {
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         bgp_leaf_session_password: Some("this_is_not_a_real_password".to_string()),
         site_global_vpc_vni: None,
         asn: 65535,
@@ -915,6 +917,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         tenant_host_asn: Some(65100),
         dhcp_servers: vec!["127.0.0.1".to_string()],
         ntp_servers: vec![],
+        dhcpv6_server_preference: Some(255),
         vni_device: "".to_string(),
 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {

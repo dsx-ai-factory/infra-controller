@@ -26,7 +26,7 @@ var _ MappedNullable = &BatchNVLinkDomainFirmwareUpdateRequest{}
 type BatchNVLinkDomainFirmwareUpdateRequest struct {
 	// ID of the Site
 	SiteId string `json:"siteId"`
-	// UUIDs of the NVLink Domains to update. IDs must be unique after UUID normalization (case-insensitive).
+	// Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
 	DomainIds []string `json:"domainIds"`
 	// Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
 	Version NullableString `json:"version,omitempty"`

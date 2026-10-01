@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -30,7 +29,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
@@ -75,7 +73,6 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 		Message:     "Processing",
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -177,7 +174,6 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -222,7 +218,6 @@ type GetTasksHandlerTestCase struct {
 func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(echo.Context) error, scp *sc.ClientPool, siteID string, testCases []GetTasksHandlerTestCase) {
 	t.Helper()
 	e := echo.New()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
@@ -273,9 +268,6 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 				ec.SetParamValues(tt.reqOrg, tt.pathParam)
 			}
 			ec.Set("user", tt.user)
-
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s err=%v", rec.Body.String(), err)
@@ -630,7 +622,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		Message:     "Cancelled by user",
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -746,7 +737,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err = handler.Handle(ec)

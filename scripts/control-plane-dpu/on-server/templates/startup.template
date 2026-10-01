@@ -101,4 +101,7 @@
             peer-group:
               HBNUNDERLAY:
                 remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
 

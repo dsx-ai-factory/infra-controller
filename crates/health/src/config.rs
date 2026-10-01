@@ -77,6 +77,9 @@ pub struct Config {
 
     pub sinks: SinksConfig,
 
+    /// Global token bucket that every collector iteration waits on before it
+    /// runs. Disabled by default; a `[rate_limit]` table enables it, with
+    /// defaults for any omitted field.
     pub rate_limit: Configurable<RateLimitConfig>,
 
     pub collectors: CollectorsConfig,
@@ -118,7 +121,7 @@ impl Default for Config {
             endpoint_sources: EndpointSourcesConfig::default(),
             tls: TlsConfig::default(),
             sinks: SinksConfig::default(),
-            rate_limit: Configurable::Enabled(RateLimitConfig::default()),
+            rate_limit: Configurable::Disabled,
             collectors: CollectorsConfig::default(),
             attributes: AttributesConfig::default(),
             processors: ProcessorsConfig::default(),
@@ -669,6 +672,24 @@ pub struct OtlpTargetConfig {
     #[serde(default = "OtlpTargetConfig::default_queue_capacity")]
     pub queue_capacity: usize,
 
+    /// Maximum encoded size, in bytes, of one export request.
+    ///
+    /// A batch whose request would be larger is split and sent in parts, as is
+    /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
+    /// record or metric point is always sent on its own, so the target still
+    /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
+    /// receive limit of the OpenTelemetry Collector, and must be greater than
+    /// zero.
+    #[serde(default = "OtlpTargetConfig::default_max_request_bytes")]
+    pub max_request_bytes: usize,
+
+    /// Maximum number of export requests in flight to this target for each
+    /// signal. Batches are exported concurrently over one connection, so
+    /// their arrival order is not guaranteed. Defaults to 4 and must be
+    /// greater than zero.
+    #[serde(default = "OtlpTargetConfig::default_max_concurrent_exports")]
+    pub max_concurrent_exports: usize,
+
     /// Maximum time to wait before flushing a non-empty batch for either
     /// signal. Defaults to two seconds.
     #[serde(
@@ -698,6 +719,8 @@ pub struct OtlpTargetConfig {
 
 impl OtlpTargetConfig {
     pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 32_768;
+    pub(crate) const DEFAULT_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+    pub(crate) const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 4;
 
     fn default_batch_size() -> usize {
         512
@@ -705,6 +728,14 @@ impl OtlpTargetConfig {
 
     fn default_queue_capacity() -> usize {
         Self::DEFAULT_QUEUE_CAPACITY
+    }
+
+    fn default_max_request_bytes() -> usize {
+        Self::DEFAULT_MAX_REQUEST_BYTES
+    }
+
+    fn default_max_concurrent_exports() -> usize {
+        Self::DEFAULT_MAX_CONCURRENT_EXPORTS
     }
 
     fn default_flush_interval() -> std::time::Duration {
@@ -720,6 +751,16 @@ impl OtlpTargetConfig {
 
         if self.queue_capacity == 0 {
             return Err(format!("{path}.queue_capacity must be greater than 0"));
+        }
+
+        if self.max_request_bytes == 0 {
+            return Err(format!("{path}.max_request_bytes must be greater than 0"));
+        }
+
+        if self.max_concurrent_exports == 0 {
+            return Err(format!(
+                "{path}.max_concurrent_exports must be greater than 0"
+            ));
         }
 
         if self.flush_interval.is_zero() {
@@ -1927,6 +1968,36 @@ impl Default for NvueGnmiConfig {
 
 impl NvueGnmiConfig {
     fn validate(&self) -> Result<(), String> {
+        if let Some(interface_paths) = &self.paths.interface_paths {
+            let config_path = "collectors.nvue.gnmi.paths.interface_paths";
+
+            if !self.paths.interfaces_enabled {
+                return Err(format!("{config_path} requires interfaces_enabled = true"));
+            }
+
+            if interface_paths.is_empty()
+                || interface_paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+            {
+                return Err(format!(
+                    "{config_path} must contain non-empty paths and elements; use interfaces_enabled = false to disable interface telemetry"
+                ));
+            }
+
+            for (index, path) in interface_paths.iter().enumerate() {
+                if interface_paths
+                    .iter()
+                    .take(index)
+                    .any(|earlier| earlier == path)
+                {
+                    return Err(format!(
+                        "{config_path}[{index}] duplicates another selected interface path"
+                    ));
+                }
+            }
+        }
+
         let mut names = HashSet::new();
         let mut exported_metrics = HashMap::new();
 
@@ -2374,6 +2445,13 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
+    /// Interface leaf paths relative to `/interfaces/interface` for every interface.
+    ///
+    /// Omission retains the full interface subtree. A nonempty list selects
+    /// only mapped built-in interface metrics; disable `interfaces_enabled` to
+    /// omit interface telemetry entirely.
+    pub interface_paths: Option<Vec<Vec<String>>>,
+
     /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
     ///
     /// Disabled by default because path support depends on the NVOS release.
@@ -2389,6 +2467,7 @@ impl Default for NvueGnmiPaths {
             components_enabled: true,
             interfaces_enabled: true,
             platform_general_enabled: true,
+            interface_paths: None,
             leak_sensors_enabled: false,
         }
     }
@@ -2927,6 +3006,8 @@ mod tests {
             tls: None,
             batch_size: 512,
             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
             flush_interval: Duration::from_secs(2),
             include_diagnostics: false,
             include_alert_details: false,
@@ -3147,6 +3228,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_table_enables_the_limiter_with_defaults() {
+        let config: Config = Figment::new()
+            .merge(Toml::string("[rate_limit]\n"))
+            .extract()
+            .expect("failed to parse");
+
+        let Configurable::Enabled(rate_limit) = config.rate_limit else {
+            panic!("an empty [rate_limit] table enables the limiter");
+        };
+        assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
+        assert_eq!(rate_limit.bucket_burst, 100);
+        assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
+    }
+
+    #[test]
     fn test_static_only_config() {
         let toml_content = r#"
 endpoint_discovery_interval = "1m"
@@ -3200,13 +3296,7 @@ cache_size = 50
         assert_eq!(config.metrics.prefix, "carbide_hardware_new_health");
         assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(60));
 
-        if let Configurable::Enabled(ref rate_limit) = config.rate_limit {
-            assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
-            assert_eq!(rate_limit.bucket_burst, 100);
-            assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
-        } else {
-            panic!("rate limit empty")
-        }
+        assert!(!config.rate_limit.is_enabled());
 
         assert!(config.collectors.sensors.is_enabled());
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
@@ -3818,6 +3908,26 @@ reload_interval = "30s"
                 IndexedOtlpTarget {
                     index: 2,
                     target: OtlpTargetConfig {
+                        max_request_bytes: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_request_bytes must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
+                        max_concurrent_exports: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_concurrent_exports must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
                         flush_interval: Duration::ZERO,
                         ..otlp_target("http://site.example:4317")
                     },
@@ -3988,6 +4098,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -4027,6 +4140,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: true,
                             include_alert_details: false,
@@ -4046,6 +4162,9 @@ reload_interval = "30s"
                                 endpoint: "http://site.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: false,
                                 include_alert_details: false,
@@ -4055,6 +4174,9 @@ reload_interval = "30s"
                                 endpoint: "http://central.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: true,
                                 include_alert_details: false,
@@ -4102,6 +4224,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -4146,7 +4271,7 @@ reload_interval = "30s"
             config.metrics.bmc_latency_attributes(),
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
         );
-        assert!(config.rate_limit.is_enabled());
+        assert!(!config.rate_limit.is_enabled());
         assert!(config.processors.leak_detection.is_enabled());
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());
@@ -4886,6 +5011,73 @@ events_enabled = false
     }
 
     #[test]
+    fn selective_interface_paths_parse_and_validate() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+[collectors.nvue.gnmi.paths]
+interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
+"#,
+            ))
+            .extract()
+            .expect("selective interface configuration should parse");
+
+        let Configurable::Enabled(nvue) = config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = nvue.gnmi else {
+            panic!("gNMI collector should be enabled");
+        };
+
+        assert_eq!(
+            gnmi.paths.interface_paths,
+            Some(vec![
+                vec!["state".to_string(), "oper-status".to_string()],
+                vec![
+                    "phy-diag".to_string(),
+                    "state".to_string(),
+                    "raw-ber".to_string()
+                ]
+            ])
+        );
+
+        assert!(gnmi.validate().is_ok());
+
+        for (description, paths, enabled, expected) in [
+            ("empty selection", vec![], true, "non-empty paths"),
+            (
+                "empty element",
+                vec![vec![String::new()]],
+                true,
+                "non-empty paths",
+            ),
+            (
+                "disabled interfaces",
+                vec![vec!["state".to_string(), "oper-status".to_string()]],
+                false,
+                "requires interfaces_enabled",
+            ),
+            (
+                "duplicate path",
+                vec![vec!["state".to_string(), "oper-status".to_string()]; 2],
+                true,
+                "duplicates",
+            ),
+        ] {
+            let mut invalid = NvueGnmiConfig::default();
+            invalid.paths.interface_paths = Some(paths);
+            invalid.paths.interfaces_enabled = enabled;
+
+            let error = invalid.validate().expect_err(description);
+
+            assert!(error.contains(expected), "{description}: {error}");
+        }
+    }
+
+    #[test]
     fn nvue_gnmi_additional_subscription_parses_complete_contract() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
@@ -4907,7 +5099,10 @@ heartbeat_interval = "1m"
 paths = [["interface"]]
 metrics = [
   { path = ["interface", "state", "health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["healthy", "attention"] } },
+  { path = ["interface", "state", "other-health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["offline"] } },
   { path = ["interface", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "state", "other-counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "lane", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }, { name = "lane_id", element = "lane", key = "id" }], output = { kind = "gauge", unit = "count" } },
 ]
 "#,
             ))
@@ -4938,7 +5133,7 @@ metrics = [
         assert_eq!(subscription.encoding, NvueGnmiEncoding::JsonIetf);
         assert!(subscription.updates_only);
         assert_eq!(subscription.paths.len(), 1);
-        assert_eq!(subscription.metrics.len(), 2);
+        assert_eq!(subscription.metrics.len(), 5);
 
         assert_eq!(subscription.mode, NvueGnmiSubscriptionMode::Sample);
         assert_eq!(subscription.sample_interval, Some(Duration::from_secs(10)));
@@ -6103,53 +6298,27 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
     /// Capture tracing WARN events emitted during a closure.
     /// Uses a per-call dispatcher so parallel tests don't interfere.
     fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
-        use std::sync::{Arc, Mutex};
+        carbide_instrument::testing::capture_logs(f)
+            .into_iter()
+            .filter(|log| log.level == tracing::Level::WARN)
+            .map(|log| log.message)
+            .collect()
+    }
 
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
+    #[test]
+    fn capture_warnings_allows_retained_dispatch() {
+        let mut dispatch = None;
+        let warnings = capture_warnings(|| {
+            // Tracing can keep our `Dispatch` alive while another test rebuilds
+            // the callsite cache. Hold it past capture to verify that reading
+            // the warnings doesn't require exclusive ownership of the buffer.
+            dispatch = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::info!("not a warning");
+            tracing::warn!("captured warning");
+        });
 
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
-
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() != Level::WARN {
-                    return;
-                }
-                struct Visitor(String);
-                impl tracing::field::Visit for Visitor {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message" {
-                            self.0 = format!("{value:?}").trim_matches('"').to_string();
-                        }
-                    }
-                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                        if field.name() == "message" {
-                            self.0 = value.to_string();
-                        }
-                    }
-                }
-                let mut v = Visitor(String::new());
-                event.record(&mut v);
-                self.0.lock().unwrap().push(v.0);
-            }
-        }
-
-        tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
-            f,
-        );
-        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+        assert_eq!(warnings, ["captured warning"]);
+        drop(dispatch);
     }
 
     #[test]

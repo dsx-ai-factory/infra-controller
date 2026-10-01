@@ -211,6 +211,14 @@ impl Bmc for RedfishBmc {
         self.finish("get", result)
     }
 
+    async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(
+        &self,
+        id: &ODataId,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.poll(id).await;
+        self.finish("poll", result)
+    }
+
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
@@ -457,6 +465,9 @@ impl ServiceRootCache {
 
 struct CachedServiceRoot {
     root: Arc<ServiceRoot>,
+    /// The client `root` was fetched through, kept so callers reuse it rather
+    /// than building a second one for the same BMC.
+    bmc: Arc<RedfishBmc>,
     generation: u64,
 }
 
@@ -538,16 +549,31 @@ impl NvRedfishClientPool {
         credentials: Option<Credentials>,
         should_cache: impl FnOnce(&ServiceRoot) -> bool,
     ) -> Result<Arc<ServiceRoot>, Error> {
+        self.service_root_and_bmc(bmc_address, credentials, should_cache)
+            .await
+            .map(|(service_root, _)| service_root)
+    }
+
+    /// Same as [`Self::service_root_with_cache_predicate`], but also hands back
+    /// the client the root was fetched through. `ServiceRoot` keeps its client
+    /// private, so a caller that needs to fetch a resource nv-redfish does not
+    /// model has no other way to reach the one the root's entity graph uses.
+    pub async fn service_root_and_bmc(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: Option<Credentials>,
+        should_cache: impl FnOnce(&ServiceRoot) -> bool,
+    ) -> Result<(Arc<ServiceRoot>, Arc<RedfishBmc>), Error> {
         let bmc_credentials = self.bmc_credentials(credentials)?;
         self.remove_expired(Instant::now());
         self.refresh_mutual_client().await?;
 
-        if let Some(sevice_root) = self.cached_root(bmc_address, bmc_credentials.clone()) {
-            Ok(sevice_root)
+        if let Some(cached) = self.cached_root(bmc_address, bmc_credentials.clone()) {
+            Ok(cached)
         } else {
             let bmc = self.create_bmc(bmc_address, bmc_credentials.clone(), false)?;
-            let service_root = ServiceRoot::new(bmc).await?;
-            let service_root = if service_root.vendor()
+            let service_root = ServiceRoot::new(bmc.clone()).await?;
+            let (service_root, bmc) = if service_root.vendor()
                 == Some(nv_redfish::service_root::Vendor::new("HPE"))
                 && let Some(HpeManagerType::Ilo(version)) = service_root
                     .oem_hpe_ilo_service_ext()
@@ -565,15 +591,20 @@ impl NvRedfishClientPool {
                 // is about to close by server. Reusing such
                 // connections causes errors.
                 let bmc = self.create_bmc(bmc_address, bmc_credentials.clone(), true)?;
-                service_root.replace_bmc(bmc.clone())
+                (service_root.replace_bmc(bmc.clone()), bmc)
             } else {
-                service_root
+                (service_root, bmc)
             };
             let service_root = Arc::new(service_root);
             if should_cache(&service_root) {
-                self.update_cache(bmc_address, bmc_credentials, service_root.clone());
+                self.update_cache(
+                    bmc_address,
+                    bmc_credentials,
+                    service_root.clone(),
+                    bmc.clone(),
+                );
             }
-            Ok(service_root)
+            Ok((service_root, bmc))
         }
     }
 
@@ -599,7 +630,7 @@ impl NvRedfishClientPool {
         &self,
         bmc_address: SocketAddr,
         credentials: BmcCredentials,
-    ) -> Option<Arc<ServiceRoot>> {
+    ) -> Option<(Arc<ServiceRoot>, Arc<RedfishBmc>)> {
         let proxy_address = self.proxy_address.load();
         let key = PoolKey {
             proxy_address: proxy_address.clone(),
@@ -611,7 +642,7 @@ impl NvRedfishClientPool {
             .expect("nv-redfish client cache mutex poisoned")
             .roots
             .get(&key)
-            .map(|entry| entry.root.clone())
+            .map(|entry| (entry.root.clone(), entry.bmc.clone()))
     }
 
     fn update_cache(
@@ -619,6 +650,7 @@ impl NvRedfishClientPool {
         bmc_address: SocketAddr,
         credentials: BmcCredentials,
         root: Arc<ServiceRoot>,
+        bmc: Arc<RedfishBmc>,
     ) {
         let proxy_address = self.proxy_address.load();
         let key = PoolKey {
@@ -632,9 +664,14 @@ impl NvRedfishClientPool {
             .expect("nv-redfish client cache mutex poisoned");
         let expires_at = Instant::now() + self.cache_ttl;
         let generation = cache.allocate_generation();
-        cache
-            .roots
-            .insert(key.clone(), CachedServiceRoot { root, generation });
+        cache.roots.insert(
+            key.clone(),
+            CachedServiceRoot {
+                root,
+                bmc,
+                generation,
+            },
+        );
         cache.expirations.push(Reverse(CacheExpiration {
             expires_at,
             generation,
@@ -847,6 +884,70 @@ mod tests {
             ),
             sensitive_values,
         )
+    }
+
+    #[tokio::test]
+    async fn task_poll_preserves_pending_responses_and_redacts_http_failures() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let app = Router::new()
+            .route("/pending", get(|| async { StatusCode::ACCEPTED }))
+            .route(
+                "/failed",
+                get(|| async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "credential secret rejected",
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let credentials = BmcCredentials::new("root".to_string(), "secret".to_string());
+        let sensitive_values = sensitive_values(&credentials);
+
+        let bmc = RedfishBmc::new(
+            InnerRedfishBmc::with_custom_headers(
+                SpanIsolatedHttpClient::new(RedfishReqwestClient::new().unwrap()),
+                Url::parse(&format!("http://{address}")).unwrap(),
+                credentials,
+                CacheSettings::with_capacity(1),
+                HeaderMap::new(),
+            ),
+            sensitive_values,
+        );
+
+        let pending = bmc
+            .poll::<()>(&ODataId::from("/pending".to_string()))
+            .await
+            .unwrap();
+
+        let ModificationResponse::Task(task) = pending else {
+            panic!("202 must preserve the pending task");
+        };
+
+        assert_eq!(task.location.0.to_string(), "/pending");
+
+        let error = bmc
+            .poll::<()>(&ODataId::from("/failed".to_string()))
+            .await
+            .unwrap_err();
+
+        let BmcError::InvalidResponse { status, text, .. } = error else {
+            panic!("HTTP failure must preserve its status and sanitized body");
+        };
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!text.contains("secret"));
+        assert!(text.contains("rejected"));
+
+        server.abort();
+
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     /// Verifies nv-redfish removes plaintext, full Basic header, and bare

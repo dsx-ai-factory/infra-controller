@@ -177,6 +177,7 @@ func TestNewAPIInstance(t *testing.T) {
 		IsPhysical:  true,
 		MacAddress:  cutil.GetPtr("test-mac-address"),
 		IPAddresses: []string{"12.70.0.1"},
+		IPPrefixes:  []string{"12.70.0.0/24", "2001:db8::/64"},
 		Status:      cdbm.InterfaceStatusPending,
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -424,6 +425,7 @@ func TestNewAPIInstance(t *testing.T) {
 				assert.Equal(t, *tt.args.dbis[0].MacAddress, *got.Interfaces[0].MacAddress)
 			}
 			assert.Equal(t, tt.args.dbis[0].IPAddresses, got.Interfaces[0].IPAddresses)
+			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPPrefixes...), got.Interfaces[0].IPPrefixes)
 			assert.Equal(t, tt.args.dbis[0].Status, got.Interfaces[0].Status)
 			assert.Equal(t, tt.args.dbis[0].Created, got.Interfaces[0].Created)
 			assert.Equal(t, tt.args.dbis[0].Updated, got.Interfaces[0].Updated)
@@ -2483,6 +2485,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
 						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+						BridgeName:           cutil.GetPtr("br-spx0"),
 					},
 				},
 			},
@@ -2923,7 +2926,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		ID:               uuid.New(),
 		Name:             "ab",
 		IpxeScript:       cutil.GetPtr("original ipxe"),
-		UserData:         cutil.GetPtr("#cloud-config\n{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
+		UserData:         cutil.GetPtr("{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
 		PhoneHomeEnabled: true,
 		IsActive:         true,
 		Status:           cdbm.OperatingSystemStatusReady,
@@ -2938,7 +2941,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		IpxeScript:               cutil.GetPtr("#!ipxe 9ea0c946-29af-11ef-b798-df4626ad0292"),
 		AlwaysBootWithCustomIpxe: true,
 		PhoneHomeEnabled:         true,
-		UserData:                 cutil.GetPtr("#cloud-config\n{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
+		UserData:                 cutil.GetPtr("{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
 	}
 
 	// Instance with ipxe and user-data.
@@ -3139,11 +3142,12 @@ phone_home:
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
 				UserData:          cutil.GetPtr(""),
 			},
-			wantErr:            false,
-			cfg:                cfg1,
-			instance:           instance1,
-			os:                 os1,
-			userDataExactMatch: cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg1.GetSitePhoneHomeUrl())),
+			wantErr:  false,
+			cfg:      cfg1,
+			instance: instance1,
+			os:       os1,
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{
 			name: "PhoneHome enabled in instance and request updates only base OS",
@@ -3722,13 +3726,19 @@ func TestValidateInfiniBandRequestForMachineCapability(t *testing.T) {
 func TestValidateSpectrumXAttachments(t *testing.T) {
 	device := "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
 	attachment := func(deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
-		return APISpectrumXAttachmentCreateOrUpdateRequest{
+		req := APISpectrumXAttachmentCreateOrUpdateRequest{
 			SpectrumXPartitionID: uuid.NewString(),
 			Device:               device,
 			DeviceInstance:       cutil.GetPtr(deviceInstance),
 			AttachmentType:       attachmentType,
 			VirtualFunctionID:    virtualFunctionID,
 		}
+		// bridgeName is required for OVS, so a helper-built OVS attachment carries one to
+		// isolate these cases from the per-attachment OVS validation.
+		if attachmentType == cdbm.SpectrumXAttachmentTypeOVS {
+			req.BridgeName = cutil.GetPtr("br-spx0")
+		}
+		return req
 	}
 	overCap := make([]APISpectrumXAttachmentCreateOrUpdateRequest, 0, MaxSpectrumXAttachmentCount+1)
 	for i := range MaxSpectrumXAttachmentCount + 1 {

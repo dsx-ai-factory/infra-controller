@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -40,7 +40,9 @@ use itertools::Itertools as _;
 use model::ConfigValidationError;
 use model::dpa_interface::DpaSearchConfig;
 use model::instance::config::InstanceConfig;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
+use model::instance::config::extension_services::{
+    InstanceExtensionServicesConfig, RequestedInstanceExtensionServicesConfig,
+};
 use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::InstanceNetworkConfig;
 use model::instance::config::nvlink::InstanceNvLinkConfig;
@@ -67,9 +69,11 @@ use crate::api::{Api, log_machine_id, log_request_data, log_tenant_organization_
 use crate::ethernet_virtualization::validate_instance_interface_routing_profiles;
 use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
-    allocate_spx_port_mac, ib_memberships_from_config, load_extension_services,
-    load_ib_partition_pkeys, validate_ib_partition_ownership, validate_instance_extension_services,
-    validate_instance_vfs_against_dpf_topology, validate_os_definition_usable,
+    allocate_spx_port_mac, assign_implicit_instance_vfs_from_effective_dpu_inventory,
+    expected_machine_declares_cx9, ib_memberships_from_config, instance_vf_inventory_source,
+    load_extension_services, load_ib_partition_pkeys, requests_implicit_vf_allocation,
+    validate_ib_partition_ownership, validate_instance_extension_services,
+    validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
     validate_spx_partition_ownership,
 };
 use crate::{CarbideError, CarbideResult};
@@ -311,8 +315,7 @@ pub(crate) async fn find_by_machine_id(
         Err(e) => return Err(CarbideError::from(e).into()),
     };
 
-    let maybe_instance =
-        Option::<rpc::Instance>::rpc_try_from(mh_snapshot).map_err(CarbideError::from)?;
+    let maybe_instance = snapshot_to_optional_instance(mh_snapshot)?;
 
     let instances = if let Some(instance) = maybe_instance {
         vec![instance]
@@ -1324,10 +1327,24 @@ pub(crate) async fn update_instance_config(
             network.auto && network.auto_config.is_none() && network.interfaces.is_empty()
         });
 
-    let mut config: InstanceConfig = match request.config {
+    let implicit_vf_allocation = request
+        .config
+        .as_ref()
+        .is_some_and(requests_implicit_vf_allocation);
+
+    let mut rpc_config = match request.config {
         None => return Err(CarbideError::MissingArgument("config").into()),
-        Some(config) => config.try_into().map_err(CarbideError::from)?,
+        Some(config) => config,
     };
+    let requested_extension_services = rpc_config
+        .dpu_extension_services
+        .take()
+        .map(RequestedInstanceExtensionServicesConfig::try_from)
+        .transpose()
+        .map_err(CarbideError::from)?
+        .unwrap_or_default();
+    let mut config: InstanceConfig = rpc_config.try_into().map_err(CarbideError::from)?;
+    config.extension_services = requested_extension_services.clone().into_new_attachments();
 
     tracing::info!(
         spx_config = ?config.spxconfig,
@@ -1385,6 +1402,21 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
+    // Resolve the persisted CX9 declaration used by DPF provisioning before validating VFs.
+    let expected_machine = if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        match mh_snapshot.host_snapshot.status.bmc_info.mac {
+            Some(bmc_mac) => {
+                db::expected_machine::find_by_bmc_mac_address(&mut txn, bmc_mac).await?
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let vf_inventory_source = instance_vf_inventory_source(
+        &mh_snapshot,
+        expected_machine_declares_cx9(expected_machine.as_ref()),
+    );
     // This first snapshot establishes the request's comparison baseline.
     // An overlap wait reloads it before resource validation; an IB change
     // later rereads it after locking the Instance and Machine.
@@ -1436,6 +1468,15 @@ pub(crate) async fn update_instance_config(
             .into());
         };
         config.network.auto_config = Some(auto_config);
+    }
+
+    // Resolve legacy omitted VF IDs before deciding whether the network expands.
+    if implicit_vf_allocation {
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut config.network,
+            &api.runtime_config,
+            vf_inventory_source,
+        )?;
     }
 
     // Check whether the update is allowed
@@ -1532,6 +1573,7 @@ pub(crate) async fn update_instance_config(
         &mh_snapshot,
         initial_instance,
         &config.extension_services,
+        &requested_extension_services,
         &mut txn,
     )
     .await?;
@@ -1541,6 +1583,7 @@ pub(crate) async fn update_instance_config(
         initial_instance,
         &mut config,
         &mh_snapshot,
+        vf_inventory_source,
         &mut txn,
         needs_overlap_check,
     )
@@ -1656,6 +1699,7 @@ async fn update_instance_network_config(
     instance: &InstanceSnapshot,
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
+    vf_inventory_source: crate::instance::InstanceVfInventorySource,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
@@ -1753,6 +1797,12 @@ async fn update_instance_network_config(
         return Err(ConfigValidationError::InstanceDeletionIsRequested.into());
     }
 
+    // Service-interface records are managed by Core and are absent from public
+    // requests. Preserve them while applying the caller's tenant-network definition.
+    network
+        .service_interfaces
+        .clone_from(&instance.config.network.service_interfaces);
+
     // Preserve caller intent long enough to enforce prefix family and VPC allocation policy.
     // Resource reuse below deliberately restores stored requested addresses for matching explicit
     // prefixes, which must not erase a newly requested address before validation.
@@ -1779,7 +1829,11 @@ async fn update_instance_network_config(
                 .unwrap_or(true),
         )
         .map_err(CarbideError::from)?;
-    validate_instance_vfs_against_dpf_topology(network, runtime_config)?;
+    validate_instance_vfs_against_effective_dpu_inventory(
+        network,
+        runtime_config,
+        vf_inventory_source,
+    )?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
     if needs_overlap_check {
@@ -2017,9 +2071,59 @@ async fn update_instance_extension_services_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     extension_services: &InstanceExtensionServicesConfig,
+    requested_extension_services: &RequestedInstanceExtensionServicesConfig,
     txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let current = &instance.config.extension_services;
+
+    // A client may repeat the current VPC selection, but creating service-interface
+    // records or moving them to another VPC requires reconciliation planned in issue #6125.
+    for requested in &requested_extension_services.service_configs {
+        if requested.service_vpc_ids.is_empty() {
+            continue;
+        }
+        let Some(attachment) = current.active_services().into_iter().find(|attachment| {
+            attachment.service_id == requested.service_id && attachment.version == requested.version
+        }) else {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC attachment is unavailable until network resource reconciliation is implemented"
+                    .to_string(),
+            ));
+        };
+        let mut selected_vpcs = BTreeMap::new();
+        for service_interface in instance
+            .config
+            .network
+            .service_interfaces
+            .iter()
+            .filter(|service_interface| Some(service_interface.attachment_id) == attachment.id)
+        {
+            if let Some(stored_vpc) = selected_vpcs.insert(
+                service_interface.interface_ordinal,
+                service_interface.vpc_id,
+            ) && stored_vpc != service_interface.vpc_id
+            {
+                return Err(CarbideError::internal(format!(
+                    "extension-service attachment has conflicting VPC selections for interface {}",
+                    service_interface.interface_ordinal,
+                )));
+            }
+        }
+        if selected_vpcs.len() != requested.service_vpc_ids.len()
+            || selected_vpcs
+                .iter()
+                .zip(&requested.service_vpc_ids)
+                .enumerate()
+                .any(|(ordinal, ((stored_ordinal, stored_vpc), requested_vpc))| {
+                    *stored_ordinal as usize != ordinal || stored_vpc != requested_vpc
+                })
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "the VPC selection of an existing extension-service attachment cannot be changed"
+                    .to_string(),
+            ));
+        }
+    }
 
     if !current.is_extension_services_config_update_requested(extension_services) {
         return Ok(());
@@ -2038,8 +2142,8 @@ async fn update_instance_extension_services_config(
         return Err(ConfigValidationError::InstanceDeletionIsRequested.into());
     }
 
-    // A service being detached remains durably represented with `removed:
-    // true`, so the merged config references every service the instance is
+    // A service being detached remains durably represented with a removal
+    // timestamp, so the merged config references every service the instance is
     // attached to before and after this update.
     let mut new_extension_services_config =
         current.calculate_new_extension_services_config(extension_services);
@@ -2104,19 +2208,31 @@ async fn update_instance_extension_services_config(
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot
 ///
 /// This method expects that the snapshot must contain an instance definition.
-/// If this is not required, then `Option::<rpc::Instance>::try_from(mh_snapshot)`
-/// can be utilized.
+/// If this is not required, use `snapshot_to_optional_instance`.
 fn snapshot_to_instance(
     mh_snapshot: ManagedHostStateSnapshot,
 ) -> Result<rpc::Instance, CarbideError> {
     let machine_id = mh_snapshot.host_snapshot.id;
-    Option::<rpc::Instance>::rpc_try_from(mh_snapshot)
-        .map_err(CarbideError::from)?
-        .ok_or_else(|| {
-            CarbideError::internal(format!(
-                "instance on machine {machine_id} can be converted from snapshot"
-            ))
-        })
+    snapshot_to_optional_instance(mh_snapshot)?.ok_or_else(|| {
+        CarbideError::internal(format!(
+            "snapshot for machine {machine_id} does not contain an instance"
+        ))
+    })
+}
+
+/// Converts stored managed-host state into an optional caller-visible instance.
+///
+/// Conversion failures come from server-owned state, so they are internal
+/// errors rather than invalid client input.
+pub(super) fn snapshot_to_optional_instance(
+    snapshot: ManagedHostStateSnapshot,
+) -> Result<Option<rpc::Instance>, CarbideError> {
+    let machine_id = snapshot.host_snapshot.id;
+    Option::<rpc::Instance>::rpc_try_from(snapshot).map_err(|error| {
+        CarbideError::internal(format!(
+            "failed to convert managed-host snapshot for machine {machine_id} to an instance response: {error}"
+        ))
+    })
 }
 
 /// Records every exact IB membership available from the current `Instance`

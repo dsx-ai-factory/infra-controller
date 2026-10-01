@@ -292,6 +292,7 @@ impl ApiClient {
                 allow_delete_with_orphaned_dpf_crds: false,
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
+                release_preserved_addresses: false,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -565,6 +566,7 @@ impl ApiClient {
         rack_profile_id: RackProfileId,
     ) -> ClientApiResult<()> {
         let expected_rack = ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(rack_id.clone()),
             rack_profile_id: Some(rack_profile_id.clone()),
             metadata: None,

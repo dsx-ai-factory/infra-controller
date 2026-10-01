@@ -17,6 +17,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use db::DatabaseError;
+use mac_address::MacAddress;
 use model::expected_switch::ExpectedSwitch;
 use model::site_explorer::ExploredManagedSwitch;
 use sqlx::{PgConnection, PgPool};
@@ -45,6 +46,12 @@ impl SwitchCreator {
         explored_managed_switches: &[ExploredManagedSwitch],
         expected_explored_endpoint_index: &ExploredEndpointIndex,
     ) -> SiteExplorerResult<()> {
+        // One query replaces a per-switch transaction for switches that already
+        // exist; `create_switch` keeps its own checks for the rest.
+        let existing_bmc_macs =
+            db::switch::find_all_bmc_mac_addresses(&self.database_connection).await?;
+
+        let mut skipped_existing_switches = 0usize;
         for explored_managed_switch in explored_managed_switches {
             let expected_switch = match expected_explored_endpoint_index
                 .matched_expected_switch(&explored_managed_switch.bmc_ip)
@@ -58,6 +65,21 @@ impl SwitchCreator {
                     continue;
                 }
             };
+
+            if existing_bmc_macs.contains(&expected_switch.bmc_mac_address) {
+                skipped_existing_switches += 1;
+                if let Err(error) = self
+                    .update_nvos_mac_addresses_if_changed(explored_managed_switch, expected_switch)
+                    .await
+                {
+                    tracing::error!(
+                        %error,
+                        bmc_ip_address = %explored_managed_switch.bmc_ip,
+                        "Failed to update NVOS MAC addresses of existing switch"
+                    );
+                }
+                continue;
+            }
 
             match self
                 .create_managed_switch(
@@ -92,6 +114,44 @@ impl SwitchCreator {
             }
         }
 
+        if skipped_existing_switches > 0 {
+            tracing::info!(
+                skipped_existing_switches,
+                "Skipped switches that already exist"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Opens a transaction only when the explored NVOS MAC addresses differ
+    /// from the expected switch record.
+    async fn update_nvos_mac_addresses_if_changed(
+        &self,
+        explored_managed_switch: &ExploredManagedSwitch,
+        expected_switch: &ExpectedSwitch,
+    ) -> SiteExplorerResult<()> {
+        let Some(explored_macs) =
+            changed_nvos_mac_addresses(explored_managed_switch, expected_switch)
+        else {
+            return Ok(());
+        };
+
+        let mut txn = self
+            .database_connection
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::new("begin update_nvos_mac_addresses", e))?;
+        db::expected_switch::update_nvos_mac_addresses(
+            &mut txn,
+            expected_switch.bmc_mac_address,
+            explored_macs,
+        )
+        .await?;
+        txn.commit()
+            .await
+            .map_err(|e| DatabaseError::new("commit update_nvos_mac_addresses", e))?;
+
         Ok(())
     }
 
@@ -124,16 +184,15 @@ impl SwitchCreator {
         explored_managed_switch: &ExploredManagedSwitch,
         expected_switch: &ExpectedSwitch,
     ) -> SiteExplorerResult<Option<SwitchId>> {
-        if !explored_managed_switch.nv_os_mac_addresses.is_empty() {
-            let explored_macs = explored_managed_switch.nv_os_mac_addresses.clone();
-            if *explored_macs != expected_switch.nvos_mac_addresses {
-                db::expected_switch::update_nvos_mac_addresses(
-                    &mut *txn,
-                    expected_switch.bmc_mac_address,
-                    &explored_macs,
-                )
-                .await?;
-            }
+        if let Some(explored_macs) =
+            changed_nvos_mac_addresses(explored_managed_switch, expected_switch)
+        {
+            db::expected_switch::update_nvos_mac_addresses(
+                &mut *txn,
+                expected_switch.bmc_mac_address,
+                explored_macs,
+            )
+            .await?;
         }
 
         // Defense against the duplicate-switches bug: if a switch already
@@ -229,5 +288,67 @@ impl SwitchCreator {
         }
 
         Ok(())
+    }
+}
+
+/// Explored NVOS MAC addresses that should replace the expected switch
+/// record's; an empty exploration result never replaces it.
+fn changed_nvos_mac_addresses<'a>(
+    explored_managed_switch: &'a ExploredManagedSwitch,
+    expected_switch: &ExpectedSwitch,
+) -> Option<&'a [MacAddress]> {
+    let explored_macs = explored_managed_switch.nv_os_mac_addresses.as_slice();
+    (!explored_macs.is_empty() && explored_macs != expected_switch.nvos_mac_addresses)
+        .then_some(explored_macs)
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+    use model::site_explorer::EndpointExplorationReport;
+
+    use super::*;
+
+    #[test]
+    fn changed_nvos_mac_addresses_cases() {
+        let mac = |last| MacAddress::new([0x02, 0, 0, 0, 0, last]);
+        let expected_switch = ExpectedSwitch {
+            nvos_mac_addresses: vec![mac(1), mac(2)],
+            ..ExpectedSwitch::default()
+        };
+        let explored = |nv_os_mac_addresses| ExploredManagedSwitch {
+            bmc_ip: "10.0.0.1".parse().unwrap(),
+            nv_os_mac_addresses,
+            report: EndpointExplorationReport::default(),
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "empty exploration result keeps the record",
+                    input: vec![],
+                    expect: None,
+                },
+                Check {
+                    scenario: "same addresses need no update",
+                    input: vec![mac(1), mac(2)],
+                    expect: None,
+                },
+                Check {
+                    scenario: "different addresses replace the record",
+                    input: vec![mac(3)],
+                    expect: Some(vec![mac(3)]),
+                },
+                Check {
+                    scenario: "same addresses in another order replace the record",
+                    input: vec![mac(2), mac(1)],
+                    expect: Some(vec![mac(2), mac(1)]),
+                },
+            ],
+            |nv_os_mac_addresses| {
+                changed_nvos_mac_addresses(&explored(nv_os_mac_addresses), &expected_switch)
+                    .map(<[MacAddress]>::to_vec)
+            },
+        );
     }
 }

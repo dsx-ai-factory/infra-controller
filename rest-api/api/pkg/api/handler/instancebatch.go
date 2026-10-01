@@ -29,6 +29,7 @@ import (
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -46,23 +47,21 @@ const (
 
 // BatchCreateInstanceHandler is the API Handler for creating multiple instances with topology-optimized allocation
 type BatchCreateInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewBatchCreateInstanceHandler initializes and returns a new handler for batch creating Instances
 func NewBatchCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) BatchCreateInstanceHandler {
 	return BatchCreateInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -298,17 +297,11 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler for batch instance creation")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := bcih.tracerSpan.CreateChildInContext(ctx, "BatchCreateInstanceHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
+	ctx, handlerSpan := cotel.StartSpan(ctx, "BatchCreateInstanceHandler")
+	defer handlerSpan.End()
+	cotel.SetAttribute(handlerSpan, attribute.String("org", org))
 
-		defer handlerSpan.End()
-
-		bcih.tracerSpan.SetAttribute(handlerSpan, attribute.String("org", org), logger)
-	}
-
-	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, bcih.tracerSpan, handlerSpan)
+	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, handlerSpan)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
@@ -1850,6 +1843,8 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					DeviceInstance:       *sac.DeviceInstance,
 					AttachmentType:       sac.AttachmentType,
 					VirtualFunctionID:    sac.VirtualFunctionID,
+					BridgeName:           sac.BridgeName,
+					OvnNetworkName:       sac.OvnNetworkName,
 					Status:               cdbm.SpectrumXAttachmentStatusPending,
 					CreatedBy:            dbUser.ID,
 				})
@@ -2157,6 +2152,7 @@ func allocateMachinesForBatch(
 		updateInputs = append(updateInputs, cdbm.MachineUpdateInput{
 			MachineID:  mc.ID,
 			IsAssigned: cutil.GetPtr(true),
+			Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
 		})
 		verifiedMachines = append(verifiedMachines, umc)
 	}
@@ -2174,6 +2170,20 @@ func allocateMachinesForBatch(
 		logger.Error().Err(err).Msg("failed to batch update machines to assigned")
 		return nil, cutil.NewAPIError(http.StatusInternalServerError,
 			fmt.Sprintf("Failed to batch update machines: %v", err), nil)
+	}
+
+	statusDetails := make([]cdbm.StatusDetailCreateInput, 0, len(allocatedMachines))
+	for _, machine := range allocatedMachines {
+		statusDetails = append(statusDetails, cdbm.StatusDetailCreateInput{
+			EntityID: machine.ID,
+			Status:   cdbm.MachineStatusInUse,
+			Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+		})
+	}
+	_, err = cdbm.NewStatusDetailDAO(dbSession).CreateMultiple(ctx, tx, statusDetails)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create Machine status details for batch allocation")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status changes", nil)
 	}
 
 	// Log NVLink domain distribution for observability

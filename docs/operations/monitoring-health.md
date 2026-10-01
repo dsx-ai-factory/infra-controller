@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -41,6 +42,21 @@ more classifications. Classifications define operational impact. For example,
 `PreventAllocations` blocks new allocations while the alert is active, and
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
+
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
 
 ## Hardware Health Monitoring
 
@@ -164,7 +180,7 @@ Collector defaults from the example config:
 | NVUE REST collector | `poll_interval` | `"1m"` | NVUE REST polling cadence. |
 | Leak processor | `minimum_alerts_per_report` | `1` | Leak alert threshold for health reports. |
 | Rack leak processor | `leaking_tray_threshold` | `2` | Rack-level leak threshold. |
-| Metrics | `endpoint` | `"0.0.0.0:9009"` | Metrics listener. |
+| Metrics | `endpoint` | `"0.0.0.0:9009"` | Explicit IPv4 listener override. The binary default is `[::]:9009` (dual-stack with IPv4 fallback when IPv6 socket setup is unavailable). [NICo Metrics](../observability/metrics.md#metrics-services-and-ipv6) describes configuration precedence. |
 | Metrics | `prefix` | `"carbide_hardware_health"` | Hardware-health metric prefix. |
 
 NMX-C connects directly to eligible primary switch-host gRPC endpoints whose
@@ -540,6 +556,7 @@ for common workflows:
 | `MarkHealthy` | Force healthy. |
 | `StopRebootForAutomaticRecoveryFromStateMachine` | Block automatic recovery reboots during manual work. |
 | `TenantReportedIssue` | Tenant-reported issue while releasing an instance. |
+| `RequestOnlineRepair` | Keep an unhealthy instance assigned until the online repair override is cleared. |
 | `RequestRepair` | Tenant-reported issue requiring repair. |
 
 Examples:

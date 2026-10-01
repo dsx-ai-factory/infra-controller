@@ -50,7 +50,10 @@ type Bundb struct {
 	userTx *bun.Tx
 }
 
-// NewBunStorage will create a new Bundb interface to ipam
+// NewBunStorage will create a new Bundb interface to IPAM. The caller owns
+// database instrumentation; REST's shared DB session attaches the Bun tracing
+// hook before passing the DB here. Attaching another hook in this wrapper would
+// duplicate spans because a new wrapper can be created for each transaction.
 func NewBunStorage(db *bun.DB, tx *bun.Tx) *Bundb {
 	return &Bundb{
 		db:     db,

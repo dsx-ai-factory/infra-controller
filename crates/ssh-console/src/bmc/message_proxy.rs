@@ -21,9 +21,9 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use russh::ChannelMsg;
 use russh::server::Msg;
-use tokio::sync::oneshot::Sender;
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::shutdown_handle::ShutdownHandle;
 
@@ -33,11 +33,14 @@ pub(crate) fn spawn(
     to_frontend_tx: russh::ChannelWriteHalf<Msg>,
     peer_addr: String,
 ) -> Handle {
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let join_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                res = from_bmc_rx.recv() => match res {
+    let (cancel_token, drop_guard) = {
+        let t = CancellationToken::new();
+        (t.clone(), t.drop_guard())
+    };
+    let join_handle = tokio::spawn({
+        async move {
+            while let Some(res) = cancel_token.run_until_cancelled(from_bmc_rx.recv()).await {
+                match res {
                     Ok(msg) => {
                         let msg = Arc::<ChannelMsg>::from(msg);
                         match proxy_channel_message(msg.as_ref(), &to_frontend_tx).await {
@@ -59,29 +62,26 @@ pub(crate) fn spawn(
                         );
                         break;
                     }
-                },
-                _ = &mut shutdown_rx => {
-                    break;
                 }
             }
+            to_frontend_tx.close().await.ok();
         }
-        to_frontend_tx.close().await.ok();
     });
 
     Handle {
-        shutdown_tx,
+        drop_guard,
         join_handle,
     }
 }
 
 pub(crate) struct Handle {
-    shutdown_tx: oneshot::Sender<()>,
+    drop_guard: DropGuard,
     join_handle: JoinHandle<()>,
 }
 
 impl ShutdownHandle<()> for Handle {
-    fn into_parts(self) -> (Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
