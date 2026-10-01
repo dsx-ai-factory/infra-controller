@@ -125,6 +125,53 @@ pub struct InstanceNetworkConfig {
     /// The resolved per-interface details (IP, MAC, gateway, prefix) appear in
     /// `Instance.status.network.interfaces` like usual.
     pub auto_config: Option<InstanceNetworkAutoConfig>,
+
+    /// Server-owned service interfaces that never appear as tenant OS interfaces.
+    #[serde(default)]
+    pub service_interfaces: Vec<InstanceServiceInterfaceConfig>,
+}
+
+/// Stored DPU-local service-interface record for one attachment and fixed slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceServiceInterfaceConfig {
+    /// Attachment associated with this service-interface record.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this service interface is configured.
+    pub dpu_id: DpuMachineId,
+    /// Fixed service slot used on that DPU.
+    pub slot_index: u32,
+    /// VPC connected to this service interface.
+    pub vpc_id: VpcId,
+    /// VPC prefix from which this service interface's network was allocated.
+    pub vpc_prefix_id: VpcPrefixId,
+    /// Network segment created for this service interface.
+    pub network_segment_id: NetworkSegmentId,
+    /// Network prefix created for this service interface.
+    pub network_prefix_id: NetworkPrefixId,
+    /// Canonical IPv4 /31 or IPv6 /127 shared by HBN and the service.
+    pub link_prefix: IpNetwork,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this service interface across reconciliation.
+    pub internal_uuid: uuid::Uuid,
+}
+
+impl InstanceServiceInterfaceConfig {
+    /// Validates that the link prefix is a canonical IPv4 /31 or IPv6 /127.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let expected_prefix = if self.link_prefix.is_ipv4() { 31 } else { 127 };
+        if self.link_prefix.prefix() != expected_prefix
+            || self.link_prefix.ip() != self.link_prefix.network()
+        {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} must be a canonical IPv4 /31 or IPv6 /127",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +225,7 @@ impl InstanceNetworkConfig {
                     vpc_id: vpc_ids.first().copied(),
                 }],
                 auto_config: None,
+                service_interfaces: vec![],
             }
         } else {
             Self {
@@ -204,6 +252,7 @@ impl InstanceNetworkConfig {
                     })
                     .collect(),
                 auto_config: None,
+                service_interfaces: vec![],
             }
         }
     }
@@ -228,6 +277,7 @@ impl InstanceNetworkConfig {
                 vpc_id,
             }],
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -235,20 +285,24 @@ impl InstanceNetworkConfig {
     /// configs, the resolved interfaces are stripped so external callers see
     /// just their request (`{ auto: true, interfaces: [] }`). The fully-
     /// resolved interfaces still drive `InstanceNetworkStatus` population
-    /// from the internal model. For non-auto configs, returns `self`
-    /// unchanged.
+    /// from the internal model. For non-auto configs, caller-owned interfaces
+    /// remain unchanged.
     ///
     /// This exists to keep the input config from the user represented
     /// back to them as they sent it, and mask any internal interface
     /// resolution that happened as a result of `auto`.
+    ///
+    /// Service-interface records are always stripped because they must not
+    /// appear in the tenant OS network configuration.
     pub fn into_external_view(self) -> Self {
-        if self.auto_config.is_some() {
-            Self {
-                interfaces: vec![],
-                auto_config: self.auto_config,
-            }
-        } else {
-            self
+        Self {
+            interfaces: if self.auto_config.is_some() {
+                vec![]
+            } else {
+                self.interfaces
+            },
+            auto_config: self.auto_config,
+            service_interfaces: vec![],
         }
     }
 
@@ -416,6 +470,8 @@ impl InstanceNetworkConfig {
         // Remove all service-generated properties before validating the config
         let mut current = self.clone();
         let mut new_config = new_config.clone();
+        current.service_interfaces.clear();
+        new_config.service_interfaces.clear();
         for iface in &mut current.interfaces {
             iface.ip_addrs.clear();
             iface.interface_prefixes.clear();
@@ -994,6 +1050,50 @@ mod tests {
 
     use super::*;
 
+    /// Verifies durable service interfaces accept only canonical point-to-point
+    /// prefixes, because malformed stored links cannot be projected safely by
+    /// later allocation and networking stages.
+    #[test]
+    fn service_vpc_interface_validates_canonical_link_prefixes() {
+        let service_interface = |link_prefix: &str| InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: link_prefix.parse().expect("valid test prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+
+        // A canonical IPv4 /31 is valid durable link state.
+        let ipv4 = service_interface("192.0.2.0/31");
+        ipv4.validate().expect("canonical IPv4 service prefix");
+
+        // A canonical IPv6 /127 is the corresponding valid IPv6 shape.
+        let ipv6 = service_interface("2001:db8::/127");
+        ipv6.validate().expect("canonical IPv6 service prefix");
+
+        // Both family forms must survive the JSONB representation unchanged.
+        for service_interface in [&ipv4, &ipv6] {
+            let decoded: InstanceServiceInterfaceConfig = serde_json::from_value(
+                serde_json::to_value(service_interface).expect("serialize service interface"),
+            )
+            .expect("deserialize service interface");
+            assert_eq!(&decoded, service_interface);
+        }
+
+        // A wider prefix or non-base address would make the stored link
+        // ambiguous and must fail before use.
+        assert!(service_interface("192.0.2.0/30").validate().is_err());
+        assert!(service_interface("192.0.2.1/31").validate().is_err());
+    }
+
     #[test]
     fn iterate_function_ids() {
         let func_ids: Vec<InterfaceFunctionId> = InterfaceFunctionId::iter_all().collect();
@@ -1114,6 +1214,7 @@ mod tests {
         InstanceNetworkConfig {
             interfaces,
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -1728,6 +1829,7 @@ mod tests {
             auto_config: Some(InstanceNetworkAutoConfig {
                 vpc_id: VpcId::new(),
             }),
+            service_interfaces: vec![],
         }
     }
 

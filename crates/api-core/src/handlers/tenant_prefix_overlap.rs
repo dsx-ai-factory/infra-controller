@@ -477,10 +477,12 @@ pub(super) fn instance_network_is_nonexpanding(
             let previous_interface = InstanceNetworkConfig {
                 interfaces: vec![retained.clone()],
                 auto_config: previous.auto_config,
+                service_interfaces: vec![],
             };
             let requested_interface = InstanceNetworkConfig {
                 interfaces: vec![requested.clone()],
                 auto_config: candidate.auto_config,
+                service_interfaces: vec![],
             };
             !previous_interface.is_network_config_update_requested(&requested_interface)
         })
