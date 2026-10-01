@@ -678,7 +678,7 @@ def _resolve_lenovo_host_bmc_username(
     and fall back to "root" if not. Some Lenovo BMCs in our fleet may
     still be set to "root".
     """
-    url = f"https://{machine_info.host_bmc_ip}/redfish/v1/Systems/1"
+    url = network.redfish_url(machine_info.host_bmc_ip, "/redfish/v1/Systems/1")
     credentials = site_config.host_bmc_credentials
     response = requests.get(
         url,
