@@ -119,6 +119,11 @@ pub async fn find_all_by_rack_id(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// Lists every expected power shelf with its ingested shelf, if any.
+///
+/// An expected shelf links to a power shelf by `bmc_mac_address`. An ingested
+/// shelf always has `power_shelves.bmc_mac_address` recorded, so the stored MAC
+/// is never NULL.
 pub async fn find_all_linked(
     txn: &mut PgConnection,
 ) -> DatabaseResult<Vec<LinkedExpectedPowerShelf>> {
