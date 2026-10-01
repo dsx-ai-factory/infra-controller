@@ -513,12 +513,20 @@ async fn update_dpf_helm_chart(
     let existing_v1 =
         extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
     let existing_data = parse_dpf_helm_chart_data(&existing_v1.data)?;
-    if desired_data.service_id != existing_data.service_id {
-        return Err(CarbideError::InvalidArgument(
-            "serviceID cannot be changed for a DPF helm chart extension service".to_string(),
-        )
-        .into());
-    }
+    let dpf_service_id = match desired_data.service_id.as_deref() {
+        None => {
+            return Err(
+                CarbideError::InvalidArgument("serviceID must not be empty".to_string()).into(),
+            );
+        }
+        Some(id) if existing_data.service_id.as_deref() == Some(id) => id,
+        Some(_) => {
+            return Err(CarbideError::InvalidArgument(
+                "serviceID cannot be changed for a DPF helm chart extension service".to_string(),
+            )
+            .into());
+        }
+    };
 
     if desired_data == existing_data
         && service_vpc_interfaces == current_service.service_vpc_interfaces
@@ -558,6 +566,7 @@ async fn update_dpf_helm_chart(
         req.description.as_deref(),
         service_vpc_interfaces,
         &desired_data,
+        dpf_service_id,
         existing_v1.version,
         current_service.version_ctr,
         controller_state_version_change,

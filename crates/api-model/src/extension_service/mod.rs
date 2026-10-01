@@ -552,6 +552,8 @@ pub enum DpfHelmChartServiceDataError {
     Json(String),
     #[error("{0} must not be empty")]
     MissingField(&'static str),
+    #[error("serviceID must not contain NUL characters")]
+    InvalidServiceIdNul,
     #[error("repoURL must begin with oci:// or https://")]
     InvalidRepositoryUrl,
     #[error(
@@ -600,6 +602,9 @@ impl DpfHelmChartServiceData {
         // serviceID is required
         if matches!(self.service_id.as_deref(), None | Some("")) {
             return Err(DpfHelmChartServiceDataError::MissingField("serviceID"));
+        }
+        if self.service_id.as_ref().is_some_and(|id| id.contains('\0')) {
+            return Err(DpfHelmChartServiceDataError::InvalidServiceIdNul);
         }
         // Currently only allow deploy_in_cluster to be false so extension service
         // only gets deployed in DPU clusters
@@ -702,6 +707,28 @@ mod tests {
             DpfHelmChartServiceData::parse_normalized(input).unwrap(),
             data.normalized_json().unwrap()
         );
+    }
+
+    /// Ensures decoded NUL in Helm values remains valid because only the
+    /// separately stored service identity is constrained by PostgreSQL text.
+    #[test]
+    fn dpf_helm_chart_data_accepts_nul_in_values() {
+        // Parse a valid identity with an escaped NUL inside arbitrary chart values.
+        let input = r#"{
+            "repoURL":"oci://registry.example.com/charts",
+            "chartName":"tenant-service",
+            "chartVersion":"1.2.3",
+            "serviceID":"tenant-service-v1",
+            "deployInCluster":false,
+            "security":{"privileged":false},
+            "values":{"payload":"\u0000"}
+        }"#;
+        let parsed = DpfHelmChartServiceData::parse(input).expect("NUL in values is allowed");
+
+        // Preserve the decoded value through normalization without treating it as an ID.
+        let normalized = parsed.normalized_json().expect("normalize chart data");
+        let reparsed = DpfHelmChartServiceData::parse(&normalized).expect("parse normalized data");
+        assert_eq!(reparsed.values, parsed.values);
     }
 
     #[test]

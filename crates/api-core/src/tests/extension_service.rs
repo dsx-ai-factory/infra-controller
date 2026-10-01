@@ -1358,6 +1358,15 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     );
     txn.commit().await?;
 
+    // V1 replacement keeps the immutable ID in its separate column.
+    let stored_dpf_id: Option<String> = sqlx::query_scalar(
+        "SELECT dpf_service_id FROM extension_service_versions WHERE service_id = $1 AND deleted IS NULL",
+    )
+    .bind(service_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(stored_dpf_id.as_deref(), Some("tenant-service-v1"));
+
     // A second data update is rejected before it can change V1 because DPF
     // reconciliation of the first replacement has not completed yet.
     let error = env
@@ -1998,6 +2007,19 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "security":{"privileged":false}
             }"#,
             "serviceID must not be empty",
+        ),
+        // An escaped NUL decodes to a character PostgreSQL cannot store as an identity.
+        (
+            "dpf-nul-service-id",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "serviceID":"tenant\u0000service",
+                "deployInCluster":false,
+                "security":{"privileged":false}
+            }"#,
+            "serviceID must not contain NUL characters",
         ),
         // NICo requires the DPF deployment location to be explicit before persistence.
         (

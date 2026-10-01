@@ -281,15 +281,16 @@ pub async fn create(
     // Insert the initial version using the service id
     let service_id = service.id;
 
-    let version_query = "INSERT INTO extension_service_versions 
-            (service_id, version, data, observability, has_credential)
-            VALUES ($1, $2, $3, $4, $5)
+    let version_query = "INSERT INTO extension_service_versions
+            (service_id, version, data, dpf_service_id, observability, has_credential)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING service_id, version, data, observability, has_credential, created, deleted";
 
     let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
         .bind(service_id)
         .bind(version.to_string())
         .bind(data)
+        .bind(dpf_service_id)
         .bind(observability.map(sqlx::types::Json))
         .bind(has_credential)
         .fetch_one(&mut *txn)
@@ -503,6 +504,7 @@ pub async fn update_dpf_helm_chart_in_place(
     description: Option<&str>,
     service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     normalized_data: &str,
+    dpf_service_id: &str,
     stable_version: ConfigVersion,
     expected_version_ctr: i32,
     controller_state_version_change: ConfigVersionChange,
@@ -573,11 +575,12 @@ pub async fn update_dpf_helm_chart_in_place(
     };
 
     let version_query = "UPDATE extension_service_versions
-                         SET data = $1
-                         WHERE service_id = $2 AND version = $3 AND deleted IS NULL
+                         SET data = $1, dpf_service_id = $2
+                         WHERE service_id = $3 AND version = $4 AND deleted IS NULL
                          RETURNING service_id, version, data, observability, has_credential, created, deleted";
     let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
         .bind(normalized_data)
+        .bind(dpf_service_id)
         .bind(service_id)
         .bind(stable_version)
         .fetch_one(&mut *txn)
@@ -1291,10 +1294,8 @@ async fn ensure_dpf_service_id_unique(
         JOIN extension_service_versions AS version ON version.service_id = service.id
         WHERE (service.deleted IS NULL
                OR service.controller_state->>'state' <> 'deleted')
-          AND lower(CASE
-                WHEN service.type = 'dpf_helm_chart'
-                THEN version.data::jsonb->>'serviceID'
-              END) = lower($1)
+          AND service.type = 'dpf_helm_chart'
+          AND lower(version.dpf_service_id) = lower($1)
         LIMIT 1"#;
 
     let found = sqlx::query_scalar::<_, i32>(lookup_query)
@@ -1580,7 +1581,7 @@ mod test_batched_lookups {
         let version = ConfigVersion::initial();
         let first_service_id = ExtensionServiceId::new();
         let claimed_id = "contended-dpf-id";
-        let claimed_data = r#"{"serviceID":"contended-dpf-id"}"#;
+        let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
         let mut first = pool.begin().await.expect("begin first create");
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *first)
@@ -1674,7 +1675,7 @@ mod test_batched_lookups {
             .await
             .expect("commit rejected create transaction");
         let owners: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM extension_service_versions WHERE lower(data::jsonb->>'serviceID') = lower($1)",
+            "SELECT count(*) FROM extension_service_versions WHERE lower(dpf_service_id) = lower($1)",
         )
         .bind(claimed_id)
         .fetch_one(&pool)
