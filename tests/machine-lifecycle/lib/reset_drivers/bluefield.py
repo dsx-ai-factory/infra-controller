@@ -31,7 +31,9 @@ class BlueFieldDpuResetDriver:
 
     def reset_dpu(self, target: ResetTarget) -> None:
         print(f"Resetting BIOS settings on {target.label}")
-        url = f"https://{target.bmc_ip}/redfish/v1/Systems/Bluefield/Bios/Settings"
+        url = network.redfish_url(
+            target.bmc_ip, "/redfish/v1/Systems/Bluefield/Bios/Settings"
+        )
         data = {"Attributes": {"ResetEfiVars": True}}
         print(f"Executing redfish request. \nPayload: {data} \nURL: {url}")
         try:

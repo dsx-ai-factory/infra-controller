@@ -167,6 +167,9 @@ pub(crate) async fn find_machines_by_ids(
         db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
             .await?;
 
+    let lldp_neighbors_by_machine =
+        db::machine_lldp_neighbor::find_by_machine_ids(&mut txn, &machine_ids).await?;
+
     txn.commit().await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
@@ -178,6 +181,7 @@ pub(crate) async fn find_machines_by_ids(
         snapshots,
         &sla_config,
         spectrum_x_capabilities_by_machine,
+        lldp_neighbors_by_machine,
     )))
 }
 
@@ -1110,6 +1114,7 @@ fn snapshot_map_to_rpc_machines(
         HostMachineId,
         Vec<db::dpa_interface::SpectrumXDeviceCapability>,
     >,
+    mut lldp_neighbors_by_machine: HashMap<MachineId, Vec<model::lldp::LldpNeighbor>>,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
@@ -1126,6 +1131,10 @@ fn snapshot_map_to_rpc_machines(
         if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
+            if let Some(neighbors) = lldp_neighbors_by_machine.remove(&machine_id) {
+                rpc_machine.status.get_or_insert_default().lldp_neighbors =
+                    neighbors.into_iter().map(Into::into).collect();
+            }
             if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
                 && !spectrum_x_capabilities.is_empty()
             {

@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 #[tokio::test]
-async fn rejected_expected_component_arguments_exit_before_contacting_core() {
+async fn rejected_arguments_exit_before_contacting_core() {
     struct Case {
         scenario: &'static str,
         args: &'static [&'static str],
@@ -32,6 +32,22 @@ async fn rejected_expected_component_arguments_exit_before_contacting_core() {
     }
 
     for case in [
+        Case {
+            scenario: "excess IPv6 values fail before allocation",
+            args: &[
+                // Without `--cloud-unsafe-op`, that guard would reject the command
+                // even if argument validation were missing.
+                "--cloud-unsafe-op=ipv6-validation-test",
+                "instance",
+                "allocate",
+                "--prefix-name=ipv6-test",
+                "--vpc-prefix-id=00000000-0000-0000-0000-000000000001",
+                "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000002",
+                "--ipv6-vpc-prefix-id=00000000-0000-0000-0000-000000000003",
+            ],
+            diagnostic: "--ipv6-vpc-prefix-id has 2 values but --vpc-prefix-id has 1",
+            usage: "Usage: nico-admin-cli instance allocate",
+        },
         Case {
             scenario: "unconfirmed machine erase fails the command",
             args: &["expected-machine", "erase"],

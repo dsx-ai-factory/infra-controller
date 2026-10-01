@@ -66,8 +66,9 @@ use model::machine::{
     MachineLastRebootRequested, MachineLastRebootRequestedMode, MachineMaintenanceOperation,
     MachineState, MachineValidatingState, MachineValidationContext, ManagedHostState,
     MeasuringState, PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState,
-    ReadyBootLockdownRecovery, ReadyBootLockdownStage, SecureEraseBossState, SetBootOrderInfo,
-    SetBootOrderState, SetSecureBootState, SpdmMeasuringState, StateMachineArea, ValidationState,
+    ReadyBootLockdownRecovery, ReadyBootLockdownStage, ResetState, SecureEraseBossState,
+    SetBootOrderInfo, SetBootOrderState, SetSecureBootState, SpdmMeasuringState, StateMachineArea,
+    ValidationState,
 };
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterfaceTarget};
 use model::machine_validation::MachineValidationState;
@@ -229,14 +230,20 @@ async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgP
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    create_instance(&env, &mh, false, segment_id).await;
+    let instance = create_instance(&env, &mh, false, segment_id).await;
     let host_id: HostMachineId = mh.id.into();
 
-    for instance_state in [
-        InstanceState::SwitchToAdminNetwork,
-        InstanceState::WaitingForNetworkSegmentToBeReady,
+    for state in [
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::SwitchToAdminNetwork,
+        },
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+        },
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        },
     ] {
-        let state = ManagedHostState::Assigned { instance_state };
         let mut txn = env.db_txn().await;
         db::machine::update_state(&mut txn, &host_id, &state)
             .await
@@ -295,6 +302,13 @@ async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgP
         assert_eq!(host.network_config.version, winning_version);
         assert_eq!(dpu.network_config.value, dpu_network.value);
         assert_eq!(dpu.network_config.version, winning_version);
+        assert_eq!(
+            db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
+                .await
+                .unwrap(),
+            Some(instance.id),
+            "{state} must retain the Instance after its network write was rejected"
+        );
         txn.commit().await.unwrap();
     }
 }

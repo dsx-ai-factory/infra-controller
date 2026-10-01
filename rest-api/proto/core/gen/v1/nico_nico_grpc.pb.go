@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
+	Forge_GetRmsVersion_FullMethodName                                      = "/forge.Forge/GetRmsVersion"
 	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
@@ -553,6 +554,12 @@ const (
 type ForgeClient interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*BuildInfo, error)
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
+	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
@@ -891,8 +898,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
@@ -958,7 +968,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	// Periodic LLDP neighbor report from scout. The DPU agent reports through
+	// RecordDpuNetworkStatus instead.
 	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
@@ -1536,6 +1547,16 @@ func (c *forgeClient) Version(ctx context.Context, in *VersionRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BuildInfo)
 	err := c.cc.Invoke(ctx, Forge_Version_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRmsVersionResponse)
+	err := c.cc.Invoke(ctx, Forge_GetRmsVersion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6777,6 +6798,12 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 type ForgeServer interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(context.Context, *VersionRequest) (*BuildInfo, error)
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
+	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
@@ -7115,8 +7142,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
-	// Trigger a reset of a managed host: tear down its instance and DPF
+	// Trigger a reset of a managed host: tear down its Instance and DPF
 	// resources, then re-ingest it from DPU discovery.
+	// With an Instance present, retain it and its network resources until every
+	// DPU attached to the host acknowledges Admin networking. An unreachable DPU
+	// keeps the reset waiting; hosts without an Instance skip this network wait.
 	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
 	// List managed hosts waiting for reset
 	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)
@@ -7182,7 +7212,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
-	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	// Periodic LLDP neighbor report from scout. The DPU agent reports through
+	// RecordDpuNetworkStatus instead.
 	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
@@ -7757,6 +7788,9 @@ type UnimplementedForgeServer struct{}
 
 func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*BuildInfo, error) {
 	return nil, status.Error(codes.Unimplemented, "method Version not implemented")
+}
+func (UnimplementedForgeServer) GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRmsVersion not implemented")
 }
 func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
@@ -9355,6 +9389,24 @@ func _Forge_Version_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).Version(ctx, req.(*VersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetRmsVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRmsVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetRmsVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetRmsVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetRmsVersion(ctx, req.(*GetRmsVersionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18729,6 +18781,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Version",
 			Handler:    _Forge_Version_Handler,
+		},
+		{
+			MethodName: "GetRmsVersion",
+			Handler:    _Forge_GetRmsVersion_Handler,
 		},
 		{
 			MethodName: "CreateDomain",

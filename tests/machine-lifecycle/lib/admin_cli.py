@@ -25,7 +25,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from lib import kubectl
+from lib import kubectl, network
 from lib.config import GrpcApiConfig
 from lib.site_vault import SiteVaultClient
 
@@ -579,7 +579,7 @@ def factory_reset_bmc(bmc_ip: str, bmc_username: str, bmc_password: str) -> None
     args = [
         "redfish",
         "--address",
-        bmc_ip,
+        network.url_host(bmc_ip),
         "--username",
         bmc_username,
         "--password",
@@ -612,7 +612,7 @@ def get_bmc_accounts(bmc_ip: str, bmc_username: str, bmc_password: str) -> None:
         [
             "redfish",
             "--address",
-            bmc_ip,
+            network.url_host(bmc_ip),
             "--username",
             bmc_username,
             "--password",
