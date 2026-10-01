@@ -79,7 +79,7 @@ func TestValidatePage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			inventory := testInventory(testPrefix())
 			tt.change(inventory)
-			_, err := validatePage(inventory)
+			err := validatePage(inventory)
 			if tt.valid {
 				require.NoError(t, err)
 			} else {

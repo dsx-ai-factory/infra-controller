@@ -93,7 +93,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 		name  string
 		check func(*testing.T, fixture)
 	}{
-		{"out of order pages allow increasing estimates and retain complete receipts", func(t *testing.T, f fixture) {
+		{"out of order pages reconcile independently with increasing estimates", func(t *testing.T, f fixture) {
 			ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
 			slices.Sort(ids)
 			timestamp := timestamppb.Now()
@@ -114,48 +114,32 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 				}
 				require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			}
-			progress := f.inventorySite(t).SitePrefixInventoryProgress
-			require.Len(t, progress.Pages, 3)
-			require.EqualValues(t, 3, progress.FinalPage)
-			require.Equal(t, ids, progress.ItemIDs)
 			require.Len(t, f.blocks(t), 4)
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryObservedAt)
-		}},
-		{"cross page inconsistencies preserve accepted receipt", func(t *testing.T, f fixture) {
-			ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
-			slices.Sort(ids)
-			first := testInventory(testPrefix())
-			first.SitePrefixes[0].Id.Value = ids[0]
-			first.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 3, PageSize: 2, ItemIds: ids}
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, first))
-			progress := f.inventorySite(t).SitePrefixInventoryProgress
-			for _, change := range []struct {
-				name      string
-				apply     func(*corev1.SitePrefixInventory)
-				errorText string
-			}{
-				{"duplicate", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Id.Value = ids[0] }, "more than one page"},
-				{"missing item", func(_ *corev1.SitePrefixInventory) {}, "does not match declared IDs"},
-				{"changed IDs", func(i *corev1.SitePrefixInventory) {
-					i.InventoryPage.ItemIds = i.InventoryPage.ItemIds[:2]
-					i.InventoryPage.TotalItems = 2
-				}, "declared IDs"},
-			} {
-				t.Run(change.name, func(t *testing.T) {
-					next := proto.Clone(first).(*corev1.SitePrefixInventory)
-					next.InventoryPage.CurrentPage = 2
-					next.SitePrefixes[0].Id.Value = ids[1]
-					next.SitePrefixes[0].Config.Prefix = "10.1.0.0/24"
-					change.apply(next)
-					require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, next), change.errorText)
-					require.Equal(t, progress, f.inventorySite(t).SitePrefixInventoryProgress)
-					require.Len(t, f.blocks(t), 1)
-				})
-			}
 		}},
 		{"Site deletion commits before reconciliation", func(t *testing.T, f fixture) { checkSiteDeletion(t, f, false) }},
 		{"reconciliation commits before Site deletion", func(t *testing.T, f fixture) { checkSiteDeletion(t, f, true) }},
 		{"allocation creation can finish while inventory waits for its root", checkAllocationCreation},
+		{"Site deletion between prefixes prevents later creation", func(t *testing.T, f fixture) {
+			first, second := testPrefix(), testPrefix()
+			ids := []string{first.Id.Value, second.Id.Value}
+			slices.Sort(ids)
+			first.Id.Value, second.Id.Value = ids[0], ids[1]
+			second.Config.Prefix = "10.1.0.0/24"
+			inventory := testInventory(first)
+			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
+			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
+			hook := &siteDeletionHook{session: f.session, siteID: f.site.ID}
+			f.session.DB.AddQueryHook(hook)
+			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrDoesNotExist)
+			require.NoError(t, hook.err)
+			require.Equal(t, 2, hook.reads)
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, first.Id.Value, blocks[0].SitePrefixID.String())
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{first.Config.Prefix}, prefixes)
+		}},
 		{"operator creates root and IPAM", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
@@ -166,9 +150,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, &inventory.SitePrefixes[0].Metadata.Description, blocks[0].Description)
 			_, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, "10.0.0.0/24", f.namespace())
 			require.NoError(t, err)
-			site := f.inventorySite(t)
-			require.Nil(t, site.SitePrefixInventoryObservedAt)
-			require.Len(t, site.SitePrefixInventoryProgress.Pages, 1)
 		}},
 		{"unnamed operator root uses CIDR and absent description", func(t *testing.T, f fixture) {
 			prefix := testPrefix()
@@ -273,77 +254,60 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Len(t, blocks, 1)
 			require.Equal(t, root.SitePrefixID, blocks[0].SitePrefixID)
 			require.Equal(t, root.Name, blocks[0].Name)
-			receipt := f.inventorySite(t).SitePrefixInventoryProgress.Pages[1]
-			require.Equal(t, inventory.InventoryPage.ItemIds, receipt.ItemIDs)
-			require.Equal(t, receipt.ItemIDs, receipt.DeferredIDs)
 		}},
-		{"exact retry noops and changed retry rejects", func(t *testing.T, f fixture) {
+		{"operator reactivation preserves root identity and IPAM", func(t *testing.T, f fixture) {
+			root := f.root(t, true)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			ready := testInventory(prefix)
+			deleting := proto.Clone(ready).(*corev1.SitePrefixInventory)
+			deleting.SitePrefixes[0].Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			deleting.Timestamp = timestamppb.New(ready.Timestamp.AsTime().Add(time.Second))
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, deleting))
+			block := f.blocks(t)[0]
+			require.Equal(t, cdbm.IPBlockStatusDeleting, block.Status)
+			ready.Timestamp = timestamppb.New(deleting.Timestamp.AsTime().Add(time.Second))
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, ready))
+			block = f.blocks(t)[0]
+			require.Equal(t, cdbm.IPBlockStatusReady, block.Status)
+			require.Equal(t, root.ID, block.ID)
+			require.Equal(t, root.SitePrefixID, block.SitePrefixID)
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{prefix.Config.Prefix}, prefixes)
+		}},
+		{"replay is idempotent and changed reports reconcile", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			site, block := f.inventorySite(t), f.blocks(t)[0]
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, proto.Clone(inventory).(*corev1.SitePrefixInventory)))
 			require.Equal(t, site.Updated, f.inventorySite(t).Updated)
-			require.Equal(t, block.Updated, f.blocks(t)[0].Updated)
-			inventory.SitePrefixes[0].Metadata.Name = "changed"
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "retry changed")
-			require.Equal(t, block.Name, f.blocks(t)[0].Name)
-		}},
-		{"unchanged later collection records receipt without rewriting the block", func(t *testing.T, f fixture) {
-			inventory := testInventory(testPrefix())
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			block := f.blocks(t)[0]
-			inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(time.Second))
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.Equal(t, block, f.blocks(t)[0])
-			progress := f.inventorySite(t).SitePrefixInventoryProgress
-			require.Equal(t, inventory.Timestamp.AsTime(), progress.ReportedAt)
-			hash, err := validatePage(inventory)
-			require.NoError(t, err)
-			require.Equal(t, hash, progress.Pages[1].Hash)
 			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
 				cdbm.StatusDetailFilterInput{EntityIDs: []string{block.ID.String()}}, paginator.PageInput{})
 			require.NoError(t, err)
 			require.Len(t, details, 1)
+			inventory.SitePrefixes[0].Metadata.Name = "changed"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Equal(t, "changed", f.blocks(t)[0].Name)
 		}},
-		{"older collection cannot overwrite or infer absence", func(t *testing.T, f fixture) {
+		{"empty inventory does not infer absence", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			progress := f.inventorySite(t).SitePrefixInventoryProgress
-			inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(-time.Second))
-			inventory.SitePrefixes[0].Metadata.Name = "stale"
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			require.Equal(t, progress, f.inventorySite(t).SitePrefixInventoryProgress)
-			inventory.Timestamp = timestamppb.New(time.Now().Add(time.Second))
+			block := f.blocks(t)[0]
 			inventory.SitePrefixes, inventory.InventoryPage.ItemIds = nil, nil
 			inventory.InventoryPage.TotalItems, inventory.InventoryPage.TotalPages = 0, 0
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			require.Len(t, f.blocks(t), 1)
-			require.Nil(t, f.blocks(t)[0].Deleted)
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryObservedAt)
+			require.Equal(t, []cdbm.IPBlock{block}, f.blocks(t))
 		}},
-		{"late final page in the current collection is reconciled", func(t *testing.T, f fixture) {
+		{"late final page is reconciled without discarding earlier resources", func(t *testing.T, f fixture) {
 			ids := []string{uuid.NewString(), uuid.NewString()}
 			slices.Sort(ids)
 			first := testInventory(testPrefix())
+			first.Timestamp = timestamppb.New(time.Now().Add(-4 * time.Minute))
 			first.SitePrefixes[0].Id.Value = ids[0]
 			first.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 2, PageSize: 1, ItemIds: ids}
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, first))
-
-			// Backdate the accepted collection and its receipt to model four
-			// minutes passing without sleeping.
-			first.Timestamp = timestamppb.New(time.Now().Add(-4 * time.Minute))
-			progress := f.inventorySite(t).SitePrefixInventoryProgress
-			progress.ReportedAt = first.Timestamp.AsTime()
-			receipt := progress.Pages[1]
-			hash, err := validatePage(first)
-			require.NoError(t, err)
-			receipt.Hash = hash
-			progress.Pages[1] = receipt
-			_, err = cdbm.NewSiteDAO(f.session).Update(ctx, nil, cdbm.SiteUpdateInput{
-				SiteID: f.site.ID, SitePrefixInventoryProgress: progress,
-			})
-			require.NoError(t, err)
-
 			final := proto.Clone(first).(*corev1.SitePrefixInventory)
 			final.InventoryPage.CurrentPage = 2
 			final.SitePrefixes[0].Id.Value = ids[1]
@@ -352,19 +316,9 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			block, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, uuid.MustParse(ids[1]))
 			require.NoError(t, err)
 			require.Equal(t, "10.1.0.0", block.Prefix)
-			saved := f.inventorySite(t).SitePrefixInventoryProgress
-			require.Equal(t, progress.ReportedAt, saved.ReportedAt)
-			require.Len(t, saved.Pages, 2)
-			require.Equal(t, receipt, saved.Pages[1])
-			hash, err = validatePage(final)
-			require.NoError(t, err)
-			require.Equal(t, cdbm.SitePrefixInventoryPage{
-				Hash: hash, ItemIDs: []string{ids[1]}, DeferredIDs: []string{},
-			}, saved.Pages[2])
-			require.EqualValues(t, 2, saved.FinalPage)
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryObservedAt)
+			require.Len(t, f.blocks(t), 2)
 		}},
-		{"failure diagnostics do not change progress or resources", func(t *testing.T, f fixture) {
+		{"failure diagnostics do not change the Site or resources", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			site := f.inventorySite(t)
@@ -374,7 +328,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, site, f.inventorySite(t))
 			require.Len(t, f.blocks(t), 1)
 		}},
-		{"later unknown tenant rolls back earlier resource and IPAM", func(t *testing.T, f fixture) {
+		{"later unknown tenant preserves earlier resource and retries converge", func(t *testing.T, f fixture) {
 			first, second := testPrefix(), testPrefix()
 			ids := []string{first.Id.Value, second.Id.Value}
 			slices.Sort(ids)
@@ -385,11 +339,46 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
 			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
 			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "unknown or ambiguous")
-			require.Empty(t, f.blocks(t))
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			firstBlock := blocks[0]
+			require.Equal(t, first.Id.Value, firstBlock.SitePrefixID.String())
 			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixes(ctx, f.namespace())
 			require.NoError(t, err)
-			require.Empty(t, prefixes)
+			require.Len(t, prefixes, 1)
+			util.TestBuildTenant(t, f.session, "unknown", "unknown", nil, &cdbm.User{ID: f.site.CreatedBy})
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Len(t, f.blocks(t), 2)
+			retained, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, firstBlock.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, firstBlock, *retained)
+		}},
+		{"failed prefix rolls back its IPAM and record without undoing earlier commits", func(t *testing.T, f fixture) {
+			first, second := testPrefix(), testPrefix()
+			ids := []string{first.Id.Value, second.Id.Value}
+			slices.Sort(ids)
+			first.Id.Value, second.Id.Value = ids[0], ids[1]
+			second.Config.Prefix = "10.1.0.0/24"
+			inventory := testInventory(first)
+			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
+			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
+			f.session.DB.AddQueryHook(&statusDetailFailureHook{remaining: 2})
+			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), context.Canceled)
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			firstBlock := blocks[0]
+			require.Equal(t, first.Id.Value, firstBlock.SitePrefixID.String())
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{first.Config.Prefix}, prefixes)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Len(t, f.blocks(t), 2)
+			retained, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, firstBlock.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, firstBlock, *retained)
+			prefixes, err = ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.ElementsMatch(t, []string{first.Config.Prefix, second.Config.Prefix}, prefixes)
 		}},
 		{"soft deleted Core ID cannot be reused", func(t *testing.T, f fixture) {
 			root := f.root(t, true)
@@ -397,7 +386,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			prefix := testPrefix()
 			prefix.Id.Value = root.SitePrefixID.String()
 			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
 			require.NotNil(t, f.blocks(t)[0].Deleted)
 		}},
 		{"Core identity cannot move between owners", func(t *testing.T, f fixture) {
@@ -427,7 +415,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 						Column("site_id", "infrastructure_provider_id", "tenant_id").WherePK().Exec(ctx)
 					require.NoError(t, err)
 					require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
-					require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
 					require.Equal(t, root.Name, f.blocks(t)[0].Name)
 				})
 			}
@@ -440,7 +427,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory := testInventory(testPrefix())
 			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrXactAdvisoryLockFailed)
 			require.Empty(t, f.blocks(t))
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
 			require.NoError(t, tx.Commit())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.Len(t, f.blocks(t), 1)
@@ -484,9 +470,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Len(t, blocks, 1)
 			require.Equal(t, root.ID, blocks[0].ID)
 			require.Equal(t, cdbm.IPBlockStatusDeleting, blocks[0].Status)
-			receipt := f.inventorySite(t).SitePrefixInventoryProgress.Pages[1]
-			require.Equal(t, ids, receipt.ItemIDs)
-			require.Equal(t, []string{replacement.Id.Value}, receipt.DeferredIDs)
 			tx, err := cdb.BeginTx(ctx, f.session, nil)
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
@@ -517,7 +500,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())), change.errorText)
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
 			for _, block := range f.blocks(t) {
 				require.Nil(t, block.SitePrefixID)
 			}
@@ -542,11 +524,49 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			prefix.Id.Value = root.SitePrefixID.String()
 			change.apply(prefix)
 			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
-			require.Nil(t, f.inventorySite(t).SitePrefixInventoryProgress)
 			require.Equal(t, root.Name, f.blocks(t)[0].Name)
 		})
 	}
 }
+
+// Delete after the first prefix commits, before the second locks the Site.
+type siteDeletionHook struct {
+	session *cdb.Session
+	siteID  uuid.UUID
+	reads   int
+	err     error
+}
+
+func (hook *siteDeletionHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if strings.Contains(event.Query, "FROM \"site\" AS \"st\"") && strings.Contains(event.Query, "FOR NO KEY UPDATE") {
+		hook.reads++
+		if hook.reads == 2 {
+			hook.err = cdbm.NewSiteDAO(hook.session).Delete(ctx, nil, hook.siteID)
+		}
+	}
+	return ctx
+}
+
+func (*siteDeletionHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// Fail one status-detail insert after the prefix's REST and IPAM writes.
+type statusDetailFailureHook struct {
+	remaining int
+}
+
+func (hook *statusDetailFailureHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if strings.HasPrefix(event.Query, "INSERT INTO \"status_detail\"") {
+		hook.remaining--
+		if hook.remaining == 0 {
+			failedCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			return failedCtx
+		}
+	}
+	return ctx
+}
+
+func (*statusDetailFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func checkAllocationCreation(t *testing.T, f fixture) {
 	t.Helper()
@@ -600,7 +620,6 @@ func checkAllocationCreation(t *testing.T, f fixture) {
 	updated, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, root.ID, nil)
 	require.NoError(t, err)
 	require.Equal(t, cdbm.IPBlockStatusDeleting, updated.Status)
-	require.Len(t, f.inventorySite(t).SitePrefixInventoryProgress.Pages, 1)
 }
 
 // Pause after acquiring the Site row lock, without timing-dependent sleeps.
@@ -679,7 +698,4 @@ func checkSiteDeletion(t *testing.T, f fixture, reconcileFirst bool) {
 	deletedSite, err := dao.GetByID(ctx, nil, f.site.ID, nil, true)
 	require.NoError(t, err)
 	require.NotNil(t, deletedSite.Deleted)
-	if !reconcileFirst {
-		require.Nil(t, deletedSite.SitePrefixInventoryProgress)
-	}
 }
