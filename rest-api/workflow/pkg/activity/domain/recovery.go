@@ -11,11 +11,11 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 	tclient "go.temporal.io/sdk/client"
 )
 
@@ -79,7 +79,7 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		// a late first RPC cannot create a different owner or another ID.
 		resource := &corev1.Domain{}
 		req := &corev1.CreateDomainRequest{Name: d.Hostname, ReservedId: &corev1.DomainId{Value: d.ControllerDomainID.String()}}
-		if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, req, resource, d.SiteID.String()); apiErr != nil {
+		if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateDomain_FullMethodName, req, resource, d.SiteID.String()); apiErr != nil {
 			// Only a definitive Core validation/conflict response can terminate
 			// this intent. A proxy timeout or transport failure leaves the same
 			// reserved ID Pending for safe replay on a later sweep.
@@ -109,7 +109,7 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		// Even an absent Core row must leave a durable cancellation tombstone
 		// before REST may soft-delete its projection (late create race).
 		req := &corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: d.ControllerDomainID.String()}, CancelReservedId: true}
-		if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
+		if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
 			return fmt.Errorf("Core deletion/cancellation unconfirmed: %s", apiErr.Message)
 		}
 		changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusDeleting, cdbm.DomainStatusDeleting, true)
@@ -126,7 +126,7 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 // is terminal only after Core confirms its durable cancellation tombstone.
 func (m ManageDomain) cancelRejected(ctx context.Context, dao cdbm.DomainDAO, d *cdbm.Domain, stc tclient.Client) error {
 	req := &corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: d.ControllerDomainID.String()}, CancelReservedId: true}
-	if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
+	if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
 		return fmt.Errorf("Core rejection cancellation unconfirmed: %s", apiErr.Message)
 	}
 	changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusRejecting, cdbm.DomainStatusError, false)

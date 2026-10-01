@@ -10,10 +10,10 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 )
 
 // ReconcileAttachmentIntents processes a bounded number of authorized, durable
@@ -72,7 +72,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	}
 	read := func() (*corev1.NetworkSegment, error) {
 		result := &corev1.NetworkSegmentList{}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName,
+		apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName,
 			&corev1.NetworkSegmentsByIdsRequest{NetworkSegmentsIds: []*corev1.NetworkSegmentId{{Value: s.ControllerNetworkSegmentID.String()}}}, result, s.SiteID.String())
 		if apiErr != nil {
 			return nil, fmt.Errorf("Core segment read failed: %s", apiErr.Message)
@@ -122,7 +122,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 		ExpectedSegmentVersion: s.AttachSegmentVersion,
 	}
 	response := &corev1.NetworkSegment{}
-	if apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName, request, response, s.SiteID.String()); apiErr != nil {
+	if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName, request, response, s.SiteID.String()); apiErr != nil {
 		return fmt.Errorf("Core attach unconfirmed: %s", apiErr.Message)
 	}
 	if response.GetId().GetValue() != s.ControllerNetworkSegmentID.String() || response.GetConfig().GetVpcId().GetValue() != s.AttachTargetControllerVpcID.String() {
