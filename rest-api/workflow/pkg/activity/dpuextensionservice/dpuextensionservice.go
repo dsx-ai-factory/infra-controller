@@ -41,20 +41,6 @@ type ManageDpuExtensionService struct {
 	siteClientPool *sc.ClientPool
 }
 
-type dpuExtensionServiceRecoveryInput struct {
-	id             uuid.UUID
-	name           string
-	description    *string
-	serviceType    string
-	dpuTarget      *string
-	version        *string
-	versionInfo    *cdbm.DpuExtensionServiceVersionInfo
-	activeVersions []string
-	tenantOrg      string
-	status         string
-	statusMessage  string
-}
-
 type dpuExtensionServiceRecoveryResult struct {
 	dpuExtensionService *cdbm.DpuExtensionService
 }
@@ -321,7 +307,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 // inventory, or undeletes and refreshes a matching soft-deleted row. It returns nil when
 // recovery is skipped or fails.
 //
-//nolint:funlen // Input mapping and transaction dispatch are kept together to show the recovery flow.
+//nolint:cyclop,funlen,gocognit,nestif // Recovery is intentionally kept as one transactional flow.
 func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 	ctx context.Context,
 	site *cdbm.Site,
@@ -333,103 +319,18 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		Str("DPU Extension Service ID", controllerDpuExtensionService.GetServiceId()).
 		Logger()
 
-	recoveryInput, valid := dpuExtensionServiceRecoveryInputFromSite(controllerDpuExtensionService)
-	if !valid {
-		return nil
-	}
-
-	result, err := cdb.WithTxResult(ctx, mde.dbSession, func(transaction *cdb.Tx) (dpuExtensionServiceRecoveryResult, error) {
-		dpuExtensionServiceDAO := cdbm.NewDpuExtensionServiceDAO(mde.dbSession)
-
-		tenant, eligible, tenantErr := mde.resolveDpuExtensionServiceRecoveryTenant(
-			ctx,
-			transaction,
-			site,
-			recoveryInput.tenantOrg,
-		)
-		if tenantErr != nil {
-			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, tenantErr
-		}
-
-		if !eligible {
-			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-		}
-
-		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
-		// the same fallback name.
-		lockErr := transaction.TryAcquireAdvisoryLock(
-			ctx,
-			cdb.GetAdvisoryLockIDFromString("dpu-extension-service-recovery-"+tenant.ID.String()),
-			nil,
-		)
-		if lockErr != nil {
-			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to acquire Tenant recovery lock, DB error: %w", lockErr)
-		}
-
-		matches, _, reloadErr := dpuExtensionServiceDAO.GetAll(
-			ctx,
-			transaction,
-			cdbm.DpuExtensionServiceFilterInput{
-				DpuExtensionServiceIDs: []uuid.UUID{recoveryInput.id},
-				IncludeDeleted:         true,
-			},
-			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-			nil,
-		)
-		if reloadErr != nil {
-			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to retrieve service by ID, DB error: %w", reloadErr)
-		}
-
-		if len(matches) > 0 {
-			return mde.restoreDpuExtensionServiceFromSite(
-				ctx,
-				transaction,
-				dpuExtensionServiceDAO,
-				site,
-				tenant,
-				&matches[0],
-				recoveryInput,
-			)
-		}
-
-		return mde.createDpuExtensionServiceFromSite(
-			ctx,
-			transaction,
-			dpuExtensionServiceDAO,
-			site,
-			tenant,
-			recoveryInput,
-		)
-	})
-	if err != nil {
-		logger.Warn().Err(err).Msg("failed to create or undelete DPU Extension Service from Site inventory")
-
-		return nil
-	}
-
-	return result.dpuExtensionService
-}
-
-func dpuExtensionServiceRecoveryInputFromSite(
-	controllerDpuExtensionService *corev1.DpuExtensionService,
-) (dpuExtensionServiceRecoveryInput, bool) {
-	logger := log.With().
-		Str("Activity", "UpdateDpuExtensionServicesInDB").
-		Str("DPU Extension Service ID", controllerDpuExtensionService.GetServiceId()).
-		Logger()
-
 	dpuExtensionServiceID, err := uuid.Parse(controllerDpuExtensionService.GetServiceId())
 	if err != nil {
 		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: failed to parse ID, not a valid UUID %s", controllerDpuExtensionService.GetServiceId())
 
-		return dpuExtensionServiceRecoveryInput{}, false
+		return nil
 	}
 
 	org := controllerDpuExtensionService.GetTenantOrganizationId()
 	if org == "" {
 		logger.Warn().Msg("unable to create DPU Extension Service found on Site: service is reporting empty Tenant organization ID")
 
-		return dpuExtensionServiceRecoveryInput{}, false
+		return nil
 	}
 
 	serviceType := cdbm.DpuExtensionServiceServiceTypeKubernetesPod
@@ -447,7 +348,7 @@ func dpuExtensionServiceRecoveryInputFromSite(
 		if targetErr != nil || dpuTarget == nil {
 			logger.Warn().Err(targetErr).Msg("unable to create DPU Extension Service found on Site: DPF Helm chart is missing a valid DPU target")
 
-			return dpuExtensionServiceRecoveryInput{}, false
+			return nil
 		}
 
 		status = cdbm.DpuExtensionServiceStatusPending
@@ -460,7 +361,7 @@ func dpuExtensionServiceRecoveryInputFromSite(
 	default:
 		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: unsupported service type %s", controllerDpuExtensionService.GetServiceType())
 
-		return dpuExtensionServiceRecoveryInput{}, false
+		return nil
 	}
 
 	name := controllerDpuExtensionService.GetServiceName()
@@ -482,304 +383,257 @@ func dpuExtensionServiceRecoveryInputFromSite(
 		versionInfo = new(cdbm.DpuExtensionServiceVersionInfo)
 		versionInfo.FromProto(latestVersionInfo, time.Now().UTC())
 	}
+	activeVersions := append([]string{}, controllerDpuExtensionService.GetActiveVersions()...)
 
-	return dpuExtensionServiceRecoveryInput{
-		id:             dpuExtensionServiceID,
-		name:           name,
-		description:    description,
-		serviceType:    serviceType,
-		dpuTarget:      dpuTarget,
-		version:        version,
-		versionInfo:    versionInfo,
-		activeVersions: append([]string{}, controllerDpuExtensionService.GetActiveVersions()...),
-		tenantOrg:      org,
-		status:         status,
-		statusMessage:  statusMessage,
-	}, true
-}
+	result, err := cdb.WithTxResult(ctx, mde.dbSession, func(transaction *cdb.Tx) (dpuExtensionServiceRecoveryResult, error) {
+		dpuExtensionServiceDAO := cdbm.NewDpuExtensionServiceDAO(mde.dbSession)
 
-func (mde ManageDpuExtensionService) resolveDpuExtensionServiceRecoveryTenant(
-	ctx context.Context,
-	transaction *cdb.Tx,
-	site *cdbm.Site,
-	org string,
-) (*cdbm.Tenant, bool, error) {
-	logger := log.With().
-		Str("Activity", "UpdateDpuExtensionServicesInDB").
-		Str("Site ID", site.ID.String()).
-		Logger()
-
-	tenants, _, err := cdbm.NewTenantDAO(mde.dbSession).GetAll(
-		ctx,
-		transaction,
-		cdbm.TenantFilterInput{Orgs: []string{org}},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		return nil, false, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to retrieve Tenant by organization, DB error: %w", err)
-	}
-
-	if len(tenants) == 0 {
-		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: no Tenants were found for org: %s", org)
-
-		return nil, false, nil
-	}
-
-	if len(tenants) > 1 {
-		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: multiple Tenants were found for org: %s", org)
-
-		return nil, false, nil
-	}
-
-	tenant := &tenants[0]
-
-	tenantSites, _, err := cdbm.NewTenantSiteDAO(mde.dbSession).GetAll(
-		ctx,
-		transaction,
-		cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-			SiteIDs:   []uuid.UUID{site.ID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(1)},
-		nil,
-	)
-	if err != nil {
-		return nil, false, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", err)
-	}
-
-	if len(tenantSites) == 0 {
-		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: Tenant for org %s does not have access to Site", org)
-
-		return nil, false, nil
-	}
-
-	return tenant, true, nil
-}
-
-//nolint:funlen // Validation, undelete, status update, and status history must stay in one transaction.
-func (mde ManageDpuExtensionService) restoreDpuExtensionServiceFromSite(
-	ctx context.Context,
-	transaction *cdb.Tx,
-	dpuExtensionServiceDAO cdbm.DpuExtensionServiceDAO,
-	site *cdbm.Site,
-	tenant *cdbm.Tenant,
-	existingDpuExtensionService *cdbm.DpuExtensionService,
-	recoveryInput dpuExtensionServiceRecoveryInput,
-) (dpuExtensionServiceRecoveryResult, error) {
-	logger := log.With().
-		Str("Activity", "UpdateDpuExtensionServicesInDB").
-		Str("Site ID", site.ID.String()).
-		Str("DPU Extension Service ID", recoveryInput.id.String()).
-		Logger()
-
-	if existingDpuExtensionService.SiteID != site.ID {
-		logger.Warn().Msg("unable to create DPU Extension Service found on Site: service ID belongs to a different Site in REST cache")
-
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-	}
-
-	if existingDpuExtensionService.TenantID != tenant.ID {
-		logger.Warn().Msgf("unable to create DPU Extension Service found on Site: tenant organization differs in REST cache and Site record %s", recoveryInput.tenantOrg)
-
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-	}
-
-	if existingDpuExtensionService.ServiceType != recoveryInput.serviceType {
-		logger.Warn().Msg("unable to create DPU Extension Service found on Site: service type differs in REST cache and Site record")
-
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-	}
-	if existingDpuExtensionService.DpuTarget != nil &&
-		!util.PtrsEqual(existingDpuExtensionService.DpuTarget, recoveryInput.dpuTarget) {
-		logger.Warn().Msg("unable to create DPU Extension Service found on Site: DPU target differs in REST cache and Site record")
-
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-	}
-
-	if existingDpuExtensionService.Deleted == nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: existingDpuExtensionService}, nil
-	}
-
-	// A delete newer than the inventory staleness threshold can postdate this snapshot.
-	// A later inventory restores the service if Site still reports it.
-	if site.IsTimeWithinStaleInventoryThreshold(*existingDpuExtensionService.Deleted) {
-		logger.Info().Msgf("not undeleting DPU Extension Service %s yet because it was deleted more recently than the inventory interval", recoveryInput.id)
-
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
-	}
-
-	recoveredName, err := availableDpuExtensionServiceName(
-		ctx,
-		transaction,
-		dpuExtensionServiceDAO,
-		tenant.ID,
-		recoveryInput.id,
-		recoveryInput.name,
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to select recovery name, DB error: %w", err)
-	}
-
-	restored, err := dpuExtensionServiceDAO.Clear(
-		ctx,
-		transaction,
-		cdbm.DpuExtensionServiceClearInput{
-			DpuExtensionServiceID: existingDpuExtensionService.ID,
-			Deleted:               true,
-		},
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to clear soft-delete timestamp, DB error: %w", err)
-	}
-
-	restored, err = dpuExtensionServiceDAO.Update(
-		ctx,
-		transaction,
-		cdbm.DpuExtensionServiceUpdateInput{
-			DpuExtensionServiceID: restored.ID,
-			Name:                  &recoveredName,
-			DpuTarget:             recoveryInput.dpuTarget,
-			Version:               recoveryInput.version,
-			VersionInfo:           recoveryInput.versionInfo,
-			ActiveVersions:        recoveryInput.activeVersions,
-			Status:                &recoveryInput.status,
-			IsMissingOnSite:       cutil.GetPtr(false),
-		},
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to restore service status, DB error: %w", err)
-	}
-
-	_, err = cdbm.NewStatusDetailDAO(mde.dbSession).Create(
-		ctx,
-		transaction,
-		cdbm.StatusDetailCreateInput{
-			EntityID: restored.ID.String(),
-			Status:   recoveryInput.status,
-			Message:  cutil.GetPtr(recoveryInput.statusMessage),
-		},
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create Status Detail after undelete, DB error: %w", err)
-	}
-
-	return dpuExtensionServiceRecoveryResult{dpuExtensionService: restored}, nil
-}
-
-func (mde ManageDpuExtensionService) createDpuExtensionServiceFromSite(
-	ctx context.Context,
-	transaction *cdb.Tx,
-	dpuExtensionServiceDAO cdbm.DpuExtensionServiceDAO,
-	site *cdbm.Site,
-	tenant *cdbm.Tenant,
-	recoveryInput dpuExtensionServiceRecoveryInput,
-) (dpuExtensionServiceRecoveryResult, error) {
-	recoveredName, err := availableDpuExtensionServiceName(
-		ctx,
-		transaction,
-		dpuExtensionServiceDAO,
-		tenant.ID,
-		recoveryInput.id,
-		recoveryInput.name,
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to select recovery name, DB error: %w", err)
-	}
-
-	created, err := dpuExtensionServiceDAO.Create(
-		ctx,
-		transaction,
-		cdbm.DpuExtensionServiceCreateInput{
-			DpuExtensionServiceID: &recoveryInput.id,
-			Name:                  recoveredName,
-			Description:           recoveryInput.description,
-			ServiceType:           recoveryInput.serviceType,
-			DpuTarget:             recoveryInput.dpuTarget,
-			SiteID:                site.ID,
-			TenantID:              tenant.ID,
-			Version:               recoveryInput.version,
-			VersionInfo:           recoveryInput.versionInfo,
-			ActiveVersions:        recoveryInput.activeVersions,
-			Status:                recoveryInput.status,
-			CreatedBy:             tenant.CreatedBy,
-		},
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create service, DB error: %w", err)
-	}
-
-	_, err = cdbm.NewStatusDetailDAO(mde.dbSession).Create(
-		ctx,
-		transaction,
-		cdbm.StatusDetailCreateInput{
-			EntityID: created.ID.String(),
-			Status:   recoveryInput.status,
-			Message:  cutil.GetPtr(recoveryInput.statusMessage),
-		},
-	)
-	if err != nil {
-		return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create Status Detail, DB error: %w", err)
-	}
-
-	return dpuExtensionServiceRecoveryResult{dpuExtensionService: created}, nil
-}
-
-// availableDpuExtensionServiceName returns an API-valid, tenant-unique name for a service
-// recovered from Site inventory. The caller must hold the Tenant recovery advisory lock.
-func availableDpuExtensionServiceName(
-	ctx context.Context,
-	transaction *cdb.Tx,
-	dpuExtensionServiceDAO cdbm.DpuExtensionServiceDAO,
-	tenantID uuid.UUID,
-	dpuExtensionServiceID uuid.UUID,
-	reportedName string,
-) (string, error) {
-	const maxNameLength = 256
-
-	baseName := reportedName
-	baseNameRunes := []rune(baseName)
-
-	if len(baseNameRunes) < 2 ||
-		len(baseNameRunes) > maxNameLength ||
-		strings.TrimSpace(baseName) != baseName {
-		baseName = "recovered-" + dpuExtensionServiceID.String()[:8]
-	}
-
-	candidate := baseName
-	for attempt := 1; ; attempt++ {
-		nameConflicts, _, err := dpuExtensionServiceDAO.GetAll(
+		tenants, _, tenantErr := cdbm.NewTenantDAO(mde.dbSession).GetAll(
 			ctx,
 			transaction,
-			cdbm.DpuExtensionServiceFilterInput{
-				Names:     []string{candidate},
-				TenantIDs: []uuid.UUID{tenantID},
+			cdbm.TenantFilterInput{Orgs: []string{org}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if tenantErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to retrieve Tenant by organization, DB error: %w", tenantErr)
+		}
+
+		if len(tenants) == 0 {
+			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: no Tenants were found for org: %s", org)
+
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+		}
+
+		if len(tenants) > 1 {
+			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: multiple Tenants were found for org: %s", org)
+
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+		}
+		tenant := &tenants[0]
+
+		tenantSites, _, tenantSiteErr := cdbm.NewTenantSiteDAO(mde.dbSession).GetAll(
+			ctx,
+			transaction,
+			cdbm.TenantSiteFilterInput{
+				TenantIDs: []uuid.UUID{tenant.ID},
+				SiteIDs:   []uuid.UUID{site.ID},
 			},
 			cdbp.PageInput{Limit: cutil.GetPtr(1)},
 			nil,
 		)
-		if err != nil {
-			return "", fmt.Errorf("failed to query DPU Extension Service name conflicts: %w", err)
+		if tenantSiteErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
 		}
 
-		if len(nameConflicts) == 0 {
-			return candidate, nil
+		if len(tenantSites) == 0 {
+			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: Tenant for org %s does not have access to Site", org)
+
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
 		}
 
-		suffix := "-recovered-" + dpuExtensionServiceID.String()[:8]
-		if attempt > 1 {
-			suffix = fmt.Sprintf("%s-%d", suffix, attempt)
+		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
+		// the same fallback name.
+		lockErr := transaction.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString("dpu-extension-service-recovery-"+tenant.ID.String()),
+			nil,
+		)
+		if lockErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to acquire Tenant recovery lock, DB error: %w", lockErr)
 		}
 
-		maxBaseRunes := maxNameLength - len([]rune(suffix))
-		runes := []rune(baseName)
-
-		if len(runes) > maxBaseRunes {
-			runes = runes[:maxBaseRunes]
+		matches, _, reloadErr := dpuExtensionServiceDAO.GetAll(
+			ctx,
+			transaction,
+			cdbm.DpuExtensionServiceFilterInput{
+				DpuExtensionServiceIDs: []uuid.UUID{dpuExtensionServiceID},
+				IncludeDeleted:         true,
+			},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if reloadErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to retrieve service by ID, DB error: %w", reloadErr)
 		}
 
-		candidate = string(runes) + suffix
+		var existingDpuExtensionService *cdbm.DpuExtensionService
+		if len(matches) > 0 {
+			existingDpuExtensionService = &matches[0]
+
+			if existingDpuExtensionService.SiteID != site.ID {
+				logger.Warn().Msg("unable to create DPU Extension Service found on Site: service ID belongs to a different Site in REST cache")
+
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+			}
+
+			if existingDpuExtensionService.TenantID != tenant.ID {
+				logger.Warn().Msgf("unable to create DPU Extension Service found on Site: tenant organization differs in REST cache and Site record %s", org)
+
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+			}
+
+			if existingDpuExtensionService.ServiceType != serviceType {
+				logger.Warn().Msg("unable to create DPU Extension Service found on Site: service type differs in REST cache and Site record")
+
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+			}
+			if existingDpuExtensionService.DpuTarget != nil &&
+				!util.PtrsEqual(existingDpuExtensionService.DpuTarget, dpuTarget) {
+				logger.Warn().Msg("unable to create DPU Extension Service found on Site: DPU target differs in REST cache and Site record")
+
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+			}
+
+			if existingDpuExtensionService.Deleted == nil {
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: existingDpuExtensionService}, nil
+			}
+
+			// A delete newer than the inventory staleness threshold can postdate this snapshot.
+			// A later inventory restores the service if Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingDpuExtensionService.Deleted) {
+				logger.Info().Msgf("not undeleting DPU Extension Service %s yet because it was deleted more recently than the inventory interval", dpuExtensionServiceID)
+
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, nil
+			}
+		}
+
+		const maxNameLength = 256
+
+		baseName := name
+		baseNameRunes := []rune(baseName)
+
+		if len(baseNameRunes) < 2 ||
+			len(baseNameRunes) > maxNameLength ||
+			strings.TrimSpace(baseName) != baseName {
+			baseName = "recovered-" + dpuExtensionServiceID.String()[:8]
+		}
+
+		recoveredName := baseName
+		for attempt := 1; ; attempt++ {
+			nameConflicts, _, nameErr := dpuExtensionServiceDAO.GetAll(
+				ctx,
+				transaction,
+				cdbm.DpuExtensionServiceFilterInput{
+					Names:     []string{recoveredName},
+					TenantIDs: []uuid.UUID{tenant.ID},
+				},
+				cdbp.PageInput{Limit: cutil.GetPtr(1)},
+				nil,
+			)
+			if nameErr != nil {
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to query name conflicts, DB error: %w", nameErr)
+			}
+
+			if len(nameConflicts) == 0 {
+				break
+			}
+
+			suffix := "-recovered-" + dpuExtensionServiceID.String()[:8]
+			if attempt > 1 {
+				suffix = fmt.Sprintf("%s-%d", suffix, attempt)
+			}
+
+			maxBaseRunes := maxNameLength - len([]rune(suffix))
+			runes := []rune(baseName)
+			if len(runes) > maxBaseRunes {
+				runes = runes[:maxBaseRunes]
+			}
+
+			recoveredName = string(runes) + suffix
+		}
+
+		if existingDpuExtensionService != nil {
+			restored, clearErr := dpuExtensionServiceDAO.Clear(
+				ctx,
+				transaction,
+				cdbm.DpuExtensionServiceClearInput{
+					DpuExtensionServiceID: existingDpuExtensionService.ID,
+					Deleted:               true,
+				},
+			)
+			if clearErr != nil {
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to clear soft-delete timestamp, DB error: %w", clearErr)
+			}
+
+			restored, updateErr := dpuExtensionServiceDAO.Update(
+				ctx,
+				transaction,
+				cdbm.DpuExtensionServiceUpdateInput{
+					DpuExtensionServiceID: restored.ID,
+					Name:                  &recoveredName,
+					DpuTarget:             dpuTarget,
+					Version:               version,
+					VersionInfo:           versionInfo,
+					ActiveVersions:        activeVersions,
+					Status:                &status,
+					IsMissingOnSite:       cutil.GetPtr(false),
+				},
+			)
+			if updateErr != nil {
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to restore service status, DB error: %w", updateErr)
+			}
+
+			_, statusErr := cdbm.NewStatusDetailDAO(mde.dbSession).Create(
+				ctx,
+				transaction,
+				cdbm.StatusDetailCreateInput{
+					EntityID: restored.ID.String(),
+					Status:   status,
+					Message:  cutil.GetPtr(statusMessage),
+				},
+			)
+			if statusErr != nil {
+				return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create Status Detail after undelete, DB error: %w", statusErr)
+			}
+
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: restored}, nil
+		}
+
+		created, createErr := dpuExtensionServiceDAO.Create(
+			ctx,
+			transaction,
+			cdbm.DpuExtensionServiceCreateInput{
+				DpuExtensionServiceID: &dpuExtensionServiceID,
+				Name:                  recoveredName,
+				Description:           description,
+				ServiceType:           serviceType,
+				DpuTarget:             dpuTarget,
+				SiteID:                site.ID,
+				TenantID:              tenant.ID,
+				Version:               version,
+				VersionInfo:           versionInfo,
+				ActiveVersions:        activeVersions,
+				Status:                status,
+				CreatedBy:             tenant.CreatedBy,
+			},
+		)
+		if createErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create service, DB error: %w", createErr)
+		}
+
+		_, statusErr := cdbm.NewStatusDetailDAO(mde.dbSession).Create(
+			ctx,
+			transaction,
+			cdbm.StatusDetailCreateInput{
+				EntityID: created.ID.String(),
+				Status:   status,
+				Message:  cutil.GetPtr(statusMessage),
+			},
+		)
+		if statusErr != nil {
+			return dpuExtensionServiceRecoveryResult{dpuExtensionService: nil}, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to create Status Detail, DB error: %w", statusErr)
+		}
+
+		return dpuExtensionServiceRecoveryResult{dpuExtensionService: created}, nil
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to create or undelete DPU Extension Service from Site inventory")
+
+		return nil
 	}
+
+	return result.dpuExtensionService
 }
 
 // NewManageDpuExtensionService returns a new ManageDpuExtensionService activity
