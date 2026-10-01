@@ -35,7 +35,10 @@ Status tokens:
 `not-configured` — no RMS endpoint is set on this nico-api instance.
 
 `api-unreachable` — the cli could not connect to nico-api, because the
-server is down or the url is wrong.
+server is down, the url is wrong, or the tls handshake failed. A client
+certificate that nico-api rejects, for example because it is expired or
+signed by the wrong ca, is reported here, with the tls error in the
+`message` field.
 
 `rms-unreachable` — nico-api was reached but cannot contact the RMS
 backend, or timed out waiting for it.
@@ -43,8 +46,8 @@ backend, or timed out waiting for it.
 `cli-config-error` — a local cli configuration problem, such as a
 missing CA file, prevented connecting to nico-api.
 
-`auth-failed` — a certificate was rejected on the cli→nico-api path,
-or the RMS backend rejected the credentials that nico-api presented.
+`auth-failed` — the RMS backend rejected the credentials that nico-api
+presented.
 
 `auth-or-version-mismatch` — permission denied: either the cli
 certificate lacks the required role, or this nico-api server predates

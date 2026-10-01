@@ -30,13 +30,15 @@ use clap::Parser;
         `connected` — the probe reached RMS and received a version.\n\n\
         `not-configured` — no RMS endpoint is set on this nico-api instance.\n\n\
         `api-unreachable` — the cli could not connect to nico-api, because the server \
-        is down or the url is wrong.\n\n\
+        is down, the url is wrong, or the tls handshake failed. A client certificate \
+        that nico-api rejects, for example because it is expired or signed by the wrong \
+        ca, is reported here, with the tls error in the `message` field.\n\n\
         `rms-unreachable` — nico-api was reached but cannot contact the RMS backend, \
         or timed out waiting for it.\n\n\
         `cli-config-error` — a local cli configuration problem, such as a missing CA \
         file, prevented connecting to nico-api.\n\n\
-        `auth-failed` — a certificate was rejected on the cli→nico-api path, or \
-        the RMS backend rejected the credentials that nico-api presented.\n\n\
+        `auth-failed` — the RMS backend rejected the credentials that nico-api \
+        presented.\n\n\
         `auth-or-version-mismatch` — permission denied: either the cli certificate \
         lacks the required role, or this nico-api server predates `GetRmsVersion` and \
         its rbac rules reject the call before dispatch.\n\n\

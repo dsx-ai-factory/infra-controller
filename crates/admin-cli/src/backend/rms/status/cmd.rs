@@ -177,12 +177,12 @@ fn classify(s: tonic::Status) -> Report {
             }
         }
 
+        // Defensive: nico-api's auth middleware rejects with HTTP 403, and a
+        // client certificate it rejects fails at connect time (api-unreachable),
+        // so a server-generated Unauthenticated is not expected here.
         tonic::Code::Unauthenticated => Report::failure(
             StatusToken::AuthFailed,
-            format!(
-                "authentication was rejected — check the mtls certificate on the \
-                 cli→nico-api path: {msg}"
-            ),
+            format!("authentication was rejected by nico-api: {msg}"),
         ),
 
         tonic::Code::PermissionDenied => {
