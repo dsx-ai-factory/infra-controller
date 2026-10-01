@@ -1525,14 +1525,26 @@ impl SseLogConfig {
     }
 }
 
+/// Periodic log collection settings.
+///
+/// Numeric entry IDs must increase between resets; existing entries must
+/// remain unchanged. Each poll validates the highest saved entry. A missing entry
+/// or changed mapped record triggers replay of retained history. Changes below an
+/// unchanged anchor are not detected.
+/// Nonnumeric entries are emitted during full scans and ignored during incremental scans.
+///
+/// Paginated collections must report a stable `Members@odata.count` and return
+/// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
+/// progress; records accepted by a sink before a failure can replay on retry.
+/// An unpaginated collection may omit the count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeriodicLogConfig {
-    /// Interval between log collection.
+    /// Interval between log collection polls. Defaults to 5 minutes.
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service state refresh.
+    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
@@ -1547,11 +1559,11 @@ pub struct PeriodicLogConfig {
     #[serde(default = "default_excluded_log_services")]
     pub exclude_services: Vec<String>,
 
-    /// When true, on the first encounter of a LogService with no saved state,
-    /// anchor at the current highest entry ID without emitting existing entries.
-    /// Subsequent polls collect only new entries, matching SSE real-time
-    /// behaviour. Defaults to false (existing entries are collected on first
-    /// run). Also applies when auto-mode downgrades to periodic collection.
+    /// Skip retained history only on the first successful baseline without a checkpoint.
+    /// Failed baselines and saved numeric/SSE checkpoints replay retained records.
+    /// Defaults to false. Also applies after auto mode downgrades from SSE.
+    /// Old fingerprint checkpoints replay once. Numeric-only checkpoint readers
+    /// require this option disabled to replay history after rollback.
     #[serde(default)]
     pub skip_initial_history: bool,
 }
