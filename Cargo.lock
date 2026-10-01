@@ -1628,6 +1628,7 @@ dependencies = [
  "mac_address",
  "metrics-endpoint",
  "moka",
+ "nv-redfish-dispatcher",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",

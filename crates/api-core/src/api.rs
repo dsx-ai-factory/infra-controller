@@ -3780,6 +3780,13 @@ impl Forge for Api {
         crate::handlers::mlx_admin::show_device_report(self, request).await
     }
 
+    async fn mlx_admin_show_device_identities(
+        &self,
+        request: Request<mlx_device_pb::MlxAdminDeviceIdentitiesRequest>,
+    ) -> Result<Response<mlx_device_pb::MlxAdminDeviceIdentitiesResponse>, Status> {
+        crate::handlers::mlx_device_identity::show(self, request).await
+    }
+
     async fn mlx_admin_registry_list(
         &self,
         request: Request<mlx_device_pb::MlxAdminRegistryListRequest>,

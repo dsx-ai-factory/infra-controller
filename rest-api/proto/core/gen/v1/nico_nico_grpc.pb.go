@@ -506,6 +506,7 @@ const (
 	Forge_MlxAdminLockdownStatus_FullMethodName                             = "/forge.Forge/MlxAdminLockdownStatus"
 	Forge_MlxAdminShowDevice_FullMethodName                                 = "/forge.Forge/MlxAdminShowDevice"
 	Forge_MlxAdminShowMachine_FullMethodName                                = "/forge.Forge/MlxAdminShowMachine"
+	Forge_MlxAdminShowDeviceIdentities_FullMethodName                       = "/forge.Forge/MlxAdminShowDeviceIdentities"
 	Forge_MlxAdminRegistryList_FullMethodName                               = "/forge.Forge/MlxAdminRegistryList"
 	Forge_MlxAdminRegistryShow_FullMethodName                               = "/forge.Forge/MlxAdminRegistryShow"
 	Forge_MlxAdminConfigQuery_FullMethodName                                = "/forge.Forge/MlxAdminConfigQuery"
@@ -1437,6 +1438,9 @@ type ForgeClient interface {
 	MlxAdminShowDevice(ctx context.Context, in *MlxAdminDeviceInfoRequest, opts ...grpc.CallOption) (*MlxAdminDeviceInfoResponse, error)
 	// MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
 	MlxAdminShowMachine(ctx context.Context, in *MlxAdminDeviceReportRequest, opts ...grpc.CallOption) (*MlxAdminDeviceReportResponse, error)
+	// Read stored NIC identity evidence and current managed-DPU associations.
+	// Scout need not be connected. This does not establish update/reset eligibility.
+	MlxAdminShowDeviceIdentities(ctx context.Context, in *MlxAdminDeviceIdentitiesRequest, opts ...grpc.CallOption) (*MlxAdminDeviceIdentitiesResponse, error)
 	// Mellanox administrative endpoints for registry querying, which are called by
 	// the CLI (nico-admin-cli) and potentially the UI. These endpoints ultimately
 	// interconnect with a scout agent listening via an open ScoutStream connection.
@@ -6392,6 +6396,16 @@ func (c *forgeClient) MlxAdminShowMachine(ctx context.Context, in *MlxAdminDevic
 	return out, nil
 }
 
+func (c *forgeClient) MlxAdminShowDeviceIdentities(ctx context.Context, in *MlxAdminDeviceIdentitiesRequest, opts ...grpc.CallOption) (*MlxAdminDeviceIdentitiesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MlxAdminDeviceIdentitiesResponse)
+	err := c.cc.Invoke(ctx, Forge_MlxAdminShowDeviceIdentities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) MlxAdminRegistryList(ctx context.Context, in *MlxAdminRegistryListRequest, opts ...grpc.CallOption) (*MlxAdminRegistryListResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MlxAdminRegistryListResponse)
@@ -7681,6 +7695,9 @@ type ForgeServer interface {
 	MlxAdminShowDevice(context.Context, *MlxAdminDeviceInfoRequest) (*MlxAdminDeviceInfoResponse, error)
 	// MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
 	MlxAdminShowMachine(context.Context, *MlxAdminDeviceReportRequest) (*MlxAdminDeviceReportResponse, error)
+	// Read stored NIC identity evidence and current managed-DPU associations.
+	// Scout need not be connected. This does not establish update/reset eligibility.
+	MlxAdminShowDeviceIdentities(context.Context, *MlxAdminDeviceIdentitiesRequest) (*MlxAdminDeviceIdentitiesResponse, error)
 	// Mellanox administrative endpoints for registry querying, which are called by
 	// the CLI (nico-admin-cli) and potentially the UI. These endpoints ultimately
 	// interconnect with a scout agent listening via an open ScoutStream connection.
@@ -9234,6 +9251,9 @@ func (UnimplementedForgeServer) MlxAdminShowDevice(context.Context, *MlxAdminDev
 }
 func (UnimplementedForgeServer) MlxAdminShowMachine(context.Context, *MlxAdminDeviceReportRequest) (*MlxAdminDeviceReportResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MlxAdminShowMachine not implemented")
+}
+func (UnimplementedForgeServer) MlxAdminShowDeviceIdentities(context.Context, *MlxAdminDeviceIdentitiesRequest) (*MlxAdminDeviceIdentitiesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MlxAdminShowDeviceIdentities not implemented")
 }
 func (UnimplementedForgeServer) MlxAdminRegistryList(context.Context, *MlxAdminRegistryListRequest) (*MlxAdminRegistryListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MlxAdminRegistryList not implemented")
@@ -18051,6 +18071,24 @@ func _Forge_MlxAdminShowMachine_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_MlxAdminShowDeviceIdentities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MlxAdminDeviceIdentitiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).MlxAdminShowDeviceIdentities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_MlxAdminShowDeviceIdentities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).MlxAdminShowDeviceIdentities(ctx, req.(*MlxAdminDeviceIdentitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_MlxAdminRegistryList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MlxAdminRegistryListRequest)
 	if err := dec(in); err != nil {
@@ -20701,6 +20739,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MlxAdminShowMachine",
 			Handler:    _Forge_MlxAdminShowMachine_Handler,
+		},
+		{
+			MethodName: "MlxAdminShowDeviceIdentities",
+			Handler:    _Forge_MlxAdminShowDeviceIdentities_Handler,
 		},
 		{
 			MethodName: "MlxAdminRegistryList",

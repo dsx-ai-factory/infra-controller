@@ -1102,6 +1102,10 @@ service Forge {
   // MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
   rpc MlxAdminShowMachine(mlx_device.MlxAdminDeviceReportRequest) returns (mlx_device.MlxAdminDeviceReportResponse);
 
+  // Read stored NIC identity evidence and current managed-DPU associations.
+  // Scout need not be connected. This does not establish update/reset eligibility.
+  rpc MlxAdminShowDeviceIdentities(mlx_device.MlxAdminDeviceIdentitiesRequest) returns (mlx_device.MlxAdminDeviceIdentitiesResponse);
+
   // Mellanox administrative endpoints for registry querying, which are called by
   // the CLI (forge-admin-cli) and potentially the UI. These endpoints ultimately
   // interconnect with a scout agent listening via an open ScoutStream connection.

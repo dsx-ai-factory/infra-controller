@@ -29,7 +29,8 @@ use rpc::forge::{
     ScoutStreamApiBoundMessage, ScoutStreamInitRequest, scout_stream_api_bound_message,
 };
 use rpc::protos::mlx_device::{
-    MlxAdminDeviceReportRequest, MlxDeviceInfo, MlxDeviceInfoReportResponse, MlxDeviceReport,
+    MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceReportRequest, MlxDeviceIdentity,
+    MlxDeviceIdentityReport, MlxDeviceInfo, MlxDeviceInfoReportResponse, MlxDeviceReport,
     PublishMlxDeviceReportRequest, mlx_device_info_report_response,
 };
 use tokio::sync::mpsc;
@@ -40,8 +41,8 @@ use tonic_prost::ProstDecoder;
 use crate::api::{Api, ScoutStreamType};
 use crate::auth::AuthContext;
 use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
-    get_config,
+    TestEnvOverrides, create_managed_host, create_managed_host_multi_dpu, create_test_env,
+    create_test_env_with_overrides, get_config,
 };
 
 fn machine_request<T>(message: T, machine_id: MachineId) -> Request<T> {
@@ -195,6 +196,140 @@ async fn startup_snapshot_failure_still_processes_dpa_data(pool: sqlx::PgPool) {
             .as_deref(),
         Some("2")
     );
+}
+
+#[crate::sqlx_test]
+async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host_multi_dpu(&env, 2).await;
+    let machine_id: MachineId = host.id.into();
+    let host_machine_id = HostMachineId::try_from(machine_id).unwrap();
+    let machine = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let secondary_interface = machine
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| {
+            !interface.primary_interface && interface.attached_dpu_machine_id.is_some()
+        })
+        .expect("fixture has a secondary managed-DPU interface");
+    let request = MlxAdminDeviceIdentitiesRequest {
+        machine_id: Some(machine_id),
+    };
+    assert!(!env.api.scout_stream_registry.is_connected(machine_id).await);
+    assert_eq!(
+        env.api
+            .mlx_admin_show_device_identities(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .report,
+        None
+    );
+
+    let devices = [
+        MlxDeviceInfo {
+            pci_name: "01:00.0".into(),
+            device_type: "ConnectX8".into(),
+            base_guid: Some("b8599f030023f954".into()),
+            fw_version_current: "40.45.1000".into(),
+            ..Default::default()
+        },
+        MlxDeviceInfo {
+            pci_name: "02:00.0".into(),
+            device_type: "BlueField3".into(),
+            base_mac: secondary_interface.mac_address.to_string(),
+            ..Default::default()
+        },
+    ];
+    let stored = MlxDeviceObservation {
+        observed_at: "2026-09-29T00:00:00Z".parse().unwrap(),
+        devices: devices
+            .iter()
+            .cloned()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()
+            .unwrap(),
+    };
+    let mut connection = env.pool.acquire().await.unwrap();
+    assert_eq!(
+        db::machine::update_mlx_device_observation(&mut connection, &host_machine_id, &stored)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    drop(connection);
+
+    let response = env
+        .api
+        .mlx_admin_show_device_identities(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        response.report,
+        Some(MlxDeviceIdentityReport {
+            observed_at: Some(stored.observed_at.into()),
+            devices: vec![
+                MlxDeviceIdentity {
+                    device_info: Some(devices[0].clone()),
+                    managed_dpu_machine_ids: vec![],
+                },
+                MlxDeviceIdentity {
+                    device_info: Some(devices[1].clone()),
+                    managed_dpu_machine_ids: vec![
+                        secondary_interface.attached_dpu_machine_id.unwrap().into(),
+                    ],
+                },
+            ],
+        })
+    );
+    let after = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status.mlx_device_observation, Some(stored));
+    assert_eq!(after.state.value, machine.state.value);
+    assert_eq!(after.state.version, machine.state.version);
+    assert!(!env.api.scout_stream_registry.is_connected(machine_id).await);
+}
+
+#[crate::sqlx_test]
+async fn device_identity_requests_require_an_existing_host(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    for (scenario, machine_id, expected_code) in [
+        ("missing machine ID", None, tonic::Code::InvalidArgument),
+        (
+            "DPU machine ID",
+            Some(
+                "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+                    .parse()
+                    .unwrap(),
+            ),
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "unknown host",
+            Some(
+                "fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530"
+                    .parse()
+                    .unwrap(),
+            ),
+            tonic::Code::NotFound,
+        ),
+    ] {
+        let error = env
+            .api
+            .mlx_admin_show_device_identities(Request::new(MlxAdminDeviceIdentitiesRequest {
+                machine_id,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected_code, "{scenario}");
+    }
 }
 
 // Feed the real Tonic decoder so these tests exercise Init authentication and
