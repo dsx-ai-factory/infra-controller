@@ -201,6 +201,7 @@ pub async fn delete_interface_macs(
 /// * `description`            - The description of the extension service
 /// * `service_vpc_interfaces` - Service-facing interface requirements
 /// * `data`                   - Data of the initial version of the extension service
+/// * `dpf_service_id`         - DPU Service service_ID, only for dpf-helm-chart services
 /// * `observability`          - Observability config for the extension service
 /// * `has_credential`         - Whether the initial extension service version has a credential
 ///   stored in the vault
@@ -216,6 +217,7 @@ pub async fn create(
     description: Option<&str>,
     service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     data: &str,
+    dpf_service_id: Option<&str>,
     observability: Option<ExtensionServiceObservability>,
     has_credential: bool,
 ) -> Result<(ExtensionService, ExtensionServiceVersionInfo), DatabaseError> {
@@ -227,6 +229,13 @@ pub async fn create(
     // This version belongs solely to the asynchronous controller.  It must
     // not be derived from the API-visible service version counter.
     let initial_controller_state_version = ConfigVersion::initial();
+
+    // Validate DPF Helm chart extension service service_id uniqueness
+    if matches!(service_type, ExtensionServiceType::DpfHelmChart)
+        && let Some(dpf_service_id) = dpf_service_id
+    {
+        ensure_dpf_service_id_unique(txn, dpf_service_id).await?;
+    }
 
     // First create the extension service record
     let service_query = "INSERT INTO extension_services
@@ -272,15 +281,16 @@ pub async fn create(
     // Insert the initial version using the service id
     let service_id = service.id;
 
-    let version_query = "INSERT INTO extension_service_versions 
-            (service_id, version, data, observability, has_credential)
-            VALUES ($1, $2, $3, $4, $5)
+    let version_query = "INSERT INTO extension_service_versions
+            (service_id, version, data, dpf_service_id, observability, has_credential)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING service_id, version, data, observability, has_credential, created, deleted";
 
     let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
         .bind(service_id)
         .bind(version.to_string())
         .bind(data)
+        .bind(dpf_service_id)
         .bind(observability.map(sqlx::types::Json))
         .bind(has_credential)
         .fetch_one(&mut *txn)
@@ -494,6 +504,7 @@ pub async fn update_dpf_helm_chart_in_place(
     description: Option<&str>,
     service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     normalized_data: &str,
+    dpf_service_id: &str,
     stable_version: ConfigVersion,
     expected_version_ctr: i32,
     controller_state_version_change: ConfigVersionChange,
@@ -564,11 +575,12 @@ pub async fn update_dpf_helm_chart_in_place(
     };
 
     let version_query = "UPDATE extension_service_versions
-                         SET data = $1
-                         WHERE service_id = $2 AND version = $3 AND deleted IS NULL
+                         SET data = $1, dpf_service_id = $2
+                         WHERE service_id = $3 AND version = $4 AND deleted IS NULL
                          RETURNING service_id, version, data, observability, has_credential, created, deleted";
     let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
         .bind(normalized_data)
+        .bind(dpf_service_id)
         .bind(service_id)
         .bind(stable_version)
         .fetch_one(&mut *txn)
@@ -1259,6 +1271,49 @@ pub async fn set_updated_timestamp(
     Ok(())
 }
 
+/// Reserves an explicit DPF service ID until the caller's transaction ends so
+/// concurrent creates cannot claim case variants of the same identity.
+/// The caller must use an active READ COMMITTED transaction for the check and write.
+async fn ensure_dpf_service_id_unique(
+    txn: &mut PgConnection,
+    dpf_service_id: &str,
+) -> Result<(), DatabaseError> {
+    // Lock the dpf_service_id so concurrent creates cannot both
+    // claim the same dpf_service_id. This avoids the case where two concurrent
+    // create requests both check the same dpf_service_id, find no existing
+    // record, then insert at the same time.
+    let lock_query = "SELECT pg_advisory_xact_lock(hashtextextended('extension_services:dpf_service_id:' || lower($1), 0))";
+    sqlx::query(lock_query)
+        .bind(dpf_service_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let lookup_query = r#"SELECT 1
+        FROM extension_services AS service
+        JOIN extension_service_versions AS version ON version.service_id = service.id
+        WHERE (service.deleted IS NULL
+               OR service.controller_state->>'state' <> 'deleted')
+          AND service.type = 'dpf_helm_chart'
+          AND lower(version.dpf_service_id) = lower($1)
+        LIMIT 1"#;
+
+    let found = sqlx::query_scalar::<_, i32>(lookup_query)
+        .bind(dpf_service_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lookup_query, error))?
+        .is_some();
+    if found {
+        return Err(DatabaseError::AlreadyFoundError {
+            kind: "dpf_service_id",
+            id: dpf_service_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_batched_lookups {
     use carbide_test_support::query_counter::count_queries;
@@ -1505,6 +1560,7 @@ mod test_batched_lookups {
                 &[],
                 "some-data",
                 None,
+                None,
                 false,
             )
             .await
@@ -1513,6 +1569,119 @@ mod test_batched_lookups {
         }
         txn.commit().await.expect("commit");
         seeded
+    }
+
+    /// Concurrent creates using case variants must serialize on one advisory lock,
+    /// so only one active service can own the case-insensitive DPF identity.
+    #[crate::sqlx_test]
+    async fn concurrent_creates_reserve_case_insensitive_dpf_service_id(pool: sqlx::PgPool) {
+        // Seed the shared tenant used by both otherwise-independent create transactions.
+        seed_services(&pool, 0).await;
+        let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant");
+        let version = ConfigVersion::initial();
+        let first_service_id = ExtensionServiceId::new();
+        let claimed_id = "contended-dpf-id";
+        let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
+        let mut first = pool.begin().await.expect("begin first create");
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *first)
+            .await
+            .expect("get first backend");
+        create(
+            &mut first,
+            version,
+            &first_service_id,
+            &ExtensionServiceType::DpfHelmChart,
+            Some(DpuTarget::AllActive),
+            "first-service",
+            &tenant,
+            None,
+            &[],
+            claimed_data,
+            Some(claimed_id),
+            None,
+            false,
+        )
+        .await
+        .expect("first create reserves the identity");
+
+        // Start a case-variant create and verify it waits on the normalized
+        // lock key.
+        let upper_id = "CONTENDED-DPF-ID";
+        let upper_data = r#"{"serviceID":"CONTENDED-DPF-ID"}"#;
+        let second_service_id = ExtensionServiceId::new();
+        let mut second = pool.begin().await.expect("begin second create");
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *second)
+            .await
+            .expect("get second backend");
+        {
+            let create_second = create(
+                &mut second,
+                version,
+                &second_service_id,
+                &ExtensionServiceType::DpfHelmChart,
+                Some(DpuTarget::AllActive),
+                "second-service",
+                &tenant,
+                None,
+                &[],
+                upper_data,
+                Some(upper_id),
+                None,
+                false,
+            );
+            tokio::pin!(create_second);
+            let blocked = async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT $1::integer = ANY(pg_blocking_pids($2::integer))",
+                    )
+                    .bind(first_pid)
+                    .bind(second_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect competing transaction");
+                    if blocked {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut create_second => panic!("second create completed before first committed: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), blocked) => {
+                    result.expect("case variants must use the same advisory lock");
+                }
+            }
+
+            // Commit the winner; the waiter must then observe the
+            // case-insensitive collision.
+            first.commit().await.expect("commit first create");
+            let error =
+                tokio::time::timeout(std::time::Duration::from_secs(10), &mut create_second)
+                    .await
+                    .expect("second create resumes after commit")
+                    .expect_err("case-variant identity must be rejected");
+            assert!(matches!(
+                error,
+                DatabaseError::AlreadyFoundError { kind: "dpf_service_id", id } if id == upper_id
+            ));
+        }
+
+        // A rejected transaction must not persist a second owner.
+        second
+            .commit()
+            .await
+            .expect("commit rejected create transaction");
+        let owners: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM extension_service_versions WHERE lower(dpf_service_id) = lower($1)",
+        )
+        .bind(claimed_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count persisted owners");
+        assert_eq!(owners, 1);
     }
 
     #[crate::sqlx_test]
@@ -1705,6 +1874,7 @@ mod test_batched_lookups {
             Some("DPF Helm chart service"),
             &[],
             "{\"chart\": \"example\"}",
+            None,
             None,
             false,
         )
