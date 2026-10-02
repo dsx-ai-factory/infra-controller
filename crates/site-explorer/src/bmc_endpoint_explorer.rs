@@ -1917,6 +1917,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use axum::Router;
+    use bmc_mock::test_support::nvidia_gh200_swapped_managers_router;
     use bmc_mock::{CombinedServer, ListenerOrAddress};
     use carbide_instrument::Outcome;
     use carbide_instrument::testing::{
@@ -2138,6 +2139,12 @@ mod tests {
                     interface.id.as_deref() == Some("disabled") && interface.mac_address.is_none()
                 })
         );
+    }
+
+    #[tokio::test]
+    async fn explorer_chooses_correct_manager() {
+        let report = explore_router_in_default_mode(nvidia_gh200_swapped_managers_router()).await;
+        assert_eq!(report.managers[0].id, "BMC_0");
     }
 
     #[tokio::test]
