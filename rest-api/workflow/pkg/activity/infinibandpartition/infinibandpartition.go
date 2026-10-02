@@ -374,10 +374,7 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 		partitionKey = controllerIbp.GetConfig().Pkey
 	}
 
-	statusMessage := status.Message()
-	if statusMessage == "" {
-		statusMessage = "InfiniBand Partition was found on Site"
-	}
+	statusMessage := "InfiniBand Partition was found on Site, Ready for use"
 
 	ibp, err := cdb.WithTxResult(ctx, mibp.dbSession, func(tx *cdb.Tx) (*cdbm.InfiniBandPartition, error) {
 		ibpDAO := cdbm.NewInfiniBandPartitionDAO(mibp.dbSession)
@@ -520,15 +517,17 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 
 				return nil, nil
 			}
-		}
 
-		const maxNameLength = 256
+			if reportedIbp.Name == existingIbp.ID.String() {
+				reportedIbp.Name = existingIbp.Name
+			}
+		}
 
 		baseName := reportedIbp.Name
 		baseNameRunes := []rune(baseName)
 
-		if len(baseNameRunes) < 2 ||
-			len(baseNameRunes) > maxNameLength ||
+		if len(baseNameRunes) < cdbm.InfiniBandPartitionNameMinLength ||
+			len(baseNameRunes) > cdbm.InfiniBandPartitionNameMaxLength ||
 			strings.TrimSpace(baseName) != baseName {
 			baseName = "recovered-" + controllerIbpID.String()[:8]
 		}
@@ -559,7 +558,7 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 				suffix = fmt.Sprintf("%s-%d", suffix, attempt)
 			}
 
-			maxBaseRunes := maxNameLength - len([]rune(suffix))
+			maxBaseRunes := cdbm.InfiniBandPartitionNameMaxLength - len([]rune(suffix))
 			nameRunes := []rune(baseName)
 
 			if len(nameRunes) > maxBaseRunes {
