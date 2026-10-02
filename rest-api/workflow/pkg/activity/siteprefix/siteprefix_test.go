@@ -93,6 +93,28 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 		name  string
 		check func(*testing.T, fixture)
 	}{
+		{"nil inventory is rejected", func(t *testing.T, f fixture) {
+			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, nil), "nil inventory")
+		}},
+		{"unsupported inventory status is rejected", func(t *testing.T, f fixture) {
+			inventory := testInventory(testPrefix())
+			inventory.InventoryStatus = corev1.InventoryStatus_INVENTORY_STATUS_UNSPECIFIED
+			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "unsupported SitePrefix inventory status")
+			require.Empty(t, f.blocks(t))
+		}},
+		{"page metadata does not gate reconciliation", func(t *testing.T, f fixture) {
+			inventory := testInventory(testPrefix())
+			inventory.Timestamp, inventory.InventoryPage = nil, nil
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			block := f.blocks(t)[0]
+			inventory.InventoryPage = &corev1.InventoryPage{TotalItems: -1, ItemIds: []string{"not a prefix ID"}}
+			inventory.SitePrefixes[0].Metadata.Name = "updated"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, block.ID, blocks[0].ID)
+			require.Equal(t, "updated", blocks[0].Name)
+		}},
 		{"out of order pages reconcile independently with increasing estimates", func(t *testing.T, f fixture) {
 			ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
 			slices.Sort(ids)
@@ -323,7 +345,8 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			site := f.inventorySite(t)
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, &corev1.SitePrefixInventory{
-				Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED, StatusMsg: "Core unavailable",
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED, StatusMsg: "Core unavailable",
+				SitePrefixes: []*corev1.SitePrefix{nil},
 			}))
 			require.Equal(t, site, f.inventorySite(t))
 			require.Len(t, f.blocks(t), 1)
@@ -352,6 +375,23 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			retained, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, firstBlock.ID, nil)
 			require.NoError(t, err)
 			require.Equal(t, firstBlock, *retained)
+		}},
+		{"later invalid prefix preserves earlier resource", func(t *testing.T, f fixture) {
+			first, second := testPrefix(), testPrefix()
+			ids := []string{first.Id.Value, second.Id.Value}
+			slices.Sort(ids)
+			first.Id.Value, second.Id.Value = ids[0], ids[1]
+			second.Config.Prefix = "10.1.0.1/24"
+			inventory := testInventory(first)
+			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
+			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
+			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "network-aligned CIDR")
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, first.Id.Value, blocks[0].SitePrefixID.String())
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{first.Config.Prefix}, prefixes)
 		}},
 		{"failed prefix rolls back its IPAM and record without undoing earlier commits", func(t *testing.T, f fixture) {
 			first, second := testPrefix(), testPrefix()
