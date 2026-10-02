@@ -1399,7 +1399,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			alconstraints, err := common.GetAllocationConstraintsForInstanceType(ctx, tx, cih.dbSession, tenant.ID, instanceType, tnas)
 			if err != nil {
 				if err == common.ErrAllocationConstraintNotFound {
-					return cutil.NewAPIError(http.StatusInternalServerError, "No Allocations for specified Instance Type were found for current Tenant", nil)
+					return cutil.NewAPIError(http.StatusForbidden, "No Allocations for specified Instance Type were found for current Tenant", nil)
 				}
 				logger.Error().Err(err).Msg("error retrieving Allocation Constraints from DB for InstanceType and Allocation")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Allocations for specified Instance Type, DB error", nil)
