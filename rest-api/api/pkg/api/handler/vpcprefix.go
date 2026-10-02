@@ -726,10 +726,11 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, queryIncludeRelations)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -871,10 +872,11 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, nil)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -1066,10 +1068,11 @@ func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
 	vpDAO := cdbm.NewVpcPrefixDAO(dsh.dbSession)
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, []string{cdbm.IPBlockRelationName, cdbm.TenantRelationName, cdbm.SiteRelationName})
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find VPC prefix to delete", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed not retrieve VPC prefix for deletion, DB error", nil)
 	}
 
