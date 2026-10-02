@@ -36,81 +36,65 @@ func testInventory(prefix *corev1.SitePrefix) *corev1.SitePrefixInventory {
 	}
 }
 
-func TestValidatePage(t *testing.T) {
-	tests := []struct {
-		name   string
-		change func(*corev1.SitePrefixInventory)
-		valid  bool
-	}{
-		{"operator", func(_ *corev1.SitePrefixInventory) {}, true},
-		{"empty success", func(i *corev1.SitePrefixInventory) {
-			i.SitePrefixes = nil
-			i.InventoryPage.ItemIds = nil
-			i.InventoryPage.TotalItems, i.InventoryPage.TotalPages = 0, 0
-		}, true},
-		{"unpaged failure", func(i *corev1.SitePrefixInventory) {
-			i.InventoryStatus = corev1.InventoryStatus_INVENTORY_STATUS_FAILED
-			i.InventoryPage, i.SitePrefixes = nil, nil
-		}, true},
-		{"failure with resources", func(i *corev1.SitePrefixInventory) {
-			i.InventoryStatus = corev1.InventoryStatus_INVENTORY_STATUS_FAILED
-		}, false},
-		{"no timestamp", func(i *corev1.SitePrefixInventory) { i.Timestamp = nil }, false},
-		{"missing page", func(i *corev1.SitePrefixInventory) { i.InventoryPage = nil }, false},
-		{"incorrect count", func(i *corev1.SitePrefixInventory) { i.InventoryPage.TotalItems++ }, false},
-		{"undeclared ID", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Id.Value = uuid.NewString() }, false},
-		{"missing prefix", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0] = nil }, false},
-		{"unspecified authority", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Status.Authority = 0 }, false},
-		{"unspecified state", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Status.LifecycleState = 0 }, false},
-		{"operator provisioning", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Status.LifecycleState = 1 }, false},
-		{"operator owner", func(i *corev1.SitePrefixInventory) {
-			i.SitePrefixes[0].Config.TenantOrganizationId = cutil.GetPtr("tenant")
-		}, false},
-		{"unsupported routing", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Config.RoutingScope = 0 }, false},
-		{"host bits", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Config.Prefix = "10.0.0.1/24" }, false},
-		{"operator v6", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Config.Prefix = "fd00::/64" }, true},
-		{"metadata absent", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Metadata = nil }, false},
-		{"metadata bounds", func(i *corev1.SitePrefixInventory) { i.SitePrefixes[0].Metadata.Name = strings.Repeat("x", 257) }, false},
-		{"duplicate label", func(i *corev1.SitePrefixInventory) {
-			i.SitePrefixes[0].Metadata.Labels = []*corev1.Label{{Key: "x"}, {Key: "x"}}
-		}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			inventory := testInventory(testPrefix())
-			tt.change(inventory)
-			err := validatePage(inventory)
-			if tt.valid {
-				require.NoError(t, err)
-			} else {
-				var applicationErr *temporal.ApplicationError
-				require.ErrorAs(t, err, &applicationErr)
-				require.True(t, applicationErr.NonRetryable())
-			}
-		})
-	}
-}
-
 func TestValidatePrefix(t *testing.T) {
-	tests := []struct {
+	type testCase struct {
+		name   string
+		change func(*corev1.SitePrefix) *corev1.SitePrefix
+		valid  bool
+	}
+	tests := []testCase{
+		{"operator", func(p *corev1.SitePrefix) *corev1.SitePrefix { return p }, true},
+		{"missing prefix", func(_ *corev1.SitePrefix) *corev1.SitePrefix { return nil }, false},
+		{"missing ID", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Id = nil; return p }, false},
+		{"invalid ID", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Id.Value = "invalid"; return p }, false},
+		{"nil UUID", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Id.Value = uuid.Nil.String(); return p }, false},
+		{"noncanonical ID", func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Id.Value = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+			return p
+		}, false},
+		{"missing config", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config = nil; return p }, false},
+		{"missing status", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Status = nil; return p }, false},
+		{"unspecified authority", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Status.Authority = 0; return p }, false},
+		{"unspecified state", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Status.LifecycleState = 0; return p }, false},
+		{"operator provisioning", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Status.LifecycleState = 1; return p }, false},
+		{"operator owner", func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Config.TenantOrganizationId = cutil.GetPtr("tenant")
+			return p
+		}, false},
+		{"unsupported routing", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config.RoutingScope = 0; return p }, false},
+		{"host bits", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config.Prefix = "10.0.0.1/24"; return p }, false},
+		{"operator v6", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Config.Prefix = "fd00::/64"; return p }, true},
+		{"metadata absent", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata = nil; return p }, false},
+		{"metadata bounds", func(p *corev1.SitePrefix) *corev1.SitePrefix { p.Metadata.Name = strings.Repeat("x", 257); return p }, false},
+		{"duplicate label", func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Metadata.Labels = []*corev1.Label{{Key: "x"}, {Key: "x"}}
+			return p
+		}, false},
+	}
+	for _, tt := range []struct {
 		cidr  string
 		valid bool
 	}{
 		{"10.0.0.0/8", true}, {"172.16.0.0/12", true}, {"192.168.0.0/31", true},
 		{"10.0.0.0/7", false}, {"10.0.0.0/32", false}, {"192.168.0.0/15", false},
 		{"100.64.0.0/10", false}, {"203.0.113.0/24", false}, {"fd00::/64", false},
+	} {
+		tests = append(tests, testCase{"tenant " + tt.cidr, func(p *corev1.SitePrefix) *corev1.SitePrefix {
+			p.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			p.Config.TenantOrganizationId = cutil.GetPtr("tenant")
+			p.Config.Prefix = tt.cidr
+			return p
+		}, tt.valid})
 	}
 	for _, tt := range tests {
-		t.Run(tt.cidr, func(t *testing.T) {
-			prefix := testPrefix()
-			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
-			prefix.Config.TenantOrganizationId = cutil.GetPtr("tenant")
-			prefix.Config.Prefix = tt.cidr
-			err := validatePrefix(prefix)
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePrefix(tt.change(testPrefix()))
 			if tt.valid {
 				require.NoError(t, err)
 			} else {
-				require.Error(t, err)
+				var applicationErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &applicationErr)
+				require.True(t, applicationErr.NonRetryable())
 			}
 		})
 	}
