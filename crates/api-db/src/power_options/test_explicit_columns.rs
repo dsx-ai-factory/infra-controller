@@ -74,7 +74,6 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
     expected.last_fetched_off_counter = 2;
     expected.wait_until_time_before_performing_next_power_action =
         timestamp + chrono::Duration::minutes(15);
-    // A populated timestamp catches a missing column that the decoder would turn into None.
     expected.tried_triggering_on_at = Some(timestamp);
     expected.tried_triggering_on_counter = 3;
     persist(&expected, txn.as_mut()).await?;
