@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -62,7 +63,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"instance-type":             5,
 		"machine":                   21,
 		"allocation":                6,
-		"subnet":                    5,
+		"subnet":                    6,
 		"machine-instance-type":     3,
 		"user":                      1,
 		"operating-system":          5,
@@ -78,7 +79,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"task":                      3,
 		"rule":                      5,
 		"run":                       8,
-		"domain":                    6,
+		"domain":                    10,
 		"rack":                      16,
 		"tray":                      12,
 		"stats":                     4,
@@ -113,6 +114,7 @@ func TestNewAPIRoutes(t *testing.T) {
 			got := NewAPIRoutes(tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp, tt.args.cfg, nil)
 
 			assert.Equal(t, totalRouteCount, len(got))
+			assertRoutesUnique(t, got)
 
 			for _, route := range got {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())
@@ -184,6 +186,8 @@ func TestNewAPIRoutes(t *testing.T) {
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")
+			subnetPath := "/org/:orgName/" + cfg.GetAPIName() + "/subnet"
+			assertRouteHandlerType(t, got, http.MethodPost, subnetPath+"/:subnetId/attach-vpc", apiHandler.AttachSubnetVpcHandler{})
 			tenantPath := "/org/:orgName/" + cfg.GetAPIName() + "/tenant"
 			assertRouteExists(t, got, http.MethodGet, tenantPath+"/current/routing-profile")
 			vpcRoutingProfilePath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/:id/routing-profile"
@@ -243,6 +247,18 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/:id/power")
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/:id/firmware")
 
+			assertRouteHandlerType(t, got, http.MethodPatch, domainPath+"/power", apiHandler.BatchUpdateNVLinkDomainPowerStateHandler{})
+			assertRouteHandlerType(t, got, http.MethodPatch, domainPath+"/firmware", apiHandler.BatchUpdateNVLinkDomainFirmwareHandler{})
+			assertRouteHandlerType(t, got, http.MethodPatch, domainPath+"/:id/power", apiHandler.UpdateNVLinkDomainPowerStateHandler{})
+			assertRouteHandlerType(t, got, http.MethodPatch, domainPath+"/:id/firmware", apiHandler.UpdateNVLinkDomainFirmwareHandler{})
+
+			dnsDomainPath := "/org/:orgName/" + cfg.GetAPIName() + "/domain"
+			assertRouteHandlerType(t, got, http.MethodPost, dnsDomainPath, apiHandler.CreateDomainHandler{})
+			assertRouteHandlerType(t, got, http.MethodGet, dnsDomainPath, apiHandler.GetAllDomainHandler{})
+			assertRouteHandlerType(t, got, http.MethodGet, dnsDomainPath+"/:domainId", apiHandler.GetDomainHandler{})
+			assertRouteHandlerType(t, got, http.MethodDelete, dnsDomainPath+"/:domainId", apiHandler.DeleteDomainHandler{})
+			assertRouteAbsent(t, got, http.MethodPatch, dnsDomainPath+"/:domainId")
+
 			skuPath := "/org/:orgName/" + cfg.GetAPIName() + "/sku"
 			assertRouteExists(t, got, http.MethodPost, skuPath)
 			assertRouteExists(t, got, http.MethodGet, skuPath)
@@ -268,6 +284,47 @@ func assertRouteExists(t *testing.T, routes []Route, method, path string) {
 
 	for _, route := range routes {
 		if route.Method == method && route.Path == path {
+			return
+		}
+	}
+
+	assert.Failf(t, "route not found", "missing %s %s", method, path)
+}
+
+// assertRoutesUnique fails when a method and path are registered more than
+// once. Echo silently replaces the earlier handler for a duplicate route, so a
+// duplicate hides a registration mistake rather than failing at startup.
+func assertRoutesUnique(t *testing.T, routes []Route) {
+	t.Helper()
+
+	seen := make(map[string]int, len(routes))
+	for i, route := range routes {
+		key := route.Method + " " + route.Path
+		if first, ok := seen[key]; ok {
+			assert.Failf(t, "duplicate route", "%s registered at indexes %d and %d", key, first, i)
+			continue
+		}
+		seen[key] = i
+	}
+}
+
+func assertRouteAbsent(t *testing.T, routes []Route, method, path string) {
+	t.Helper()
+
+	for _, route := range routes {
+		if route.Method == method && route.Path == path {
+			assert.Failf(t, "unexpected route", "unexpected %s %s", method, path)
+			return
+		}
+	}
+}
+
+func assertRouteHandlerType(t *testing.T, routes []Route, method, path string, expected any) {
+	t.Helper()
+
+	for _, route := range routes {
+		if route.Method == method && route.Path == path {
+			assert.IsType(t, expected, route.Handler)
 			return
 		}
 	}

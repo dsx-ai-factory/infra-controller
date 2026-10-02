@@ -108,6 +108,18 @@ type Subnet struct {
 	Updated                    time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted                    *time.Time `bun:"deleted,soft_delete"`
 	CreatedBy                  uuid.UUID  `bun:"type:uuid,notnull"`
+	// An attachment intent is committed before a Site RPC. Inventory must not
+	// overwrite its VPC while the RPC or its recovery remains uncertain.
+	AttachIntentID              *uuid.UUID `bun:"attach_intent_id,type:uuid"`
+	AttachSourceVpcID           *uuid.UUID `bun:"attach_source_vpc_id,type:uuid"`
+	AttachTargetVpcID           *uuid.UUID `bun:"attach_target_vpc_id,type:uuid"`
+	AttachSourceControllerVpcID *uuid.UUID `bun:"attach_source_controller_vpc_id,type:uuid"`
+	AttachTargetControllerVpcID *uuid.UUID `bun:"attach_target_controller_vpc_id,type:uuid"`
+	AttachSegmentVersion        *string    `bun:"attach_segment_version"`
+	AttachRecoveryToken         *uuid.UUID `bun:"attach_recovery_token,type:uuid"`
+	AttachLeaseUntil            *time.Time `bun:"attach_lease_until"`
+	AttachNextAt                *time.Time `bun:"attach_next_at"`
+	AttachAttempts              int        `bun:"attach_attempts,notnull"`
 }
 
 // GetSiteID returns the Subnet ID to use when communicating with the
@@ -440,6 +452,13 @@ type SubnetDAO interface {
 	GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, vpcID *uuid.UUID) (map[string]int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SubnetUpdateInput) (*Subnet, error)
+	// UpdateVpcFromInventory applies an observed VPC only if no attachment intent
+	// exists and the Subnet is still at the VPC seen in the inventory snapshot.
+	UpdateVpcFromInventory(ctx context.Context, id, siteID, expectedVpcID, reportedVpcID uuid.UUID, controllerSegmentID *uuid.UUID, mtu *int, clearMissing bool) (bool, error)
+	ReserveAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error)
+	CompleteAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error)
+	ClaimAttachmentRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Subnet, error)
+	DeferAttachmentRecovery(ctx context.Context, subnetID, intentID, token uuid.UUID, delay time.Duration) (bool, error)
 	//
 	Clear(ctx context.Context, tx *db.Tx, input SubnetClearInput) (*Subnet, error)
 	//
@@ -765,9 +784,24 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId).Exec(ctx)
+		q := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId)
+		// Deletion must not supersede an unresolved remote reassignment. Both
+		// use this row as their serialization point, not an earlier GET.
+		if input.Status != nil && *input.Status == SubnetStatusDeleting {
+			q = q.Where("attach_intent_id IS NULL")
+		}
+		result, err := q.Exec(ctx)
 		if err != nil {
 			return nil, err
+		}
+		if input.Status != nil && *input.Status == SubnetStatusDeleting {
+			rows, rowsErr := result.RowsAffected()
+			if rowsErr != nil {
+				return nil, rowsErr
+			}
+			if rows != 1 {
+				return nil, fmt.Errorf("Subnet deletion rejected: attachment is pending or Subnet changed")
+			}
 		}
 	}
 
@@ -777,6 +811,36 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 		return nil, err
 	}
 	return nv, nil
+}
+
+// UpdateVpcFromInventory is an atomic observation, never an authorization to
+// race an in-flight tenant attachment. The same Subnet row is locked by the
+// UPDATE as the durable intent reservation/complete transactions. A rejected
+// observation is retried by later inventory; pending intents remain eligible
+// for the bounded recovery worker, which independently reads Core.
+func (ssd SubnetSQLDAO) UpdateVpcFromInventory(ctx context.Context, id, siteID, expectedVpcID, reportedVpcID uuid.UUID, controllerSegmentID *uuid.UUID, mtu *int, clearMissing bool) (bool, error) {
+	if id == uuid.Nil || siteID == uuid.Nil || expectedVpcID == uuid.Nil || reportedVpcID == uuid.Nil {
+		return false, fmt.Errorf("invalid inventory VPC observation")
+	}
+	q := ssd.dbSession.DB.NewUpdate().Model(&Subnet{}).
+		Set("vpc_id = ?", reportedVpcID).
+		Set("updated = current_timestamp").
+		Where("id = ? AND site_id = ? AND vpc_id = ? AND deleted IS NULL AND attach_intent_id IS NULL", id, siteID, expectedVpcID)
+	if controllerSegmentID != nil {
+		q = q.Set("controller_network_segment_id = ?", controllerSegmentID)
+	}
+	if mtu != nil {
+		q = q.Set("mtu = ?", *mtu)
+	}
+	if clearMissing {
+		q = q.Set("is_missing_on_site = FALSE")
+	}
+	result, err := q.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 // Clear sets parameters of an existing Subnet to null values in db
@@ -874,7 +938,8 @@ func (ssd SubnetSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (re
 		ID: id,
 	}
 
-	_, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model(s).Where("id = ?", id).Exec(ctx)
+	_, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model(s).
+		Where("id = ? AND attach_intent_id IS NULL", id).Exec(ctx)
 	if err != nil {
 		return err
 	}

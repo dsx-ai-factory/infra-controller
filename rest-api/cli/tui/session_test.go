@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -77,4 +78,39 @@ func TestSession_fetchAll(t *testing.T) {
 			assert.Empty(t, items)
 		})
 	}
+}
+
+// The Domain list includes reservations, but the subnet chooser must only
+// offer a Domain once its Core-backed ownership index has reached Ready.
+func TestSessionDomainResolver_OnlyReadyDomainSelectable(t *testing.T) {
+	status := "Pending"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/org/acme/nico/domain":
+			assert.Equal(t, "tenant-1", r.URL.Query().Get("tenantId"))
+			assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+			_, _ = fmt.Fprintf(w, `[{"id":"domain-1","name":"dev.example","status":%q,"tenantId":"tenant-1","siteId":"site-1"},{"id":"domain-2","name":"deleting.example","status":"Deleting","tenantId":"tenant-1","siteId":"site-1"}]`, status)
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	session.Scope.SiteID = "site-1"
+	session.Cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
+
+	items, err := session.Resolver.Fetch(context.Background(), "domain")
+	require.NoError(t, err)
+	assert.Empty(t, items)
+	_, err = session.Resolver.Resolve(context.Background(), "domain", "DNS Domain")
+	require.ErrorContains(t, err, "no DNS Domain available")
+
+	status = "Ready"
+	session.Cache.Invalidate("domain")
+	item, err := session.Resolver.Resolve(context.Background(), "domain", "DNS Domain")
+	require.NoError(t, err)
+	assert.Equal(t, "domain-1", item.ID)
+	assert.Equal(t, "Ready", item.Status)
+	assert.Equal(t, "site-1", item.Extra["siteId"])
 }

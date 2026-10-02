@@ -21,6 +21,7 @@ mod client_resolution;
 pub(in crate::tests) mod common;
 mod component_manager;
 mod dhcp_cross_family_regression_test;
+mod domain;
 mod dpf;
 mod dpu_machine_update;
 mod dpu_nic_firmware;

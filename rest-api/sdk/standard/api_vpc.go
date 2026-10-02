@@ -391,6 +391,7 @@ type ApiGetAllVpcRequest struct {
 	ctx                      context.Context
 	ApiService               *VPCAPIService
 	org                      string
+	tenantId                 *string
 	siteId                   *string
 	status                   *string
 	networkSecurityGroupId   *string
@@ -400,6 +401,12 @@ type ApiGetAllVpcRequest struct {
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
+}
+
+// Optional ID of the current Tenant. A different Tenant ID is rejected.
+func (r ApiGetAllVpcRequest) TenantId(tenantId string) ApiGetAllVpcRequest {
+	r.tenantId = &tenantId
+	return r
 }
 
 // Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
@@ -463,7 +470,7 @@ func (r ApiGetAllVpcRequest) Execute() ([]VPC, *http.Response, error) {
 /*
 GetAllVpc Retrieve all VPCs
 
-Retrieve all VPCs for the org.
+Retrieve all VPCs for the org. When `tenantId` is supplied, it must match the org's current Tenant.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
@@ -502,6 +509,9 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.tenantId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
+	}
 	if r.siteId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
@@ -571,6 +581,17 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 		newErr := &GenericOpenAPIError{
 			body:  localVarBody,
 			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError

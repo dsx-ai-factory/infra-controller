@@ -1,0 +1,24 @@
+make: Entering directory '/home/developer/workspace/verify-4371-56fa/rest-api'
+/home/developer/workspace/verify-4371-56fa/evidence/4371-56fa/verify.mk:3: warning: overriding recipe for target 'ensure-postgres'
+Makefile:118: warning: ignoring old recipe for target 'ensure-postgres'
+Owned disposable PostgreSQL 127.0.0.1:31435; Docker disabled
+go test -p 1 -count=1 -run '^TestCreateDomainHandler_Handle$/(lost_cancellation_reply_cannot_allow_late_Ready_completion|Core_rejection_preserves_Error_reservation)$' -v ./api/pkg/api/handler
+=== RUN   TestCreateDomainHandler_Handle
+=== RUN   TestCreateDomainHandler_Handle/lost_cancellation_reply_cannot_allow_late_Ready_completion
+connections count = 6
+{"level":"info","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","time":"2026-09-30T20:12:07Z","message":"started API handler"}
+{"level":"debug","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","time":"2026-09-30T20:12:07Z","message":"error extracting tracer from context"}
+{"level":"info","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","Starfleet ID":"2567351a-7f0c-454a-89f6-cd5f7d713f02","time":"2026-09-30T20:12:07Z","message":"retrieved user from request context"}
+{"level":"error","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","Starfleet ID":"2567351a-7f0c-454a-89f6-cd5f7d713f02","error":"Domain rejected","time":"2026-09-30T20:12:07Z","message":"Domain create did not return a confirmed resource; reservation retained"}
+=== RUN   TestCreateDomainHandler_Handle/Core_rejection_preserves_Error_reservation
+connections count = 6
+{"level":"info","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","time":"2026-09-30T20:12:07Z","message":"started API handler"}
+{"level":"debug","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","time":"2026-09-30T20:12:07Z","message":"error extracting tracer from context"}
+{"level":"info","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","Starfleet ID":"e019ad28-f166-4d96-9313-52d11f8bb282","time":"2026-09-30T20:12:07Z","message":"retrieved user from request context"}
+{"level":"error","Model":"Domain","Handler":"Create","Org":"domain-test-tenant-org","Starfleet ID":"e019ad28-f166-4d96-9313-52d11f8bb282","error":"Domain rejected","time":"2026-09-30T20:12:07Z","message":"Domain create did not return a confirmed resource; reservation retained"}
+--- PASS: TestCreateDomainHandler_Handle (0.21s)
+    --- PASS: TestCreateDomainHandler_Handle/lost_cancellation_reply_cannot_allow_late_Ready_completion (0.12s)
+    --- PASS: TestCreateDomainHandler_Handle/Core_rejection_preserves_Error_reservation (0.09s)
+PASS
+ok  	github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler	0.329s
+make: Leaving directory '/home/developer/workspace/verify-4371-56fa/rest-api'

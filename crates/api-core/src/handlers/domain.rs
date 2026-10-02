@@ -18,6 +18,7 @@ use ::rpc::protos::dns::{
     CreateDomainRequest, Domain, DomainDeletionRequest, DomainDeletionResult, DomainList,
     DomainSearchQuery, UpdateDomainRequest,
 };
+use carbide_authn::middleware::Principal;
 use db::dns::domain;
 use db::{self, ObjectColumnFilter};
 use model::dns::NewDomain;
@@ -25,6 +26,7 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::Api;
+use crate::auth::{AuthContext, has_exclusive_identity};
 
 /// Validates a caller-supplied default TTL into the zone's range.
 fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, CarbideError> {
@@ -52,22 +54,111 @@ fn ensure_not_reverse_zone_name(proposed_name: &str) -> Result<(), CarbideError>
     Ok(())
 }
 
+/// Additional authorization beyond RPC RBAC: only the REST site's exact
+/// service identity may supply a reserved ID or cancel one. Admin CLI users
+/// retain ordinary create/delete but cannot claim another tenant's identity.
+fn require_site_agent<T>(request: &Request<T>) -> Result<(), Status> {
+    let allowed = request.extensions().get::<AuthContext>().is_some_and(|auth| {
+        has_exclusive_identity(&auth.principals, |principal| {
+            matches!(
+                principal,
+                Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
+            )
+        })
+    });
+    if !allowed {
+        return Err(CarbideError::PermissionDeniedError(
+            "reserved domain IDs require the site-agent identity".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// RPC RBAC permits both the operator CLI and site agent on these two
+/// methods. Only the site agent may use a reserved ID; conversely its service
+/// identity must never use the unrestricted operator operation. A request
+/// containing both identities is not an operator request.
+fn authorize_domain_intent<T>(request: &Request<T>, reserved: bool) -> Result<(), Status> {
+    if reserved {
+        return require_site_agent(request);
+    }
+    if request
+        .extensions()
+        .get::<AuthContext>()
+        .is_some_and(|auth| {
+            auth.principals.iter().any(|principal| matches!(
+            principal,
+            Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
+        ))
+        })
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "site-agent domain writes require a reserved ID operation".to_string(),
+        )
+        .into());
+    }
+    // The RPC middleware performs ordinary operator RBAC before dispatch.
+    // Direct test-harness callers have no AuthContext and bypass that layer.
+    Ok(())
+}
+
 pub(crate) async fn create(
     api: &Api,
     request: Request<CreateDomainRequest>,
 ) -> Result<Response<Domain>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    // A reserved ID is an internal REST replay identity, not a user-supplied
+    // ID. The CLI and legacy callers continue to request a fresh Core ID.
+    authorize_domain_intent(&request, request.get_ref().reserved_id.is_some())?;
 
+    let mut txn = api.txn_begin().await?;
     let req = request.into_inner();
     ensure_not_reverse_zone_name(&req.name)?;
+    // Internal retry intent is a DNS identity, not a presentation spelling.
+    // Leave legacy/admin names unchanged for compatibility.
+    let name = if req.reserved_id.is_some() {
+        db::dns::normalize_domain(&req.name)
+    } else {
+        req.name
+    };
     let new_domain = NewDomain {
         default_ttl: zone_ttl_argument(req.default_ttl)?,
-        ..NewDomain::new(req.name)
+        ..NewDomain::new(name)
     };
 
-    let domain = domain::persist(new_domain, &mut txn).await?;
+    let domain = if let Some(id) = req.reserved_id {
+        // This lock is shared with delete and reference writers. After a
+        // response-lost create, retrying the same reserved ID finds the exact
+        // committed zone instead of creating a second forward-name match.
+        domain::lock_id_exclusive(txn.as_mut(), id).await?;
+        if domain::is_reserved_id_cancelled(txn.as_mut(), id).await? {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "reserved domain ID {id} has been cancelled"
+            ))
+            .into());
+        }
+        if let Some((existing, reserved, created_ttl)) =
+            domain::reserved_create_intent(txn.as_mut(), id).await?
+        {
+            if existing.deleted.is_some()
+                || !reserved
+                || existing.name != new_domain.name
+                || created_ttl != new_domain.default_ttl
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "domain ID {id} is deleted or belongs to a different create request"
+                ))
+                .into());
+            }
+            existing
+        } else {
+            domain::persist_reserved(new_domain, id, txn.as_mut()).await?
+        }
+    } else {
+        domain::persist(new_domain, txn.as_mut()).await?
+    };
 
     txn.commit().await?;
 
@@ -91,13 +182,13 @@ pub(crate) async fn update(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let mut domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let mut domain = domain::find_by_uuid_for_delete(txn.as_mut(), uuid)
+        .await?
+        .filter(|domain| domain.deleted.is_none())
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
 
     // Renaming a domain is not supported. The name may be omitted or sent
     // back unchanged so a caller updating another field need not read the
@@ -129,23 +220,56 @@ pub(crate) async fn delete(
 ) -> Result<Response<DomainDeletionResult>, Status> {
     crate::api::log_request_data(&request);
 
+    authorize_domain_intent(&request, request.get_ref().cancel_reserved_id)?;
     let mut txn = api.txn_begin().await?;
 
     let req = request.into_inner();
     let uuid = req.id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
+    let domain = match domain::find_by_uuid_for_delete(txn.as_mut(), uuid).await? {
+        Some(domain) => domain,
+        None if req.cancel_reserved_id => {
+            // The same per-ID lock is held by a future/retried reserved create.
+            // Commit a terminal cancellation before reporting success.
+            domain::cancel_reserved_id(txn.as_mut(), uuid).await?;
+            txn.commit().await?;
+            return Ok(Response::new(DomainDeletionResult {}));
+        }
+        None => {
+            return Err(CarbideError::NotFoundError {
                 kind: "domain",
                 id: uuid.to_string(),
-            })?;
+            }
+            .into());
+        }
+    };
+
+    if req.cancel_reserved_id {
+        // A SiteAgent may cancel only rows created with a reserved ID, never
+        // reinterpret a legacy/admin domain as its own REST projection.
+        let (_, is_reserved, _) = domain::reserved_create_intent(txn.as_mut(), uuid)
+            .await?
+            .expect("domain was found under the same exclusive ID lock");
+        if !is_reserved {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "domain ID {uuid} was not created with a reserved ID"
+            ))
+            .into());
+        }
+    }
+    if domain.deleted.is_some() {
+        txn.commit().await?;
+        return Ok(Response::new(DomainDeletionResult {}));
+    }
 
     db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
-    // TODO: This needs to validate that nothing references the domain anymore
-    // (like NetworkSegments)
+    if domain::has_live_references(txn.as_mut(), uuid).await? {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "domain {uuid} is still referenced by a network segment or machine interface"
+        ))
+        .into());
+    }
 
     domain::delete(domain, &mut txn).await?;
 
@@ -217,6 +341,7 @@ pub(crate) async fn create_legacy_compat(
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
         default_ttl: None,
+        reserved_id: None,
     };
 
     // Call the new handler
@@ -286,6 +411,7 @@ pub(crate) async fn delete_legacy_compat(
     // Convert to new request format
     let deletion_request = DomainDeletionRequest {
         id: deletion_legacy.id,
+        cancel_reserved_id: false,
     };
 
     // Call the new handler

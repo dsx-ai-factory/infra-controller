@@ -896,7 +896,10 @@ type CreateDomainRequest struct {
 	// Default record TTL in seconds, 30 to 86400 inclusive; values outside that
 	// range are rejected with INVALID_ARGUMENT. Absent means the site default
 	// of 300.
-	DefaultTtl    *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
+	DefaultTtl *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
+	// Internal REST ownership-index retry: reserve this ID durably before creating
+	// the zone. Omit for legacy callers; never accept an unowned tenant ID.
+	ReservedId    *DomainId `protobuf:"bytes,3,opt,name=reserved_id,json=reservedId,proto3" json:"reserved_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -943,6 +946,13 @@ func (x *CreateDomainRequest) GetDefaultTtl() uint32 {
 		return *x.DefaultTtl
 	}
 	return 0
+}
+
+func (x *CreateDomainRequest) GetReservedId() *DomainId {
+	if x != nil {
+		return x.ReservedId
+	}
+	return nil
 }
 
 type UpdateDomainRequest struct {
@@ -1045,10 +1055,14 @@ func (x *DomainSearchQuery) GetName() string {
 }
 
 type DomainDeletionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Internal SiteAgent-only cancellation of an owned, durably reserved ID.
+	// On an absent ID this records a terminal tombstone so a delayed CreateDomain
+	// cannot resurrect the zone. Omit for legacy/admin CLI deletes.
+	CancelReservedId bool `protobuf:"varint,2,opt,name=cancel_reserved_id,json=cancelReservedId,proto3" json:"cancel_reserved_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *DomainDeletionRequest) Reset() {
@@ -1086,6 +1100,13 @@ func (x *DomainDeletionRequest) GetId() *DomainId {
 		return x.Id
 	}
 	return nil
+}
+
+func (x *DomainDeletionRequest) GetCancelReservedId() bool {
+	if x != nil {
+		return x.CancelReservedId
+	}
+	return false
 }
 
 type DomainDeletionResult struct {
@@ -1196,11 +1217,13 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\vdefault_ttl\x18\b \x01(\rH\x01R\n" +
 	"defaultTtl\x88\x01\x01B\x06\n" +
 	"\x04_soaB\x0e\n" +
-	"\f_default_ttl\"_\n" +
+	"\f_default_ttl\"\x92\x01\n" +
 	"\x13CreateDomainRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
 	"\vdefault_ttl\x18\x02 \x01(\rH\x00R\n" +
-	"defaultTtl\x88\x01\x01B\x0e\n" +
+	"defaultTtl\x88\x01\x01\x121\n" +
+	"\vreserved_id\x18\x03 \x01(\v2\x10.common.DomainIdR\n" +
+	"reservedIdB\x0e\n" +
 	"\f_default_ttl\":\n" +
 	"\x13UpdateDomainRequest\x12#\n" +
 	"\x06domain\x18\x01 \x01(\v2\v.dns.DomainR\x06domain\"c\n" +
@@ -1208,9 +1231,10 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdH\x00R\x02id\x88\x01\x01\x12\x17\n" +
 	"\x04name\x18\x02 \x01(\tH\x01R\x04name\x88\x01\x01B\x05\n" +
 	"\x03_idB\a\n" +
-	"\x05_name\"9\n" +
+	"\x05_name\"g\n" +
 	"\x15DomainDeletionRequest\x12 \n" +
-	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\"\x16\n" +
+	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\x12,\n" +
+	"\x12cancel_reserved_id\x18\x02 \x01(\bR\x10cancelReservedId\"\x16\n" +
 	"\x14DomainDeletionResult*\x8d\x02\n" +
 	"\x10DnsLookupOutcome\x12\"\n" +
 	"\x1eDNS_LOOKUP_OUTCOME_UNSPECIFIED\x10\x00\x12\x1e\n" +
@@ -1272,14 +1296,15 @@ var file_dns_nico_proto_depIdxs = []int32{
 	20, // 10: dns.Domain.updated:type_name -> google.protobuf.Timestamp
 	20, // 11: dns.Domain.deleted:type_name -> google.protobuf.Timestamp
 	4,  // 12: dns.Domain.metadata:type_name -> dns.DomainMetadata
-	13, // 13: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
-	19, // 14: dns.DomainSearchQuery.id:type_name -> common.DomainId
-	19, // 15: dns.DomainDeletionRequest.id:type_name -> common.DomainId
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	19, // 13: dns.CreateDomainRequest.reserved_id:type_name -> common.DomainId
+	13, // 14: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
+	19, // 15: dns.DomainSearchQuery.id:type_name -> common.DomainId
+	19, // 16: dns.DomainDeletionRequest.id:type_name -> common.DomainId
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_dns_nico_proto_init() }

@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -48,6 +49,7 @@ use rpc::forge::{
 use sqlx::{PgPool, PgTransaction};
 use tonic::Request;
 
+use crate::auth::AuthContext;
 use crate::cfg::file::{
     FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, VpcIsolationBehaviorType,
 };
@@ -1420,15 +1422,25 @@ async fn unattached_segment_preserves_global_compatibility_and_rechecks_stored_s
             assert_eq!(count, 0);
         } else {
             assert_eq!(create_result?.into_inner().id, Some(segment_id));
+            let mut attach_request = Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
+                network_segment_id: Some(segment_id),
+                vpc_id: Some(attach_vpc),
+                allow_replace: false,
+                expected_source_vpc_id: None,
+                expected_segment_version: None,
+            });
+            // Direct fixture calls bypass the RPC authentication middleware.
+            attach_request.extensions_mut().insert(AuthContext {
+                principals: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-admin-cli".into(),
+                    None,
+                ))],
+                authorization: None,
+            });
             let error = env
                 .api
-                .attach_network_segment_to_vpc(Request::new(
-                    rpc::forge::AttachNetworkSegmentToVpcRequest {
-                        network_segment_id: Some(segment_id),
-                        vpc_id: Some(attach_vpc),
-                        allow_replace: false,
-                    },
-                ))
+                .attach_network_segment_to_vpc(attach_request)
                 .await
                 .expect_err("later attachment must still reject the global overlap");
             assert_eq!(error.code(), tonic::Code::InvalidArgument);

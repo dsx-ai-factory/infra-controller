@@ -88,6 +88,24 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		logger.Info().Msg("No Subnets found for Site")
 	}
 
+	vpcs, _, err := cdbm.NewVpcDAO(ms.dbSession).GetAll(
+		ctx,
+		nil,
+		cdbm.VpcFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+		cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to get VPCs for Site from DB")
+		return nil, err
+	}
+	vpcByControllerID := make(map[string]cdbm.Vpc, len(vpcs))
+	for _, vpc := range vpcs {
+		if vpc.ControllerVpcID != nil {
+			vpcByControllerID[vpc.ControllerVpcID.String()] = vpc
+		}
+	}
+
 	// Construct a map of Controller Segment ID to Subnet
 	existingSubnetIDMap := make(map[string]*cdbm.Subnet)
 	existingSubnetCtrlIDMap := make(map[string]*cdbm.Subnet)
@@ -179,14 +197,48 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 			controllerSegmentID = &ctrlID
 		}
 
-		var mtu *int
 		cfg := controllerSegment.GetConfig()
+		var vpcID *uuid.UUID
+		if cfg.GetVpcId().GetValue() != "" {
+			controllerVpcID := cfg.GetVpcId().GetValue()
+			reportedVpc, found := vpcByControllerID[controllerVpcID]
+			switch {
+			case cfg.GetSegmentType() != corev1.NetworkSegmentType_TENANT:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile a non-tenant Network Segment to a tenant Subnet")
+			case !found:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("could not map the Network Segment VPC to a REST VPC at this Site")
+			case reportedVpc.TenantID != subnet.TenantID:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile Subnet to a VPC owned by another Tenant")
+			case reportedVpc.NetworkVirtualizationType != nil &&
+				*reportedVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer &&
+				*reportedVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizerWithNVUE:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile tenant Subnet to a non-Ethernet-virtualizer VPC")
+			case reportedVpc.ID != subnet.VpcID:
+				vpcID = &reportedVpc.ID
+			}
+		}
+
+		var mtu *int
 		if cfg != nil && cfg.Mtu != nil {
 			mtuVal := int(*cfg.Mtu)
 			mtu = &mtuVal
 		}
 
-		if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil {
+		if vpcID != nil {
+			// A Site inventory page is an observation and can be older than a
+			// tenant attachment or a late Site RPC. The conditional UPDATE takes
+			// the same Subnet row lock used by an attach reservation and refuses
+			// to overwrite an unresolved durable intent or a newer REST VPC.
+			// Recovery remains due and re-reads Core even when inventory skips.
+			updated, serr := subnetDAO.UpdateVpcFromInventory(ctx, subnet.ID, site.ID, subnet.VpcID, *vpcID, controllerSegmentID, mtu, true)
+			if serr != nil {
+				slogger.Error().Err(serr).Msg("failed to reconcile Site VPC observation in REST DB")
+				continue
+			}
+			if !updated {
+				slogger.Info().Msg("skipping stale Site VPC observation or pending tenant attachment")
+			}
+		} else if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil {
 			_, serr := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, ControllerNetworkSegmentID: controllerSegmentID, Mtu: mtu, IsMissingOnSite: cwutil.GetPtr(false)})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update MTU/missing on Site flag/controller Segment ID in DB")
@@ -257,6 +309,12 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 	// Loop through and remove controller Network Segment ID from Subnets that were not found
 	for _, subnet := range subnetsToDelete {
 		slogger := logger.With().Str("Subnet ID", subnet.ID.String()).Logger()
+		// Missing inventory is not authority to discard a pending Site write.
+		// The bounded recovery worker re-reads the exact Core segment.
+		if subnet.AttachIntentID != nil {
+			slogger.Info().Msg("skipping missing-inventory cleanup during pending VPC attachment")
+			continue
+		}
 
 		// If the Subnet was already being deleted, we can proceed with removing it from the DB
 		if subnet.Status == cdbm.SubnetStatusDeleting {

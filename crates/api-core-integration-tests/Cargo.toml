@@ -71,6 +71,7 @@ sha2 = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }

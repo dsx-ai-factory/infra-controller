@@ -34,7 +34,10 @@ var argResourceMap = map[string]string{
 	"vpc update":                    "vpc",
 	"vpc virtualization update":     "vpc",
 	"vpc delete":                    "vpc",
+	"domain get":                    "domain",
+	"domain delete":                 "domain",
 	"subnet get":                    "subnet",
+	"subnet attach-vpc":             "subnet",
 	"subnet update":                 "subnet",
 	"subnet delete":                 "subnet",
 	"instance-type get":             "instance-type",
@@ -543,6 +546,24 @@ func getAllSuggestions(s *Session, input string, cmdNames []string) []string {
 	commandName, argPart, matched := matchAutocompleteCommand(input, cmdNames)
 	if !matched {
 		return getCommandSuggestions(input, cmdNames)
+	}
+	canonicalCommandName := commandName
+	if target, ok := generatedCommandAliases[commandName]; ok {
+		canonicalCommandName = target
+	}
+	if canonicalCommandName == "subnet attach-vpc" {
+		if strings.TrimSpace(s.Scope.SiteID) == "" {
+			return nil
+		}
+		tenantID, err := s.getTenantID(context.Background())
+		if err != nil {
+			return nil
+		}
+		items, err := s.subnetAttachSources(context.Background(), s.Scope.SiteID, tenantID)
+		if err != nil {
+			return nil
+		}
+		return resourceItemSuggestions(commandName, nil, items, argPart)
 	}
 	if info, ok := generatedAutocompleteInfo(commandName); ok && len(info.PathParameters) > 0 {
 		return getGeneratedResourceSuggestions(s, info, argPart)

@@ -23,7 +23,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tp "go.temporal.io/sdk/temporal"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -45,7 +44,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 )
 
 const (
@@ -1266,91 +1265,9 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 }
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
+// See siteproxy.UnwrapWorkflowError.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	code, unwrappedError = http.StatusInternalServerError, err
-
-	// Attempt to unwrap our way through Temporal's WorkflowExecutionError
-	// and ActivityError layers to reach the underlying cause. These types
-	// contain Temporal-internal details (workflow IDs, run IDs, scheduled
-	// event IDs, etc) that generally shouldn't be getting exposed to users.
-	innerErr := err
-
-	var wfErr *tp.WorkflowExecutionError
-	if errors.As(innerErr, &wfErr) {
-		if cause := errors.Unwrap(wfErr); cause != nil {
-			innerErr = cause
-		}
-	}
-
-	var actErr *tp.ActivityError
-	if errors.As(innerErr, &actErr) {
-		if cause := errors.Unwrap(actErr); cause != nil {
-			innerErr = cause
-		}
-	}
-
-	unwrappedError = innerErr
-
-	// if the error chain contains a gRPC error code use it to tune our HTTP response code
-	// NOTE: this is duplicating some feature of grpc-gateway and not exhaustive
-	s, ok := status.FromError(innerErr)
-	if ok {
-		// NOTE: this matches WrapErr in site-workflow/pkg/error/error.go
-		switch s.Code() {
-		case codes.NotFound:
-			code = http.StatusNotFound
-		case codes.Unimplemented:
-			code = http.StatusNotImplemented
-		case codes.Unavailable:
-			code = http.StatusServiceUnavailable
-		case codes.PermissionDenied:
-			code = http.StatusForbidden
-		case codes.AlreadyExists:
-			code = http.StatusConflict
-		case codes.FailedPrecondition:
-			code = http.StatusPreconditionFailed
-		case codes.InvalidArgument:
-			code = http.StatusBadRequest
-		case codes.ResourceExhausted:
-			code = http.StatusTooManyRequests
-		}
-	}
-
-	// if the error is NOT a Temporal ApplicationError return what we have
-	tpError := &tp.ApplicationError{}
-	if !errors.As(innerErr, &tpError) {
-		return
-	}
-
-	// Tune HTTP status code using the application error type coming back from Site.
-	switch tpError.Type() {
-	case swe.ErrTypeInvalidRequest:
-		code = http.StatusBadRequest
-	case swe.ErrTypeNICoObjectNotFound, swe.ErrTypeCarbideObjectNotFound:
-		code = http.StatusNotFound
-	case swe.ErrTypeNICoUnimplemented, swe.ErrTypeCarbideUnimplemented:
-		code = http.StatusNotImplemented
-	case swe.ErrTypeNICoDenied, swe.ErrTypeCarbideDenied:
-		code = http.StatusForbidden
-	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
-		code = http.StatusServiceUnavailable
-	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists:
-		code = http.StatusConflict
-	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
-		code = http.StatusPreconditionFailed
-	case swe.ErrTypeNICoInvalidArgument, swe.ErrTypeCarbideInvalidArgument:
-		code = http.StatusBadRequest
-	case swe.ErrTypeNICoResourceExhausted:
-		code = http.StatusTooManyRequests
-	}
-
-	// if the error is an internal Temporal error it is mostly useless so we unwrap it but we keep
-	// the current error if there is no unwrapped error
-	if potentialError := errors.Unwrap(tpError); potentialError != nil {
-		unwrappedError = potentialError
-	}
-
-	return
+	return siteproxy.UnwrapWorkflowError(err)
 }
 
 // GRPCStatusMessage returns the gRPC status message when err is a gRPC status,

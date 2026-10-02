@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use ::rpc::forge::ManagedHostNetworkConfigRequest;
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::vpc::VpcId;
@@ -28,6 +29,7 @@ use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
 use model::test_support::ManagedHostConfig;
 use rpc::{Metadata, forge};
 
+use crate::auth::AuthContext;
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::test_support::mac_address_pool::HOST_NON_DPU_MAC_ADDRESS_POOL;
@@ -641,14 +643,24 @@ async fn test_zero_dpu_auto_update_rejects_host_inband_segment_bound_to_differen
     .into_inner();
 
     let conflicting_vpc_id = vpc_id_by_name(&env, "test flat vpc 2").await;
+    let mut attach_request = tonic::Request::new(forge::AttachNetworkSegmentToVpcRequest {
+        network_segment_id: Some(host_inband_segment.id),
+        vpc_id: Some(conflicting_vpc_id),
+        allow_replace: false,
+        expected_source_vpc_id: None,
+        expected_segment_version: None,
+    });
+    // Direct fixture calls bypass the RPC authentication middleware.
+    attach_request.extensions_mut().insert(AuthContext {
+        principals: vec![Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-admin-cli".into(),
+            None,
+        ))],
+        authorization: None,
+    });
     env.api
-        .attach_network_segment_to_vpc(tonic::Request::new(
-            forge::AttachNetworkSegmentToVpcRequest {
-                network_segment_id: Some(host_inband_segment.id),
-                vpc_id: Some(conflicting_vpc_id),
-                allow_replace: false,
-            },
-        ))
+        .attach_network_segment_to_vpc(attach_request)
         .await
         .expect("operator should be able to bind the HostInband segment after allocation");
 

@@ -237,6 +237,40 @@ func TestGetAllSuggestions_PreservesManualAliasCompletion(t *testing.T) {
 	assert.Equal(t, []string{"machine dpu get host-one"}, suggestions)
 }
 
+func TestGetAllSuggestions_SubnetAttachOnlyOffersEligibleSources(t *testing.T) {
+	cache := NewCache()
+	resolver := NewResolver(cache)
+	session := &Session{
+		Org:      "acme",
+		Scope:    Scope{SiteID: "site-1"},
+		Cache:    cache,
+		Resolver: resolver,
+	}
+	cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
+	cache.Set("vpc", []NamedItem{
+		{ID: "vpc-1", Status: "Ready", Extra: map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "networkVirtualizationType": "ETHERNET_VIRTUALIZER"}},
+		{ID: "vpc-2", Status: "Ready", Extra: map[string]string{"siteId": "site-1", "tenantId": "tenant-2", "networkVirtualizationType": "ETHERNET_VIRTUALIZER"}},
+	})
+	cache.Set("subnet", []NamedItem{
+		{Name: "eligible-subnet", ID: "subnet-1", Status: "Ready", Extra: map[string]string{"siteId": "site-1", "vpcId": "vpc-1", "acquiredIPs": "2"}},
+		{Name: "used-subnet", ID: "subnet-2", Status: "Ready", Extra: map[string]string{"siteId": "site-1", "vpcId": "vpc-1", "acquiredIPs": "3"}},
+		{Name: "other-tenant-subnet", ID: "subnet-3", Status: "Ready", Extra: map[string]string{"siteId": "site-1", "vpcId": "vpc-2", "acquiredIPs": "2"}},
+	})
+
+	for _, commandName := range []string{
+		"subnet attach-vpc",
+		"subnet attach-vpc-to attach-vpc-to-subnet",
+	} {
+		t.Run(commandName, func(t *testing.T) {
+			assert.Equal(
+				t,
+				[]string{commandName + " eligible-subnet"},
+				getAllSuggestions(session, commandName+" elig", []string{commandName}),
+			)
+		})
+	}
+}
+
 func TestGetAllSuggestions_GeneratedResourceAfterValueFlag(t *testing.T) {
 	cache := NewCache()
 	resolver := NewResolver(cache)

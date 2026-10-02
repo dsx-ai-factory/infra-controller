@@ -832,6 +832,34 @@ impl ApiClient {
         Ok(self.0.find_domain(request).await?)
     }
 
+    pub(crate) async fn create_domain(
+        &self,
+        name: String,
+        default_ttl: Option<u32>,
+    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
+        self.0
+            .create_domain(::rpc::protos::dns::CreateDomainRequest {
+                name,
+                default_ttl,
+                reserved_id: None,
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn delete_domain(
+        &self,
+        id: ::carbide_uuid::domain::DomainId,
+    ) -> CarbideCliResult<()> {
+        self.0
+            .delete_domain(::rpc::protos::dns::DomainDeletionRequest {
+                id: Some(id),
+                cancel_reserved_id: false,
+            })
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn update_domain(
         &self,
         domain: ::rpc::protos::dns::Domain,

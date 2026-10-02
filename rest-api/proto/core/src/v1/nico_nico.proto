@@ -3263,6 +3263,12 @@ message AttachNetworkSegmentToVpcRequest {
   common.NetworkSegmentId network_segment_id = 1;
   common.VpcId vpc_id = 2;
   bool allow_replace = 3;
+  // If present, reject a reassignment from a different source. The REST site
+  // agent uses the version precondition to fence late replies and ABA retries.
+  common.VpcId expected_source_vpc_id = 4;
+  // Compare against NetworkSegment.status.lifecycle.version, which reflects
+  // the stored network_segments.version (not controller_state_version).
+  optional string expected_segment_version = 5;
 }
 
 message NetworkSegmentDeletionResult {

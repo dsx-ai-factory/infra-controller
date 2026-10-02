@@ -24,7 +24,7 @@ func TestSession_fetchDPUMachines(t *testing.T) {
 		wantError string
 	}{
 		{name: "all pages in selected site", site: "site-1"},
-		{name: "missing site", wantError: "siteId must be resolved before DPU machines"},
+		{name: "missing site", wantError: "select a site before resolving a DPU Machine"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			requests := 0
