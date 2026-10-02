@@ -2461,21 +2461,46 @@ async fn attach_to_different_vpc_requires_force(
 async fn attach_rejects_site_agent_with_an_additional_identity(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
 
-    for (name, additional_identity) in [
+    let site_agent = || Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+    let external_user = || {
+        Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-admin-cli".to_string(),
+            None,
+        ))
+    };
+    for (name, principals) in [
         (
-            "service",
-            Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+            "site agent plus another service",
+            vec![
+                site_agent(),
+                Principal::TrustedCertificate,
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+            ],
         ),
         (
-            "machine",
-            Principal::SpiffeMachineIdentifier("machine-1".to_string()),
+            "machine bearer plus site agent mTLS",
+            vec![
+                Principal::SpiffeMachineIdentifier("machine-1".to_string()),
+                Principal::TrustedCertificate,
+                site_agent(),
+                Principal::TrustedCertificate,
+            ],
+        ),
+        (
+            "site agent plus external user",
+            vec![site_agent(), Principal::TrustedCertificate, external_user()],
+        ),
+        (
+            "trusted certificate without an identity",
+            vec![Principal::TrustedCertificate],
         ),
     ] {
         let mut request = authenticated_attach_request(
             NetworkSegmentId::new(),
             VpcId::new(),
             true,
-            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            site_agent(),
             None,
             Some("not-read-before-authorization".to_string()),
         );
@@ -2483,8 +2508,7 @@ async fn attach_rejects_site_agent_with_an_additional_identity(pool: sqlx::PgPoo
             .extensions_mut()
             .get_mut::<AuthContext>()
             .unwrap()
-            .principals
-            .push(additional_identity);
+            .principals = principals;
 
         let error = env
             .api
