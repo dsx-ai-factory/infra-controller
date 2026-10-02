@@ -55,7 +55,11 @@ The workflow aims for the following state:
 | Per-shelf BMC/PMC credential | Removed from the credentials store |
 | Rack power | Unchanged by decommissioning |
 
-The power shelf's endpoints will not be reachable at their former IP addresses. NICo's DHCP server will not offer new IPs to associated MACs until the suppression is removed with force-delete.
+NICo suppresses discovery and responses from its own DHCP service for the
+device's associated interfaces until you remove the suppressions with force-delete.
+Endpoints can remain reachable if they use static IP addresses or receive an
+address from an external DHCP server. Complete any required network changes or
+physical hardware removal before force-deleting the device records.
 
 ## After decommissioning
 

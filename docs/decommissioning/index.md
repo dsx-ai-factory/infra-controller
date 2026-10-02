@@ -7,7 +7,15 @@ you intend one of the following outcomes:
 1. The hardware is permanently leaving the site, either because it is moving to a new site or it is leaving service.
 2. The hardware will be ingested from a clean pre-ingestion state into the same site.
 
-After beginning decommissioning, the hardware performs a series of clean-up steps and eventually reaches the terminal state `Decommissioning/Decommissioned`. In this state, NICo performs no further action on the hardware and the hardware endpoints become unreachable. Then perform any necessary external cleanup such as network changes or physical hardware removal.
+After decommissioning begins, the hardware performs a series of cleanup steps
+and reaches the terminal state `Decommissioning/Decommissioned`. NICo then
+performs no further decommissioning actions.
+
+NICo suppresses discovery and responses from its own DHCP service for the
+device's associated interfaces until you remove the suppressions with force-delete.
+Endpoints can remain reachable if they use static IP addresses or receive an
+address from an external DHCP server. Complete any required network changes or
+physical hardware removal before force-deleting the device records.
 
 After cleaning up, use [force-delete](#force-delete-after-decommissioning) to remove a decommissioned machine and its records from NICo.
 
