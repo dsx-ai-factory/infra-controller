@@ -384,19 +384,6 @@ mod tests {
                 false,
             ),
             (
-                "two different external users",
-                vec![
-                    external_user(),
-                    Principal::ExternalUser(ExternalUserInfo::new(
-                        None,
-                        "other-client".to_string(),
-                        None,
-                    )),
-                    Principal::TrustedCertificate,
-                ],
-                false,
-            ),
-            (
                 "machine bearer plus site agent mTLS",
                 vec![
                     Principal::SpiffeMachineIdentifier("machine-1".to_string()),
@@ -419,6 +406,22 @@ mod tests {
                 "{name}"
             );
         }
+
+        assert!(
+            !has_exclusive_identity(
+                &[
+                    external_user(),
+                    Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "other-client".to_string(),
+                        None,
+                    )),
+                    Principal::TrustedCertificate,
+                ],
+                |principal| matches!(principal, Principal::ExternalUser(_)),
+            ),
+            "different external users are distinct effective identities"
+        );
     }
 
     /// A rejecting policy lets the permissive wrapper exercise the exact
