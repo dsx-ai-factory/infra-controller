@@ -131,10 +131,26 @@ nico-api:
 
       # -----------------------------------------------------------------------
       # site_fabric_prefixes: prefixes that ARE part of the site fabric.
+      # site_fabric_null_routes: optional FNN blackholes; omitted means
+      # site_fabric_prefixes, all retained tenant SitePrefixes, and retiring
+      # operator roots with retained VpcPrefixes or VPC-attached direct prefixes.
+      # Inherited roots are collapsed. Explicit lists preserve distinct CIDRs.
+      # Under mutual isolation, they must cover every retained tenant root;
+      # [] is valid only without tenant roots. Open isolation does not install
+      # these routes or require coverage.
       # deny_prefixes: prefixes instances must NOT reach (OOB, ctrl-plane, underlay).
       # -----------------------------------------------------------------------
       site_fabric_prefixes = []                  # REQUIRED: your fabric CIDR(s)
+      # site_fabric_null_routes = []             # OPTIONAL: see coverage requirement above
       deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
+
+      # -----------------------------------------------------------------------
+      # FNN related configuration
+      # FNN support is mandatory for nico-api to function
+      # datacenter_asn is a root key and has to stay above the first [table].
+      # -----------------------------------------------------------------------
+      # Replace 4266030000 with the ASN for the physical datacenter itself
+      datacenter_asn = 4266030000
 
       # -----------------------------------------------------------------------
       # Site explorer — periodic background scan of site inventory
@@ -155,9 +171,13 @@ nico-api:
       # -----------------------------------------------------------------------
       # IP / integer pools — nico-api allocates from these ranges.
       # REQUIRED: set the loopback (lo-ip) range to your site's pool.
+      # A pool range is applied when nico-api first sees it. A later change
+      # logs a drift warning and is not applied. Grow an established pool with
+      # `nico-admin-cli resource-pool grow`.
       # -----------------------------------------------------------------------
       [pools.lo-ip]
       type = "ipv4"
+      # One address per machine, hosts and DPUs alike: size for hosts x (1 + DPUs per host).
       ranges = []                                # REQUIRED: e.g. [{ start = "...", end = "..." }]
 
       [pools.vlan-id]
@@ -221,15 +241,6 @@ nico-api:
       # -----------------------------------------------------------------------
       [machine_state_controller]
       failure_retry_time = "90m"
-
-      # -----------------------------------------------------------------------
-      # FNN related configuration
-      # FNN support is mandatory for nico-api to function
-      # -----------------------------------------------------------------------
-
-      # datacenter_asn
-      # Replace 4266030000 with the ASN for the physical datacenter itself
-      datacenter_asn = 4266030000
 
 
       [fnn.admin_vpc]
@@ -316,6 +327,7 @@ nico-api:
       [pools.fnn-asn]
       type = "integer"
       # Change 4268060405 and 4268060499 to the actual ASN values. Each DPU needs an ASN, so the range should be sufficient to cover all hosts.
+      # Size for hosts x DPUs per host. Like every pool, the range is not re-applied after a change.
       ranges = [{ start = "4268060405", end = "4268060499" }]
 
       [pools.vpc-dpu-lo]
@@ -375,6 +387,18 @@ nico-api:
 ## ---------------------------------------------------------------------------
 
 nico-dhcp:
+  ## IPv6 is opt-in. Enable only after the pod network and relay IPv6 VIP are ready.
+  dhcp:
+    v6Enabled: false
+    v6ServerIdentifier: ""  # Required when enabled: stable, site-unique 12 hex digits.
+    v6DnsServers: ""
+    v6NtpServers: ""
+    v6ProvisioningServer: ""
+    v6RapidCommit: false
+  v6ExternalService:
+    enabled: false
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # Required only when this Service is enabled.
   externalService:
     enabled: true    # must be explicitly enabled - defaults to false in chart
     annotations:

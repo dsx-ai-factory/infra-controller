@@ -75,6 +75,8 @@ type Instance struct {
 	Interfaces []Interface `json:"interfaces,omitempty"`
 	// InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance
 	InfinibandInterfaces []InfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
+	SpectrumXAttachments []SpectrumXAttachment `json:"spectrumXAttachments,omitempty"`
 	// NVLinkInterfaces are list of the NVLinkInterface associated with the Instance
 	NvLinkInterfaces []NVLinkInterface `json:"nvLinkInterfaces,omitempty"`
 	// DPU Extension Services deployed on DPUs of this Instance
@@ -862,7 +864,7 @@ func (o *Instance) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *Instance) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {
@@ -1054,6 +1056,38 @@ func (o *Instance) HasInfinibandInterfaces() bool {
 // SetInfinibandInterfaces gets a reference to the given []InfiniBandInterface and assigns it to the InfinibandInterfaces field.
 func (o *Instance) SetInfinibandInterfaces(v []InfiniBandInterface) {
 	o.InfinibandInterfaces = v
+}
+
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+func (o *Instance) GetSpectrumXAttachments() []SpectrumXAttachment {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		var ret []SpectrumXAttachment
+		return ret
+	}
+	return o.SpectrumXAttachments
+}
+
+// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Instance) GetSpectrumXAttachmentsOk() ([]SpectrumXAttachment, bool) {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		return nil, false
+	}
+	return o.SpectrumXAttachments, true
+}
+
+// HasSpectrumXAttachments returns a boolean if a field has been set.
+func (o *Instance) HasSpectrumXAttachments() bool {
+	if o != nil && !IsNil(o.SpectrumXAttachments) {
+		return true
+	}
+
+	return false
+}
+
+// SetSpectrumXAttachments gets a reference to the given []SpectrumXAttachment and assigns it to the SpectrumXAttachments field.
+func (o *Instance) SetSpectrumXAttachments(v []SpectrumXAttachment) {
+	o.SpectrumXAttachments = v
 }
 
 // GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise.
@@ -1474,6 +1508,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
+	}
+	if !IsNil(o.SpectrumXAttachments) {
+		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.NvLinkInterfaces) {
 		toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces

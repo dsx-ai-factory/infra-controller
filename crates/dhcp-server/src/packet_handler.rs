@@ -33,12 +33,13 @@ use tokio::sync::Mutex;
 use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
 use crate::metrics::{DhcpReplySent, DhcpRequestReceived, MessageTypeLabel};
-use crate::{Config, DhcpMode, util};
+use crate::modes::DhcpMode;
+use crate::{Config, util};
 
 const PKT_TYPE_OP_REQUEST: u8 = 1;
 const BOOTP_CHADDR_LEN: u8 = 16;
 
-pub(super) struct DecodedPacket {
+pub struct DecodedPacket {
     packet: Message,
 }
 
@@ -209,7 +210,7 @@ impl DecodedPacket {
     }
 }
 
-pub(super) struct Packet {
+pub struct Packet {
     encoded_packet: Vec<u8>,
     sent_packet: Message,
     dst_address: Ipv4Addr,
@@ -220,14 +221,9 @@ pub(super) struct Packet {
 }
 
 impl Packet {
-    #[cfg(test)]
-    pub(super) fn encoded_packet(&self) -> &Vec<u8> {
+    /// Return the encoded DHCPv4 response bytes.
+    pub fn encoded_packet(&self) -> &[u8] {
         &self.encoded_packet
-    }
-
-    #[cfg(test)]
-    pub(super) fn message_type(&self) -> MessageTypeLabel {
-        self.message_type
     }
 
     pub(super) fn dst_address(&self) -> SocketAddrV4 {
@@ -236,7 +232,7 @@ impl Packet {
 }
 
 impl Packet {
-    pub(super) async fn send(
+    pub async fn send(
         &self,
         dst_address: SocketAddrV4,
         socket: Arc<UdpSocket>,
@@ -268,7 +264,7 @@ impl Packet {
     }
 }
 
-pub(super) async fn process_packet(
+pub async fn process_packet(
     buf: &[u8],
     source_address: SocketAddr,
     config: &Config,
@@ -418,6 +414,7 @@ fn create_dhcp_reply_packet(
     let (prefix, broadcast) = match parse {
         Ok(prefix) => match prefix {
             IpNetwork::V4(prefix) => (prefix.mask(), prefix.broadcast()),
+            // Kept for safety until v6 path is at parity.
             IpNetwork::V6(prefix) => {
                 return Err(DhcpError::GenericError(format!(
                     "Prefix ({prefix}) is an IPv6 network, which is not supported."

@@ -31,10 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Run(run_command) => {
-            let spawn_handle = ssh_console::spawn((*run_command).try_into()?).await?;
+            let sigterm_cancel_token = carbide_utils::shutdown_handler::start()?;
+            let spawn_handle =
+                ssh_console::spawn((*run_command).try_into()?, Some(sigterm_cancel_token)).await?;
             // Let the service run forever by awaiting the join handle, while holding onto the
             // shutdown handle.
-            let (_shutdown_tx, join_handle) = spawn_handle.into_parts();
+            let (_drop_guard, join_handle) = spawn_handle.into_parts();
             join_handle.await.expect("ssh-console task panicked");
         }
         Command::DefaultRunConfig => {
@@ -76,6 +78,11 @@ struct RunCommand {
         help = "Address to listen on for prometheus metrics requests (HTTP), overriding configuration file"
     )]
     metrics_address: Option<String>,
+    #[clap(
+        long,
+        help = "Address to listen on for the private console-log gRPC API"
+    )]
+    api_listen_address: Option<String>,
     #[clap(long, short = 'u', help = "Address of carbide-api (forge)")]
     forge_url: Option<http::Uri>,
     #[clap(
@@ -189,6 +196,14 @@ impl TryInto<Config> for RunCommand {
         if let Some(client_key_path) = self.client_key_path {
             config.client_key_path = client_key_path;
         }
+        if let Some(api_listen_address) = self.api_listen_address {
+            config.api_listen_address = api_listen_address.parse().map_err(|error| {
+                CliError::InvalidApiListeningAddress {
+                    addr: api_listen_address,
+                    error,
+                }
+            })?;
+        }
         if let Some(override_bmc_ssh_host) = self.override_bmc_ssh_host {
             config.override_bmc_ssh_host = Some(override_bmc_ssh_host);
         }
@@ -203,6 +218,8 @@ enum CliError {
     InvalidListeningAddress { addr: String, error: AddrParseError },
     #[error("invalid metrics address {addr}: {error}")]
     InvalidMetricsAddress { addr: String, error: AddrParseError },
+    #[error("invalid API listening address {addr}: {error}")]
+    InvalidApiListeningAddress { addr: String, error: AddrParseError },
     #[error("configuration error: {0}")]
     Config(#[from] ConfigError),
 }

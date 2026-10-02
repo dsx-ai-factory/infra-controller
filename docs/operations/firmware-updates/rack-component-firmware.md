@@ -66,7 +66,7 @@ bundle. An unfiltered batch request can affect the entire site.
 
 ## Describe the update
 
-The request has four controls in addition to `siteId`:
+The request supports these controls in addition to `siteId`:
 
 | Field | Purpose |
 |---|---|
@@ -74,6 +74,8 @@ The request has four controls in addition to `siteId`:
 | `targets` | Optional component subset for tray requests. When present, `version` must also be present. Rack handlers do not forward this field, so do not send it with a rack request. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
+| `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
+| `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
 
 Although the API permits `version` to be omitted when `targets` is empty, that
 is not portable across component backends. Rack-scale RMS updates require SOT
@@ -101,6 +103,12 @@ jq -n \
   '{siteId: $siteId, version: $version, targets: ["bmc", "bios"]}'
 ```
 
+For a rack request, `version` can hold one shared firmware object for all
+selected tray types. No additional flag is required. The firmware object must
+be suitable for every selected tray type. The exact lowercase top-level keys
+`compute`, `nvswitch`, and `powershelf` are reserved for per-tray mappings;
+a shared firmware object must not contain any of them.
+
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and
 `powershelf` keys. Flow extracts the relevant value before calling each
@@ -117,13 +125,28 @@ LAYERED_VERSION=$(jq -cn \
   '{compute: $compute, nvswitch: $nvswitch}')
 ```
 
+Each mapping value may be a JSON object or a string containing the firmware
+input. The outer REST `version` field remains a string in both forms.
+
 If a layered document omits a component-type key, Flow passes an empty target
 to that component manager. Use an operation rule that excludes the component
 instead of relying on an empty value to skip it.
 
-The REST surface does not accept an RMS artifact access token. Core sends
-`NOAUTH` when no token is available, so artifacts referenced by these requests
-must be reachable without a separate token.
+### Firmware authentication
+
+`authenticationData` accepts exactly one of `shared` (an opaque credential
+string) or `perComponent` (an object with optional `compute`, `nvswitch`, and
+`powershelf` credential strings). Unknown keys are rejected at both levels.
+Omission or `null` supplies no credentials; empty strings or an empty
+`perComponent` object also supply none. Missing component entries do not
+inherit another type's credential. Do not encode component mappings inside
+`shared`. Non-empty credentials are not supported for DPU-only updates or by
+the legacy NICo compute firmware controller.
+
+For RMS-backed updates, the selected credential is the artifact access token.
+Without a token, Core sends `NOAUTH`. Non-empty credentials require Flow's
+[persisted firmware authentication](../../architecture/flow.md#persisted-firmware-authentication)
+encryption configuration. Keep credentials out of shell arguments and logs.
 
 ## Submit an update
 
@@ -173,7 +196,7 @@ The built-in rule deliberately excludes power shelves and does not perform an
 AC power cycle after flashing. Use an approved custom operation rule for power
 shelves. If firmware activation requires a power cycle, submit the appropriate
 power-recycle task separately or include it in a custom rule. Refer to the
-Flow [Operation Rules Guide](../../../rest-api/flow/docs/operation-rules-guide.md).
+Flow [Operation Rules Guide](../flow/operation-rules.md).
 
 ## Component behavior
 
@@ -289,8 +312,8 @@ rack operations because it provides readiness checks, ordering, task reports,
 and cancellation. Direct commands require the operator to provide those
 safeguards.
 
-For RMS-backed compute trays or switches, pass a SOT file rather than embedding
-it on the command line:
+For RMS-backed compute trays, switches, or power shelves, pass a SOT file rather
+than embedding it on the command line:
 
 ```sh
 nico-admin-cli component-manager update-firmware compute-tray \
@@ -304,7 +327,7 @@ nico-admin-cli component-manager update-firmware switch \
 
 nico-admin-cli component-manager update-firmware power-shelf \
   --power-shelf-id <power-shelf-id> \
-  --target-version <target-version> \
+  --sot-json-file ./power-shelf-firmware-object.json \
   --component pmc,psu
 ```
 
@@ -320,7 +343,7 @@ lower-level execution details.
 | No work starts after the REST response | Read the returned task. It may be waiting at the readiness gate or for an earlier rule stage. |
 | Task fails after about 30 minutes | Inspect the error for component IDs blocked by the readiness gate. Confirm tenant state and the persisted component operation status. |
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
-| Rack-scale update rejects `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that referenced artifacts are reachable without a REST-supplied access token. |
+| Rack-scale update rejects `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
 | Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
 | Retry begins from an uncertain state | Inspect per-component status and inventory first. A Flow task failure or cancellation does not roll hardware back. |

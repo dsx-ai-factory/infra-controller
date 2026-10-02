@@ -16,8 +16,8 @@
  */
 
 // src/config.rs
-// This module defines the firmware configuration types: FirmwareSpec,
-// FlashSpec, FlashOptions, and FirmwareFlasherProfile. I originally had
+// This module re-exports FirmwareSpec and defines the firmware configuration
+// types FlashSpec, FlashOptions, and FirmwareFlasherProfile. I originally had
 // this single SupernicFirmwareConfig type in here, but it started to get
 // kind of messy when I tried to implement it. By breaking it up into a
 // a structured separation of concerns, I ended up with a pretty nice RAII
@@ -26,9 +26,10 @@
 
 use std::path::{Path, PathBuf};
 
+pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
-    FirmwareFlasherProfile as FirmwareFlasherProfilePb, FirmwareSpec as FirmwareSpecPb,
-    FlashOptions as FlashOptionsPb, FlashSpec as FlashSpecPb,
+    FirmwareFlasherProfile as FirmwareFlasherProfilePb, FlashOptions as FlashOptionsPb,
+    FlashSpec as FlashSpecPb,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -36,34 +37,6 @@ use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::DEFAULT_RESET_LEVEL;
 use crate::firmware::source::FirmwareSource;
-
-// FirmwareSpec identifies a firmware target by device identity and
-// version. The part_number and psid identify the hardware the
-// firmware is built for, and the version is the target firmware
-// version. Used to construct a FirmwareFlasher with the aforementioned
-// RAII-esque validation (if the underlying MlxDeviceInfo for the given
-// device_id doesn't match this FirmwareSpec, then we will fail to
-// construct a new FirmwareFlasher).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FirmwareSpec {
-    // part_number is the manufacturer part number that the firmware
-    // is built for (e.g., "900-9D3B4-00CV-TA0").
-    pub part_number: String,
-    // psid (Parameter-Set IDentification) identifies the firmware
-    // configuration (e.g., "MT_0000000884").
-    pub psid: String,
-    // version is the target firmware version (e.g., "32.43.1014").
-    pub version: String,
-}
-
-impl FirmwareSpec {
-    // map_key returns a key suitable for indexing firmware specs
-    // by hardware identity, in the format "part_number:psid", like
-    // in the case of the carbide-api runtime config mappings.
-    pub fn map_key(&self) -> String {
-        format!("{}:{}", self.part_number, self.psid)
-    }
-}
 
 // FlashSpec specifies source locations and caching options for
 // flash and verify_image operations. Contains everything needed
@@ -257,28 +230,6 @@ impl FirmwareFlasherProfile {
     }
 }
 
-// From implementations for converting FirmwareSpec
-// to/from a FirmwareSpecPb protobuf message and back.
-impl From<FirmwareSpec> for FirmwareSpecPb {
-    fn from(spec: FirmwareSpec) -> Self {
-        FirmwareSpecPb {
-            part_number: spec.part_number,
-            psid: spec.psid,
-            version: spec.version,
-        }
-    }
-}
-
-impl From<FirmwareSpecPb> for FirmwareSpec {
-    fn from(proto: FirmwareSpecPb) -> Self {
-        FirmwareSpec {
-            part_number: proto.part_number,
-            psid: proto.psid,
-            version: proto.version,
-        }
-    }
-}
-
 // From implementations for converting FlashSpec
 // to/from a FlashSpecPb protobuf message and back.
 impl From<FlashSpec> for FlashSpecPb {
@@ -370,30 +321,6 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_firmware_spec_map_key() {
-        let spec = FirmwareSpec {
-            part_number: "900-9D3B4-00CV-TA0".to_string(),
-            psid: "MT_0000000884".to_string(),
-            version: "32.43.1014".to_string(),
-        };
-        assert_eq!(spec.map_key(), "900-9D3B4-00CV-TA0:MT_0000000884");
-    }
-
-    #[test]
-    fn test_firmware_spec_roundtrip() {
-        let original = FirmwareSpec {
-            part_number: "900-9D3B4-00CV-TA0".to_string(),
-            psid: "MT_0000000884".to_string(),
-            version: "32.43.1014".to_string(),
-        };
-        let proto: FirmwareSpecPb = original.clone().into();
-        let converted: FirmwareSpec = proto.into();
-        assert_eq!(original.part_number, converted.part_number);
-        assert_eq!(original.psid, converted.psid);
-        assert_eq!(original.version, converted.version);
-    }
 
     #[test]
     fn test_flash_options_default() {

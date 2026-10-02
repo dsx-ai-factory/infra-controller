@@ -40,6 +40,10 @@ pub struct Config {
     pub listen_address: SocketAddr,
     #[serde(default = "Defaults::metrics_address")]
     pub metrics_address: SocketAddr,
+    #[serde(default = "Defaults::api_listen_address")]
+    pub api_listen_address: SocketAddr,
+    #[serde(default = "Defaults::api_allowed_client_spiffe_id")]
+    pub api_allowed_client_spiffe_id: String,
     #[serde(
         rename = "carbide_url",
         default = "Defaults::carbide_uri",
@@ -65,6 +69,8 @@ pub struct Config {
     pub override_ipmi_port: Option<u16>,
     #[serde(default)]
     pub insecure_ipmi_ciphers: bool,
+    #[serde(default = "Defaults::ipmitool_path")]
+    pub ipmitool_path: PathBuf,
     #[serde(default)]
     pub force_deactivate_conflicting_ipmi_sol_sessions: bool,
     #[serde(default = "Defaults::root_ca_path")]
@@ -200,6 +206,8 @@ impl Config {
         let Self {
             listen_address,
             metrics_address,
+            api_listen_address,
+            api_allowed_client_spiffe_id,
             authorized_keys_path: _,
             override_bmcs: _,
             host_key_path,
@@ -210,6 +218,7 @@ impl Config {
             override_bmc_ssh_port: _,
             override_ipmi_port: _,
             insecure_ipmi_ciphers,
+            ipmitool_path,
             force_deactivate_conflicting_ipmi_sol_sessions,
             forge_root_ca_path,
             client_cert_path,
@@ -235,6 +244,7 @@ impl Config {
         let carbide_uri = carbide_uri.to_string();
         let listen_address = listen_address.to_string();
         let metrics_address = metrics_address.to_string();
+        let api_listen_address = api_listen_address.to_string();
         let log_rotate_max_size = log_rotate_max_size
             .format()
             .with_base(size::Base::Base2)
@@ -276,6 +286,12 @@ listen_address = {listen_address:?}
 ## Address to listen on for prometheus metrics requests (HTTP)
 metrics_address = {metrics_address:?}
 
+## Address for the private console-log gRPC API.
+api_listen_address = {api_listen_address:?}
+
+## The only SPIFFE identity permitted to call the private API.
+api_allowed_client_spiffe_id = {api_allowed_client_spiffe_id:?}
+
 ## Address for carbide-api
 carbide_url = {carbide_uri:?}
 
@@ -316,6 +332,9 @@ insecure = {insecure}
 
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = {insecure_ipmi_ciphers}
+
+## Path to the ipmitool executable.
+ipmitool_path = {ipmitool_path:?}
 
 ## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
 ## whether the existing session is stale or belongs to an active operator, so enabling this may
@@ -456,6 +475,8 @@ impl Default for Config {
         Self {
             listen_address: Defaults::listen_address(),
             metrics_address: Defaults::metrics_address(),
+            api_listen_address: Defaults::api_listen_address(),
+            api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
             host_key_path: Defaults::host_key_path(),
             carbide_uri: Defaults::carbide_uri(),
             forge_root_ca_path: Defaults::root_ca_path(),
@@ -479,6 +500,7 @@ impl Default for Config {
             override_bmcs: None,
             insecure: false,
             insecure_ipmi_ciphers: false,
+            ipmitool_path: Defaults::ipmitool_path(),
             force_deactivate_conflicting_ipmi_sol_sessions: false,
             override_bmc_ssh_host: None,
             admin_certificate_role: None,
@@ -523,8 +545,22 @@ impl Defaults {
             .expect("BUG: default listen_address is invalid")
     }
 
+    pub fn api_listen_address() -> SocketAddr {
+        "[::]:1079"
+            .parse()
+            .expect("BUG: default api_listen_address is invalid")
+    }
+
+    pub fn api_allowed_client_spiffe_id() -> String {
+        "spiffe://nico.local/nico-system/sa/nico-api".to_string()
+    }
+
     pub fn host_key_path() -> PathBuf {
         "/etc/ssh/ssh_host_ed25519_key".into()
+    }
+
+    pub fn ipmitool_path() -> PathBuf {
+        "ipmitool".into()
     }
 
     pub fn dpus() -> bool {

@@ -25,24 +25,22 @@ import (
 
 // GetAllMachineHealthReportHandler lists all health reports for a given Machine
 type GetAllMachineHealthReportHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetAllMachineHealthReportHandler returns a new GetAllMachineHealthReportHandler
 func NewGetAllMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) GetAllMachineHealthReportHandler {
 	return GetAllMachineHealthReportHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle godoc
 // @Summary Get all Machine Health Reports
 // @Description Get all health report overrides for a Machine.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -51,7 +49,7 @@ func NewGetAllMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientP
 // @Success 200 {array} model.APIMachineHealthReportEntry
 // @Router /v2/org/{org}/nico/machine/{machineId}/health-report [get]
 func (h GetAllMachineHealthReportHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "List", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "List", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -163,24 +161,22 @@ func (h GetAllMachineHealthReportHandler) Handle(c echo.Context) error {
 
 // CreateOrUpdateMachineHealthReportHandler creates or updates a health report for a given Machine
 type CreateOrUpdateMachineHealthReportHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateMachineHealthReportHandler returns a new CreateOrUpdateMachineHealthReportHandler
 func NewCreateOrUpdateMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateOrUpdateMachineHealthReportHandler {
 	return CreateOrUpdateMachineHealthReportHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle godoc
 // @Summary Insert Machine Health Report
 // @Description Add or update a Machine health report override.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -190,7 +186,7 @@ func NewCreateOrUpdateMachineHealthReportHandler(dbSession *cdb.Session, scp *sc
 // @Success 200 {object} model.APIMachineHealthReportEntry
 // @Router /v2/org/{org}/nico/machine/{machineId}/health-report [put]
 func (h CreateOrUpdateMachineHealthReportHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "Insert", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "Insert", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -309,24 +305,22 @@ func (h CreateOrUpdateMachineHealthReportHandler) Handle(c echo.Context) error {
 
 // DeleteMachineHealthReportHandler deletes a health report for a given Machine
 type DeleteMachineHealthReportHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteMachineHealthReportHandler returns a new DeleteMachineHealthReportHandler
 func NewDeleteMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteMachineHealthReportHandler {
 	return DeleteMachineHealthReportHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle godoc
 // @Summary Remove Machine Health Report
 // @Description Remove a Machine health report override.
-// @Tags health-report
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -336,7 +330,7 @@ func NewDeleteMachineHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientP
 // @Success 204
 // @Router /v2/org/{org}/nico/machine/{machineId}/health-report/{source} [delete]
 func (h DeleteMachineHealthReportHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "Remove", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineHealthReport", "Remove", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

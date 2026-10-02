@@ -177,23 +177,78 @@ providers: {}
 }
 
 func TestNewProviderRegistry(t *testing.T) {
-	registry, err := NewProviderRegistry(
-		context.Background(),
-		cmconfig.Config{
-			ProviderConfigs: map[string]providerapi.ProviderConfig{
-				"alpha": testServiceProviderConfig{name: "alpha"},
-				"beta":  testServiceProviderConfig{name: "beta"},
+	t.Run("validation errors", testNewProviderRegistryErrors)
+	t.Run("success", func(t *testing.T) {
+		registry, err := NewProviderRegistry(
+			context.Background(),
+			cmconfig.Config{
+				ProviderConfigs: map[string]providerapi.ProviderConfig{
+					"alpha": testServiceProviderConfig{name: "alpha"},
+					"beta":  testServiceProviderConfig{name: "beta"},
+				},
 			},
-		},
-	)
+		)
 
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"alpha", "beta"}, registry.List())
-	assert.True(t, registry.Has("alpha"))
-	assert.True(t, registry.Has("beta"))
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"alpha", "beta"}, registry.List())
+		assert.True(t, registry.Has("alpha"))
+		assert.True(t, registry.Has("beta"))
+		require.NoError(t, registry.Close())
+	})
+	for _, mismatch := range []bool{false, true} {
+		name := "construction fails after creating a provider"
+		if mismatch {
+			name = "created provider has wrong name"
+		}
+		t.Run(name, func(t *testing.T) {
+			var created, closed int
+			createErr := errors.New("construction failed")
+			configs := make(map[string]providerapi.ProviderConfig)
+			for _, providerName := range []string{"alpha", "beta"} {
+				configs[providerName] = cleanupTestConfig{name: providerName, create: func() (providerapi.Provider, error) {
+					created++
+					if created == 2 && !mismatch {
+						return nil, createErr
+					}
+					name := providerName
+					if created == 2 {
+						name = "wrong"
+					}
+					return cleanupTestProvider{name: name, close: func() { closed++ }}, nil
+				}}
+			}
+			registry, err := NewProviderRegistry(context.Background(), cmconfig.Config{ProviderConfigs: configs})
+			require.Nil(t, registry)
+			if mismatch {
+				require.ErrorIs(t, err, providerapi.ErrProviderNameMismatch)
+				assert.Equal(t, 2, closed)
+			} else {
+				require.ErrorIs(t, err, createErr)
+				assert.Equal(t, 1, closed)
+			}
+		})
+	}
 }
 
-func TestNewProviderRegistryErrors(t *testing.T) {
+type cleanupTestConfig struct {
+	name   string
+	create func() (providerapi.Provider, error)
+}
+
+func (c cleanupTestConfig) Name() string { return c.name }
+func (c cleanupTestConfig) NewProvider(context.Context) (providerapi.Provider, error) {
+	return c.create()
+}
+
+type cleanupTestProvider struct {
+	name  string
+	close func()
+}
+
+func (p cleanupTestProvider) Name() string { return p.name }
+func (p cleanupTestProvider) Close() error { p.close(); return nil }
+
+func testNewProviderRegistryErrors(t *testing.T) {
 	rootErr := errors.New("boom")
 
 	tests := []struct {

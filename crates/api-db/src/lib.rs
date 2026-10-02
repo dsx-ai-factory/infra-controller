@@ -19,16 +19,20 @@
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 pub mod attestation;
+pub mod attestation_profile;
 pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod conditional_write;
+mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
+pub mod direct_dispatch_firmware_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
@@ -37,10 +41,12 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;
@@ -57,6 +63,7 @@ pub mod machine_boot_override;
 pub mod machine_desired_boot_interface;
 pub mod machine_interface;
 pub mod machine_interface_address;
+pub mod machine_lldp_neighbor;
 pub mod machine_pending_action;
 pub mod machine_topology;
 pub mod machine_validation;
@@ -71,6 +78,7 @@ pub mod network_devices;
 pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
+pub mod nic_firmware;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -98,6 +106,7 @@ pub mod switch;
 pub mod tenant;
 pub mod tenant_identity_config;
 pub mod tenant_keyset;
+pub mod tenant_prefix_overlap;
 pub mod trim_table;
 pub mod vpc;
 pub mod vpc_dpu_loopback;
@@ -105,10 +114,15 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 use std::backtrace::{Backtrace, BacktraceStatus};
+use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
@@ -118,6 +132,7 @@ use std::pin::Pin;
 use carbide_instrument::{Event, LabelValue, emit};
 #[cfg(test)]
 pub(crate) use carbide_macros::sqlx_test;
+use carbide_uuid::machine::InvalidMachineType;
 use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
@@ -408,6 +423,26 @@ pub enum DatabaseError {
     TryAgain,
     #[error("no site-wide rotation target for credential type: {0:?}")]
     MissingSitewideRotationTarget(crate::credential_rotation::CredentialRotationType),
+}
+
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for DatabaseError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
+impl From<InvalidMachineType> for DatabaseError {
+    fn from(value: InvalidMachineType) -> Self {
+        Self::internal(value.to_string())
+    }
 }
 
 impl DatabaseError {

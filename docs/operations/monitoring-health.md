@@ -1,4 +1,4 @@
-# Monitoring and Health <Badge intent="launch" minimal>New</Badge>
+# Monitoring and Health
 
 This page covers monitoring and health workflows for NICo sites after
 deployment: hardware health, DPU health, aggregate host health, health
@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -42,6 +43,21 @@ more classifications. Classifications define operational impact. For example,
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
 
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
+
 ## Hardware Health Monitoring
 
 NICo monitors hardware through the hardware health service. The Helm chart is
@@ -55,18 +71,13 @@ firmware, log, NMX-T, NMX-C, NVUE REST, and leak-related data when configured.
 
 ### Helm Configuration
 
-Enable hardware health in Helm values:
-
-```yaml
-nico-hardware-health:
-  enabled: true
-```
+`nico-hardware-health` is a core component of the umbrella chart and is
+always installed; it has no `enabled` toggle.
 
 Enable metrics scraping with its ServiceMonitor:
 
 ```yaml
 nico-hardware-health:
-  enabled: true
   replicas: 1
 
   serviceMonitor:
@@ -159,6 +170,7 @@ Collector defaults from the example config:
 | Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
 | Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
+| Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
 | NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
 | NMX-C collector | `heartbeat_rate` | `30` | Subscribe heartbeat for NMX-C `DomainStateInfo` updates. |
@@ -168,7 +180,7 @@ Collector defaults from the example config:
 | NVUE REST collector | `poll_interval` | `"1m"` | NVUE REST polling cadence. |
 | Leak processor | `minimum_alerts_per_report` | `1` | Leak alert threshold for health reports. |
 | Rack leak processor | `leaking_tray_threshold` | `2` | Rack-level leak threshold. |
-| Metrics | `endpoint` | `"0.0.0.0:9009"` | Metrics listener. |
+| Metrics | `endpoint` | `"0.0.0.0:9009"` | Explicit IPv4 listener override. The binary default is `[::]:9009` (dual-stack with IPv4 fallback when IPv6 socket setup is unavailable). [NICo Metrics](../observability/metrics.md#metrics-services-and-ipv6) describes configuration precedence. |
 | Metrics | `prefix` | `"carbide_hardware_health"` | Hardware-health metric prefix. |
 
 NMX-C connects directly to eligible primary switch-host gRPC endpoints whose
@@ -306,7 +318,7 @@ Keep the following in mind when configuring health report records:
 
 - *The setting is per-target*. This means that, for example, a debugging destination can receive detail, while a long-term store receives the routing, count, and success evidence without needing to store free-form alert messages.
 
-- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one.
+- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one. Sensor alerts also carry `powersupply_id` and `physical_context` when the sensor reports them, so a consumer can attribute the alert to a power supply without parsing the sensor name.
 
 - `health_report.alerts.dropped` appears only when details are enabled *and* the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
 
@@ -344,6 +356,8 @@ Key `nico-dpu-agent` chart values:
 | `dhcp_server.interface_prepend` | empty by default | Optional DHCP interface prefix argument. |
 | `dhcp_server.service_name` | set by DPF service integration | DHCP gRPC service name. |
 | `fmds.service_name` | set by DPF service integration | FMDS gRPC service name. |
+| `lldpSidecar.resources.requests` | `10m` CPU, `64Mi` memory | Default scheduler request for DPF LLDP collection. |
+| `lldpSidecar.resources.limits` | `250m` CPU, `128Mi` memory | Default resource limit for DPF LLDP collection. |
 
 The DaemonSet renders these core arguments:
 
@@ -374,6 +388,24 @@ The pod sets these runtime environment variables:
 | `NVUE_USERNAME` | NVUE user configured for the deployment. |
 | `NVUE_PASSWORD` | Secret key from `hbn.nvue_credentials_secret_name`. |
 | `RUST_LOG` | `info`. |
+
+### DPF LLDP Collection
+
+A DPF-managed DPU pod includes a `nico-lldp-sidecar` container. It captures
+LLDP-MED data through the DPU host's `lldpcli` and publishes `/data/lldp` for
+the `nico-dpu-agent` container. A successful capture is refreshed every 120
+seconds; a failure is retried after 30 seconds. The previous successful file is
+retained across a collection failure, but the agent rejects it after five
+minutes.
+
+When physical uplink discovery is missing or stale, inspect both containers in
+the DPU pod. Confirm that the sidecar can execute the host `lldpcli`, that
+`/data/lldp` is being refreshed, and that the agent has not rejected the file as
+too old. Centralized DPF logs identify the sidecar with
+`systemd.unit=nico-lldp-sidecar`. A systemd-managed DPU does not use the
+snapshot; its agent queries the local `lldpd` service directly.
+
+The deployment and freshness contract is documented in [DPU LLDP Collection](../dpu-management/dpu_configuration.md#dpu-lldp-collection).
 
 ### Common DPU Alerts
 
@@ -524,6 +556,7 @@ for common workflows:
 | `MarkHealthy` | Force healthy. |
 | `StopRebootForAutomaticRecoveryFromStateMachine` | Block automatic recovery reboots during manual work. |
 | `TenantReportedIssue` | Tenant-reported issue while releasing an instance. |
+| `RequestOnlineRepair` | Keep an unhealthy instance assigned until the online repair override is cleared. |
 | `RequestRepair` | Tenant-reported issue requiring repair. |
 
 Examples:

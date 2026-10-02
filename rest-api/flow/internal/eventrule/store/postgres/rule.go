@@ -14,6 +14,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 )
 
 // GetByID returns one persisted rule.
@@ -39,14 +40,49 @@ func (s *Store) GetByID(
 // List returns persisted rules matching the filter in stable ID order.
 func (s *Store) List(
 	ctx context.Context,
-	filter eventrule.RuleFilter,
-) ([]*eventrule.Rule, error) {
-	if !filter.IncludesOrigin(eventrule.RuleOriginPersisted) {
-		return nil, nil
+	request eventrule.RuleListRequest,
+) (eventrule.RuleListPage, error) {
+	if err := request.Validate(); err != nil {
+		return eventrule.RuleListPage{}, err
+	}
+
+	countQuery := eventRuleListQuery(
+		s.pg.DB.NewSelect().Model((*dbmodel.EventRule)(nil)),
+		request.Filter,
+	)
+	total, err := countQuery.Count(ctx)
+	if err != nil {
+		return eventrule.RuleListPage{}, err
 	}
 
 	var records []dbmodel.EventRule
-	query := s.pg.DB.NewSelect().Model(&records)
+	query := eventRuleListQuery(s.pg.DB.NewSelect().Model(&records), request.Filter)
+	err = query.
+		OrderExpr("er.id ASC").
+		Offset(request.Offset).
+		Limit(request.Limit).
+		Scan(ctx)
+	if err != nil {
+		return eventrule.RuleListPage{}, err
+	}
+
+	rules := make([]*eventrule.Rule, len(records))
+	for i := range records {
+		rule, err := converterdao.EventRuleFrom(&records[i])
+		if err != nil {
+			return eventrule.RuleListPage{}, err
+		}
+
+		rules[i] = rule
+	}
+
+	return eventrule.RuleListPage{Rules: rules, Total: total}, nil
+}
+
+func eventRuleListQuery(
+	query *bun.SelectQuery,
+	filter eventrule.RuleFilter,
+) *bun.SelectQuery {
 	if filter.EventType != nil {
 		query = query.Where("er.event_type = ?", string(*filter.EventType))
 	}
@@ -54,21 +90,7 @@ func (s *Store) List(
 		query = query.Where("er.enabled = ?", *filter.Enabled)
 	}
 
-	if err := query.OrderExpr("er.id ASC").Scan(ctx); err != nil {
-		return nil, err
-	}
-
-	rules := make([]*eventrule.Rule, len(records))
-	for i := range records {
-		rule, err := converterdao.EventRuleFrom(&records[i])
-		if err != nil {
-			return nil, err
-		}
-
-		rules[i] = rule
-	}
-
-	return rules, nil
+	return query
 }
 
 // Create stores a new persisted rule using database-owned timestamps.
@@ -159,7 +181,41 @@ func (s *Store) SetEnabled(
 	id uuid.UUID,
 	enabled bool,
 ) error {
-	return s.updateRule(ctx, id, "enabled = ?", enabled)
+	return s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var rule dbmodel.EventRule
+		err := tx.NewSelect().
+			Model(&rule).
+			Column("enabled").
+			Where("er.id = ?", id).
+			For("UPDATE").
+			Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
+		}
+		if err != nil {
+			return err
+		}
+		if rule.Enabled == enabled {
+			return nil
+		}
+
+		now, err := s.timestamp(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.NewUpdate().
+			Model((*dbmodel.EventRule)(nil)).
+			Set("enabled = ?", enabled).
+			Set("updated_at = ?", now).
+			Where("id = ?", id).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+
+		return requireRuleMutation(result, id)
+	})
 }
 
 func (s *Store) updateRule(

@@ -185,6 +185,17 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 			activeVersions = controllerDpuExtensionService.ActiveVersions
 		}
 
+		var dpuTarget *string
+		if dpuExtensionService.ServiceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+			controllerDpuTarget, targetErr := cdbm.DpuExtensionServiceDpuTargetFromProto(controllerDpuExtensionService.DpuTarget)
+			if targetErr != nil {
+				slogger.Error().Err(targetErr).Msg("failed to map DPU Extension Service DPU target")
+			} else if controllerDpuTarget != nil &&
+				(dpuExtensionService.DpuTarget == nil || *dpuExtensionService.DpuTarget != *controllerDpuTarget) {
+				dpuTarget = controllerDpuTarget
+			}
+		}
+
 		// Core reconciles a DPF Helm chart asynchronously, so its lifecycle state owns the
 		// status and supersedes the presence-based status above. Without a usable state the
 		// stored status is kept rather than inferred from the service being reported.
@@ -203,6 +214,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 
 		needsUpdate := status != nil ||
 			isMissingOnSite != nil ||
+			dpuTarget != nil ||
 			version != nil ||
 			versionInfo != nil ||
 			activeVersions != nil
@@ -219,6 +231,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 		if needsUpdate {
 			_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
 				DpuExtensionServiceID: dpuExtensionService.ID,
+				DpuTarget:             dpuTarget,
 				Version:               version,
 				VersionInfo:           versionInfo,
 				ActiveVersions:        activeVersions,
@@ -245,7 +258,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 	dpuExtensionServicesToDelete := []*cdbm.DpuExtensionService{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if inventory.InventoryPage == nil || inventory.InventoryPage.TotalPages == 0 || (inventory.InventoryPage.CurrentPage == inventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(inventory.GetInventoryPage()) {
 		for _, dpuExtensionService := range existingDpuExtensionServiceIDMap {
 			if !reportedDpuExtensionServiceIDMap[dpuExtensionService.ID] {
 				dpuExtensionServicesToDelete = append(dpuExtensionServicesToDelete, dpuExtensionService)

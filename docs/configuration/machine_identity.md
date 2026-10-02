@@ -1,4 +1,4 @@
-# Machine Identity (Day 1) <Badge intent="info">v2.0</Badge> <Badge intent="launch" minimal>New</Badge>
+# Machine Identity (Day 1) <Badge intent="info">v2.0</Badge>
 
 Operator guide for per-organization **machine identity** configuration: JWT-SVID issuance for tenant workloads, optional RFC 8693 token delegation, discovery endpoints, verification, and signing-key rotation.
 

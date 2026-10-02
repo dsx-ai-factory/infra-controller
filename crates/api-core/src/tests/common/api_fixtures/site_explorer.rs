@@ -20,15 +20,13 @@ use std::iter;
 use std::net::IpAddr;
 
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
 use carbide_uuid::machine_validation::MachineValidationId;
-use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use db::machine_interface::find_by_mac_address;
 use db::{
-    DatabaseError, expected_machine as db_expected_machine, power_shelf as db_power_shelf,
-    rack as db_rack, switch as db_switch,
+    DatabaseError, expected_machine as db_expected_machine, rack as db_rack, switch as db_switch,
 };
 use futures_util::FutureExt;
 use health_report::HealthReport;
@@ -42,8 +40,6 @@ use model::machine::{
     MachineState, MachineValidatingState, ManagedHostState, ManagedHostStateSnapshot,
     MeasuringState, SpdmMeasuringState, ValidationState,
 };
-use model::power_shelf::power_shelf_id::from_hardware_info;
-use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::RackConfig;
 use model::site_explorer::{Chassis, EndpointExplorationReport, EndpointType};
 use model::switch::{NewSwitch, SwitchConfig};
@@ -66,9 +62,10 @@ use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
 };
+use crate::tests::common::api_fixtures::test_managed_host::TestPredictedManagedHost;
 use crate::tests::common::api_fixtures::{
-    TestEnv, TestManagedHost, forge_agent_control, get_machine_validation_runs,
-    machine_validation_completed, persist_machine_validation_result, update_machine_validation_run,
+    TestEnv, forge_agent_control, get_machine_validation_runs, machine_validation_completed,
+    persist_machine_validation_result, update_machine_validation_run,
 };
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
@@ -89,7 +86,7 @@ async fn ensure_admin_interface_primary(
 
 async fn current_host_state_and_cleanup_needed(
     env: &TestEnv,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
 ) -> (ManagedHostState, bool) {
     let mut txn = env.db_txn().await;
     let machine = db::machine::find_one(
@@ -107,7 +104,10 @@ async fn current_host_state_and_cleanup_needed(
     )
 }
 
-async fn complete_initial_discovery_cleanup_if_needed(env: &TestEnv, host_machine_id: MachineId) {
+async fn complete_initial_discovery_cleanup_if_needed(
+    env: &TestEnv,
+    host_machine_id: HostMachineId,
+) {
     // Keep the shared fixture usable with both lifecycle shapes: older flows stay in discovery,
     // while newer flows require state-machine-owned cleanup before discovery can complete.
     let mut state = env
@@ -182,7 +182,7 @@ async fn complete_initial_discovery_cleanup_if_needed(env: &TestEnv, host_machin
 
     env.api
         .cleanup_machine_completed(Request::new(rpc::MachineCleanupInfo {
-            machine_id: host_machine_id.into(),
+            machine_id: Some(host_machine_id.into()),
             ..Default::default()
         }))
         .await
@@ -208,7 +208,7 @@ pub(in crate::tests) struct MockExploredHost<'a> {
     pub(in crate::tests) dpu_bmc_ips: HashMap<u8, IpAddr>,
     pub(in crate::tests) host_dhcp_response: Option<forge::DhcpRecord>,
     pub(in crate::tests) machine_discovery_response: Option<forge::MachineDiscoveryResult>,
-    pub(in crate::tests) dpu_machine_ids: HashMap<u8, MachineId>,
+    pub(in crate::tests) dpu_machine_ids: HashMap<u8, DpuMachineId>,
 }
 
 impl MockExploredHost<'_> {
@@ -510,16 +510,11 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .id;
-
-        for machine_id in self.dpu_machine_ids.values() {
-            create_machine_inventory(self.test_env, *machine_id).await;
-        }
+                .unwrap()[&dpu_machine_id];
 
         self.test_env
             .run_machine_state_controller_iteration_until_state_matches(
@@ -539,11 +534,15 @@ impl<'a> MockExploredHost<'a> {
                                     },
                                 )
                             })
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
             .await;
+
+        for machine_id in self.dpu_machine_ids.values() {
+            create_machine_inventory(self.test_env, *machine_id).await;
+        }
 
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {
@@ -576,7 +575,7 @@ impl<'a> MockExploredHost<'a> {
                 rpc::forge_agent_control_response::LegacyAction::Discovery as i32
             );
 
-            discovery_completed(self.test_env, *machine_id).await;
+            discovery_completed(self.test_env, machine_id).await;
         }
 
         txn.commit().await.unwrap();
@@ -592,7 +591,7 @@ impl<'a> MockExploredHost<'a> {
                             .clone()
                             .into_values()
                             .map(|machine_id| (machine_id, DpuInitState::WaitingForNetworkConfig))
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
@@ -608,12 +607,11 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .id;
+                .unwrap()[&dpu_machine_id];
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -630,7 +628,7 @@ impl<'a> MockExploredHost<'a> {
                             .clone()
                             .into_values()
                             .map(|machine_id| (machine_id, DpuInitState::Init))
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
@@ -667,7 +665,7 @@ impl<'a> MockExploredHost<'a> {
                 rpc::forge_agent_control_response::LegacyAction::Discovery as i32
             );
 
-            discovery_completed(self.test_env, *machine_id).await;
+            discovery_completed(self.test_env, machine_id).await;
         }
 
         self.test_env
@@ -681,7 +679,7 @@ impl<'a> MockExploredHost<'a> {
                             .clone()
                             .into_values()
                             .map(|machine_id| (machine_id, DpuInitState::WaitingForNetworkConfig))
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
@@ -714,12 +712,11 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .id;
+                .unwrap()[&dpu_machine_id];
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -736,7 +733,7 @@ impl<'a> MockExploredHost<'a> {
                             .clone()
                             .into_values()
                             .map(|machine_id| (machine_id, DpuInitState::Init))
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
@@ -766,7 +763,7 @@ impl<'a> MockExploredHost<'a> {
         }
 
         for machine_id in self.dpu_machine_ids.values() {
-            discovery_completed(self.test_env, *machine_id).await;
+            discovery_completed(self.test_env, machine_id).await;
         }
 
         self.test_env
@@ -780,7 +777,7 @@ impl<'a> MockExploredHost<'a> {
                             .clone()
                             .into_values()
                             .map(|machine_id| (machine_id, DpuInitState::WaitingForNetworkConfig))
-                            .collect::<HashMap<MachineId, DpuInitState>>(),
+                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
                     },
                 },
             )
@@ -792,11 +789,13 @@ impl<'a> MockExploredHost<'a> {
     }
 
     pub(in crate::tests) async fn host_state_controller_iterations(self) -> Self {
-        let host_machine_id = self
+        let host_machine_id: HostMachineId = self
             .machine_discovery_response
             .as_ref()
             .unwrap()
             .machine_id
+            .unwrap()
+            .try_into()
             .unwrap();
 
         let expected_state = self.managed_host.expected_state.clone();
@@ -860,14 +859,14 @@ impl<'a> MockExploredHost<'a> {
                     ),
                     ..Default::default()
                 }),
-                machine_id: Some(host_machine_id),
+                machine_id: Some(host_machine_id.into()),
             }))
             .await
             .expect("Failed to add hardware health report to newly created machine");
 
-        discovery_completed(self.test_env, host_machine_id).await;
+        discovery_completed(self.test_env, &host_machine_id).await;
         self.test_env.run_ib_fabric_monitor_iteration().await;
-        host_uefi_setup(self.test_env, &host_machine_id).await;
+        host_uefi_setup(self.test_env, host_machine_id).await;
 
         let stop_state = self
             .test_env
@@ -1080,11 +1079,13 @@ impl<'a> MockExploredHost<'a> {
         machine_validation_result_data: Option<rpc::forge::MachineValidationResult>,
         error: Option<String>,
     ) -> Self {
-        let host_machine_id = self
+        let host_machine_id: HostMachineId = self
             .machine_discovery_response
             .as_ref()
             .unwrap()
             .machine_id
+            .unwrap()
+            .try_into()
             .unwrap();
         let mut machine_validation_result = machine_validation_result_data.unwrap_or_default();
         complete_initial_discovery_cleanup_if_needed(self.test_env, host_machine_id).await;
@@ -1099,14 +1100,14 @@ impl<'a> MockExploredHost<'a> {
                     ),
                     ..Default::default()
                 }),
-                machine_id: Some(host_machine_id),
+                machine_id: Some(host_machine_id.into()),
             }))
             .await
             .expect("Failed to add hardware health report to newly created machine");
 
-        discovery_completed(self.test_env, host_machine_id).await;
+        discovery_completed(self.test_env, &host_machine_id).await;
         self.test_env.run_ib_fabric_monitor_iteration().await;
-        host_uefi_setup(self.test_env, &host_machine_id).await;
+        host_uefi_setup(self.test_env, host_machine_id).await;
 
         self.test_env
             .run_machine_state_controller_iteration_until_state_matches(
@@ -1279,7 +1280,7 @@ impl<'a> MockExploredHost<'a> {
                                 failed_at: chrono::Utc::now(),
                                 source: FailureSource::Scout,
                             },
-                            machine_id: host_machine_id,
+                            machine_id: host_machine_id.into(),
                             retry_count: 0,
                         },
                     )
@@ -1331,7 +1332,7 @@ impl<'a> MockExploredHost<'a> {
 
     async fn assign_sku_if_needed(
         &self,
-        host_machine_id: &MachineId,
+        host_machine_id: &HostMachineId,
         state: ManagedHostState,
         expected_state: &ManagedHostState,
     ) -> ManagedHostState {
@@ -1740,7 +1741,7 @@ pub(in crate::tests) async fn new_host_with_machine_validation(
 pub(in crate::tests) async fn new_dpu(
     env: &TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<MachineId> {
+) -> eyre::Result<DpuMachineId> {
     register_expected_machine(env, &config, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, config);
 
@@ -1775,7 +1776,7 @@ pub(in crate::tests) async fn new_dpu(
 pub(in crate::tests) async fn new_dpu_in_network_install(
     env: &TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<TestManagedHost> {
+) -> eyre::Result<TestPredictedManagedHost> {
     register_expected_machine(env, &config, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, config);
 
@@ -1812,68 +1813,13 @@ pub(in crate::tests) async fn new_dpu_in_network_install(
         .unwrap()
         .id;
 
-    Ok(TestManagedHost {
-        id: host_machine_id,
+    Ok(TestPredictedManagedHost {
+        id: host_machine_id
+            .try_into()
+            .expect("discovered host ID should be a valid PredictedHostMachineId"),
         dpu_ids: vec![dpu_machine_id],
         api: env.api.clone(),
     })
-}
-
-/// Creates a new power shelf for testing purposes
-pub(in crate::tests) async fn new_power_shelf(
-    env: &TestEnv,
-    name: Option<String>,
-    capacity: Option<u32>,
-    voltage: Option<u32>,
-    _location: Option<String>,
-) -> eyre::Result<PowerShelfId> {
-    let mut txn = env.pool.begin().await.unwrap();
-
-    // Generate a unique name if not provided
-    let power_shelf_name = name.unwrap_or_else(|| {
-        format!(
-            "Test Power Shelf {}",
-            &uuid::Uuid::new_v4().to_string()[..8]
-        )
-    });
-
-    // Generate power shelf ID using hardware info
-    let power_shelf_serial = &power_shelf_name;
-    let power_shelf_vendor = "NVIDIA";
-    let power_shelf_model = "PowerShelf";
-
-    let power_shelf_id = from_hardware_info(
-        power_shelf_serial,
-        power_shelf_vendor,
-        power_shelf_model,
-        PowerShelfIdSource::ProductBoardChassisSerial,
-        PowerShelfType::Rack,
-    )
-    .map_err(|e| eyre::eyre!("failed to create power shelf ID: {:?}", e))?;
-
-    // Create power shelf configuration
-    let config = PowerShelfConfig {
-        name: power_shelf_name,
-        capacity: capacity.or(Some(100)),
-        voltage: voltage.or(Some(240)),
-    };
-
-    // Create the power shelf
-    let new_power_shelf = NewPowerShelf {
-        id: power_shelf_id,
-        config,
-        bmc_mac_address: None,
-        metadata: None,
-        rack_id: None,
-    };
-
-    let _power_shelf = db_power_shelf::create(&mut txn, &new_power_shelf)
-        .await
-        .map_err(|e| eyre::eyre!("failed to create power shelf: {:?}", e))?;
-
-    txn.commit().await.unwrap();
-
-    Ok(power_shelf_id)
 }
 
 /*
@@ -2090,7 +2036,7 @@ pub(in crate::tests) async fn new_mock_host_with_dpf(
         .boxed()
         .await;
 
-    let dpu_ids: Vec<MachineId> = mock_explored_host
+    let dpu_ids: Vec<DpuMachineId> = mock_explored_host
         .dpu_machine_ids
         .values()
         .copied()

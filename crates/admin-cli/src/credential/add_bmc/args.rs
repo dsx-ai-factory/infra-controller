@@ -60,6 +60,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password,
             mac_address: args.mac_address.map(|mac| mac.to_string()),
             vendor: None,
+            credential_name: None,
         })
     }
 }

@@ -40,7 +40,9 @@ pub async fn metadata_for_domain(
 ) -> Result<DbMetadata, DatabaseError> {
     let domain_name = crate::dns::normalize_domain(domain_name);
 
-    let query = "SELECT m.* FROM domain_metadata m JOIN domains d ON m.id = d.domain_metadata_id WHERE d.name = $1";
+    let query = "SELECT m.allow_axfr_from
+                 FROM domain_metadata m JOIN domains d ON m.id = d.domain_metadata_id
+                 WHERE d.name = $1";
     let metadata: DbMetadata = sqlx::query_as(query)
         .bind(domain_name)
         .fetch_one(&mut **txn)

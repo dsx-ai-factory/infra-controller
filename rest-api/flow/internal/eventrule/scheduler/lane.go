@@ -8,17 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
+	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
 )
 
 type claimExecutionsFunc func(
 	context.Context,
 	eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error)
+) (eventrule.ExecutionClaimBatch, error)
 
 type laneDefinition struct {
 	name          string
@@ -118,36 +119,40 @@ func (l *lane) returnSlot() error {
 func (l *lane) claim(
 	ctx context.Context,
 	owner string,
-) ([]eventrule.ClaimedExecution, error) {
+	claimDuration time.Duration,
+	maxAttempts int,
+) (eventrule.ExecutionClaimBatch, error) {
 	reserved := l.reserveAvailableSlots()
 	if reserved == 0 {
-		return nil, nil
+		return eventrule.ExecutionClaimBatch{}, nil
 	}
 
-	claims, err := l.claimFunc(
+	batch, err := l.claimFunc(
 		ctx,
 		eventrule.ExecutionClaimRequest{
-			Owner: owner,
-			Limit: reserved,
+			Owner:         owner,
+			Limit:         reserved,
+			ClaimDuration: claimDuration,
+			MaxAttempts:   maxAttempts,
 		},
 	)
 	if err != nil {
 		slotErr := l.returnSlots(reserved)
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-			return nil, slotErr
+			return eventrule.ExecutionClaimBatch{}, slotErr
 		}
 
-		return nil, errors.Join(
+		return eventrule.ExecutionClaimBatch{}, errors.Join(
 			fmt.Errorf("claim %s executions: %w", l.name, err),
 			slotErr,
 		)
 	}
 
-	if err := l.returnSlots(reserved - len(claims)); err != nil {
-		return nil, err
+	if err := l.returnSlots(reserved - len(batch.Claims)); err != nil {
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
-	return claims, nil
+	return batch, nil
 }
 
 func (l *lane) startWorkers(
@@ -193,37 +198,24 @@ func (l *lane) dispatch(
 	runtime *runtime,
 ) error {
 	execution := claim.Execution
-	actionExecutor, err := runtime.executors.Executor(execution.Plan.Type())
-	if err != nil {
-		return l.persistResult(
-			ctx,
-			claim,
-			runtime.policy.resultForExecutionError(execution.Attempts, err),
-			runtime,
-		)
-	}
+	var result eventrule.ExecutionResult
 
-	if err := actionExecutor.Execute(
-		ctx,
-		executor.ExecutionRequest{
+	executor, err := runtime.executors.Executor(execution.Plan.Type())
+	if err != nil {
+		result = runtime.policy.resultForExecutionError(execution.Attempts, err)
+	} else {
+		req := eventexecutor.ExecutionRequest{
 			ExecutionID: execution.ID,
 			Plan:        execution.Plan,
-		},
-	); err != nil {
-		return l.persistResult(
-			ctx,
-			claim,
-			runtime.policy.resultForExecutionError(execution.Attempts, err),
-			runtime,
-		)
+		}
+		if err := executor.Execute(ctx, req); err != nil {
+			result = runtime.policy.resultForExecutionError(execution.Attempts, err)
+		} else {
+			result = eventrule.CompletedExecutionResult()
+		}
 	}
 
-	return l.persistResult(
-		ctx,
-		claim,
-		eventrule.CompletedExecutionResult(),
-		runtime,
-	)
+	return l.persistResult(ctx, claim, result, runtime)
 }
 
 func (l *lane) persistResult(

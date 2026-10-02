@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -24,6 +25,19 @@ func TestAPIExploredEndpointGetAllRequest_Validate(t *testing.T) {
 		{
 			name: "valid siteId",
 			req:  APIExploredEndpointGetAllRequest{SiteID: "00000000-0000-0000-0000-000000000001"},
+		},
+		{
+			name: "machine filter",
+			req: APIExploredEndpointGetAllRequest{
+				SiteID: "00000000-0000-0000-0000-000000000001", MachineID: cutil.GetPtr("fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g"),
+			},
+		},
+		{
+			name: "empty machine filter",
+			req: APIExploredEndpointGetAllRequest{
+				SiteID: "00000000-0000-0000-0000-000000000001", MachineID: cutil.GetPtr(""),
+			},
+			wantErr: "cannot be blank",
 		},
 		{
 			name:    "missing siteId",

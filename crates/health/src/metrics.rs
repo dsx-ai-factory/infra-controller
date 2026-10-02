@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +25,6 @@ use dashmap::DashMap;
 use http::Response;
 use http::header::CONTENT_TYPE;
 use hyper::Request;
-use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -35,7 +34,6 @@ use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder, proto,
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 
 use crate::HealthError;
 
@@ -335,7 +333,14 @@ pub struct CollectorRegistry {
 impl CollectorRegistry {
     fn new(id: String, parent: Registry, prefix: impl Into<String>) -> Result<Self, HealthError> {
         let fq_id = id.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-        let desc = Desc::new(fq_id, id, Vec::new(), HashMap::new())?;
+
+        // Prometheus retains descriptor names after unregistering collectors.
+        let desc = Desc::new(
+            "health_collector_registry".to_string(),
+            "Internal health collector registry identity".to_string(),
+            Vec::new(),
+            HashMap::from([("collector_id".to_string(), fq_id)]),
+        )?;
 
         let registry = Box::new(SubRegistry {
             registry: Registry::new(),
@@ -479,10 +484,13 @@ pub struct GaugeMetrics {
     metric_name_prefix: String,
     metric_help: String,
     static_labels: Vec<proto::LabelPair>,
+    static_label_names: HashSet<String>,
     desc: Desc,
 }
 
 impl GaugeMetrics {
+    /// Registers gauge readings with an ID unique to the registry. The registration
+    /// identity does not add labels or change the names returned by `collect()`.
     pub fn new(
         id: String,
         registry: &Registry,
@@ -490,21 +498,35 @@ impl GaugeMetrics {
         metric_help: impl Into<String>,
         static_labels: Vec<(impl Into<String>, impl Into<String>)>,
     ) -> Result<Self, prometheus::Error> {
-        let desc = Desc::new(id.clone(), id, Vec::new(), HashMap::new())?;
+        // Only collect() supplies exported metric names and labels.
+        let desc = Desc::new(
+            "health_gauge_metrics".to_string(),
+            "Internal health gauge collector identity".to_string(),
+            Vec::new(),
+            HashMap::from([("collector_id".to_string(), id)]),
+        )?;
+
+        let mut static_label_names = HashSet::with_capacity(static_labels.len());
+        let static_labels = static_labels
+            .into_iter()
+            .map(|(name, value)| {
+                let name = name.into();
+                static_label_names.insert(name.clone());
+
+                let mut label = LabelPair::new();
+                label.set_name(name);
+                label.set_value(value.into());
+                label
+            })
+            .collect();
+
         let metrics = Self {
             gauges: Arc::new(DashMap::new()),
             current_generation: Arc::new(AtomicU64::new(0)),
             metric_name_prefix: metric_name_prefix.into(),
             metric_help: metric_help.into(),
-            static_labels: static_labels
-                .into_iter()
-                .map(|(name, value)| {
-                    let mut label = LabelPair::new();
-                    label.set_name(name.into());
-                    label.set_value(value.into());
-                    label
-                })
-                .collect(),
+            static_labels,
+            static_label_names,
             desc,
         };
 
@@ -514,6 +536,10 @@ impl GaugeMetrics {
 
     pub fn begin_update(&self) {
         self.current_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_static_label(&self, name: &str) -> bool {
+        self.static_label_names.contains(name)
     }
 
     pub fn record(&self, reading: GaugeReading) {
@@ -530,6 +556,35 @@ impl GaugeMetrics {
                 generation,
             },
         );
+    }
+
+    /// Drops readings with the selected type, unit, and label values. When given,
+    /// label names must match the complete dynamic label set.
+    pub(crate) fn prune(
+        &self,
+        metric_type: Option<&str>,
+        labels: &[(Cow<'static, str>, String)],
+        unit: Option<&str>,
+        label_names: Option<&[Cow<'static, str>]>,
+    ) {
+        self.gauges.retain(|_, data| {
+            let matches = metric_type.is_none_or(|kind| data.metric_type == kind)
+                && labels.iter().all(|label| data.labels.contains(label))
+                && unit.is_none_or(|unit| data.unit == unit)
+                && label_names.is_none_or(|names| {
+                    data.labels.len() == names.len()
+                        && names
+                            .iter()
+                            .all(|name| data.labels.iter().any(|(actual, _)| actual == name))
+                });
+
+            !matches
+        });
+    }
+
+    /// Removes one reading by the key used when it was recorded.
+    pub(crate) fn prune_key(&self, key: &str) {
+        self.gauges.remove(&GaugeKey::from(key));
     }
 
     pub fn sweep_stale(&self) {
@@ -597,7 +652,7 @@ pub async fn run_metrics_server(
     metrics_endpoint: std::net::SocketAddr,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<(), BoxedErr> {
-    let listener = TcpListener::bind(metrics_endpoint)
+    let listener = metrics_endpoint::bind_tcp_listener(metrics_endpoint)
         .await
         .map_err(|e| Box::new(e) as BoxedErr)?;
 
@@ -628,8 +683,8 @@ pub async fn run_metrics_server(
     }
 }
 
-fn serve_request(
-    req: Request<Incoming>,
+fn serve_request<B>(
+    req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
     match req.uri().path() {
@@ -641,7 +696,7 @@ fn serve_request(
         "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
         "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
         _ => Ok(Response::builder()
-            .status(http::StatusCode::OK)
+            .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("not found; use /metrics, /telemetry, or /livez".to_string())
             .expect("BUG: Response::builder error")),
@@ -700,27 +755,137 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collector_registry_sanitizes_descriptor_fq_name() {
-        for (id, expected_fq_name) in [
-            (
-                "sensor_collector_10.0.0.1:443",
-                "sensor_collector_10_0_0_1_443",
-            ),
-            (
-                "log_collector_bmc-01.example.com",
-                "log_collector_bmc_01_example_com",
-            ),
-            (
-                "collector with spaces/slashes",
-                "collector_with_spaces_slashes",
-            ),
-        ] {
-            let registry = CollectorRegistry::new(id.to_string(), Registry::new(), "test_prefix")
-                .expect("collector registry should accept sanitized id");
+    fn unknown_metrics_route_returns_not_found() {
+        let request = Request::builder()
+            .uri("/definitely-not-a-route")
+            .body(())
+            .expect("test request should be valid");
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
 
-            assert_eq!(registry.registry.desc.fq_name, expected_fq_name);
-            assert_eq!(registry.registry.desc.help, id);
+        let response =
+            serve_request(request, metrics_manager).expect("request should produce a response");
+
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+        assert_eq!(
+            response.body(),
+            "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn collector_registry_metadata_is_fixed_across_identities() {
+        let parent = Registry::new();
+        let ids = ["sensor_10.0.0.1:443", "log_bmc-01.example.com"];
+
+        let collectors: Vec<_> = ids
+            .iter()
+            .map(|id| CollectorRegistry::new(id.to_string(), parent.clone(), "test").unwrap())
+            .collect();
+
+        for collector in &collectors {
+            assert_eq!(collector.registry.desc.fq_name, "health_collector_registry");
+
+            assert_eq!(
+                collector.registry.desc.dim_hash,
+                collectors[0].registry.desc.dim_hash
+            );
         }
+
+        assert_ne!(
+            collectors[0].registry.desc.id,
+            collectors[1].registry.desc.id
+        );
+
+        assert!(matches!(
+            CollectorRegistry::new(ids[0].to_string(), parent.clone(), "test"),
+            Err(HealthError::PrometheusError(prometheus::Error::AlreadyReg))
+        ));
+
+        assert!(matches!(
+            CollectorRegistry::new("sensor_10_0_0_1_443".to_string(), parent.clone(), "test"),
+            Err(HealthError::PrometheusError(prometheus::Error::AlreadyReg))
+        ));
+
+        drop(collectors);
+
+        CollectorRegistry::new(ids[0].to_string(), parent, "test")
+            .expect("dropped collector identity must register again");
+    }
+
+    #[test]
+    fn gauge_registration_identity_preserves_export_and_unregister() {
+        let collector = CollectorRegistry::new("owner".to_string(), Registry::new(), "test")
+            .expect("collector registry");
+
+        let gauges: Vec<_> = ["endpoint_a", "endpoint_b"]
+            .into_iter()
+            .map(|id| {
+                collector
+                    .create_gauge_metrics(
+                        id.to_string(),
+                        "Sensor readings",
+                        vec![("endpoint".into(), id.to_string())],
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        for gauge in &gauges {
+            gauge.record(
+                GaugeReading::new("reading", "temperature", "sensor", "celsius", 42.0)
+                    .with_labels(vec![("channel".into(), "inlet".to_string())]),
+            );
+        }
+
+        assert_eq!(gauges[0].desc.fq_name, "health_gauge_metrics");
+        assert_eq!(gauges[0].desc.dim_hash, gauges[1].desc.dim_hash);
+        assert_ne!(gauges[0].desc.id, gauges[1].desc.id);
+
+        assert!(matches!(
+            collector.create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new()),
+            Err(prometheus::Error::AlreadyReg)
+        ));
+
+        let families = collector.registry().gather();
+
+        assert_eq!(families.len(), 1);
+        assert_eq!(families[0].name(), "test_temperature_sensor_celsius");
+        assert_eq!(families[0].help(), "Sensor readings");
+        assert_eq!(families[0].get_field_type(), proto::MetricType::GAUGE);
+        assert_eq!(families[0].get_metric().len(), 2);
+
+        for (metric, endpoint) in families[0]
+            .get_metric()
+            .iter()
+            .zip(["endpoint_a", "endpoint_b"])
+        {
+            assert_eq!(metric.get_gauge().value(), 42.0);
+            assert_eq!(metric.get_label().len(), 2);
+            assert_eq!(metric.get_label()[0].name(), "endpoint");
+            assert_eq!(metric.get_label()[0].value(), endpoint);
+            assert_eq!(metric.get_label()[1].name(), "channel");
+            assert_eq!(metric.get_label()[1].value(), "inlet");
+        }
+
+        collector
+            .unregister_gauge_metrics(&gauges[0])
+            .expect("unregister first endpoint");
+
+        assert_eq!(collector.registry().gather()[0].get_metric().len(), 1);
+        assert!(collector.unregister_gauge_metrics(&gauges[0]).is_err());
+
+        collector
+            .create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new())
+            .expect("removed gauge identity must register again");
     }
 
     #[test]

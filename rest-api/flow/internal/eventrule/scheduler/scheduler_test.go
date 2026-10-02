@@ -299,6 +299,15 @@ func TestScheduler_refill(t *testing.T) {
 		require.Empty(t, pending.slots)
 		require.Empty(t, store.transitions)
 	})
+
+	t.Run("wakes after a full scan produces no claims", func(t *testing.T) {
+		store := newFakeStore()
+		store.scanLimitReached["deferred"] = true
+		configured := newTestScheduler(t, store, successfulExecutorRegistry())
+
+		require.NoError(t, configured.refill(context.Background()))
+		require.Len(t, configured.runtime.wakeCh, 1)
+	})
 }
 
 const testInstanceID = "scheduler-test"
@@ -312,22 +321,24 @@ type transitionRecord struct {
 }
 
 type fakeStore struct {
-	mu            sync.Mutex
-	claims        map[string][]eventrule.ClaimedExecution
-	claimErrors   map[string]error
-	requests      []eventrule.ExecutionClaimRequest
-	requestLanes  []string
-	actionNames   map[uuid.UUID]string
-	transitionErr error
-	transitions   chan transitionRecord
+	mu               sync.Mutex
+	claims           map[string][]eventrule.ClaimedExecution
+	scanLimitReached map[string]bool
+	claimErrors      map[string]error
+	requests         []eventrule.ExecutionClaimRequest
+	requestLanes     []string
+	actionNames      map[uuid.UUID]string
+	transitionErr    error
+	transitions      chan transitionRecord
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		claims:      make(map[string][]eventrule.ClaimedExecution),
-		claimErrors: make(map[string]error),
-		actionNames: make(map[uuid.UUID]string),
-		transitions: make(chan transitionRecord, 10),
+		claims:           make(map[string][]eventrule.ClaimedExecution),
+		scanLimitReached: make(map[string]bool),
+		claimErrors:      make(map[string]error),
+		actionNames:      make(map[uuid.UUID]string),
+		transitions:      make(chan transitionRecord, 10),
 	}
 }
 
@@ -358,14 +369,14 @@ func (s *fakeStore) requestCount() int {
 func (s *fakeStore) ClaimPendingExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claim(ctx, request, "pending")
 }
 
 func (s *fakeStore) ClaimRetryExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claim(ctx, request, "deferred")
 }
 
@@ -373,19 +384,19 @@ func (s *fakeStore) claim(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
 	lane string,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
 	s.requests = append(s.requests, request)
 	s.requestLanes = append(s.requestLanes, lane)
 
 	if err := s.claimErrors[lane]; err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
 	available := s.claims[lane]
@@ -398,7 +409,10 @@ func (s *fakeStore) claim(
 
 	s.claims[lane] = available[count:]
 
-	return claimed, nil
+	return eventrule.ExecutionClaimBatch{
+		Claims:           claimed,
+		ScanLimitReached: s.scanLimitReached[lane] || len(available) >= request.Limit,
+	}, nil
 }
 
 func (s *fakeStore) TransitionClaimedExecution(
@@ -447,7 +461,16 @@ func newClaimedExecution(
 	require.NoError(t, err)
 
 	token := uuid.New()
-	require.NoError(t, execution.Claim(owner, token, createdAt.Add(time.Second)))
+	claimAt := createdAt.Add(time.Second)
+	disposition, err := execution.AcquireClaim(
+		owner,
+		token,
+		claimAt,
+		time.Now().Add(time.Minute),
+		4,
+	)
+	require.NoError(t, err)
+	require.Equal(t, eventrule.ClaimAcquired, disposition)
 
 	execution.Attempts = attempts
 	require.NoError(t, execution.Validate())

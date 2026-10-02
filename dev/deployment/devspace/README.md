@@ -228,7 +228,9 @@ case "$(uname -m)" in
   aarch64|arm64) build_arch=aarch64 ;;
   *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
 esac
+kea_version=$(cat dev/docker/kea.version)
 docker build --pull=false -t build-container-localdev \
+  --build-arg KEA_VERSION="${kea_version}" \
   -f "dev/docker/Dockerfile.build-container-${build_arch}" .
 docker build --pull=false -t nico-devspace-core-artifacts \
   -f dev/deployment/devspace/Dockerfile.core-artifacts .

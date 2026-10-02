@@ -27,15 +27,15 @@ const (
 func (s *Store) ClaimPendingExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claimExecutions(ctx, request, pendingExecutionClaim)
 }
 
-// ClaimRetryExecutions atomically allocates due deferred attempts.
+// ClaimRetryExecutions atomically allocates due deferred or expired attempts.
 func (s *Store) ClaimRetryExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claimExecutions(ctx, request, retryExecutionClaim)
 }
 
@@ -43,12 +43,14 @@ func (s *Store) claimExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
 	kind executionClaimKind,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
-	var claims []eventrule.ClaimedExecution
+	batch := eventrule.ExecutionClaimBatch{
+		Claims: make([]eventrule.ClaimedExecution, 0, request.Limit),
+	}
 	err := s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 		now, err := s.timestamp(ctx, tx)
 		if err != nil {
@@ -68,9 +70,19 @@ func (s *Store) claimExecutions(
 				OrderExpr("eae.created_at ASC, eae.id ASC")
 		case retryExecutionClaim:
 			query = query.
-				Where("eae.status = ?", string(eventrule.ExecutionStatusDeferred)).
-				Where("eae.next_attempt_at <= ?", now).
-				OrderExpr("eae.next_attempt_at ASC, eae.id ASC")
+				Where(
+					"(eae.status = ? AND eae.next_attempt_at <= ?) OR "+
+						"(eae.status = ? AND eae.claim_expires_at <= ?)",
+					string(eventrule.ExecutionStatusDeferred),
+					now,
+					string(eventrule.ExecutionStatusRunning),
+					now,
+				).
+				OrderExpr(
+					"CASE WHEN eae.status = ? THEN eae.next_attempt_at "+
+						"ELSE eae.claim_expires_at END ASC, eae.id ASC",
+					string(eventrule.ExecutionStatusDeferred),
+				)
 		default:
 			return fmt.Errorf("unknown execution claim kind %d", kind)
 		}
@@ -78,8 +90,8 @@ func (s *Store) claimExecutions(
 		if err := query.Scan(ctx); err != nil {
 			return err
 		}
+		batch.ScanLimitReached = len(records) == request.Limit
 
-		claims = make([]eventrule.ClaimedExecution, len(records))
 		for i := range records {
 			execution, err := converterdao.EventActionExecutionFrom(&records[i])
 			if err != nil {
@@ -87,7 +99,15 @@ func (s *Store) claimExecutions(
 			}
 
 			token := uuid.New()
-			if err := execution.Claim(request.Owner, token, now); err != nil {
+			claimExpiresAt := now.Add(request.ClaimDuration)
+			disposition, err := execution.AcquireClaim(
+				request.Owner,
+				token,
+				now,
+				claimExpiresAt,
+				request.MaxAttempts,
+			)
+			if err != nil {
 				return err
 			}
 
@@ -95,23 +115,29 @@ func (s *Store) claimExecutions(
 				return err
 			}
 
-			claims[i] = eventrule.ClaimedExecution{
-				Execution: execution.Clone(),
-				Token:     token,
+			switch disposition {
+			case eventrule.ClaimAcquired:
+				batch.Claims = append(batch.Claims, eventrule.ClaimedExecution{
+					Execution: execution.Clone(),
+					Token:     token,
+				})
+			case eventrule.ClaimExhausted:
+			default:
+				return fmt.Errorf("unknown claim disposition %d", disposition)
 			}
 		}
 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
-	return claims, nil
+	return batch, nil
 }
 
 // TransitionClaimedExecution persists an attempt result only while token owns
-// the locked running execution.
+// the locked running execution. Expiration alone does not invalidate the token.
 func (s *Store) TransitionClaimedExecution(
 	ctx context.Context,
 	id uuid.UUID,
@@ -129,20 +155,12 @@ func (s *Store) TransitionClaimedExecution(
 	}
 
 	return s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
-		var record dbmodel.EventActionExecution
-		err := tx.NewSelect().
-			Model(&record).
-			Where("eae.id = ?", id).
-			For("UPDATE").
-			Scan(ctx)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %s", eventrule.ErrExecutionNotFound, id)
-		}
+		record, err := lockExecution(ctx, tx, id)
 		if err != nil {
 			return err
 		}
 
-		execution, err := converterdao.EventActionExecutionFrom(&record)
+		execution, err := converterdao.EventActionExecutionFrom(record)
 		if err != nil {
 			return err
 		}
@@ -158,6 +176,27 @@ func (s *Store) TransitionClaimedExecution(
 
 		return updateExecution(ctx, tx, execution)
 	})
+}
+
+func lockExecution(
+	ctx context.Context,
+	tx bun.Tx,
+	id uuid.UUID,
+) (*dbmodel.EventActionExecution, error) {
+	var record dbmodel.EventActionExecution
+	err := tx.NewSelect().
+		Model(&record).
+		Where("eae.id = ?", id).
+		For("UPDATE").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", eventrule.ErrExecutionNotFound, id)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &record, nil
 }
 
 func updateExecution(
@@ -178,6 +217,7 @@ func updateExecution(
 			"attempts",
 			"claim_token",
 			"claim_owner",
+			"claim_expires_at",
 			"status_message",
 			"updated_at",
 			"next_attempt_at",

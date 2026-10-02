@@ -27,7 +27,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 #[derive(Clone)]
 pub(crate) enum BluefieldState {
@@ -107,10 +107,10 @@ pub(in crate::redfish) fn resource(system_id: &str) -> redfish::Resource<'static
 
 const SYSTEMS_OEM_RESOURCE_DELETE_FIELDS: &[&str] = &["Id", "Name"];
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
         "/redfish/v1/Systems/{system_id}/Oem/Nvidia",
-        get(get_oem_nvidia),
+        get(get_oem_nvidia::<C>),
     )
     .route(
         // TODO: This is BF-3 only.
@@ -121,11 +121,11 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
         // BF-3 OEM mode flip. Staged here and applied on the next power
         // cycle, the same as real hardware.
         "/redfish/v1/Systems/{system_id}/Oem/Nvidia/Actions/Mode.Set",
-        post(mode_set),
+        post(mode_set::<C>),
     )
     .route(
         "/redfish/v1/Managers/{manager_id}/Oem/Nvidia",
-        patch(patch_managers_oem_nvidia),
+        patch(patch_managers_oem_nvidia::<C>),
     )
 }
 
@@ -133,8 +133,8 @@ async fn hostrshim_set() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn get_oem_nvidia(
-    State(state): State<BmcState>,
+async fn get_oem_nvidia<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     axum::extract::Path(system_id): axum::extract::Path<String>,
 ) -> Response {
     let redfish::oem::State::NvidiaBluefield(state) = state.oem_state else {
@@ -163,8 +163,8 @@ async fn get_oem_nvidia(
     }
 }
 
-async fn patch_managers_oem_nvidia(
-    State(state): State<BmcState>,
+async fn patch_managers_oem_nvidia<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     if state.manager.find(&manager_id).is_none() {
@@ -179,8 +179,8 @@ async fn patch_managers_oem_nvidia(
 /// change is staged and only takes effect on the next power cycle (applied in
 /// `BmcState::on_event` on `PowerOn`), so a read-back before then still shows
 /// the old mode.
-async fn mode_set(
-    State(state): State<BmcState>,
+async fn mode_set<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Response {
     let redfish::oem::State::NvidiaBluefield(bluefield) = state.oem_state else {

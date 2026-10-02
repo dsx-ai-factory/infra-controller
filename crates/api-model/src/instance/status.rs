@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use serde::{Deserialize, Serialize};
 
 use crate::machine::ReprovisionRequest;
@@ -81,12 +81,12 @@ pub enum SyncState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceStatusObservations {
     /// Observed status of the networking subsystem
-    pub network: HashMap<MachineId, network::InstanceNetworkStatusObservation>,
+    pub network: HashMap<DpuMachineId, network::InstanceNetworkStatusObservation>,
 
     /// Observed extension-service status, partitioned by service type. Each
     /// service type has one authoritative writer.
     pub extension_services:
-        HashMap<MachineId, extension_service::InstanceExtensionServiceStatusObservationByType>,
+        HashMap<DpuMachineId, extension_service::InstanceExtensionServiceStatusObservationByType>,
 
     /// Has the instance phoned home?
     pub phone_home_last_contact: Option<chrono::DateTime<chrono::Utc>>,

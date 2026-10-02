@@ -157,6 +157,9 @@ impl DpuRepository for DeviceRegistrationMock {
     async fn delete(&self, _: &str, _: &str) -> Result<(), DpfError> {
         Ok(())
     }
+    async fn delete_if_uid(&self, name: &str, _ns: &str, _uid: &str) -> Result<(), DpfError> {
+        Err(DpfError::not_found("DPU", name))
+    }
     fn watch<F, Fut>(
         &self,
         _: &str,

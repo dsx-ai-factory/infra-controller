@@ -98,7 +98,7 @@ async fn get_pxe_instructions(
 async fn test_pxe_dpu_ready(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (_host_id, dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
-    move_machine_to_needed_state(dpu_id, &ManagedHostState::Ready, &env.pool).await;
+    move_machine_to_needed_state(dpu_id.into(), &ManagedHostState::Ready, &env.pool).await;
 
     let mut txn = env
         .pool
@@ -146,7 +146,7 @@ async fn test_pxe_dpu_waiting_for_network_install(pool: sqlx::PgPool) {
         machine.current_state(),
         &ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
-                states: HashMap::from([(mh.dpu().id, DpuInitState::WaitingForNetworkConfig,)]),
+                states: HashMap::from([(mh.dpu_ids[0], DpuInitState::WaitingForNetworkConfig)]),
             },
         }
     );
@@ -317,7 +317,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
         .id;
     txn.commit().await.unwrap();
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::HostInit {
             machine_state: MachineState::WaitingForDiscovery,
         },
@@ -341,7 +341,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     );
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::HostInit {
             machine_state: MachineState::Discovered {
                 skip_reboot_wait: false,
@@ -361,7 +361,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::BootConfiguring {
             desired_version: ConfigVersion::new(7),
             desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
@@ -390,7 +390,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::HostReprovision {
             reprovision_state: HostReprovisionState::WaitingForManualUpgrade {
                 manual_upgrade_started: Utc::now(),
@@ -411,7 +411,7 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
     move_machine_to_needed_state(
-        host_id,
+        host_id.into(),
         &ManagedHostState::WaitingForCleanup {
             cleanup_state: model::machine::CleanupState::Init,
             cleanup_context: CleanupContext::Deprovision,
@@ -453,7 +453,10 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
         .await;
 
-    assert_eq!(instructions.pxe_script, "SomeRandomiPxe".to_string());
+    assert_eq!(
+        instructions.pxe_script,
+        "set nico-retry-provisioning 1\nSomeRandomiPxe"
+    );
 }
 
 #[crate::sqlx_test]
@@ -551,7 +554,7 @@ async fn test_cloud_init_after_dpu_update(pool: sqlx::PgPool) {
 
     let (_host_id, dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
     move_machine_to_needed_state(
-        dpu_id,
+        dpu_id.into(),
         &ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
                 states: HashMap::from([(dpu_id, DpuInitState::Init)]),
@@ -562,7 +565,7 @@ async fn test_cloud_init_after_dpu_update(pool: sqlx::PgPool) {
     .await;
 
     // Interface is created. Let's fetch interface id.
-    let machine = env.find_machine(dpu_id).await.remove(0);
+    let machine = env.find_machine(&dpu_id).await.remove(0);
     assert_eq!(machine.status.as_ref().unwrap().interfaces.len(), 1);
 
     let cloud_init_cfg = env

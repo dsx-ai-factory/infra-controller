@@ -23,7 +23,7 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required for PKI (certificate signing) and secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components.
+Required for PKI (certificate signing) and, by default, secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components. NICo can keep the credentials it manages in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
 
 - Vault must be deployed and unsealed.
 - A PKI secrets engine must be configured for certificate signing.
@@ -323,6 +323,10 @@ Do not set `bypass_rbac = true` in production: it removes the internal RBAC
 gate, leaving the Casbin decision as the effective authorization result. Trust
 only a dedicated admin-client intermediate and issuance profile whose entire
 issuance population is intended to cross this admin trust boundary.
+
+For client-certificate issuance and installation, protected CLI verification,
+renewal, CA overlap, recovery, and the existing revocation support boundary,
+see [NICo mTLS and authorization](../docs/manuals/nico-api-auth.md).
 
 ---
 

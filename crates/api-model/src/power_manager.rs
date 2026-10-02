@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ impl PowerHandlingOutcome {
 /// the handling and move to the state handler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerOptions {
-    pub host_id: MachineId,
+    pub host_id: HostMachineId,
     pub last_fetched_updated_at: DateTime<Utc>,
     pub last_fetched_next_try_at: DateTime<Utc>,
     pub last_fetched_power_state: PowerState,
@@ -180,7 +180,7 @@ pub fn are_all_dpus_up_after_power_operation(
 
 impl<'r> FromRow<'r, PgRow> for PowerOptions {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let host_id: MachineId = row.try_get("host_id")?;
+        let host_id: HostMachineId = row.try_get("host_id")?;
         let last_fetched_updated_at = row.try_get("last_fetched_updated_at")?;
         let last_fetched_next_try_at = row.try_get("last_fetched_next_try_at")?;
         let last_fetched_power_state = row.try_get("last_fetched_power_state")?;
@@ -197,7 +197,7 @@ impl<'r> FromRow<'r, PgRow> for PowerOptions {
         let wait_until_time_before_performing_next_power_action =
             row.try_get("wait_until_time_before_performing_next_power_action")?;
         let tried_triggering_on_at: Option<DateTime<Utc>> =
-            row.try_get("tried_triggering_on_at").ok();
+            row.try_get("tried_triggering_on_at")?;
         let tried_triggering_on_counter = row.try_get("tried_triggering_on_counter")?;
 
         Ok(Self {
@@ -212,5 +212,64 @@ impl<'r> FromRow<'r, PgRow> for PowerOptions {
             tried_triggering_on_at,
             tried_triggering_on_counter,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn power_on_timestamp_decoding_preserves_errors(pool: sqlx::PgPool) {
+        struct Case {
+            timestamp_projection: &'static str,
+            check: fn(Result<PowerOptions, sqlx::Error>),
+        }
+
+        let cases = [
+            Case {
+                timestamp_projection: "NULL::timestamptz AS another_column",
+                check: |result| {
+                    assert!(
+                        matches!(&result, Err(sqlx::Error::ColumnNotFound(name))
+                            if name == "tried_triggering_on_at"),
+                        "{result:?}"
+                    );
+                },
+            },
+            Case {
+                timestamp_projection: "'not a timestamp'::text AS tried_triggering_on_at",
+                check: |result| {
+                    assert!(
+                        matches!(&result, Err(sqlx::Error::ColumnDecode { index, .. })
+                        if index == "\"tried_triggering_on_at\""),
+                        "{result:?}"
+                    );
+                },
+            },
+        ];
+
+        for case in cases {
+            let query = format!(
+                "SELECT
+                    'fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg'::text AS host_id,
+                    now() AS last_fetched_updated_at,
+                    now() AS last_fetched_next_try_at,
+                    'off'::host_power_state_t AS last_fetched_power_state,
+                    0::integer AS last_fetched_off_counter,
+                    $1::text AS desired_power_state_version,
+                    'on'::host_power_state_t AS desired_power_state,
+                    now() AS wait_until_time_before_performing_next_power_action,
+                    0::integer AS tried_triggering_on_counter,
+                    {}",
+                case.timestamp_projection
+            );
+            let row = sqlx::query(sqlx::AssertSqlSafe(query))
+                .bind(ConfigVersion::initial().to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            (case.check)(PowerOptions::from_row(&row));
+        }
     }
 }

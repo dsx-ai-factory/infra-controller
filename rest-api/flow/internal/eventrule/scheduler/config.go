@@ -58,6 +58,13 @@ func (c LaneConfig) validate(name string) error {
 type RuntimeConfig struct {
 	PollInterval   time.Duration
 	PersistTimeout time.Duration
+	// ClaimDuration is the fixed interval before an initial running execution
+	// becomes eligible for recovery. Reclaimed executions receive twice this
+	// interval as a bounded safeguard against an underestimated duration. Current
+	// actions do not renew claims. If a future action can legitimately run longer
+	// without increasing the acceptable recovery delay, add an explicit renewable
+	// mode for that action instead of renewing every claim.
+	ClaimDuration time.Duration
 	// Lanes overrides capacity by supported lane name. Omitted lanes use their
 	// defaults; lane priority remains defined by the scheduler.
 	Lanes map[string]LaneConfig
@@ -73,6 +80,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 	return RuntimeConfig{
 		PollInterval:   time.Minute,
 		PersistTimeout: time.Second,
+		ClaimDuration:  30 * time.Second,
 		Lanes:          lanes,
 	}
 }
@@ -93,6 +101,9 @@ func (c RuntimeConfig) Validate() error {
 
 	if c.PersistTimeout <= 0 {
 		return fmt.Errorf("execution persist timeout must be positive")
+	}
+	if c.ClaimDuration <= 0 {
+		return fmt.Errorf("execution claim duration must be positive")
 	}
 
 	supportedLanes := make(map[string]struct{}, len(laneDefinitions))
@@ -165,6 +176,7 @@ func (c Config) runtime() runtime {
 		policy:            c.Policy,
 		pollInterval:      c.Runtime.PollInterval,
 		persistTimeout:    c.Runtime.PersistTimeout,
+		claimDuration:     c.Runtime.ClaimDuration,
 		wakeCh:            make(chan struct{}, 1),
 		fatalWorkerErrors: make(chan error, workerCount),
 	}

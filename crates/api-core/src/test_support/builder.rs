@@ -21,16 +21,19 @@ use arc_swap::ArcSwap;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
-use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
-use carbide_site_explorer::{EndpointExplorationService, EndpointExplorer};
+use carbide_site_explorer::{
+    AuthenticatedBmc, AuthenticatedBmcClient, EndpointExplorationService, EndpointExplorer,
+};
 use carbide_utils::test_support::test_meter::TestMeter;
 use db::work_lock_manager::WorkLockManagerHandle;
+use ipnetwork::IpNetwork;
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
@@ -42,7 +45,7 @@ use super::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
-use crate::ethernet_virtualization::EthVirtData;
+use crate::ethernet_virtualization::{EthVirtData, SiteFabricPrefixList};
 use crate::logging::level_filter::ActiveLevel;
 use crate::logging::log_limiter::LogLimiter;
 use crate::scout_stream::ConnectionRegistry;
@@ -56,7 +59,7 @@ pub struct TestApiBuilder {
     work_lock_manager: WorkLockManagerHandle,
     runtime_config: Option<Arc<CarbideConfig>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
-    redfish_pool: Option<Arc<dyn RedfishClientPool>>,
+    redfish_pool: Option<Arc<dyn BmcCredentialOps>>,
     rms_client: Option<Arc<dyn RmsApi>>,
     nmxc_client_pool: Option<Arc<dyn NmxcPool>>,
     eth_data: Option<EthVirtData>,
@@ -66,6 +69,7 @@ pub struct TestApiBuilder {
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
     endpoint_explorer: Option<MockEndpointExplorer>,
+    console_log_source: Option<Arc<dyn crate::console_logs::ConsoleLogSource>>,
 }
 
 impl TestApiBuilder {
@@ -90,6 +94,7 @@ impl TestApiBuilder {
             component_manager: None,
             secrets_context: None,
             endpoint_explorer: None,
+            console_log_source: None,
         }
     }
 
@@ -107,7 +112,10 @@ impl TestApiBuilder {
         }
     }
 
-    pub fn with_redfish_pool(self, redfish_pool: Arc<dyn RedfishClientPool>) -> Self {
+    /// Installs the Redfish pool the API under test uses. Takes the
+    /// credential-operations handle because tests hand one sim in as both
+    /// the general pool and the ops handle.
+    pub fn with_redfish_pool(self, redfish_pool: Arc<dyn BmcCredentialOps>) -> Self {
         Self {
             redfish_pool: Some(redfish_pool),
             ..self
@@ -127,6 +135,14 @@ impl TestApiBuilder {
             eth_data: Some(eth_data),
             ..self
         }
+    }
+
+    /// Replaces the site fabric ranges used to validate VPC and tenant network
+    /// segment prefixes in tests.
+    pub fn with_site_fabric_prefixes(mut self, prefixes: Vec<IpNetwork>) -> Self {
+        let eth_data = self.eth_data.get_or_insert_with(default_test_eth_virt_data);
+        eth_data.site_fabric_prefixes = SiteFabricPrefixList::from_ipnetwork_vec(prefixes);
+        self
     }
 
     pub fn with_dpf_sdk(self, dpf_sdk: Arc<dyn DpfOperations>) -> Self {
@@ -185,6 +201,16 @@ impl TestApiBuilder {
         }
     }
 
+    pub fn with_console_log_source(
+        self,
+        console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    ) -> Self {
+        Self {
+            console_log_source: Some(console_log_source),
+            ..self
+        }
+    }
+
     pub fn build(self) -> Api {
         let runtime_config = self
             .runtime_config
@@ -199,7 +225,7 @@ impl TestApiBuilder {
         let machine_state_handler_enqueuer = Enqueuer::new(self.db_pool.clone());
         let dpu_health_log_limiter = LogLimiter::default();
 
-        let redfish_pool = self
+        let redfish_pool: Arc<dyn BmcCredentialOps> = self
             .redfish_pool
             .unwrap_or_else(|| Arc::new(RedfishSim::default()));
 
@@ -226,18 +252,32 @@ impl TestApiBuilder {
         // behind it), so a supplied mock serves exploration -- but forwards its
         // boot-order/machine-setup calls to this real, `RedfishSim`-backed
         // explorer. With no mock, the API uses the real explorer (prod wiring).
-        let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
+        let real_bmc_client = Arc::new(AuthenticatedBmcClient::new(
             redfish_pool.clone(),
             nv_redfish_pool,
+            // Tests run without [bmc_proxy]: everything dials the sim directly.
+            None,
             carbide_ipmi::test_support(),
             credential_manager.clone(),
+        ));
+        let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
+            real_bmc_client.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             SiteExplorerExploreMode::NvRedfish,
             self.db_pool.clone(),
         );
-        let endpoint_explorer: Arc<dyn EndpointExplorer> = match self.endpoint_explorer {
-            Some(mock) => Arc::new(mock.with_redfish_backend(real_endpoint_explorer)),
-            None => real_endpoint_explorer,
+        // A mock supplies both narrow interfaces so tests asserting on BMC calls
+        // still see them; production-like tests use the independently constructed
+        // authenticated client shared with the real explorer.
+        let (endpoint_explorer, bmc_client): (
+            Arc<dyn EndpointExplorer>,
+            Arc<dyn AuthenticatedBmc>,
+        ) = match self.endpoint_explorer {
+            Some(mock) => {
+                let mock = Arc::new(mock.with_redfish_backend(real_bmc_client));
+                (mock.clone(), mock)
+            }
+            None => (real_endpoint_explorer, real_bmc_client),
         };
         let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
             self.db_pool.clone(),
@@ -273,12 +313,16 @@ impl TestApiBuilder {
             credential_manager,
             certificate_provider,
             database_connection: self.db_pool,
-            redfish_pool,
+            // dyn upcast: the ops handle is also the general pool in tests.
+            redfish_pool: redfish_pool.clone(),
+            bmc_credential_ops: redfish_pool,
+            bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,
             ib_fabric_manager,
             dynamic_settings,
             endpoint_explorer,
+            bmc_client,
             endpoint_exploration_service,
             dpu_health_log_limiter,
             scout_stream_registry,
@@ -292,6 +336,9 @@ impl TestApiBuilder {
             bms_client: std::sync::OnceLock::new(),
             secrets_context: self.secrets_context,
             node_jwt_validator: None,
+            console_log_source: self
+                .console_log_source
+                .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
         }
     }
 }

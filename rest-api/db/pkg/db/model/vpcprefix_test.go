@@ -18,7 +18,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -49,6 +48,62 @@ func TestVpcPrefix_ToProto(t *testing.T) {
 		require.NotNil(t, proto.Id)
 		assert.Equal(t, prefixID.String(), proto.Id.Value)
 	})
+}
+
+// TestVpcPrefix_GetCIDR verifies stored IPv4 and IPv6 prefixes parse into the
+// netip.Prefix used by the usage calculation.
+func TestVpcPrefix_GetCIDR(t *testing.T) {
+	tests := []struct {
+		name      string
+		prefix    string
+		prefixLen int
+		want      string
+		wantErr   bool
+	}{
+		{
+			name: "unset prefix",
+		},
+		{
+			name:      "IPv4 address uses the stored prefix length",
+			prefix:    "192.0.2.0",
+			prefixLen: 24,
+			want:      "192.0.2.0/24",
+		},
+		{
+			name:   "IPv4 CIDR is masked to its network",
+			prefix: "192.0.2.1/24",
+			want:   "192.0.2.0/24",
+		},
+		{
+			name:   "IPv6 CIDR is preserved",
+			prefix: "2001:db8::/64",
+			want:   "2001:db8::/64",
+		},
+		{
+			name:    "malformed CIDR returns an error",
+			prefix:  "not-a-prefix",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			vp := VpcPrefix{Prefix: tc.prefix, PrefixLength: tc.prefixLen}
+			got, err := vp.GetCIDR()
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.False(t, got.IsValid())
+				return
+			}
+			require.NoError(t, err)
+			if tc.want == "" {
+				assert.False(t, got.IsValid())
+				return
+			}
+			require.True(t, got.IsValid())
+			assert.Equal(t, tc.want, got.String())
+		})
+	}
 }
 
 func TestVpcPrefix_FromProto(t *testing.T) {
@@ -329,8 +384,6 @@ func TestVpcPrefixSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -426,8 +479,6 @@ func TestVpcPrefixSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -675,8 +726,6 @@ func TestVpcPrefixSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -849,8 +898,6 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -920,8 +967,6 @@ func testVpcPrefixSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1080,6 +1125,28 @@ func TestVpcPrefixUsageFromInterfaces(t *testing.T) {
 
 //nolint:funlen,paralleltest // Cases and fixtures stay inline; model tests share a PostgreSQL schema.
 func TestVpcPrefixSQLDAO_GetPrefixUsage(t *testing.T) {
+	dao := NewVpcPrefixDAO(nil)
+	t.Run("IPv6 prefix returns no usage entry", func(t *testing.T) {
+		usageByID, err := dao.GetPrefixUsage(context.Background(), nil, &VpcPrefix{
+			ID:     uuid.New(),
+			Prefix: "2001:db8::/64",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, usageByID)
+	})
+
+	t.Run("malformed stored prefix returns an error", func(t *testing.T) {
+		prefixID := uuid.New()
+		usageByID, err := dao.GetPrefixUsage(context.Background(), nil, &VpcPrefix{
+			ID:     prefixID,
+			Prefix: "not-a-prefix",
+		})
+		require.Error(t, err)
+		assert.Nil(t, usageByID)
+		assert.ErrorContains(t, err, prefixID.String())
+		assert.ErrorContains(t, err, "not-a-prefix")
+	})
+
 	type interfaceFixture struct {
 		status    string
 		ipAddress *string

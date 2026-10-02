@@ -21,10 +21,11 @@ use scout::{CarbideClientError, CarbideClientResult};
 
 use crate::Options;
 
-pub(super) async fn create_forge_client(
-    config: &Options,
-) -> CarbideClientResult<forge_tls_client::ForgeClientT> {
-    let client_config = ForgeClientConfig::new(
+/// The client TLS config every scout connection to the API uses. Callers that
+/// hold a long-lived client of their own build it from here so none of them
+/// silently drops the node-auth JWT.
+pub(super) fn forge_client_config(config: &Options) -> ForgeClientConfig {
+    ForgeClientConfig::new(
         config.root_ca.clone(),
         Some(ClientCert {
             cert_path: config.client_cert.clone(),
@@ -33,7 +34,13 @@ pub(super) async fn create_forge_client(
     )
     // Node-auth (#355): also present a self-signed bearer JWT minted from the
     // client cert's key. Ignored by the API unless [node_auth] is enabled.
-    .with_node_jwt();
+    .with_node_jwt()
+}
+
+pub(super) async fn create_forge_client(
+    config: &Options,
+) -> CarbideClientResult<forge_tls_client::ForgeClientT> {
+    let client_config = forge_client_config(config);
     let api_config = ApiConfig::new(&config.api, &client_config);
 
     let client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)

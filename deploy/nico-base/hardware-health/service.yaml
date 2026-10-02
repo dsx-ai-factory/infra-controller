@@ -24,6 +24,7 @@ metadata:
     app.kubernetes.io/metrics: nico-hardware-health
 
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 9009
       name: metrics

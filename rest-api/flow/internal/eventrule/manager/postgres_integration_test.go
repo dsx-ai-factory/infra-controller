@@ -98,7 +98,7 @@ func TestManager_PostgresDurableRetryWithoutRedelivery(t *testing.T) {
 	session := storetest.NewPostgresTestSession(t)
 	rackID := uuid.New()
 	inventory := newPostgresIntegrationInventory(rackID)
-	tasks := &postgresRetryTaskManager{}
+	tasks := &postgresRetryTaskManager{failFirst: true}
 	config := testManagerConfig()
 	store := eventstore.New(session)
 	config.Store = store
@@ -168,6 +168,82 @@ func TestManager_PostgresDurableRetryWithoutRedelivery(t *testing.T) {
 
 }
 
+func TestManager_PostgresExpiredClaimRecovery(t *testing.T) {
+	ctx := context.Background()
+	session := storetest.NewPostgresTestSession(t)
+	rackID := uuid.New()
+	inventory := newPostgresIntegrationInventory(rackID)
+	tasks := &postgresRetryTaskManager{}
+	config := testManagerConfig()
+	store := eventstore.New(session)
+	config.Store = store
+	config.Inventory = inventory
+	config.TaskManager = tasks
+	config.Scheduler.Runtime.PollInterval = 5 * time.Millisecond
+	config.Scheduler.Runtime.ClaimDuration = 120 * time.Millisecond
+	config.Scheduler.Policy.MaxAttempts = 2
+
+	manager, err := New(config)
+	require.NoError(t, err)
+
+	envelope := eventrule.Envelope{
+		Key: eventrule.EventKey{
+			SourceName: "manager_postgres_test",
+			SourceKey:  "expired-claim-recovery",
+		},
+		Type: leakage.TypeHardwareLeakDetected,
+		Resource: eventrule.Resource{
+			Kind: eventrule.ResourceKindComponent,
+			ID:   inventory.component.Info.ID,
+		},
+	}
+	require.NoError(t, manager.Process(ctx, envelope))
+
+	batch, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
+		Owner:         "crashed-scheduler",
+		Limit:         1,
+		ClaimDuration: 50 * time.Millisecond,
+		MaxAttempts:   2,
+	})
+	require.NoError(t, err)
+	require.Len(t, batch.Claims, 1)
+	claim := batch.Claims[0]
+
+	require.Eventually(t, func() bool {
+		var expired bool
+		err := session.DB.NewSelect().
+			TableExpr("event_action_executions").
+			ColumnExpr("claim_expires_at <= transaction_timestamp()").
+			Where("id = ?", claim.Execution.ID).
+			Scan(ctx, &expired)
+
+		return err == nil && expired
+	}, time.Second, 5*time.Millisecond)
+
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() {
+		require.NoError(t, manager.Stop())
+	})
+
+	require.Eventually(t, func() bool {
+		executions, err := store.Executions(ctx)
+
+		return err == nil &&
+			len(executions) == 1 &&
+			executions[0].Status == eventrule.ExecutionStatusCompleted &&
+			executions[0].Attempts == 2
+	}, time.Second, 5*time.Millisecond)
+	require.Equal(t, 1, tasks.callCount())
+
+	err = store.TransitionClaimedExecution(
+		ctx,
+		claim.Execution.ID,
+		claim.Token,
+		eventrule.CompletedExecutionResult(),
+	)
+	require.ErrorIs(t, err, eventrule.ErrExecutionClaimLost)
+}
+
 type postgresIntegrationInventory struct {
 	rack      *rack.Rack
 	component *component.Component
@@ -230,8 +306,9 @@ func (i *postgresIntegrationInventory) GetRackByIdentifier(
 }
 
 type postgresRetryTaskManager struct {
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	calls     int
+	failFirst bool
 }
 
 func (m *postgresRetryTaskManager) SubmitTask(
@@ -242,7 +319,7 @@ func (m *postgresRetryTaskManager) SubmitTask(
 	defer m.mu.Unlock()
 
 	m.calls++
-	if m.calls == 1 {
+	if m.failFirst && m.calls == 1 {
 		return nil, errors.New("temporary task service failure")
 	}
 

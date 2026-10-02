@@ -36,6 +36,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
@@ -44,21 +45,19 @@ import (
 
 // CreateInstanceTypeHandler is the API Handler for creating new InstanceType
 type CreateInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateInstanceTypeHandler initializes and returns a new handler for creating Instance Type
 func NewCreateInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateInstanceTypeHandler {
 	return CreateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -74,7 +73,7 @@ func NewCreateInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Success 201 {object} model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type [post]
 func (cith CreateInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Create", c, cith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -335,19 +334,17 @@ func (cith CreateInstanceTypeHandler) Handle(c echo.Context) error {
 
 // GetAllInstanceTypeHandler is the API Handler for getting all Instance Types
 type GetAllInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllInstanceTypeHandler initializes and returns a new handler for getting all Instance Types
 func NewGetAllInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInstanceTypeHandler {
 	return GetAllInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -374,7 +371,7 @@ func NewGetAllInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Success 200 {object} []model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type [get]
 func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "GetAll", c, gaith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -450,7 +447,7 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaith.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -464,7 +461,7 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		status = &statusQuery
-		gaith.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 	}
 
 	// Get and validate includeRelation params
@@ -687,19 +684,17 @@ func (gaith GetAllInstanceTypeHandler) Handle(c echo.Context) error {
 
 // GetInstanceTypeHandler is the API Handler for getting details of a specific instance type
 type GetInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetInstanceTypeHandler initializes and returns a new handler for getting an Instance Type
 func NewGetInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetInstanceTypeHandler {
 	return GetInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -718,7 +713,7 @@ func NewGetInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 200 {object} []model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{id} [get]
 func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Get", c, gith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -734,7 +729,7 @@ func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance Type ID in URL", nil)
 	}
 
-	gith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -864,21 +859,19 @@ func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
 
 // UpdateInstanceTypeHandler is the API Handler for updating an Instance Type
 type UpdateInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateInstanceTypeHandler initializes and returns a new handler for updating Instance Type
 func NewUpdateInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateInstanceTypeHandler {
 	return UpdateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -895,7 +888,7 @@ func NewUpdateInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Success 200 {object} model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{id} [patch]
 func (uith UpdateInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Update", c, uith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -929,7 +922,7 @@ func (uith UpdateInstanceTypeHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance Type ID in URL", nil)
 	}
 
-	uith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	// Check if org has an Infrastructure Provider
 	ipDAO := cdbm.NewInfrastructureProviderDAO(uith.dbSession)
@@ -1282,21 +1275,19 @@ func (uith UpdateInstanceTypeHandler) Handle(c echo.Context) error {
 
 // DeleteInstanceTypeHandler is the API Handler for deleting a Site
 type DeleteInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteInstanceTypeHandler initializes and returns a new handler for deleting an Instance Type
 func NewDeleteInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteInstanceTypeHandler {
 	return DeleteInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1312,7 +1303,7 @@ func NewDeleteInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Success 204
 // @Router /v2/org/{org}/nico/instance/type/{id} [delete]
 func (dith DeleteInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Delete", c, dith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InstanceType", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1341,7 +1332,7 @@ func (dith DeleteInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get Instance Type ID
 	itStrID := c.Param("id")
 
-	dith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	itID, err := uuid.Parse(itStrID)
 	if err != nil {

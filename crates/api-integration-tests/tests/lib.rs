@@ -29,17 +29,21 @@ use ::machine_a_tron::{
 use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
 use api_test_helper::utils::TestApiServerArgs;
 use api_test_helper::{
-    IntegrationTestEnvironment, domain, instance, machine, metrics, subnet, tenant, utils, vpc,
-    vpc_prefix,
+    IntegrationTestEnvironment, domain, instance, machine, metrics, scout_stream, subnet, tenant,
+    utils, vpc, vpc_prefix,
 };
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
+use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::site_prefix::SitePrefixId;
 use eyre::ContextCompat;
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
+use model::metadata::Metadata;
+use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +66,42 @@ async fn test_integration() -> eyre::Result<()> {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
+
+    // Persist a predecessor root without a protection request before either API
+    // starts, then verify that the background controller makes it ready.
+    db::migrations::migrate(&test_env.db_pool).await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let recovery_tenant_id = "site-prefix-recovery";
+    db::tenant::create_and_persist(
+        recovery_tenant_id.to_string(),
+        Metadata {
+            name: "SitePrefix Recovery".to_string(),
+            ..Default::default()
+        },
+        None,
+        &mut txn,
+    )
+    .await?;
+    let site_prefix = db::site_prefix::create_tenant_managed(
+        NewTenantManagedSitePrefix {
+            id: SitePrefixId::new(),
+            tenant_organization_id: recovery_tenant_id.parse()?,
+            prefix: "10.250.0.0/24".parse()?,
+            metadata: Metadata {
+                name: "readiness-recovery".to_string(),
+                ..Default::default()
+            },
+        },
+        1,
+        &mut txn,
+    )
+    .await?
+    .site_prefix;
+    txn.commit().await?;
+    assert_eq!(
+        site_prefix.status.lifecycle_state,
+        SitePrefixLifecycleState::Provisioning,
+    );
 
     let bmc_address_registry = BmcMockRegistry::default();
     let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
@@ -125,6 +165,28 @@ async fn test_integration() -> eyre::Result<()> {
 
     let tenant_org_id = "tenant_organization";
     tenant::create(carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+
+    // The first enqueue is immediate; allow later 30-second passes and jitter.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let stored = db::site_prefix::find_by_ids(&test_env.db_pool, &[site_prefix.id])
+                .await?
+                .pop()
+                .context("readiness fixture SitePrefix disappeared")?;
+            if stored.status.lifecycle_state == SitePrefixLifecycleState::Ready {
+                return Ok::<(), eyre::Report>(());
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        eyre::eyre!(
+            "SitePrefix {} did not become ready within 120 seconds",
+            site_prefix.id,
+        )
+    })??;
+
     let tenant1_vpc = vpc::create(carbide_api_addrs, tenant_org_id).await?;
     let domain_id = domain::create(carbide_api_addrs, "tenant-1.local").await?;
     let managed_segment_id =
@@ -256,6 +318,12 @@ async fn test_integration() -> eyre::Result<()> {
             &test_env,
             &bmc_address_registry,
             &dual_stack_l2_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_scout_stream(
+            &test_env,
+            &bmc_address_registry,
             UNDERLAY_DHCP_RELAY_ADDRESS,
         )
         .boxed(),
@@ -538,7 +606,10 @@ async fn test_metrics_integration() -> eyre::Result<()> {
                 let vpc_id = vpc::create(&carbide_api_addrs, tenant_org_id).await?;
                 let domain_id = domain::create(&carbide_api_addrs, "tenant-1.local").await?;
                 let segment_id = subnet::create(&carbide_api_addrs, &vpc_id, &domain_id, 10, false).await?;
-                let host_machine_id = machine_handle.observed_machine_id().expect("Should have gotten a machine ID by now");
+                let host_machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Should have gotten a machine ID by now")
+                    .try_into()?;
 
                 // Create instance with phone_home enabled
                 let instance_id = instance::create(
@@ -668,9 +739,10 @@ async fn test_machine_a_tron_multidpu(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 if let Some(expected_selection) = expected_selection {
                     let selection: (MacAddress, BootInterfaceSelectionSource) = sqlx::query_as(
                         "SELECT desired_mac_address, selection_source
@@ -764,9 +836,10 @@ async fn test_machine_a_tron_zerodpu(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready, allocating instance",
@@ -834,9 +907,10 @@ async fn test_machine_a_tron_nic_mode(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready, allocating instance",
@@ -1006,9 +1080,10 @@ async fn test_machine_a_tron_dual_stack(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine is Ready, allocating dual-stack instance via ipv6 config",
@@ -1119,9 +1194,10 @@ async fn test_machine_a_tron_dual_stack_l2(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine is Ready, allocating dual-stack L2 instance",
@@ -1159,6 +1235,66 @@ async fn test_machine_a_tron_dual_stack_l2(
                     "Machine back to Ready after dual-stack L2 release",
                 );
                 Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+async fn test_machine_a_tron_scout_stream(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<()> {
+    let scout_stream_api_addrs = vec![
+        *test_env
+            .carbide_api_addrs
+            .first()
+            .context("no carbide API addresses configured")?,
+    ];
+
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        2,
+        0,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        move |machine_handle| {
+            let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            async move {
+                machine_handle
+                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                    .await?;
+                let machine_id = machine_handle
+                    .observed_machine_id()
+                    .context("ready machine has no observed machine ID")?;
+
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+                let own_connection_count = scout_stream::connections(&scout_stream_api_addrs)
+                    .await?
+                    .iter()
+                    .filter(|connection| connection.machine_id == Some(machine_id))
+                    .count();
+                assert_eq!(own_connection_count, 1);
+                assert_eq!(
+                    scout_stream::ping(&scout_stream_api_addrs, machine_id).await?,
+                    format!("pong from {machine_id}")
+                );
+                scout_stream::check_unsupported_request(&scout_stream_api_addrs, machine_id)
+                    .await?;
+
+                assert!(scout_stream::disconnect(&scout_stream_api_addrs, machine_id).await?);
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+
+                machine_handle.abort_and_wait().await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await
             }
         },
     )
@@ -1229,6 +1365,7 @@ where
                 scout_run_interval: Duration::from_secs(1),
                 discovery_retry_interval: Duration::from_millis(100),
                 dpus_in_nic_mode,
+                dpf_enabled: true,
                 dpu_firmware_versions: None,
                 host_firmware_versions: None,
                 dpu_agent_version: None,
@@ -1247,11 +1384,13 @@ where
         host_bmc_password: None,
         dpu_bmc_password: None,
         api_refresh_interval: Duration::from_millis(500),
+        scout_stream_reconnect_interval: Duration::from_secs(1),
         mock_bmc_ssh_server: false,
         enable_ipmi_simulation: false,
         hw_mac_address_ranges: None,
         mac_address_pool: None,
         ufm_mock: Default::default(),
+        rms_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

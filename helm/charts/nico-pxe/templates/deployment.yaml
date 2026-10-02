@@ -10,6 +10,9 @@
 {{- if $bootstrapRootCaEnabled -}}
 {{- $_ := set $env "FORGE_BOOTSTRAP_ROOT_CAFILE_PATH" "/var/run/secrets/bootstrap-root-ca/ca.crt" -}}
 {{- end -}}
+{{- with .Values.otlpEndpoint -}}
+{{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,9 +43,9 @@ spec:
       {{- end }}
       {{- if or .Values.initContainers .Values.bootArtifactContainers }}
       initContainers:
-        {{- range .Values.bootArtifactContainers }}
+        {{- range $index, $container := .Values.bootArtifactContainers }}
         - name: {{ .name }}
-          image: {{ if and .repository .tag }}{{ .repository }}:{{ .tag }}{{ else }}{{ .image }}{{ end }}
+          image: {{ include "nico.containerImage" (dict "container" $container "path" (printf "%s.bootArtifactContainers[%d]" $.Chart.Name $index)) | quote }}
           {{- with .command }}
           command:
             {{- toYaml . | nindent 12 }}
@@ -57,8 +60,10 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- end }}
-        {{- with .Values.initContainers }}
-        {{- toYaml . | nindent 8 }}
+        {{- range $index, $entry := .Values.initContainers }}
+        {{- $container := omit $entry "repository" "tag" }}
+        {{- $_ := set $container "image" (include "nico.containerImage" (dict "container" $entry "path" (printf "%s.initContainers[%d]" $.Chart.Name $index))) }}
+        {{- toYaml (list $container) | nindent 8 }}
         {{- end }}
       {{- end }}
       containers:
@@ -69,7 +74,21 @@ spec:
             - /bin/sh
             - -c
             - |
-              ulimit -Sn {{ .Values.fileDescriptorLimit | int }} || exit 1
+              {{- $fdLimit := 65536 }}
+              {{- if not (kindIs "invalid" .Values.fileDescriptorLimit) }}
+              {{- $fdLimit = .Values.fileDescriptorLimit | int }}
+              {{- end }}
+              {{- if le $fdLimit 0 }}
+              {{- fail "fileDescriptorLimit must be a positive integer" }}
+              {{- end }}
+              FD_LIMIT={{ $fdLimit }}
+              FD_REQUESTED="$FD_LIMIT"
+              FD_HARD="$(ulimit -Hn)"
+              if [ "$FD_HARD" != "unlimited" ] && [ "$FD_LIMIT" -gt "$FD_HARD" ]; then
+                echo "fileDescriptorLimit ${FD_LIMIT} exceeds the hard limit ${FD_HARD}; clamping" >&2
+                FD_LIMIT="$FD_HARD"
+              fi
+              ulimit -Sn "$FD_LIMIT" || { echo "ulimit -Sn ${FD_LIMIT} failed (requested ${FD_REQUESTED}, hard limit ${FD_HARD})" >&2; exit 1; }
               if [ -x /opt/nico/nico ]; then BIN=/opt/nico/nico; else BIN=/opt/carbide/carbide; fi
               exec "$BIN" -s {{ .Values.bootArtifacts.servePath }}
           env:

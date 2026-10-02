@@ -25,11 +25,13 @@ type runtime struct {
 	policy            PolicyConfig
 	pollInterval      time.Duration
 	persistTimeout    time.Duration
+	claimDuration     time.Duration
 	wakeCh            chan struct{}
 	fatalWorkerErrors chan error
 }
 
-// Scheduler claims and dispatches pending and due deferred executions.
+// Scheduler claims and dispatches pending, due deferred, and expired running
+// executions.
 type Scheduler struct {
 	instanceID  string
 	runtime     runtime
@@ -185,7 +187,12 @@ func (s *Scheduler) refill(ctx context.Context) error {
 			return nil
 		}
 
-		claims, err := workLane.claim(ctx, s.instanceID)
+		batch, err := workLane.claim(
+			ctx,
+			s.instanceID,
+			s.runtime.claimDuration,
+			s.runtime.policy.MaxAttempts,
+		)
 		if err != nil {
 			if errors.Is(err, errLaneCapacityAccounting) {
 				return err
@@ -202,7 +209,7 @@ func (s *Scheduler) refill(ctx context.Context) error {
 		}
 
 		channelCapacityMismatch := false
-		for _, claim := range claims {
+		for _, claim := range batch.Claims {
 			select {
 			case workLane.jobs <- claim:
 			default:
@@ -224,9 +231,9 @@ func (s *Scheduler) refill(ctx context.Context) error {
 			)
 		}
 
-		// A full scan may have truncated additional eligible work, so schedule
-		// another pass. Partial and empty scans avoid a redundant store read.
-		if len(claims) == workLane.scanLimit {
+		// A full candidate scan may have left additional eligible work, even when
+		// exhausted retries reduced the number of claims it produced.
+		if batch.ScanLimitReached {
 			s.wake()
 		}
 	}

@@ -29,11 +29,11 @@ use std::time::Duration;
 
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::machine::{DpfState, DpuInitState, FailureCause, FailureDetails, ManagedHostState};
 use tokio::time::timeout;
 
-use super::{dpf_config, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_test_env_with_overrides, get_config,
 };
@@ -52,10 +52,15 @@ fn provisioning_mock_with_labels_valid(labels_valid: Arc<AtomicBool>) -> MockDpf
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels()
         .returning(move |_, _| Ok(labels_valid.load(Ordering::SeqCst)));
+    expect_dpf_service_inventory(&mut mock);
     mock
 }
 
-async fn reset_host_to_provisioning(pool: &sqlx::PgPool, host_id: &MachineId, dpu_id: &MachineId) {
+async fn reset_host_to_provisioning(
+    pool: &sqlx::PgPool,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
+) {
     let state = ManagedHostState::DPUInit {
         dpu_states: model::machine::DpuInitStates {
             states: HashMap::from([(
@@ -87,8 +92,8 @@ async fn reset_host_to_provisioning(pool: &sqlx::PgPool, host_id: &MachineId, dp
 
 async fn reset_host_to_waiting_for_ready(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state = ManagedHostState::DPUInit {
         dpu_states: model::machine::DpuInitStates {

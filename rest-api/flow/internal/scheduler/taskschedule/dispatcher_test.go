@@ -183,6 +183,13 @@ func (m *mockTaskStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid
 	panic("mockTaskStore.ListNonTerminalTasksForRacks: not implemented")
 }
 
+func (m *mockTaskStore) LatestLeakageShutdownTaskStatuses(
+	_ context.Context,
+	_ []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	panic("mockTaskStore.LatestLeakageShutdownTaskStatuses: not implemented")
+}
+
 func (m *mockTaskStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) error {
 	panic("mockTaskStore.UpdateScheduledTask: not implemented")
 }
@@ -965,6 +972,39 @@ func TestSubmitScopeTasks(t *testing.T) {
 		assert.Equal(t, 30*time.Second, capturedReq.QueueTimeout)
 		require.NotNil(t, capturedReq.RuleID)
 		assert.Equal(t, ruleUUID, *capturedReq.RuleID)
+	})
+
+	t.Run("invalid persisted rule ID fails before task submission", func(t *testing.T) {
+		tmpl, err := MarshalTemplate(
+			taskcommon.TaskTypePowerControl,
+			taskcommon.OpCodePowerControlPowerOn,
+			json.RawMessage(`{}`),
+			TemplateOptions{RuleID: "not-a-uuid"},
+		)
+		require.NoError(t, err)
+
+		called := false
+		manager := &mockTaskManager{
+			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+				called = true
+				return []uuid.UUID{taskID}, nil
+			},
+		}
+		dispatcher := newDispatcher(nil, nil, manager)
+		schedule := &dbmodel.TaskSchedule{
+			ID:                uuid.New(),
+			Name:              "sched",
+			OperationTemplate: tmpl,
+		}
+
+		_, _, err = dispatcher.submitScopeTasks(
+			context.Background(),
+			schedule,
+			[]*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}},
+			now,
+		)
+		require.ErrorContains(t, err, "invalid rule_id")
+		assert.False(t, called)
 	})
 
 	t.Run("SubmitTask error — scope skipped, all-fail error returned", func(t *testing.T) {

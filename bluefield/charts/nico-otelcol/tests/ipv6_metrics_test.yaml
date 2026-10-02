@@ -1,0 +1,34 @@
+# Remote scraping must be opt-in because the collector uses the DPU host network.
+suite: Collector metrics exposure
+templates: [configmap.yaml, service.yaml]
+tests:
+  # Existing installations must retain loopback-only metrics exposure on upgrade.
+  - it: preserves the loopback exporter by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prometheus:\s*endpoint: "127.0.0.1:9999"'
+        template: configmap.yaml
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+        template: service.yaml
+      - equal:
+          path: spec.ports
+          value: [{name: prometheus, protocol: TCP, port: 9999, targetPort: 9999}]
+        template: service.yaml
+
+  # Remote opt-in must expose the exporter and keep its overridden port aligned with the Service.
+  - it: exposes remote metrics on the configured Service port when enabled
+    set:
+      prometheusRemoteAccess: true
+      prometheusPort: 19999
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prometheus:\s*endpoint: ":19999"'
+        template: configmap.yaml
+      - equal:
+          path: spec.ports
+          value: [{name: prometheus, protocol: TCP, port: 19999, targetPort: 19999}]
+        template: service.yaml

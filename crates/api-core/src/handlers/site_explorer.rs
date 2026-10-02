@@ -15,18 +15,20 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use ::rpc::forge::{self as rpc, IsBmcInManagedHostResponse};
 use carbide_site_explorer::EndpointExplorationServiceError;
 use config_version::ConfigVersion;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
-use crate::handlers::utils::resolve_bmc_address;
+use crate::handlers::utils::resolve_bmc_addresses;
 
 pub(crate) async fn find_explored_endpoint_ids(
     api: &Api,
@@ -34,7 +36,8 @@ pub(crate) async fn find_explored_endpoint_ids(
 ) -> Result<Response<::rpc::site_explorer::ExploredEndpointIdList>, Status> {
     log_request_data(&request);
 
-    let filter: model::site_explorer::ExploredEndpointSearchFilter = request.into_inner().into();
+    let filter: model::site_explorer::ExploredEndpointSearchFilter =
+        request.into_inner().try_into()?;
 
     let endpoint_ips = db::explored_endpoints::find_ips(&api.database_connection, filter).await?;
 
@@ -256,7 +259,8 @@ pub(crate) async fn clear_site_exploration_error(
     // report cleared above. Reset it to `Initial` here so clearing the error
     // actually retries preingestion instead of requiring a force-delete of the
     // endpoint. Non-failed states are left untouched.
-    if db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn).await? {
+    if let Applied(()) = db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn).await?
+    {
         tracing::info!(
             bmc_ip_address = %bmc_ip,
             "Reset failed preingestion to initial after clearing the site exploration error",
@@ -322,8 +326,11 @@ pub(crate) async fn re_explore_endpoint(
         )
         .await
         {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(Applied(())) => {}
+            Ok(NotApplied(EndpointReportNotCurrent)) => {
+                // This API reports `FailedPrecondition` for a conditional miss,
+                // whether the report version changed or the endpoint was removed
+                // after the initial lookup.
                 return Err(CarbideError::ConcurrentModificationError(
                     "explored_endpoint",
                     expected_version.to_string(),
@@ -403,16 +410,33 @@ pub(crate) async fn is_bmc_in_managed_host(
 ) -> Result<Response<IsBmcInManagedHostResponse>, tonic::Status> {
     log_request_data(&request);
     let req = request.into_inner();
-    let bmc_addr = resolve_bmc_address(&req.ip_address).await?;
+    let bmc_addresses = resolve_bmc_addresses(&req.ip_address).await?;
 
-    let in_managed_host =
-        carbide_site_explorer::is_endpoint_in_managed_host(bmc_addr.ip(), &api.database_connection)
-            .await
-            .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let in_managed_host = is_any_bmc_in_managed_host(api, &bmc_addresses).await?;
 
     Ok(Response::new(IsBmcInManagedHostResponse {
         in_managed_host,
     }))
+}
+
+/// Checks every resolved address because a managed machine's BMC address
+/// may not be the hostname's first DNS answer.
+async fn is_any_bmc_in_managed_host(
+    api: &Api,
+    bmc_addresses: &[SocketAddr],
+) -> Result<bool, CarbideError> {
+    for bmc_address in bmc_addresses {
+        if carbide_site_explorer::is_endpoint_in_managed_host(
+            bmc_address.ip(),
+            &api.database_connection,
+        )
+        .await
+        .map_err(|e| CarbideError::internal(e.to_string()))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn delete_explored_endpoint(
@@ -460,4 +484,100 @@ pub(crate) async fn delete_explored_endpoint(
             "Successfully deleted explored endpoint with IP {bmc_ip}"
         )),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use ::rpc::forge::forge_server::Forge;
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
+    use carbide_uuid::network::NetworkSegmentId;
+    use model::allocation_type::AllocationType;
+    use model::machine::ManagedHostState;
+
+    use super::*;
+    use crate::tests::create_test_env;
+
+    #[crate::sqlx_test]
+    async fn bmc_membership_checks_later_resolved_addresses(pool: sqlx::PgPool) {
+        let env = create_test_env(pool).await;
+        let registered_ip: IpAddr = "2001:db8::10".parse().unwrap();
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x26; 32],
+            MachineType::Host,
+        );
+        let mut txn = env.api.database_connection.begin().await.unwrap();
+        db::machine::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type) \
+             VALUES ('bmc-membership', 'V1-T0', 'admin') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces \
+                 (segment_id, mac_address, primary_interface, hostname, machine_id, \
+                  interface_type, association_type) \
+             VALUES ($1, '02:00:00:00:69:26', false, 'bmc-membership', $2, 'Bmc', 'Machine') \
+             RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(machine_id)
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        db::machine_interface_address::insert(
+            txn.as_mut(),
+            interface_id,
+            registered_ip,
+            AllocationType::Static,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        for (scenario, addresses, expected) in [
+            (
+                "later IPv6 answer belongs to a managed host",
+                ["192.0.2.99:443", "[2001:db8::10]:443"],
+                true,
+            ),
+            (
+                "no answer belongs to a managed host",
+                ["192.0.2.99:443", "[2001:db8::99]:443"],
+                false,
+            ),
+        ] {
+            let addresses = addresses.map(|address| address.parse().unwrap());
+            assert_eq!(
+                is_any_bmc_in_managed_host(&env.api, &addresses)
+                    .await
+                    .unwrap(),
+                expected,
+                "{scenario}",
+            );
+        }
+
+        // Exercise the RPC wiring separately with a literal IPv6 address.
+        let response = env
+            .api
+            .is_bmc_in_managed_host(Request::new(rpc::BmcEndpointRequest {
+                ip_address: registered_ip.to_string(),
+                mac_address: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.in_managed_host);
+    }
 }

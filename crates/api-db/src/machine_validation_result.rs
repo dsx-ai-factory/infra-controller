@@ -109,8 +109,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineValidationResult>>
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineValidationResult>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM machine_validation_results").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            machine_validation_id, name, description, command, args, context, stdout, stderr,
+            exit_code, start_time, end_time, test_id
+        FROM machine_validation_results",
+    )
+    .filter(&filter);
     query.push(" ORDER BY start_time");
     let custom_results = query
         .build_query_as()

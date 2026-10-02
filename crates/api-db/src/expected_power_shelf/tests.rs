@@ -17,9 +17,95 @@
 
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::metadata::Metadata;
+use sqlx::Connection;
 
 use super::*;
 use crate as db;
+
+#[crate::sqlx_test]
+async fn expected_power_shelf_queries_survive_added_columns(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut api_connection = pool.acquire().await?;
+    exercise_expected_power_shelf_queries(&mut api_connection).await?;
+    assert!(api_connection.cached_statements_size() > 0);
+
+    // Keep the API's prepared statements while another connection applies DDL.
+    let mut migration = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL lock_timeout = '5s';
+         ALTER TABLE expected_power_shelves ADD COLUMN test_added_column text;",
+    )
+    .execute(&mut *migration)
+    .await?;
+    migration.commit().await?;
+
+    exercise_expected_power_shelf_queries(&mut api_connection).await?;
+    Ok(())
+}
+
+async fn exercise_expected_power_shelf_queries(
+    connection: &mut PgConnection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = connection.begin().await?;
+    let id = Uuid::new_v4();
+    let rack_id = RackId::new("projection-rack");
+    let expected = ExpectedPowerShelf {
+        expected_power_shelf_id: Some(id),
+        bmc_mac_address: "02:00:00:00:03:01".parse()?,
+        bmc_username: "test-user".to_string(),
+        bmc_password: "test-password".to_string(),
+        serial_number: "projection-shelf".to_string(),
+        bmc_ip_address: Some("192.0.2.30".parse()?),
+        rack_id: Some(rack_id.clone()),
+        bmc_retain_credentials: Some(true),
+        metadata: Metadata {
+            name: "expected power shelf".to_string(),
+            description: "populated projection fixture".to_string(),
+            labels: HashMap::from([("location".to_string(), "rack-1".to_string())]),
+        },
+    };
+    assert_power_shelf(&create(&mut txn, expected.clone()).await?, &expected);
+
+    for found in [
+        find_by_bmc_mac_address(&mut txn, expected.bmc_mac_address).await?,
+        find_by_id(&mut txn, id).await?,
+        find_by_id_for_update(&mut txn, id).await?,
+    ] {
+        assert_power_shelf(&found.expect("the expected power shelf exists"), &expected);
+    }
+    for found in [
+        find_all(&mut txn).await?,
+        find_all_by_rack_id(&mut txn, &rack_id).await?,
+    ] {
+        assert_eq!(found.len(), 1);
+        assert_power_shelf(&found[0], &expected);
+    }
+    let found = find_many_by_bmc_mac_address(&mut txn, &[expected.bmc_mac_address]).await?;
+    assert_eq!(found.len(), 1);
+    assert_power_shelf(&found[&expected.bmc_mac_address], &expected);
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+fn assert_power_shelf(actual: &ExpectedPowerShelf, expected: &ExpectedPowerShelf) {
+    assert_eq!(
+        actual.expected_power_shelf_id,
+        expected.expected_power_shelf_id
+    );
+    assert_eq!(actual.bmc_mac_address, expected.bmc_mac_address);
+    assert_eq!(actual.bmc_username, expected.bmc_username);
+    assert_eq!(actual.bmc_password, expected.bmc_password);
+    assert_eq!(actual.serial_number, expected.serial_number);
+    assert_eq!(actual.bmc_ip_address, expected.bmc_ip_address);
+    assert_eq!(actual.rack_id, expected.rack_id);
+    assert_eq!(
+        actual.bmc_retain_credentials,
+        expected.bmc_retain_credentials
+    );
+    assert_eq!(actual.metadata, expected.metadata);
+}
 
 fn expected_power_shelf_bmc_mac_address(index: u8) -> mac_address::MacAddress {
     mac_address::MacAddress::new([0x44, 0x44, 0x22, 0x22, 0x00, index])
@@ -194,4 +280,107 @@ async fn test_delete(pool: sqlx::PgPool) -> () {
         async |txn, mac| db::expected_power_shelf::find_by_bmc_mac_address(txn, mac).await,
     )
     .await;
+}
+
+/// Every power shelf is rack-scale, so the pre-ingestion RMS identity resolver
+/// requires a declared `rack_id` and takes its rack profile from the live
+/// `racks` row when present, otherwise the `expected_racks` declaration.
+/// A power shelf missing a `rack_id` is a misconfiguration and is omitted.
+#[crate::sqlx_test]
+async fn test_find_rms_identities_by_bmc_macs(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+
+    use model::rack::RackConfig;
+
+    let mut txn = pool.begin().await?;
+
+    let bmc_expected_only = "02:00:00:00:0e:01";
+    let bmc_live_rack = "02:00:00:00:0e:02";
+    let bmc_no_rack = "02:00:00:00:0e:03";
+
+    let rack_expected: RackId = "ps-rack-expected-only".parse().unwrap();
+    let rack_live: RackId = "ps-rack-live".parse().unwrap();
+    let profile_expected = RackProfileId::new("NVL72-EXPECTED");
+    let profile_live = RackProfileId::new("NVL72-LIVE");
+
+    // Both racks are declared in expected_racks; only rack_live also has a
+    // live racks row (with a different profile) to prove COALESCE precedence.
+    sqlx::query("INSERT INTO expected_racks (rack_id, rack_profile_id) VALUES ($1, $2), ($3, $4)")
+        .bind(rack_expected.to_string())
+        .bind(profile_expected.to_string())
+        .bind(rack_live.to_string())
+        .bind("NVL72-EXPECTED-IGNORED")
+        .execute(txn.as_mut())
+        .await?;
+
+    crate::rack::create(
+        txn.as_mut(),
+        &rack_live,
+        Some(&profile_live),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO expected_power_shelves
+             (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id)
+         VALUES ('PS-EXP', $1::macaddr, 'admin', 'pw', $2),
+                ('PS-LIVE', $3::macaddr, 'admin', 'pw', $4),
+                ('PS-NORACK', $5::macaddr, 'admin', 'pw', NULL)",
+    )
+    .bind(bmc_expected_only)
+    .bind(rack_expected.to_string())
+    .bind(bmc_live_rack)
+    .bind(rack_live.to_string())
+    .bind(bmc_no_rack)
+    .execute(txn.as_mut())
+    .await?;
+
+    let identities = find_rms_identities_by_bmc_macs(
+        txn.as_mut(),
+        &[
+            bmc_expected_only.parse()?,
+            bmc_live_rack.parse()?,
+            bmc_no_rack.parse()?,
+        ],
+    )
+    .await?;
+
+    let by_mac: HashMap<_, _> = identities
+        .iter()
+        .map(|id| (id.bmc_mac_address, id))
+        .collect();
+
+    assert_eq!(by_mac.len(), 2, "the no-rack power shelf must be omitted");
+
+    let expected_only = by_mac
+        .get(&bmc_expected_only.parse()?)
+        .expect("expected-only power shelf resolves");
+    assert_eq!(expected_only.rack_id, rack_expected);
+    assert_eq!(
+        expected_only.rack_profile_id.as_ref(),
+        Some(&profile_expected),
+        "rack profile falls back to expected_racks when no live rack exists"
+    );
+
+    let live = by_mac
+        .get(&bmc_live_rack.parse()?)
+        .expect("live-rack power shelf resolves");
+    assert_eq!(live.rack_id, rack_live);
+    assert_eq!(
+        live.rack_profile_id.as_ref(),
+        Some(&profile_live),
+        "a live racks row takes precedence over the expected_racks declaration"
+    );
+
+    assert!(
+        !by_mac.contains_key(&bmc_no_rack.parse()?),
+        "a power shelf without a rack_id cannot resolve an RMS identity"
+    );
+
+    txn.rollback().await?;
+    Ok(())
 }

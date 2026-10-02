@@ -23,23 +23,31 @@ use carbide_power_shelf_controller::context::{
     PowerShelfStateHandlerContextObjects, PowerShelfStateHandlerServices,
 };
 use carbide_power_shelf_controller::handler::PowerShelfStateHandler;
+use carbide_power_shelf_controller::io::PowerShelfStateControllerIO;
 use carbide_power_shelf_controller::metrics::PowerShelfMetrics;
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::TestHarness;
+use carbide_uuid::machine::MachineInterfaceId;
+use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
 use db::power_shelf as db_power_shelf;
+use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
 use model::rack_type::RackProfileConfig;
 use model::test_support::rms_rack_profiles;
 use sqlx::{PgConnection, PgPool};
+use state_controller::controller::StateController;
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerOutcome};
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 pub(super) struct ControllerEnv {
     pub(super) harness: TestHarness,
@@ -49,6 +57,7 @@ pub(super) struct ControllerEnv {
     pub(super) rms_sim: Arc<RmsSim>,
     pub(super) rack_profiles: RackProfileConfig,
     pub(super) per_object_metrics_registry: Arc<PerObjectMetricsRegistry>,
+    controller: Mutex<StateController<PowerShelfStateControllerIO>>,
 }
 
 impl ControllerEnv {
@@ -66,7 +75,7 @@ impl ControllerEnv {
                 .clone(),
             Duration::from_secs(60),
         );
-        let api_component_manager = component_manager::component_manager::build_component_manager(
+        let component_manager = component_manager::component_manager::build_component_manager(
             &ComponentManagerConfig {
                 nv_switch_backend: NvSwitchBackend::Rms,
                 power_shelf_backend: PowerShelfBackend::Rms,
@@ -83,6 +92,8 @@ impl ControllerEnv {
         )
         .await
         .expect("test component manager should build");
+        let component_manager = Arc::new(component_manager);
+        let api_component_manager = component_manager.clone();
         let api_redfish_sim = redfish_sim.clone();
         let api_credential_manager = credential_manager.clone();
         let api_rms_client = rms_sim
@@ -96,10 +107,33 @@ impl ControllerEnv {
                     .with_credential_manager(api_credential_manager)
                     .with_redfish_pool(api_redfish_sim)
                     .with_rms_client(api_rms_client)
-                    .with_component_manager(Arc::new(api_component_manager))
+                    .with_component_manager(api_component_manager)
             })
             .build()
             .await;
+        let controller = StateController::builder()
+            .database(pool.clone(), harness.api().work_lock_manager_handle())
+            .meter("carbide_power_shelves", harness.test_meter.meter())
+            .processor_id(uuid::Uuid::new_v4().to_string())
+            .services(
+                PowerShelfStateHandlerServices {
+                    db_pool: pool.clone(),
+                    component_manager: Some(component_manager),
+                    credential_manager: credential_manager.clone(),
+                    per_object_metrics_registry: per_object_metrics_registry.clone(),
+                    rack_firmware_reprovisioning_enabled: false,
+                    redfish_client_pool: redfish_sim.clone(),
+                    bmc_credential_ops: redfish_sim.clone(),
+                    bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                        db::credential_rotation::CredentialRotationType::Bmc,
+                    ),
+                    bmc_rotation_enabled: false,
+                }
+                .into(),
+            )
+            .state_handler(Arc::new(PowerShelfStateHandler::default()))
+            .build_for_manual_iterations(CancellationToken::new())
+            .expect("power shelf state controller should build");
 
         Self {
             harness,
@@ -109,7 +143,12 @@ impl ControllerEnv {
             rms_sim,
             rack_profiles,
             per_object_metrics_registry,
+            controller: Mutex::new(controller),
         }
+    }
+
+    pub(super) async fn run_controller_iteration(&self) {
+        self.controller.lock().await.run_single_iteration().await;
     }
 }
 
@@ -117,6 +156,9 @@ pub(super) fn services_without_component_manager(
     pool: &PgPool,
     rack_firmware_reprovisioning_enabled: bool,
 ) -> PowerShelfStateHandlerServices {
+    // One shared sim so tests that queue expectations or read history see
+    // the same instance behind both handles.
+    let redfish_sim: Arc<RedfishSim> = Arc::new(RedfishSim::default());
     PowerShelfStateHandlerServices {
         db_pool: pool.clone(),
         component_manager: None,
@@ -126,12 +168,56 @@ pub(super) fn services_without_component_manager(
             Duration::from_secs(60),
         ),
         rack_firmware_reprovisioning_enabled,
-        redfish_client_pool: Arc::new(RedfishSim::default()),
+        redfish_client_pool: redfish_sim.clone(),
+        bmc_credential_ops: redfish_sim,
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),
         bmc_rotation_enabled: false,
     }
+}
+
+/// Link a `Bmc` machine interface to the power shelf so its load query resolves
+/// `bmc_info` with an addressable PMC endpoint. Returns the PMC MAC.
+pub(super) async fn seed_pmc_endpoint(
+    pool: &PgPool,
+    power_shelf_id: PowerShelfId,
+) -> Result<MacAddress, Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+
+    let segment_id: NetworkSegmentId = sqlx::query_scalar(
+        "INSERT INTO network_segments (name, version, network_segment_type)
+         VALUES ($1, 'V1-T0', 'tenant') RETURNING id",
+    )
+    .bind(format!("pmc-{power_shelf_id}"))
+    .fetch_one(txn.as_mut())
+    .await?;
+
+    let pmc_mac = "02:00:00:00:0b:01";
+    let bmc_interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+             (power_shelf_id, association_type, segment_id, mac_address,
+              primary_interface, hostname, interface_type)
+         VALUES ($1, 'PowerShelf', $2, $3::macaddr, false, 'pmc', 'Bmc')
+         RETURNING id",
+    )
+    .bind(power_shelf_id)
+    .bind(segment_id)
+    .bind(pmc_mac)
+    .fetch_one(txn.as_mut())
+    .await?;
+
+    db::machine_interface_address::insert(
+        txn.as_mut(),
+        bmc_interface_id,
+        "10.30.40.50".parse()?,
+        AllocationType::Dhcp,
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    Ok(pmc_mac.parse()?)
 }
 
 pub(super) async fn load_power_shelf(pool: &PgPool, id: &PowerShelfId) -> PowerShelf {

@@ -73,6 +73,10 @@ func TestConfigValidate(t *testing.T) {
 			mutate:  func(config *Config) { config.Runtime.PersistTimeout = 0 },
 			wantErr: "execution persist timeout must be positive",
 		},
+		"invalid claim duration": {
+			mutate:  func(config *Config) { config.Runtime.ClaimDuration = 0 },
+			wantErr: "execution claim duration must be positive",
+		},
 		"invalid max attempts": {
 			mutate:  func(config *Config) { config.Policy.MaxAttempts = 0 },
 			wantErr: "retry max attempts must be positive",
@@ -111,6 +115,7 @@ func TestDefaultRuntimeConfig(t *testing.T) {
 	expected := RuntimeConfig{
 		PollInterval:   time.Minute,
 		PersistTimeout: time.Second,
+		ClaimDuration:  30 * time.Second,
 		Lanes: map[string]LaneConfig{
 			"pending":  {Workers: 1, ScanLimit: 1},
 			"deferred": {Workers: 1, ScanLimit: 1},
@@ -173,6 +178,7 @@ func TestConfig_runtime(t *testing.T) {
 	require.Equal(t, config.Policy, actual.policy)
 	require.Equal(t, config.Runtime.PollInterval, actual.pollInterval)
 	require.Equal(t, config.Runtime.PersistTimeout, actual.persistTimeout)
+	require.Equal(t, config.Runtime.ClaimDuration, actual.claimDuration)
 	require.Equal(t, 1, cap(actual.wakeCh))
 	require.Equal(t, 3, cap(actual.fatalWorkerErrors))
 }

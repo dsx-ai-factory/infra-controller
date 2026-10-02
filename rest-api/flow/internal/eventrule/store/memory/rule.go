@@ -30,8 +30,12 @@ func (s *Store) GetByID(_ context.Context, id uuid.UUID) (*eventrule.Rule, error
 // List returns persisted rules matching the filter.
 func (s *Store) List(
 	_ context.Context,
-	filter eventrule.RuleFilter,
-) ([]*eventrule.Rule, error) {
+	request eventrule.RuleListRequest,
+) (eventrule.RuleListPage, error) {
+	if err := request.Validate(); err != nil {
+		return eventrule.RuleListPage{}, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -39,16 +43,26 @@ func (s *Store) List(
 	for _, persisted := range s.rules {
 		rule, err := converterdao.EventRuleFrom(&persisted)
 		if err != nil {
-			return nil, err
+			return eventrule.RuleListPage{}, err
 		}
-		if filter.Matches(rule) {
+		if request.Filter.Matches(rule) {
 			rules = append(rules, rule)
 		}
 	}
 	slices.SortFunc(rules, func(a, b *eventrule.Rule) int {
 		return cmp.Compare(a.ID.String(), b.ID.String())
 	})
-	return rules, nil
+
+	total := len(rules)
+	if request.Offset >= total {
+		return eventrule.RuleListPage{Total: total}, nil
+	}
+
+	end := min(request.Offset+request.Limit, total)
+	return eventrule.RuleListPage{
+		Rules: rules[request.Offset:end],
+		Total: total,
+	}, nil
 }
 
 // Create stores a new persisted rule.
@@ -124,9 +138,30 @@ func (s *Store) Delete(_ context.Context, id uuid.UUID) error {
 
 // SetEnabled changes one persisted rule's enabled state.
 func (s *Store) SetEnabled(_ context.Context, id uuid.UUID, enabled bool) error {
-	return s.updateRule(id, func(rule *eventrule.Rule) {
-		rule.Enabled = enabled
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	persisted, ok := s.rules[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
+	}
+	if persisted.Enabled == enabled {
+		return nil
+	}
+
+	rule, err := converterdao.EventRuleFrom(&persisted)
+	if err != nil {
+		return err
+	}
+	rule.Enabled = enabled
+	rule.UpdatedAt = s.now().UTC()
+	updated, err := converterdao.EventRuleTo(rule)
+	if err != nil {
+		return err
+	}
+	s.rules[id] = *updated
+
+	return nil
 }
 
 func (s *Store) updateRule(id uuid.UUID, mutate func(*eventrule.Rule)) error {

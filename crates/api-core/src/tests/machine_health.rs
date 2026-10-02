@@ -716,7 +716,7 @@ async fn test_double_insert(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     let _ = env
         .api
         .insert_machine_health_report(Request::new(rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(host_machine_id),
+            machine_id: Some(host_machine_id.into()),
             health_report_entry: Some(rpc::forge::HealthReportEntry {
                 report: Some(health_report::HealthReport::empty("over".to_string()).into()),
                 mode: health_report::HealthReportApplyMode::Replace as i32,
@@ -738,7 +738,7 @@ async fn test_double_insert(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     let _ = env
         .api
         .insert_machine_health_report(Request::new(rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(host_machine_id),
+            machine_id: Some(host_machine_id.into()),
             health_report_entry: Some(rpc::forge::HealthReportEntry {
                 report: Some(merge_hr.clone().into()),
                 mode: health_report::HealthReportApplyMode::Merge as i32,
@@ -784,7 +784,7 @@ async fn test_insert_machine_health_report_retains_in_alert_since(
         env.api
             .insert_machine_health_report(Request::new(
                 rpc::forge::InsertMachineHealthReportRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                     health_report_entry: Some(rpc::forge::HealthReportEntry {
                         report: Some(report.into()),
                         mode: HealthReportApplyMode::Merge as i32,
@@ -863,11 +863,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
     let mut txn = env.pool.begin().await?;
-    let machine_ids = db::machine::find_machine_ids(
-        txn.as_mut(),
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?;
+    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -915,11 +911,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     .await;
 
     let mut txn = env.pool.begin().await?;
-    let machine_ids = db::machine::find_machine_ids(
-        txn.as_mut(),
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?;
+    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,

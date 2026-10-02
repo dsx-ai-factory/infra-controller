@@ -1,0 +1,10 @@
+nico-hardware-health:
+  env:
+    CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "false"
+    CARBIDE_HEALTH__SINKS__OTLP__ENABLED: "true"
+    CARBIDE_HEALTH__SINKS__OTLP__TARGETS: >-
+      [ {endpoint="http://otlp-receiver.observability.svc.cluster.local:4317"} ]
+  serviceMonitor:
+    enabled: false
+  telemetryServiceMonitor:
+    enabled: false

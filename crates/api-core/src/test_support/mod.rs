@@ -18,11 +18,14 @@
 pub mod builder;
 pub mod default_config;
 pub mod fixture_config;
+pub mod health;
 pub(crate) mod ib_fabric;
 pub(crate) mod ib_guid_pool;
 pub mod mac_address_pool;
+pub mod metadata;
 pub mod network;
 pub mod network_segment;
+pub mod redfish;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +72,7 @@ impl Api {
 
     pub async fn process_scout_req_for_test(
         &self,
-        machine_id: carbide_uuid::machine::MachineId,
+        machine_id: carbide_uuid::machine::HostMachineId,
     ) -> crate::CarbideResult<rpc::forge_agent_control_response::Action> {
         crate::handlers::process_scout_req_for_test(self, machine_id).await
     }

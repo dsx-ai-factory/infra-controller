@@ -20,6 +20,8 @@ siteIpBlocks:
   # Site IP Blocks are created automatically from fabric prefixes reported
   # by the Site. This selector discovers the existing block; it never posts
   # a Provider-created IP Block. Rerun bootstrap if inventory is not ready.
+  # routingType is DatacenterOnly for an RFC 1918 or RFC 4193 private range
+  # such as 10.40.0.0/16, and Public for any other range.
   match:
     siteId: "${site.id}"
     routingType: DatacenterOnly

@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -104,6 +104,8 @@ pub(crate) struct Kea {
     temp_base_directory: TempDir,
 
     process: Option<Child>,
+    logs: Arc<Mutex<Vec<String>>>,
+    log_readers: Vec<thread::JoinHandle<()>>,
     _run_permit: Option<KeaRunPermit>,
 }
 
@@ -162,6 +164,8 @@ impl Kea {
             dhcp_out_port,
             dhcp_in_port_reservation,
             process: None,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            log_readers: Vec::new(),
             _run_permit: None,
         })
     }
@@ -232,16 +236,36 @@ impl Kea {
 
         let stdout = BufReader::new(process.stdout.take().unwrap());
         let stderr = BufReader::new(process.stderr.take().unwrap());
-        thread::spawn(move || {
+        let stdout_logs = self.logs.clone();
+        self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
-                println!("KEA STDOUT: {}", line.unwrap());
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDOUT: {line}");
+                        stdout_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stdout: {error}");
+                        break;
+                    }
+                }
             }
-        });
-        thread::spawn(move || {
+        }));
+        let stderr_logs = self.logs.clone();
+        self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
-                println!("KEA STDERR: {}", line.unwrap());
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDERR: {line}");
+                        stderr_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stderr: {error}");
+                        break;
+                    }
+                }
             }
-        });
+        }));
 
         self.process = Some(process);
 
@@ -279,7 +303,17 @@ impl Kea {
         Ok(None)
     }
 
-    fn stop_process(&mut self) {
+    /// Return whether the captured stdout or stderr contains `needle`.
+    pub(crate) fn has_log(&self, needle: &str) -> bool {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    /// Stop Kea and wait until its captured stdout and stderr have been drained.
+    pub(crate) fn stop_process(&mut self) {
         if let Some(process) = &mut self.process {
             // Rust stdlib can only send a KILL (9) to sub-process. Thankfully dhcp already depends on
             // libc so we can use that.
@@ -291,9 +325,15 @@ impl Kea {
             thread::sleep(Duration::from_millis(100));
             if let Ok(None) = process.try_wait() {
                 process.kill().unwrap(); // -9
+                process.wait().unwrap();
             }
         }
         self.process = None;
+        for reader in self.log_readers.drain(..) {
+            if reader.join().is_err() {
+                eprintln!("Kea log-reader thread panicked");
+            }
+        }
     }
 
     fn config(api_server_url: &str, lease_file: &Path) -> String {
@@ -362,7 +402,7 @@ impl Kea {
                 {
                     "name": "kea-dhcp4.carbide-callouts",
                     "output_options": [{"output": "stdout"}],
-                    "severity": "FATAL",
+                    "severity": "ERROR",
                     "debuglevel": 10
                 }
             ]

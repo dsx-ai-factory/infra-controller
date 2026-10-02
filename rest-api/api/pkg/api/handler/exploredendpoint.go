@@ -28,19 +28,17 @@ const (
 
 // GetAllExploredEndpointHandler lists explored endpoints for a Site via Core.
 type GetAllExploredEndpointHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllExploredEndpointHandler returns a handler for listing explored endpoints.
 func NewGetAllExploredEndpointHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) GetAllExploredEndpointHandler {
 	return GetAllExploredEndpointHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -53,13 +51,14 @@ func NewGetAllExploredEndpointHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site"
+// @Param machineId query string false "Filter reports by Machine ID"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Endpoint ID ordering" Enums(ID_ASC, ID_DESC) default(ID_ASC)
 // @Success 200 {array} model.APIExploredEndpoint
 // @Router /v2/org/{org}/nico/site-explorer/endpoint [get]
 func (h GetAllExploredEndpointHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExploredEndpoint", "GetAll", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExploredEndpoint", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -106,7 +105,7 @@ func (h GetAllExploredEndpointHandler) Handle(c echo.Context) error {
 		ctx,
 		stc,
 		corev1.Forge_FindExploredEndpointIds_FullMethodName,
-		&corev1.ExploredEndpointSearchFilter{},
+		apiRequest.ToProto(),
 		&ids,
 		siteID,
 	)

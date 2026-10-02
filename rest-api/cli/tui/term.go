@@ -34,16 +34,18 @@ type KeyEvent struct {
 	Special SpecialKey
 }
 
-func RawMode() (restore func(), err error) {
+func RawMode() (restore func() error, err error) {
 	fd := int(os.Stdin.Fd())
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return nil, fmt.Errorf("entering raw mode: %w", err)
 	}
-	return func() {
-		if restoreErr := term.Restore(fd, oldState); restoreErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to restore terminal mode: %v\n", restoreErr)
+	return func() error {
+		err := term.Restore(fd, oldState)
+		if err != nil {
+			return fmt.Errorf("restoring terminal: %w", err)
 		}
+		return nil
 	}, nil
 }
 

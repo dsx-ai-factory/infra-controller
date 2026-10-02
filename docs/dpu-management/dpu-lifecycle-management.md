@@ -43,7 +43,28 @@ This is a security benefit: the DPU enforces host isolation before the host rece
 
 ### NICo Metadata Service
 
-The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. Tenants can use MDS to retrieve information such as the Machine ID and boot or operating system metadata for their instance. MDS runs on the DPU rather than on the host, so its responses are trusted independently of the host OS.
+The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. It runs on the DPU rather than on the host, so its responses are trusted independently of the host OS. The integrated endpoint in `dpu-agent` and the standalone FMDS service expose the same metadata paths and status behavior.
+
+List the available categories at `/latest/meta-data` or `/latest/meta-data/`. The response contains these names:
+
+| Metadata path | Value |
+|---|---|
+| `/latest/meta-data/hostname` | Hostname selected for the instance. |
+| `/latest/meta-data/instance-name` | The instance's `metadata.name` value. |
+| `/latest/meta-data/sitename` | NICo site name. |
+| `/latest/meta-data/machine-id` | Managed machine identifier. |
+| `/latest/meta-data/instance-id` | Instance identifier. |
+| `/latest/meta-data/asn` | Autonomous system number assigned to the instance. |
+| `/latest/meta-data/public-ipv4` | Public IPv4 metadata. |
+| `/latest/meta-data/public-ipv6` | Public IPv6 metadata. |
+
+For example, from a tenant instance:
+
+```bash
+curl -fsS http://169.254.169.254/latest/meta-data/instance-name
+```
+
+`instance-name` is independent of `hostname`; adding or changing the instance name does not change the hostname endpoint. If the instance metadata has no nonempty name, both the integrated and standalone services return HTTP 404 with `instance name not available`. The category remains present in the metadata index so clients can discover the supported contract.
 
 ### HBN and Containerized Cumulus
 

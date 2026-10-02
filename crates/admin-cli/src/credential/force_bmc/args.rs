@@ -43,11 +43,11 @@ Clear a pending force-converge request:
 ")]
 pub(crate) enum Args {
     #[clap(
-        about = "Request an immediate BMC credential rotation of a machine, switch, or power shelf."
+        about = "Request an immediate BMC credential rotation of a machine, DPU, switch, or power shelf."
     )]
     Set(ForceSet),
     #[clap(
-        about = "Clear a pending BMC force-converge request for a machine, switch, or power shelf."
+        about = "Clear a pending BMC force-converge request for a machine, DPU, switch, or power shelf."
     )]
     Clear(ForceClear),
 }
@@ -81,7 +81,7 @@ pub(crate) struct ForceSet {
 
     #[clap(
         long,
-        help = "MAC of the BMC to target (machine, switch, or power shelf). Provide this \
+        help = "MAC of the BMC to target (machine, DPU, switch, or power shelf). Provide this \
                 or --id; if an id is also given they must identify the same device."
     )]
     pub(super) bmc_mac: Option<MacAddress>,

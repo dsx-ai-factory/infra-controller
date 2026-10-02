@@ -546,6 +546,7 @@ mod tests {
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),
+            bmc_credential_ops: redfish_sim.clone(),
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: Arc::new(MachineStateHandlerSiteConfig::test_default()),
             component_manager: None,
@@ -568,6 +569,9 @@ mod tests {
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
                 ),
+            nic_lockdown_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                db::credential_rotation::CredentialRotationType::LockdownIkm,
+            ),
         };
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();

@@ -1,4 +1,4 @@
-# Firmware Updates <Badge intent="launch" minimal>New</Badge>
+# Firmware Updates
 
 This guide first gives a high-level view of firmware updates in NICo and helps
 you choose the workflow that applies to your hardware. The linked workflow

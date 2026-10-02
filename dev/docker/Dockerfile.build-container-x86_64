@@ -16,7 +16,9 @@
 #
 
 # This should match rust-toolchain.toml
-FROM rust:1.97.1-slim-bookworm
+FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
+
+ARG KEA_VERSION
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -43,9 +45,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 	iproute2 \
 	iputils-ping \
 	jq \
-	kea-dev \
-	kea-dhcp4-server \
-	kea-dhcp6-server \
+	kea-dev=${KEA_VERSION} \
+	kea-dhcp4-server=${KEA_VERSION} \
+	kea-dhcp6-server=${KEA_VERSION} \
 	libboost-dev \
 	libgrpc-dev \
 	libopenipmi-dev \
@@ -71,6 +73,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 	git && \
 	rm -rf /var/lib/apt/lists/*
 
+RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
+	kea-dhcp6 -V
+
 # make LLVM's linker lld the default, because ld crashes using too much memory
 RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
 
@@ -91,6 +96,7 @@ RUN cargo install cargo-cache cargo-make sccache cargo-watch taplo-cli --locked 
 # install stuff that's not in debian
 RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
 RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.14.0/kind-linux-amd64  && chmod +x ./kind && mv kind /usr/local/bin
+RUN cd /tmp && curl -Lo ./grpcurl.tar.gz https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz && tar xzf grpcurl.tar.gz && chmod +x ./grpcurl && mv grpcurl /usr/local/bin/ && rm LICENSE && rm grpcurl.tar.gz
 RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/vault_1.14.1_linux_amd64.zip && unzip vault.zip && chmod u+x vault && mv vault /usr/local/bin/ && rm vault.zip
 RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
 RUN export GO_VERSION="1.26.4" && \

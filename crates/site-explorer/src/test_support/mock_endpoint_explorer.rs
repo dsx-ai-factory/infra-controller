@@ -31,7 +31,7 @@ use model::site_explorer::{
 };
 use tokio::sync::Notify;
 
-use crate::{EndpointExplorer, SiteExplorationMetrics};
+use crate::{AuthenticatedBmc, EndpointExplorer, SiteExplorationMetrics};
 
 /// One recorded endpoint exploration and its boot-interface target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +75,9 @@ pub struct MockEndpointExplorer {
     pub precondition_result: Arc<Mutex<Result<(), EndpointExplorationError>>>,
     pub power_states: Arc<Mutex<HashMap<IpAddr, PowerState>>>,
     pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, SystemPowerControl)>>>,
+    /// Records every `redfish_chassis_reset` call (BMC address, chassis id, and
+    /// requested action) so tests can assert the reset was routed correctly.
+    pub redfish_chassis_reset_calls: Arc<Mutex<Vec<(SocketAddr, String, SystemPowerControl)>>>,
     /// Power-control actions that `redfish_power_control` should reject (the
     /// call is still recorded). Lets tests exercise the PowerCycle ->
     /// ACPowercycle fallback for a vendor that refuses `PowerCycle`.
@@ -86,10 +89,10 @@ pub struct MockEndpointExplorer {
     /// Records each call to `explore_endpoint`.
     pub explore_endpoint_calls: Arc<Mutex<Vec<EndpointExplorationCall>>>,
     next_exploration_blocker: Arc<Mutex<Option<MockEndpointExplorationBlocker>>>,
-    /// Real explorer that `machine_setup`/`set_boot_order_dpu_first` forward to
-    /// (see [`Self::with_redfish_backend`]); `None` for the pure in-memory mock
-    /// used by site-explorer's own tests.
-    redfish_backend: Option<Arc<dyn EndpointExplorer>>,
+    /// Authenticated BMC client that `machine_setup`/`set_boot_order_dpu_first`
+    /// forward to (see [`Self::with_redfish_backend`]); `None` for the pure
+    /// in-memory mock used by site-explorer's own tests.
+    redfish_backend: Option<Arc<dyn AuthenticatedBmc>>,
 }
 
 impl Default for MockEndpointExplorer {
@@ -99,6 +102,7 @@ impl Default for MockEndpointExplorer {
             precondition_result: Arc::new(Mutex::new(Ok(()))),
             power_states: Arc::default(),
             redfish_power_control_calls: Arc::default(),
+            redfish_chassis_reset_calls: Arc::default(),
             power_control_failures: Arc::default(),
             set_nic_mode_calls: Arc::default(),
             explore_endpoint_calls: Arc::default(),
@@ -163,8 +167,9 @@ impl MockEndpointExplorer {
     }
 
     /// Forward `machine_setup`/`set_boot_order_dpu_first` to `backend` (a real,
-    /// `RedfishSim`-backed explorer) instead of no-op'ing them; see the type docs.
-    pub fn with_redfish_backend(mut self, backend: Arc<dyn EndpointExplorer>) -> Self {
+    /// `RedfishSim`-backed authenticated BMC client) instead of no-op'ing them;
+    /// see the type docs.
+    pub fn with_redfish_backend(mut self, backend: Arc<dyn AuthenticatedBmc>) -> Self {
         self.redfish_backend = Some(backend);
         self
     }
@@ -210,7 +215,10 @@ impl EndpointExplorer for MockEndpointExplorer {
         });
         res.clone()
     }
+}
 
+#[async_trait::async_trait]
+impl AuthenticatedBmc for MockEndpointExplorer {
     async fn redfish_reset_bmc(
         &self,
         _address: SocketAddr,
@@ -262,6 +270,21 @@ impl EndpointExplorer for MockEndpointExplorer {
                 details: Some(format!("mock: {action:?} refused")),
             });
         }
+        Ok(())
+    }
+
+    async fn redfish_chassis_reset(
+        &self,
+        address: SocketAddr,
+        _interface: &MachineInterfaceSnapshot,
+        chassis_id: &str,
+        action: SystemPowerControl,
+    ) -> Result<(), EndpointExplorationError> {
+        self.redfish_chassis_reset_calls.lock().unwrap().push((
+            address,
+            chassis_id.to_string(),
+            action,
+        ));
         Ok(())
     }
 

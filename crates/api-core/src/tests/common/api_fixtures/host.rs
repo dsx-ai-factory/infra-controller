@@ -17,7 +17,9 @@
 
 //! Contains host related fixtures
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use db::{ObjectColumnFilter, network_prefix};
 use model::hardware_info::HardwareInfo;
 use model::machine::MachineState::UefiSetup;
@@ -59,7 +61,7 @@ pub(in crate::tests) const GB200_COMPUTE_TRAY_5_INFO_JSON: &[u8] = include_bytes
 pub(in crate::tests) async fn host_discover_dhcp(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
 ) -> MachineInterfaceId {
     let mut txn = env.pool.begin().await.unwrap();
     let loopback_ip = super::dpu::loopback_ip(&mut txn, dpu_machine_id).await;
@@ -100,7 +102,7 @@ pub(in crate::tests) async fn host_discover_machine(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
     machine_interface_id: MachineInterfaceId,
-) -> MachineId {
+) -> StableHostMachineId {
     let mut discovery_info = DiscoveryInfo::try_from(HardwareInfo::from(host_config)).unwrap();
 
     discovery_info.attest_key_info = Some(AttestKeyInfo {
@@ -121,7 +123,11 @@ pub(in crate::tests) async fn host_discover_machine(
         .unwrap()
         .into_inner();
 
-    response.machine_id.expect("machine_id must be set")
+    response
+        .machine_id
+        .expect("machine_id must be set")
+        .try_into()
+        .unwrap()
 }
 
 pub(in crate::tests) async fn host_discover_machine_with_reporter(
@@ -155,8 +161,8 @@ pub(in crate::tests) async fn host_discover_machine_with_reporter(
     response.machine_id.expect("machine_id must be set")
 }
 
-pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: &MachineId) {
-    let machine = TestMachine::new(*host_machine_id, env.api.clone());
+pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: HostMachineId) {
+    let machine = TestMachine::new(host_machine_id, env.api.clone());
 
     // Wait until we are past through the last UefiSetupState and then assert we went through all
     const MAX_ITERATIONS: usize = 20;
@@ -175,6 +181,8 @@ pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: &M
                         machine_state: UefiSetup {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: None,
+                                credential_version: (state != UefiSetupState::SetUefiPassword)
+                                    .then_some(0),
                                 uefi_setup_state: state.clone(),
                             },
                         },
@@ -190,7 +198,7 @@ pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: &M
             return;
         }
 
-        let response = forge_agent_control(env, *host_machine_id).await;
+        let response = forge_agent_control(env, host_machine_id).await;
         assert!(matches!(response.action, Some(Action::Noop(_))));
         assert_eq!(response.legacy_action, LegacyAction::Noop as i32);
     }

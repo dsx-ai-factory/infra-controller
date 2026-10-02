@@ -119,7 +119,7 @@ func (c *Config) Build(
 
 	subscriberClient, err := temporal.New(c.ClientConf)
 	if err != nil {
-		publisherClient.Client().Close()
+		publisherClient.Close()
 		return nil, err
 	}
 
@@ -127,6 +127,8 @@ func (c *Config) Build(
 	allWorkflows := workflow.GetAllWorkflows()
 	workers := make(map[string]worker.Worker)
 	for queue, options := range c.WorkerOptions {
+		// The subscriber client already carries the shared tracing
+		// interceptor, which the SDK applies to every worker built from it.
 		worker := worker.New(subscriberClient.Client(), queue, options)
 		for name, fn := range allActivities {
 			worker.RegisterActivityWithOptions(
@@ -186,8 +188,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		log.Info().Msgf("Temporal worker stopped for queue %s", queue)
 	}
 
-	m.publisherClient.Client().Close()
-	m.subscriberClient.Client().Close()
+	m.publisherClient.Close()
+	m.subscriberClient.Close()
 
 	return nil
 }

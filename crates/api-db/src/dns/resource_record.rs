@@ -108,15 +108,19 @@ pub async fn find_record(
     txn: impl DbReader<'_>,
     query_name: &str,
 ) -> Result<Vec<DbResourceRecord>, DatabaseError> {
-    // TODO: Configurable defaults for TTL
+    // The dns_records view does not filter on the owning domain's lifecycle,
+    // so join it here: a record whose zone is soft-deleted is not served, even
+    // when a live parent zone would otherwise hold the name.
     let query = r#"
     SELECT
-     q_name,
-     resource_record,
-     domain_id,
-     COALESCE(ttl, 300) as ttl,
-     COALESCE(q_type, CASE WHEN family(resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
-     from dns_records WHERE q_name=$1"#;
+     dr.q_name,
+     dr.resource_record,
+     dr.domain_id,
+     COALESCE(d.default_ttl, 300) as ttl,
+     COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
+     FROM dns_records dr
+     JOIN domains d ON d.id = dr.domain_id
+     WHERE dr.q_name = $1 AND d.deleted IS NULL"#;
 
     tracing::info!(query_name, "Looking up DNS record",);
     let result = sqlx::query_as::<_, DbResourceRecord>(query)
@@ -150,7 +154,7 @@ impl<'r> FromRow<'r, PgRow> for DbPtrRecord {
 /// sources, each mirroring its forward counterpart so a forward A/AAAA record and
 /// its PTR round-trip:
 /// - a machine interface that holds the address -- the `dns_records_shortname_combined`
-///   primary/BMC arm, with `COALESCE(meta.ttl, 300)` to match the forward TTL;
+///   primary/BMC arm, carrying the zone's default TTL like its forward record;
 /// - an overlay instance allocated the address -- read straight from the
 ///   `dns_records_instance` forward view by IP, so forward and reverse share one
 ///   definition; that view already carries the stored hostname and excludes
@@ -191,19 +195,18 @@ pub async fn find_ptr_record(
         FROM (
             SELECT
                 concat(mi.hostname, '.', d.name, '.') AS ptr_content,
-                COALESCE(meta.ttl, 300) AS ttl,
+                COALESCE(d.default_ttl, 300) AS ttl,
                 d.id AS domain_id
             FROM machine_interface_addresses mia
             JOIN machine_interfaces mi ON mi.id = mia.interface_id
             JOIN domains d ON d.id = mi.domain_id
-            LEFT JOIN dns_record_metadata meta ON meta.id = mi.id
             WHERE mia.address = $1::inet
               AND (mi.primary_interface = TRUE OR mi.interface_type = 'Bmc')
               AND d.deleted IS NULL
             UNION ALL
             SELECT
                 instance_records.q_name AS ptr_content,
-                COALESCE(instance_records.ttl, 300) AS ttl,
+                COALESCE(d.default_ttl, 300) AS ttl,
                 instance_records.domain_id
             FROM dns_records_instance instance_records
             JOIN domains d ON d.id = instance_records.domain_id
@@ -224,12 +227,46 @@ pub async fn find_ptr_record(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Is there any published record under `name`?
+///
+/// `name` is absolute and lowercase with its trailing dot, such as
+/// `rack1.example.com.`. Only names strictly below it count; a record at
+/// `name` itself does not.
+///
+/// This decides NODATA versus NXDOMAIN for a name that has no records of its
+/// own. If `gpu1.rack1.example.com.` exists then `rack1.example.com.` exists
+/// too, even with nothing published at it (RFC 8020 §2), and a query for it
+/// must not be answered NXDOMAIN.
+///
+/// Only records in a live zone count. A record under a soft-deleted child
+/// zone would otherwise turn NXDOMAIN into NODATA for a name in the live
+/// parent, matching [`find_record`], which does not serve those records.
+// TODO: the suffix predicate cannot use an index and `dns_records` is a view,
+// so this scans the view on every in-zone miss. The only forward names this
+// product publishes under are `adm.<zone>` and `bmc.<zone>`; replace the scan
+// with `EXISTS` probes on those two source tables keyed by `domain_id`.
+pub async fn any_record_below(txn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
+    let query = r#"
+    SELECT EXISTS (
+        SELECT 1
+        FROM dns_records dr
+        JOIN domains d ON d.id = dr.domain_id
+        WHERE right(lower(dr.q_name), length($1) + 1) = '.' || $1
+          AND d.deleted IS NULL
+    )"#;
+    sqlx::query_scalar::<_, bool>(query)
+        .bind(name)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 pub async fn get_all_records_all_domains(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<DbResourceRecord>, DatabaseError> {
     let query = r#"
         SELECT dr.q_name, dr.resource_record, dr.domain_id,
-               COALESCE(dr.ttl, 300) as ttl,
+               COALESCE(d.default_ttl, 300) as ttl,
                COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
         FROM dns_records dr
         JOIN domains d ON d.id = dr.domain_id
@@ -250,7 +287,7 @@ pub async fn get_all_records(
     let domain_name = crate::dns::normalize_domain(query_name);
     let query = r#"
         SELECT dr.q_name, dr.resource_record, dr.domain_id,
-               COALESCE(dr.ttl, 300) as ttl,
+               COALESCE(d.default_ttl, 300) as ttl,
                COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
         FROM dns_records dr
         JOIN domains d ON d.id = dr.domain_id
@@ -269,7 +306,7 @@ mod tests {
     use carbide_uuid::instance::InstanceId;
     use carbide_uuid::network::NetworkSegmentId;
     use carbide_uuid::vpc::VpcId;
-    use model::dns::NewDomain;
+    use model::dns::{NewDomain, ZoneTtl};
 
     use super::find_record;
     use crate::dns::domain;
@@ -487,6 +524,68 @@ mod tests {
         }
     }
 
+    // A zone's default TTL reaches the records it publishes: forward names,
+    // PTRs, and listings. A zone without one uses 300, and setting one on an
+    // existing zone takes effect on the next answer.
+    #[crate::sqlx_test]
+    async fn zone_default_ttl_applies_to_served_records(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let (instance, segment, vpc) =
+            seed_instance_segment(txn.as_mut(), "ttl", "ttl.example.com", "tenant").await;
+        add_address(
+            txn.as_mut(),
+            instance,
+            segment,
+            vpc,
+            "10.7.7.7",
+            "10.7.7.0/24",
+        )
+        .await;
+        let address: std::net::IpAddr = "10.7.7.7".parse().expect("fixture IP");
+        let name = "10-7-7-7.ttl.example.com.";
+
+        let records = find_record(txn.as_mut(), name)
+            .await
+            .expect("lookup with site default");
+        assert_eq!(records[0].ttl, 300, "no zone default falls back to 300");
+
+        let zone = domain::find_by_name(txn.as_mut(), "ttl.example.com")
+            .await
+            .expect("find zone")
+            .into_iter()
+            .next()
+            .expect("fixture zone exists");
+        domain::update(
+            &model::dns::Domain {
+                default_ttl: Some(ZoneTtl::try_from(900).expect("in range")),
+                ..zone
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("set the zone default");
+
+        let records = find_record(txn.as_mut(), name)
+            .await
+            .expect("lookup after setting the default");
+        assert_eq!(
+            records[0].ttl, 900,
+            "forward record carries the zone default"
+        );
+        let ptrs = super::find_ptr_record(txn.as_mut(), address)
+            .await
+            .expect("PTR lookup");
+        assert_eq!(ptrs[0].ttl, 900, "PTR carries the zone default");
+        assert_eq!(
+            super::get_all_records(txn.as_mut(), "ttl.example.com")
+                .await
+                .expect("list zone")[0]
+                .ttl,
+            900,
+            "listing carries the zone default"
+        );
+    }
+
     #[crate::sqlx_test]
     async fn duplicate_overlay_addresses_have_no_reverse_ptr(pool: sqlx::PgPool) {
         // An address shared by two VPCs has two valid names. Until the request
@@ -695,6 +794,64 @@ mod tests {
             .await
             .unwrap();
         assert!(soa.is_none(), "a deleted forward zone cannot serve SOA");
+    }
+
+    #[crate::sqlx_test]
+    async fn a_deleted_child_zone_neither_serves_nor_exists_under_a_live_parent(
+        pool: sqlx::PgPool,
+    ) {
+        // The dns_records view keeps publishing rows whose zone is soft-deleted.
+        // With a live parent zone above, the handler would otherwise answer the
+        // child's stale A record as authoritative through the parent, and its
+        // existence would turn the parent's NXDOMAIN into NODATA.
+        let mut txn = pool.begin().await.unwrap();
+        domain::persist(NewDomain::new("example.com"), txn.as_mut())
+            .await
+            .unwrap();
+        let (instance_id, segment_id, vpc_id) =
+            seed_instance_segment(txn.as_mut(), "deleted-child", "child.example.com", "tenant")
+                .await;
+        add_address(
+            txn.as_mut(),
+            instance_id,
+            segment_id,
+            vpc_id,
+            "10.1.2.3",
+            "10.1.2.0/24",
+        )
+        .await;
+
+        let q_name = "10-1-2-3.child.example.com.";
+        assert_eq!(
+            find_record(txn.as_mut(), q_name).await.unwrap().len(),
+            1,
+            "the record is served while the child zone is live"
+        );
+        assert!(
+            super::any_record_below(txn.as_mut(), "child.example.com.")
+                .await
+                .unwrap(),
+            "the child zone has a record below it while live"
+        );
+
+        let domains = domain::find_by_name(txn.as_mut(), "child.example.com")
+            .await
+            .unwrap();
+        let [child] = domains.as_slice() else {
+            panic!("test fixture should have exactly one child domain");
+        };
+        domain::delete(child.clone(), txn.as_mut()).await.unwrap();
+
+        assert!(
+            find_record(txn.as_mut(), q_name).await.unwrap().is_empty(),
+            "a deleted zone's records are not served through the live parent"
+        );
+        assert!(
+            !super::any_record_below(txn.as_mut(), "child.example.com.")
+                .await
+                .unwrap(),
+            "a deleted zone's records do not make its name exist in the live parent"
+        );
     }
 
     #[crate::sqlx_test]

@@ -60,10 +60,7 @@ func TestStore_DuplicateDoesNotResumeExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 
-	claims, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	claims, err := testPendingClaims(ctx, store, testClaimRequest("scheduler-1"))
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 
@@ -71,10 +68,7 @@ func TestStore_DuplicateDoesNotResumeExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, duplicate)
 
-	more, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	more, err := testPendingClaims(ctx, store, testClaimRequest("scheduler-2"))
 	require.NoError(t, err)
 	require.Empty(t, more)
 
@@ -142,10 +136,7 @@ func TestStore_UsesDatabaseTimeForRetryEligibility(t *testing.T) {
 	_, err := store.CommitEventPlan(ctx, testEventDefinition(), testEventPlan())
 	require.NoError(t, err)
 
-	claims, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	claims, err := testPendingClaims(ctx, store, testClaimRequest("scheduler-1"))
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 
@@ -160,24 +151,47 @@ func TestStore_UsesDatabaseTimeForRetryEligibility(t *testing.T) {
 		),
 	))
 
-	notDue, err := store.ClaimRetryExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	notDue, err := testRetryClaims(ctx, store, testClaimRequest("scheduler-2"))
 	require.NoError(t, err)
 	require.Empty(t, notDue)
 
 	var due []eventrule.ClaimedExecution
 	require.Eventually(t, func() bool {
-		due, err = store.ClaimRetryExecutions(ctx, eventrule.ExecutionClaimRequest{
-			Owner: "scheduler-2",
-			Limit: 1,
-		})
+		due, err = testRetryClaims(ctx, store, testClaimRequest("scheduler-2"))
 
 		return err == nil && len(due) == 1
 	}, time.Second, 20*time.Millisecond)
 	require.NoError(t, err)
 	require.Len(t, due, 1)
+}
+
+func testClaimRequest(owner string) eventrule.ExecutionClaimRequest {
+	return eventrule.ExecutionClaimRequest{
+		Owner:         owner,
+		Limit:         1,
+		ClaimDuration: time.Minute,
+		MaxAttempts:   4,
+	}
+}
+
+func testPendingClaims(
+	ctx context.Context,
+	store *Store,
+	request eventrule.ExecutionClaimRequest,
+) ([]eventrule.ClaimedExecution, error) {
+	batch, err := store.ClaimPendingExecutions(ctx, request)
+
+	return batch.Claims, err
+}
+
+func testRetryClaims(
+	ctx context.Context,
+	store *Store,
+	request eventrule.ExecutionClaimRequest,
+) ([]eventrule.ClaimedExecution, error) {
+	batch, err := store.ClaimRetryExecutions(ctx, request)
+
+	return batch.Claims, err
 }
 
 func newTestStore(t *testing.T) *Store {

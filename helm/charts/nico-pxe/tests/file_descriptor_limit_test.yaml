@@ -2,15 +2,46 @@ suite: pxe file descriptor limit
 templates:
   - templates/deployment.yaml
 tests:
-  - it: uses the default soft limit
+  - it: uses the default soft limit with a hard-limit clamp
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'ulimit -Sn 65536 \|\| exit 1'
+          pattern: 'FD_LIMIT=65536'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'FD_HARD="\$\(ulimit -Hn\)"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'ulimit -Sn "\$FD_LIMIT"'
   - it: allows an override
     set:
       fileDescriptorLimit: 32768
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
-          pattern: 'ulimit -Sn 32768 \|\| exit 1'
+          pattern: 'FD_LIMIT=32768'
+  - it: falls back to the default when the value is nulled out
+    set:
+      fileDescriptorLimit: null
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'FD_LIMIT=65536'
+  - it: rejects a non-numeric value at render time
+    set:
+      fileDescriptorLimit: unlimited
+    asserts:
+      - failedTemplate:
+          errorPattern: 'fileDescriptorLimit must be a positive integer'
+  - it: rejects a negative value at render time
+    set:
+      fileDescriptorLimit: -1
+    asserts:
+      - failedTemplate:
+          errorPattern: 'fileDescriptorLimit must be a positive integer'
+  - it: rejects zero at render time instead of falling back to the default
+    set:
+      fileDescriptorLimit: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'fileDescriptorLimit must be a positive integer'

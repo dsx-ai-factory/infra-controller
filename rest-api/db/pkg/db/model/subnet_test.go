@@ -18,7 +18,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -84,13 +83,6 @@ func TestSubnet_ToProto(t *testing.T) {
 		// ReserveFirst is a deployment-policy value overlaid by the
 		// request-shape ToProto; the entity emits zero.
 		assert.Equal(t, int32(0), proto.Config.Prefixes[0].ReserveFirst)
-
-		// Deprecated flat mirrors are no longer populated.
-		assert.Empty(t, proto.Name)
-		assert.Nil(t, proto.VpcId)
-		assert.Nil(t, proto.SubdomainId)
-		assert.Nil(t, proto.Mtu)
-		assert.Nil(t, proto.Prefixes)
 	})
 
 	t.Run("prefers ControllerNetworkSegmentID for the Site-facing ID", func(t *testing.T) {
@@ -224,54 +216,6 @@ func TestSubnet_FromProto(t *testing.T) {
 		assert.Nil(t, s.IPv4Prefix)
 		assert.Nil(t, s.IPv4Gateway)
 		assert.Zero(t, s.PrefixLength)
-	})
-
-	t.Run("clears stale fields and ignores deprecated flat mirrors", func(t *testing.T) {
-		stale := "stale"
-		staleGW := "stale-gw"
-		staleDomain := uuid.New()
-		staleVpc := uuid.New()
-		flatMtu := int32(9000)
-		flatGateway := "10.0.0.1"
-		flatDomain := uuid.New()
-		flatVpc := uuid.New()
-
-		s := &Subnet{
-			ID:           subID,
-			VpcID:        staleVpc,
-			Name:         "stale-name",
-			Description:  cutil.GetPtr("stale"),
-			DomainID:     &staleDomain,
-			MTU:          cutil.GetPtr(1500),
-			IPv4Prefix:   &stale,
-			IPv4Gateway:  &staleGW,
-			PrefixLength: 24,
-		}
-		proto := &corev1.NetworkSegment{
-			Id: &corev1.NetworkSegmentId{Value: subID.String()},
-			Metadata: &corev1.Metadata{
-				Name: "fresh-name",
-			},
-			Config: &corev1.NetworkSegmentConfig{
-				VpcId: &corev1.VpcId{Value: vpcID.String()},
-			},
-			// Deprecated flat mirrors must not leak into the entity.
-			VpcId:       &corev1.VpcId{Value: flatVpc.String()},
-			Name:        "flat-name",
-			SubdomainId: &corev1.DomainId{Value: flatDomain.String()},
-			Mtu:         &flatMtu,
-			Prefixes: []*corev1.NetworkPrefix{
-				{Prefix: "10.0.0.0/16", Gateway: &flatGateway},
-			},
-		}
-		s.FromProto(proto)
-		assert.Equal(t, "fresh-name", s.Name)
-		assert.Nil(t, s.Description)
-		assert.Equal(t, vpcID, s.VpcID)
-		assert.Nil(t, s.DomainID)
-		assert.Nil(t, s.MTU)
-		assert.Nil(t, s.IPv4Prefix)
-		assert.Nil(t, s.IPv4Gateway)
 	})
 
 	t.Run("clears Description when proto omits it", func(t *testing.T) {
@@ -635,8 +579,6 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -778,8 +720,6 @@ func TestSubnetSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -931,8 +871,6 @@ func TestSubnetSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1211,8 +1149,6 @@ func TestSubnetSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1559,8 +1495,6 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1823,11 +1757,71 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+}
+
+func TestSubnetSQLDAO_ClearDeleted(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	ip := testSubnetBuildInfrastructureProvider(t, dbSession, "testIP")
+	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
+	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
+	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
+	user := testSubnetBuildUser(t, dbSession, "testUser")
+	ipBlock := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipBlock", &user.ID)
+	subnetDAO := NewSubnetDAO(dbSession)
+	controllerSegmentID := uuid.New()
+
+	subnet, err := subnetDAO.Create(ctx, nil, SubnetCreateInput{
+		SubnetID:                   &controllerSegmentID,
+		Name:                       "test-clear-deleted",
+		Org:                        "test",
+		SiteID:                     site.ID,
+		VpcID:                      vpc.ID,
+		TenantID:                   tenant.ID,
+		ControllerNetworkSegmentID: &controllerSegmentID,
+		RoutingType:                &ipBlock.RoutingType,
+		IPv4Prefix:                 cutil.GetPtr("192.0.2.0"),
+		IPv4Gateway:                cutil.GetPtr("192.0.2.1"),
+		IPv4BlockID:                &ipBlock.ID,
+		PrefixLength:               24,
+		Status:                     SubnetStatusError,
+		CreatedBy:                  user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, subnetDAO.Delete(ctx, nil, subnet.ID))
+
+	t.Run("clears soft-delete marker", func(t *testing.T) {
+		cleared, clearErr := subnetDAO.Clear(ctx, nil, SubnetClearInput{
+			SubnetId: subnet.ID,
+			Deleted:  true,
+		})
+		require.NoError(t, clearErr)
+		require.NotNil(t, cleared)
+		assert.Nil(t, cleared.Deleted)
+
+		updated, updateErr := subnetDAO.Update(ctx, nil, SubnetUpdateInput{
+			SubnetId:        subnet.ID,
+			Status:          cutil.GetPtr(SubnetStatusReady),
+			IsMissingOnSite: cutil.GetPtr(false),
+		})
+		require.NoError(t, updateErr)
+		assert.Equal(t, SubnetStatusReady, updated.Status)
+		assert.False(t, updated.IsMissingOnSite)
+	})
+
+	t.Run("returns not found for unknown Subnet", func(t *testing.T) {
+		_, clearErr := subnetDAO.Clear(ctx, nil, SubnetClearInput{
+			SubnetId: uuid.New(),
+			Deleted:  true,
+		})
+		assert.ErrorIs(t, clearErr, db.ErrDoesNotExist)
+	})
 }
 
 func TestSubnetSQLDAO_Delete(t *testing.T) {
@@ -1907,8 +1901,6 @@ func TestSubnetSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

@@ -33,13 +33,16 @@ resources: {}
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-ssh-console-rs.name" . }}-config-files'
 
-## Soft open-file limit applied before startup. Must not exceed the runtime hard limit.
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
 imagePullSecrets: []
 
 service:
   port: 22
+  grpcPort: 1079
 
 metrics:
   port: 9009

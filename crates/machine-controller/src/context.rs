@@ -20,8 +20,9 @@ use std::sync::Arc;
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
-use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::credentials::CredentialManager;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use component_manager::component_manager::ComponentManager;
 use db::db_read::PgPoolReader;
 use libredfish::Redfish;
@@ -48,6 +49,12 @@ pub struct MachineStateHandlerServices {
     pub db_reader: PgPoolReader,
     /// API for interaction with Libredfish
     pub redfish_client_pool: Arc<dyn RedfishClientPool>,
+    /// Credential-lifecycle operations (password set/rotate/clear,
+    /// candidate validation). A sealed trait implemented only by the direct
+    /// pool, so handing these to a wrapper pool is a compile error (a
+    /// wrong-pool guard, not a wire-path guarantee -- see
+    /// [`BmcCredentialOps`]).
+    pub bmc_credential_ops: Arc<dyn BmcCredentialOps>,
     /// An implementation of the IPMITool that understands how to reboot a machine
     pub ipmi_tool: Arc<dyn IPMITool>,
     /// Configuration used by MachineStateHandler.
@@ -75,6 +82,10 @@ pub struct MachineStateHandlerServices {
     /// `RotatingBmc` state as BMC root (a single root-authenticated Redfish call
     /// with no host-power impact), so this gate only decides *entry*.
     pub dpu_bmc_service_rotation_gate: RotationGate,
+    /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
+    /// shared across this replica's per-object ticks. Family-scoped to
+    /// `lockdown_ikm` and keyed by each NIC's MAC.
+    pub nic_lockdown_rotation_gate: RotationGate,
     /// Shared registry backing the generic per-object health metrics.
     pub per_object_metrics_registry: Arc<PerObjectMetricsRegistry>,
     /// Trait/association info gauges for the per-object metrics endpoint,
@@ -85,23 +96,32 @@ pub struct MachineStateHandlerServices {
 impl MachineStateHandlerServices {
     pub async fn create_redfish_client_from_machine(
         &self,
-        machine: &Machine,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
     ) -> Result<Box<dyn Redfish>, StateHandlerError> {
+        let bmc_access_info = self.bmc_access_info_for_machine(machine).await?;
+        self.redfish_client_pool
+            .client_by_info(&bmc_access_info)
+            .await
+            .map_err(StateHandlerError::from)
+    }
+
+    /// Resolves a machine's BMC access info; credential-lifecycle call sites
+    /// hand this to [`BmcCredentialOps`], which builds its own direct client.
+    pub(crate) async fn bmc_access_info_for_machine(
+        &self,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
+    ) -> Result<carbide_utils::redfish::BmcAccessInfo, StateHandlerError> {
         let addr = machine
             .bmc_addr()
             .ok_or_else(|| StateHandlerError::MissingData {
                 object_id: machine.id.to_string(),
                 missing: "BMC Endpoint Information (bmc_info.ip)",
             })?;
-        let bmc_access_info = db::machine_interface::lookup_bmc_access_info(
+        Ok(db::machine_interface::lookup_bmc_access_info(
             &self.db_pool,
             addr.ip(),
             Some(addr.port()),
         )
-        .await?;
-        self.redfish_client_pool
-            .client_by_info(&bmc_access_info)
-            .await
-            .map_err(StateHandlerError::from)
+        .await?)
     }
 }

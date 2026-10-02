@@ -65,21 +65,59 @@ fn format_error_chain<E: std::error::Error + ?Sized>(err: &E) -> String {
     }
 }
 
+/// Concrete, non-trait-object wrapper around a transport-level `tower::BoxError` (which includes
+/// a request having hit `REQUEST_TIMEOUT`). `ForgeClientT`/`NmxCClientT` carry this as their
+/// `BoxCloneService` error type instead of a bare `tower::BoxError` (`Box<dyn Error + Send +
+/// Sync>`) alias, because that raw trait-object alias trips a known rustc/async_trait HRTB
+/// inference bug ("implementation of `From` is not general enough", rust-lang/rust#102211) in
+/// every `#[async_trait]` fn that returns `Result<ForgeClientT, _>` (e.g.
+/// `ConnectionProvider::provide_connection`). A concrete newtype sidesteps it.
+#[derive(Debug)]
+pub struct TransportError(tower::BoxError);
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // The wrapped error itself, not its own source -- skipping straight to
+        // `self.0.source()` would hide `self.0` from any downstream source-chain walk (e.g.
+        // tonic's `Status::try_from_error`, which downcasts each link looking for a nested
+        // `tonic::Status` to recover its gRPC code). A transparent wrapper must expose what it
+        // wraps as the very next link, not jump past it.
+        Some(&*self.0)
+    }
+}
+
+impl From<tower::BoxError> for TransportError {
+    fn from(e: tower::BoxError) -> Self {
+        Self(e)
+    }
+}
+
 pub type NmxCClientT = NmxControllerClient<
-    BoxCloneService<
-        hyper::Request<Body>,
-        hyper::Response<Incoming>,
-        hyper_util::client::legacy::Error,
-    >,
+    BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
 >;
 
-pub type ForgeClientT = ForgeClient<
-    BoxCloneService<
-        hyper::Request<Body>,
-        hyper::Response<Incoming>,
-        hyper_util::client::legacy::Error,
-    >,
->;
+pub type ForgeClientT =
+    ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>>;
+
+/// Default ceiling on connection acquisition + time-to-response-headers for a single gRPC
+/// request, applied at the transport layer so a connection that's accepted but never answered
+/// can't block a caller (and its admission-retry budget) forever. Overridable via
+/// [`ForgeClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
+/// server-side `pending_timeout` configured above this default -- see that field's doc comment).
+///
+/// Doesn't bound the body/trailer phase after headers arrive, and the HTTP/2 keepalive PING
+/// above doesn't either: PING is connection-scoped, so a peer can keep acking it while one
+/// individual gRPC stream on that connection stalls after sending its headers. Set comfortably
+/// above the largest admission-retry cumulative backoff used anywhere in admin-cli (120s) and
+/// above legitimate large-batch call latency, so it should never fire against a healthy,
+/// just-slow server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const DEFAULT_DOMAIN: &str = "forge.local";
 
@@ -94,6 +132,18 @@ pub struct ForgeClientConfig {
     pub suppress_insecure_tls_warning: bool,
     pub use_mgmt_vrf: bool,
     pub max_decoding_message_size: Option<usize>,
+    /// Overrides [`REQUEST_TIMEOUT`]. `None` (the default) keeps the built-in ceiling. Exists
+    /// because `api_admission_control.pending_timeout` (`crates/api-core/src/cfg`) has no
+    /// enforced upper bound -- an operator can legally configure a server-side admission wait
+    /// longer than the client's default transport timeout, which would otherwise cancel the
+    /// call before the server's own deadline.
+    ///
+    /// [`ForgeClientConfig::new`] seeds this from `FORGE_CLIENT_REQUEST_TIMEOUT_SECS` (whole
+    /// seconds; zero and non-numeric values are rejected -- logged and ignored, falling back to
+    /// [`REQUEST_TIMEOUT`] -- since a zero timeout would fail every request immediately). A
+    /// value assigned directly to this field after construction takes precedence over the
+    /// environment, same as every other knob on this struct.
+    pub request_timeout: Option<Duration>,
     pub socks_proxy: Option<String>,
     pub connect_retries_max: Option<u32>,
     pub connect_retries_interval: Option<Duration>,
@@ -114,6 +164,21 @@ impl ForgeClientConfig {
         let max_decoding_message_size = std::env::var("TONIC_MAX_DECODING_MESSAGE_SIZE")
             .ok()
             .and_then(|ms| ms.parse::<usize>().ok());
+        let request_timeout = std::env::var("FORGE_CLIENT_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| match raw.parse::<u64>() {
+                Ok(secs) if secs > 0 => Some(Duration::from_secs(secs)),
+                _ => {
+                    tracing::warn!(
+                        env_var = "FORGE_CLIENT_REQUEST_TIMEOUT_SECS",
+                        value = %raw,
+                        default_secs = REQUEST_TIMEOUT.as_secs(),
+                        "ignoring invalid request timeout override, a zero or malformed value \
+                         would fail every request immediately"
+                    );
+                    None
+                }
+            });
 
         Self {
             root_ca_path,
@@ -123,6 +188,7 @@ impl ForgeClientConfig {
             suppress_insecure_tls_warning: false,
             use_mgmt_vrf: false,
             max_decoding_message_size,
+            request_timeout,
             socks_proxy: None,
 
             // Default connect retry configuration to start.
@@ -540,7 +606,18 @@ impl<'a> ForgeTlsClient<'a> {
         );
         // Inject the issuing span's W3C trace context into every request this client sends
         // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
-        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client).boxed_clone();
+        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
+        let request_timeout = self
+            .forge_client_config
+            .request_timeout
+            .unwrap_or(REQUEST_TIMEOUT);
+        let hyper_client: BoxCloneService<
+            hyper::Request<Body>,
+            hyper::Response<Incoming>,
+            TransportError,
+        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
+            .map_err(TransportError)
+            .boxed_clone();
 
         let mut forge_client = ForgeClient::with_origin(hyper_client, uri);
 
@@ -745,7 +822,18 @@ impl<'a> ForgeTlsClient<'a> {
             .build(connector);
         // Inject the issuing span's W3C trace context into every request this client sends
         // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
-        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client).boxed_clone();
+        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
+        let request_timeout = self
+            .forge_client_config
+            .request_timeout
+            .unwrap_or(REQUEST_TIMEOUT);
+        let hyper_client: BoxCloneService<
+            hyper::Request<Body>,
+            hyper::Response<Incoming>,
+            TransportError,
+        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
+            .map_err(TransportError)
+            .boxed_clone();
 
         let mut nmx_c_client = NmxControllerClient::with_origin(hyper_client, uri);
 
@@ -862,6 +950,7 @@ pub type ForgeHttpsClientResult<T> = Result<T, ForgeTlsClientError>;
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::net::SocketAddr;
 
     use carbide_test_support::value_scenarios;
@@ -1122,5 +1211,123 @@ mod tests {
                 Box::new(Plain) as Box<dyn std::error::Error> => "only message".to_string(),
             }
         );
+    }
+
+    /// Binds a listener that accepts TCP connections and then holds each one open forever
+    /// without writing a single byte back -- no HTTP/2 preface ack, no headers, nothing. Used to
+    /// prove `REQUEST_TIMEOUT`/`request_timeout` actually bounds a real RPC against a peer that
+    /// never answers, not just client construction.
+    async fn spawn_silent_peer() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binding a loopback listener must not fail in a test");
+        let addr = listener
+            .local_addr()
+            .expect("bound listener has a local addr");
+        tokio::spawn(async move {
+            // Hold each socket open (never write, never close) so the client's read side
+            // blocks indefinitely -- exactly the "accepted but never answered" scenario
+            // REQUEST_TIMEOUT exists for. Leaking each connection is fine: the listener task,
+            // and every connection it's holding, dies with the test process.
+            while let Ok((socket, _)) = listener.accept().await {
+                std::mem::forget(socket);
+            }
+        });
+        addr
+    }
+
+    /// A silent peer must not hang a Forge RPC forever -- `request_timeout` (here overridden far
+    /// below the 300s default so the test itself stays fast) has to fire and return an error
+    /// within roughly that bound.
+    #[tokio::test]
+    async fn version_call_times_out_against_a_silent_peer() {
+        let addr = spawn_silent_peer().await;
+        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        config.request_timeout = Some(Duration::from_millis(300));
+
+        let mut client = ForgeTlsClient::new(&config)
+            .build(format!("http://{addr}"))
+            .await
+            .expect("building a client against a plaintext loopback URL must not fail");
+
+        let started = tokio::time::Instant::now();
+        let result = client
+            .version(tonic::Request::new(VersionRequest {
+                display_config: false,
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("a peer that never answers must not yield a response");
+        // Bounded on both ends and keyed to the timeout's own error text -- an upper bound
+        // alone would also pass for an unrelated early transport/handshake failure, which
+        // wouldn't prove `request_timeout` is what's actually stopping the call.
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(5),
+            "expected the 300ms request_timeout override to bound the call, took {elapsed:?}: {error}"
+        );
+        assert!(
+            format_error_chain(&error).contains("timed out"),
+            "the failure must come from the transport deadline (tower::timeout::error::Elapsed), got: {error}"
+        );
+    }
+
+    /// Same guarantee as `version_call_times_out_against_a_silent_peer`, for the NMX-C client
+    /// built by `build_nmx_c_client` -- CodeRabbit review r3962056313 asked for coverage on both
+    /// builders, not just the Forge one, since they duplicate the same timeout-wrapping logic.
+    #[tokio::test]
+    async fn hello_call_times_out_against_a_silent_peer() {
+        let addr = spawn_silent_peer().await;
+        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        config.request_timeout = Some(Duration::from_millis(300));
+
+        let mut client = ForgeTlsClient::new(&config)
+            .build_nmx_c_client(format!("http://{addr}"))
+            .await
+            .expect("building a client against a plaintext loopback URL must not fail");
+
+        let started = tokio::time::Instant::now();
+        let result = client
+            .hello(tonic::Request::new(protos::nmx_c::ClientHello {
+                gateway_id: String::new(),
+                major_version: i32::from(protos::nmx_c::ProtoMsgMajorVersion::ProtoMsgMajorVersion),
+                minor_version: i32::from(protos::nmx_c::ProtoMsgMinorVersion::ProtoMsgMinorVersion),
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("a peer that never answers must not yield a response");
+        // Bounded on both ends and keyed to the timeout's own error text -- an upper bound
+        // alone would also pass for an unrelated early transport/handshake failure, which
+        // wouldn't prove `request_timeout` is what's actually stopping the call.
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(5),
+            "expected the 300ms request_timeout override to bound the call, took {elapsed:?}: {error}"
+        );
+        assert!(
+            format_error_chain(&error).contains("timed out"),
+            "the failure must come from the transport deadline (tower::timeout::error::Elapsed), got: {error}"
+        );
+    }
+
+    /// `TransportError::source()` must expose the wrapped error itself as the next link in the
+    /// chain, not skip past it to *its* source -- otherwise a `tonic::Status` boxed inside
+    /// `tower::BoxError` (as tonic's own transport-error path can produce) becomes unreachable
+    /// to anything walking `Error::source()`, e.g. tonic's own `Status::try_from_error`, which
+    /// downcasts each link looking for a nested `Status` to recover its original gRPC code.
+    #[test]
+    fn transport_error_source_exposes_the_wrapped_error() {
+        let status = tonic::Status::unavailable("backend down");
+        let boxed: tower::BoxError = Box::new(status.clone());
+        let wrapped = TransportError::from(boxed);
+
+        let source = wrapped
+            .source()
+            .expect("a non-empty TransportError must expose its wrapped error as its source");
+        let recovered = source
+            .downcast_ref::<tonic::Status>()
+            .expect("the wrapped tonic::Status must be reachable via source(), not skipped over");
+        assert_eq!(recovered.code(), status.code());
+        assert_eq!(recovered.message(), status.message());
     }
 }

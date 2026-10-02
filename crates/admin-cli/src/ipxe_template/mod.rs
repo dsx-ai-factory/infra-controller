@@ -25,7 +25,8 @@ use crate::cfg::dispatch::Dispatch;
 #[clap(rename_all = "kebab_case")]
 pub(crate) enum Cmd {
     #[clap(
-        about = "Show iPXE templates (all, or one by name).",
+        about = "Show iPXE templates (all, or one by ID).",
+        long_about = "Show iPXE templates (all, or one by ID).\n\nFor the relationship between templates, Operating System definitions, Sites, and Instances, see docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "s"
     )]
     Show(show::Args),

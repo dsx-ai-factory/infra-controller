@@ -18,23 +18,28 @@ This section provides example REST API workflows for common NICo tasks. All exam
   </Accordion>
   <Accordion title="View Existing IP Blocks">
     Use the value of `id` from the output of the preceding example as the value for the `infrastructureProviderId` and `siteId` URL parameters.
+    The response includes the IP Block NICo creates for each fabric prefix the Site reports, such as `site-fabric-ipv4-192-168-20-0-24` in the example response.
     <Code src="snippets/input/view_ip_blocks.sh" title="Example Call" />
     <Code src="snippets/output/view_ip_blocks.json" title="Example Response" />
   </Accordion>
 </AccordionGroup>
 
-
 ## Managing Virtual Private Clouds
 
 <Note>
-`networkVirtualizationType` supports two VPC networking mechanisms: **FNN** is recommended for all deployments that include DPUs (instances in FNN VPCs reference a `vpcPrefixId` in their interface configuration.); **Legacy** VPCs use subnets instead of VPC prefixes. New deployments with DPUs should use FNN exclusively.
+`networkVirtualizationType` selects the VPC's tenant network resource. `FNN`
+VPCs use VPC Prefixes, and their Instance interfaces reference a
+`vpcPrefixId`. `ETHERNET_VIRTUALIZER` VPCs use IPv4 Subnets, and their Instance
+interfaces reference a `subnetId`. `FLAT` VPCs attach the network automatically
+and use neither resource. `FNN` is the supported target for production
+deployments with DPUs.
 
 `tenantId` is the ID of the Tenant organization generated during setup. This value is distinct from the organization name used in the API URL path.
 </Note>
 
 <AccordionGroup>
   <Accordion title="Create a VPC">
-    Create the VPC and specify a name.
+    Create an `FNN` VPC and specify a name.
     <Code src="snippets/input/create_vpc.sh" title="Example Call" />
     <Code src="snippets/output/create_vpc.json" title="Example Response" />
   </Accordion>
@@ -44,7 +49,7 @@ This section provides example REST API workflows for common NICo tasks. All exam
     <Code src="snippets/output/poll_vpc_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add an Instance with a Single Interface">
-    Add one or more compute instances. The `interfaces` array configures how each DPU port is assigned a network address. For FNN VPCs, specify a `vpcPrefixId`; for Legacy VPCs, specify a `subnetId`.
+    Add one or more compute instances. The `interfaces` array configures how each DPU port is assigned a network address. This example requires the pre-existing `ETHERNET_VIRTUALIZER` VPC and IPv4 Subnet from the Subnet examples below, so the interface specifies a `subnetId`. The VPC ID is distinct from the `FNN` VPC created above.
 
     The `isPhysical` flag determines whether a physical function (PF) or a virtual function (VF) is configured on the DPU port. Set `isPhysical: true` for standard bare-metal configurations. VFs (`isPhysical: false`) are used when running VMs on the host that require direct hardware passthrough of a DPU port.
     <Code src="snippets/input/create_instance_single_interface.sh" title="Example Call" />
@@ -92,6 +97,7 @@ Before assigning Instance Types, you should have the ID of the Instance Type. Yo
 ## Managing Operating Systems
 
 Before adding an operating system image, ensure you have:
+
 - An iPXE script as a one-line string.
 - **Optional**: A cloud-init script as a one-line string.
 - For the iPXE string and cloud-init string, replace newline characters with `\n` and escape quotation marks with `\"`.
@@ -102,15 +108,22 @@ Before adding an operating system image, ensure you have:
     <Code src="snippets/input/add_operating_system.sh" title="Example Call" />
     <Code src="snippets/output/add_operating_system.json" title="Example Response" />
   </Accordion>
+  <Accordion title="Add an Image-Based Operating System">
+    The `imageDisk` value identifies the whole disk that NICo overwrites. A `/dev/disk/by-id/` selector is stable across enumeration changes but must exist on every eligible machine. Use `smallest` only when the intended boot disk is consistently the smallest whole disk. See [Image-Based Operating Systems](../../docs/configuration/image-based-operating-systems.md) for selection, update, and filesystem-identity behavior.
+    <Code src="snippets/input/add_image_operating_system.sh" title="Example Call" />
+    <Code src="snippets/output/add_image_operating_system.json" title="Example Response" />
+  </Accordion>
 </AccordionGroup>
 
 ## Managing Subnets and VPC Prefixes
 
-Before managing Subnets, ensure you have at least one IP Block allocated so that you can add a Subnet of the IP Block address space.
+Before managing these resources, ensure you have a tenant IP Block at the VPC's
+Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
+`FNN` VPCs. IPv4 Subnets configure `ETHERNET_VIRTUALIZER` VPCs.
 
 <AccordionGroup>
   <Accordion title="Add a Subnet">
-    Add one or more subnets. The following command sample shows how to add one subnet.
+    Add an IPv4 Subnet to a Ready `ETHERNET_VIRTUALIZER` VPC. Before running this example, use the [Create VPC endpoint](/infra-controller/rest-api-reference/api-reference/vpc/create-vpc) to create that VPC and set `networkVirtualizationType` to `ETHERNET_VIRTUALIZER`. Replace the pre-existing sample VPC ID `f466a2d5-5820-4824-a845-3218fdff801b` with the new VPC's ID. This VPC is distinct from the `FNN` VPC used by the VPC Prefix examples. The Subnet's `ipv4BlockId` identifies a Ready tenant IPv4 IP Block at the same Site, and `prefixLength` accepts values from 8 through 30.
     <Code src="snippets/input/create_subnet.sh" title="Example Call" />
     <Code src="snippets/output/create_subnet.json" title="Example Response" />
   </Accordion>
@@ -120,9 +133,11 @@ Before managing Subnets, ensure you have at least one IP Block allocated so that
     <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a VPC Prefix">
-    The following command sample shows how to add one VPC prefix. You can also add multiple VPC prefixes at once.
-    <Code src="snippets/input/create_vpc_prefix.sh" title="Example Call" />
-    <Code src="snippets/output/create_vpc_prefix.json" title="Example Response" />
+    Add a VPC Prefix to the Ready `FNN` VPC created above at a Registered Site. Use a Ready tenant IP Block at that Site; the block determines the VPC Prefix's address family. Specify `prefixLength` to allocate any available CIDR of that length, or specify `prefix` to reserve an exact network-aligned CIDR from the block.
+    <Code src="snippets/input/create_vpc_prefix.sh" title="Automatic Allocation" />
+    <Code src="snippets/output/create_vpc_prefix.json" title="Automatic Allocation Response" />
+    <Code src="snippets/input/create_vpc_prefix_explicit.sh" title="Explicit CIDR Allocation" />
+    <Code src="snippets/output/create_vpc_prefix_explicit.json" title="Explicit CIDR Allocation Response" />
   </Accordion>
 </AccordionGroup>
 
@@ -130,6 +145,7 @@ Before managing Subnets, ensure you have at least one IP Block allocated so that
 
 <AccordionGroup>
   <Accordion title="Add an IP Block">
+    NICo already creates an IP Block for each fabric prefix the Site reports, so add one only for another range. A range that overlaps an existing Site IP Block returns 409.
     <Code src="snippets/input/add_ip_block.sh" title="Example Call" />
     <Code src="snippets/output/add_ip_block.json" title="Example Response" />
   </Accordion>

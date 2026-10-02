@@ -48,6 +48,7 @@ carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-secrets = { path = "../secrets" }
 carbide-site-explorer = { path = "../site-explorer" }
 carbide-version = { path = "../version" }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 spancounter = { path = "../spancounter" }
@@ -76,6 +77,7 @@ sqlx = { workspace = true, features = [
   "migrate",
   "postgres",
 ] }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -104,7 +106,10 @@ trace-propagation = { path = "../trace-propagation" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 http = { workspace = true }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "trace"] }
 tempfile = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
 
 [lints]
 workspace = true

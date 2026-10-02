@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
@@ -108,7 +110,7 @@ func TestInventoryTargetLookupTargetsFromComponentSpec(t *testing.T) {
 				{UUID: computeID},
 				{
 					External: &operation.ExternalRef{
-						Type: devicetypes.ComponentTypeNVSwitch,
+						Type: devicetypes.ComponentTypeUnknown,
 						ID:   externalID,
 					},
 				},
@@ -468,6 +470,7 @@ type fakeInventoryTargetSource struct {
 func (s *fakeInventoryTargetSource) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	return s.domainRacks[id.ID], nil
 }
@@ -491,6 +494,7 @@ func (s *fakeInventoryTargetSource) GetListOfRacks(
 	_ *dbquery.StringQueryInfo,
 	pagination *dbquery.Pagination,
 	_ *dbquery.OrderBy,
+	_ bool,
 	_ bool,
 ) ([]*rack.Rack, int32, error) {
 	if pagination != nil {
@@ -520,6 +524,13 @@ func (s *fakeInventoryTargetSource) GetComponentByID(
 	}
 
 	return nil, fmt.Errorf("component %s not found", id)
+}
+
+func (s *fakeInventoryTargetSource) GetComponentByBMCMAC(
+	_ context.Context,
+	macAddress string,
+) (*inventorycomponent.Component, error) {
+	return nil, status.Errorf(codes.NotFound, "component with BMC MAC %s not found", macAddress)
 }
 
 func (s *fakeInventoryTargetSource) GetComponentsByExternalIDs(

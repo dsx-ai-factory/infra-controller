@@ -9,7 +9,7 @@ allowing you to:
 
 - Test NICo without physical hardware
 - Simulate multiple hosts, DPUs, switches and power shelves
-- Perform load testing at scale (multiple pods, thousands of BMCs)
+- Perform load testing at scale (multiple pods, thousands of Baseboard Management Controllers (BMCs))
 - Run simulations alongside real hardware
 
 ## Namespace Configuration
@@ -25,12 +25,94 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+Only one `mat-k8s-controller` may manage a namespace. It has no leader
+election, so two active controllers duplicate reconcile work and race on the
+same Services. The chart enforces this by rendering a single replica with
+a `Recreate` rollout, and by exposing no replica count value.
+
+## Helm-Only Deployment
+
+The chart is the complete deployment path. It creates the namespace, its
+`nico.nvidia.com/managed` label, and the image pull Secret after helm-prereqs
+has installed the cert-manager ClusterIssuer and the External Secrets Operator
+(ESO):
+
+- `global.namespaceOverride` with `createNamespace: true` creates the namespace
+  and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
+  ClusterExternalSecret from helm-prereqs syncs the site CA into it.
+- `imagePullSecret.create: true` creates the `machine-a-tron-pull` Secret from the
+  base64-encoded Docker configuration JSON in `imagePullSecret.dockerconfigjson`.
+  Reference it from `global.imagePullSecrets`.
+- A pod that defines only `racks` (clearing the default group with
+  `machines.rack-machines: null`) still gets the bare `[machines]` table that
+  machine-a-tron requires at startup.
+
+The chart does not write the NICo Core site configuration or the site
+credentials. `siteCredentials` in helm-prereqs renders the site-wide BMC root
+and the Unified Extensible Firmware Interface (UEFI) defaults. Refer to
+[Site Credentials Secret](../../../helm-prereqs/README.md#site-credentials-secret).
+The Core values carry `bmc_proxy`, `allow_insecure_discovery`, and the simulated
+networks, with `helm-prereqs/values/nico-core-simulation.yaml` as the template.
+Refer to the
+[deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
+both modes.
+
+The chart reads the site-wide BMC root password from the `nico-site-credentials`
+Secret with a Helm `lookup` and pins every mock BMC to it. Install that Secret
+before the chart. Without the Secret the chart omits both password lines and
+the mocks keep their factory passwords, so enable `siteCredentials` in
+helm-prereqs for the multipod and scale profiles.
+`machineATron.siteCredentialsSecret` names the Secret, its namespace, and the
+`credentials.yaml` key whose `bmc_site_wide_root.password` entry is read.
+`machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
+looked-up value. When neither source sets a password, `mat.toml` carries no
+password line and each mock keeps its factory default, which site-explorer then
+rotates.
+
+The password lands in clear text in the `mat.toml` ConfigMap, which fits the
+simulated hardware this chart targets. A caller without `get` on Secrets in
+`nico-system` fails the render with the API error. Set
+`machineATron.siteCredentialsSecret.name: ""` to disable the lookup in that
+case.
+
+The lookup runs when the chart renders, so run `helm upgrade` on the
+machine-a-tron release after the password changes. With `persistence.enabled`,
+a mock that restores a snapshot keeps the credentials the snapshot saved, so the
+new password reaches only mocks without a snapshot. `helm template` and
+client-side `--dry-run` have no cluster, so the looked-up password is missing
+from their rendered `mat.toml`. Only an explicit `hostBmcPassword` or
+`dpuBmcPassword` appears there. Use `--dry-run=server` to see the looked-up
+value.
+
+The example scopes the Docker configuration JSON to the registry that
+machine-a-tron pulls from and uses the registry login variables from the
+deployment guide. It writes the base64-encoded payload to a temporary file that
+`mktemp` creates with mode 0600. Passing the file with `--set-file` keeps the
+credential out of Helm's process arguments, and the last step removes the file:
+
+```bash
+registry="${NICO_IMAGE_REGISTRY%%/*}"
+user="${REGISTRY_PULL_USERNAME:-\$oauthtoken}"
+auth="$(printf '%s' "${user}:${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
+dockerconfig="$(mktemp)"  # created with mode 0600
+printf '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+  "$registry" "$user" "$REGISTRY_PULL_SECRET" "$auth" \
+  | base64 | tr -d '\n' > "$dockerconfig"
+helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
+  --set global.namespaceOverride=nico-mat \
+  --set imagePullSecret.create=true \
+  --set-file imagePullSecret.dockerconfigjson="$dockerconfig" \
+  --set 'global.imagePullSecrets[0].name=machine-a-tron-pull' \
+  -f my-values.yaml
+rm -f "$dockerconfig"
+```
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
 |------|----------|--------------------|---------------|
 | **Override Mode** | Development | No | Simple - single endpoint |
-| **Controller Mode** | Scale testing | Yes | Per-BMC ClusterIP (controller-managed) |
+| **Controller Mode** | Scale testing | Yes | Per-BMC Service, BMC IP as externalIP (controller-managed) |
 
 **Default:** Override Mode (controller disabled, single pod).
 
@@ -56,9 +138,62 @@ ufmMock:
 
 For the default `mat-0` pod and chart name, the endpoint is
 `https://nico-machine-a-tron-mat-0-bmc-mock.<namespace>.svc.cluster.local:1266`.
-The chart does not aggregate InfiniBand inventory across multiple
-machine-a-tron pods. A full `configFiles.matConfigs` override owns the complete
-MAT configuration, including its `[ufm_mock]` section.
+Each embedded mock exposes only its own pod's inventory; the protocol gateway
+below aggregates across pods. A full `configFiles.matConfigs` override owns the
+complete MAT configuration, including its `[ufm_mock]` section.
+
+### Protocol gateway
+
+In controller mode, `mat-k8s-controller.gateway.enabled: true` adds the
+`mat-protocol-gateway` container to the controller pod. The gateway takes the
+machine-a-tron instances the controller discovers and serves one UFM API whose
+InfiniBand inventory covers all of them, and one RMS gRPC API that forwards
+each request to the instance simulating the rack it names (learned from every
+instance's `/racks/status`), so a multi-pod deployment needs a single NICo
+fabric and RMS configuration. It listens over HTTPS behind the ClusterIP
+Service `<release>-mat-k8s-controller-gateway`; for a release named
+`nico-machine-a-tron` in `nico-system` the endpoint is
+`https://nico-machine-a-tron-mat-k8s-controller-gateway.nico-system.svc.cluster.local:8443`
+with `/ufmRestV3` as the UFM API path, and the same URL without a path is the
+NICo `[rms] api_url`. Refer to
+[Machine-a-tron RMS Mock](../../../docs/development/machine-a-tron-rms-mock.md)
+for the `nico-api.rms` values and to the
+[gateway README](../../../crates/mat-protocol-gateway/README.md#rms-routing)
+for the RPCs it routes. The gateway exits and is restarted by
+the kubelet whenever the set of discovered instances changes. Partitions and
+other state created through the UFM API are lost on that restart; ports return
+with the first inventory poll and callers must re-create partitions once
+`/readyz` returns 200 again. RMS job ids are held in gateway memory as well.
+After that restart, a status poll for an id issued by the previous process is
+answered as the per-pod RMS mock answers an id it never issued: completed on
+`GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`, and
+`RETURN_CODE_FAILURE` with `job <id> not found` on `GetFirmwareJobStatus` and
+`GetSwitchSystemImageJobStatus`. Refer to "In-Memory State Is Lost on Restart"
+in the gateway README.
+
+The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
+builds the Go controller and `mat-protocol-gateway` from the repository root,
+and the `mat-k8s-controller` image published by this repository's CI is built
+from it. The gateway's listener certificate is issued through
+`global.certificate.issuerRef`. The gateway re-reads the mounted certificate
+and key every 30 seconds, so a renewed certificate is served without a
+container restart. For its inventory, rack status, and RMS requests to the
+machine-a-tron pods it trusts that certificate's CA, which is the only root
+trusted for RMS forwarding, unless `mat-k8s-controller.config.insecureSkipVerify`
+is set. That setting disables certificate verification for all of those
+requests. The listener is unaffected.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `mat-k8s-controller.gateway.enabled` | `false` | Add the gateway container, Service, ConfigMap, and Certificate |
+| `mat-k8s-controller.gateway.listenIpAddress` | `"0.0.0.0"` | Bare IP address to bind. Set to `"::"` for IPv6; keep the IPv4 default on hosts where IPv6 sockets are disabled. Changing this setting requires restarting the controller Deployment |
+| `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the RMS gRPC API, the probes, and the Service |
+| `mat-k8s-controller.gateway.existingAuthSecret` | `""` | Secret with a `token` key for UFM HTTP Basic auth. Empty means the `nico-machine-a-tron-ufm-mock-auth` Secret this chart generates; the gateway does not inherit `ufmMock.existingAuthSecret`. Required whenever that default Secret is absent or renamed: set it to the Secret holding the token when `ufmMock.existingAuthSecret` is set, `ufmMock.enabled` is `false`, or the parent chart uses `nameOverride`, or the gateway fails to start |
+| `mat-k8s-controller.gateway.resources` | 100m/256Mi requests, 1 CPU/1Gi limits | Gateway container resources |
+
+The gateway reads its listener address only at startup. Restarting the controller
+Deployment applies a changed address and resets the gateway's process-local
+partition state, as described above.
 
 ## Logging
 
@@ -83,15 +218,19 @@ Simple but **incompatible with real hardware**.
 helm upgrade --install nico ./helm \
   --set global.namespaceOverride=nico-system \
   --set nico-machine-a-tron.enabled=true \
-  --set nico-machine-a-tron.pods.default.machines.rack-machines.hostCount=10 \
-  --set nico-machine-a-tron.pods.default.machines.rack-machines.dpuPerHostCount=2
+  --set nico-machine-a-tron.pods.mat-0.machines.rack-machines.hostCount=10 \
+  --set nico-machine-a-tron.pods.mat-0.machines.rack-machines.dpuPerHostCount=2
 ```
+
+The example extends the chart's default `mat-0` pod. A pod under another key
+adds a second pod, which the chart rejects unless `mat-k8s-controller` is
+enabled.
 
 **NICo Site Config:**
 
 ```toml
 [site_explorer]
-bmc_proxy = "nico-machine-a-tron-default-bmc-mock.nico-system.svc.cluster.local:1266"
+bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
 ```
 
 The port defaults to 1266 and must match the `service.bmcMock.port` value if
@@ -117,7 +256,7 @@ dynamically creates/updates/deletes Kubernetes Services as machines come online.
 
 ### Setup
 
-All pods can share the same `oobDhcpRelayAddress` - NICo assigns unique IPs
+All pods can share the same `bmcDhcpRelayAddress` - NICo assigns unique IPs
 from the subnet.
 
 ```yaml
@@ -133,16 +272,16 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
+        underlayDhcpRelayAddress: "10.104.0.1"
   mat-1:
     machines:
       rack-machines:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.200.0.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 
 macAddressPool:
   enabled: true
@@ -153,12 +292,32 @@ mat-k8s-controller:
     insecureSkipVerify: true  # For self-signed certs in dev
 ```
 
+Check the rendered machine groups before deploying. Helm deep-merges values
+files, so the chart's example group survives unless the values file nulls it
+(`rack-machines: null`), and the count must equal the groups in the file.
+`helm template` has no cluster access, so its render omits the
+`host_bmc_password` and `dpu_bmc_password` lines that the site credentials
+lookup adds on install. Install with a low API request rate when the release
+creates hundreds of Services or the cluster is reached through a tunnel. With
+the values above, chart resources land in `nico-system`, and `-n nico-mat` sets
+only the Helm release namespace. The labeled `nico-system` namespace and its
+`machine-a-tron-pull` Secret must exist, or pass the flags from
+[Helm-Only Deployment](#helm-only-deployment) that make the chart create them
+in the effective resource namespace:
+
+```bash
+helm template nico-machine-a-tron ./helm/charts/nico-machine-a-tron -f my-values.yaml \
+  | grep -c '^ *\[machines\.'
+helm upgrade --install nico-machine-a-tron ./helm/charts/nico-machine-a-tron \
+  -n nico-mat --create-namespace --qps 15 --burst-limit 30 -f my-values.yaml
+```
+
 ### How It Works
 
 1. Controller discovers machine-a-tron pods via
    `nvidia-infra-controller/mat-service=true` label
 2. Polls `/machines/status` from each discovered machine-a-tron instance
-3. Creates Services with BMC IP as ClusterIP
+3. Creates a Service per BMC with the BMC IP in `spec.externalIPs`
 4. Services route traffic to correct pod via `nvidia-infra-controller/pod-name`
    selector
 5. Deletes stale Services when machines disappear
@@ -179,7 +338,7 @@ metadata:
     nvidia-infra-controller/mat-machine-type: host
   annotations:
     nvidia-infra-controller/mat-id: "uuid-..."
-    nvidia-infra-controller/mat-bmc-ip: "10.96.64.5"
+    nvidia-infra-controller/mat-bmc-ip: "10.200.0.5"
     nvidia-infra-controller/mat-hardware-type: wiwynn_gb200_nvl
   ownerReferences:
   - apiVersion: apps/v1
@@ -187,8 +346,9 @@ metadata:
     name: nico-machine-a-tron-mat-0  # The mat pod this Service routes to
     uid: <deployment-uid>
 spec:
-  type: ClusterIP
-  clusterIP: 10.96.64.5  # BMC IP assigned by NICo
+  type: ClusterIP  # clusterIP is allocated by the apiserver
+  externalIPs:
+  - 10.200.0.5  # BMC IP assigned by NICo
   ports:
   - name: redfish
     port: 443
@@ -210,13 +370,42 @@ adds a dynamic target UDP port for IPMI access.
 
 ### Requirements
 
-- `oobDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+- The BMC network (the NICo `networks` prefix that `bmcDhcpRelayAddress`
+  belongs to) must not overlap the Kubernetes ServiceCIDR, the pod CIDR, the
+  node network, or any network the nodes or pods must otherwise reach. The
+  controller publishes BMC IPs as Service `externalIPs`, which the apiserver
+  neither allocates nor validates and for which kube-proxy programs
+  forwarding rules on every node, so an overlap silently collides with a
+  dynamically allocated clusterIP or hides the real destination. This is a
+  hard requirement that neither the chart nor the controller checks. Run
+  `helm-prereqs/check-mat-service-cidr.py` against the values file before
+  every `helm upgrade --install`. It resolves each `bmcDhcpRelayAddress` to
+  its `[networks.*]` prefix in the Core values file or a rendered site config,
+  reads the ServiceCIDR from the cluster (`SCALE_SERVICE_CIDRS` overrides it),
+  and exits nonzero on an overlap, an unresolved relay, an unknown
+  ServiceCIDR, or a Controller Mode values file without `pods`, which would
+  inherit the chart's default group. `SCALE_BMC_PREFIXES` names the network of
+  a relay the site config does not declare yet.
+
+  ```bash
+  python3 helm-prereqs/check-mat-service-cidr.py my-values.yaml \
+    --site-config helm-prereqs/values/nico-core-simulation.yaml
+  ```
+
+- DHCP relay mode (see DHCP Relay Mode) is the exception: NICo resolves the
+  BMC network from the DHCP relay address, which in that mode is each pod's
+  relay Service clusterIP, so the BMC network must contain the relay
+  clusterIPs rather than use the `10.200.0.0/18` example below. Give the
+  relay Services a small dedicated ServiceCIDR (`10.96.127.0/24` in that
+  section) and keep the BMC network clear of every other ServiceCIDR.
 - NICo assigns unique BMC IPs from the configured network
-- Default ServiceCIDR ranges:
+- Default ServiceCIDR ranges to stay clear of:
   - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
   - `10.96.0.0/16` - KinD
   - `10.43.0.0/16` - K3s
 - Check with: `kubectl cluster-info dump | grep service-cluster-ip-range`
+- The `DenyServiceExternalIPs` admission plugin must not be enabled on the
+  apiserver
 
 ### NICo Configuration
 
@@ -229,8 +418,8 @@ allow_insecure_discovery = true
 # Network for all machine-a-tron BMCs
 [networks.MAT-BMC-SERVICES]
 type = "underlay"
-prefix = "10.96.64.0/18"
-gateway = "10.96.64.1"
+prefix = "10.200.0.0/18"
+gateway = "10.200.0.1"
 mtu = 1500
 ```
 
@@ -262,8 +451,8 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.200.0.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 ```
 
 ### IPMI/SOL Simulation
@@ -473,27 +662,87 @@ To use API mode (default), don't set `dhcpRelay.baseIP` (or set it to empty stri
 
 ---
 
+## Site Health Probe (synthetic monitoring)
+
+The chart ships a `nico-site-health-probe` subchart (disabled by default —
+it needs a site-provided image before it can run; set
+`nico-site-health-probe.enabled=true` alongside the image override): a
+single-replica Rust service that continuously runs read-only probes against
+the site's APIs and exposes latency/outcome metrics on `:9009/metrics`
+(`carbide_site_health_probe_*`). Source: `crates/site-health-probe`; the
+metric set is documented in the
+[subchart README](charts/nico-site-health-probe/README.md).
+
+- **gRPC probe** (on by default): `FindMachineIds` + a first-page
+  `FindMachinesByIds` against nico-api — the `machine show` read path,
+  including the PostgreSQL round-trip. Authenticates with a SPIFFE mTLS cert
+  issued by the site's ClusterIssuer under the identity
+  `spiffe://<trustDomain>/<namespace>/sa/nico-site-health-probe` (namespace
+  defaults to the release namespace), which nico-api's internal RBAC grants
+  read-only access.
+- **REST probes** (off by default): `GET /v2/org/<org>/nico/machine` and
+  `/instance` against nico-rest-api via a Keycloak service-account client.
+  Enabling them requires site inputs — the org, the token URL, a client
+  secret in an existing Secret, and the REST CA bundle (`restCa`) since
+  nico-rest serves TLS from its own issuer. See the subchart values.
+
+Disable with `nico-site-health-probe.enabled=false`. Override the image
+(`nico-site-health-probe.image.repository/tag`) — the default has no registry
+prefix and will not resolve in real clusters.
+
+> **Certificate note:** like the machine-a-tron pod certs, the probe's TLS
+> secret (`nico-site-health-probe-tls`; with `nameOverride` set it is
+> `<nameOverride>-tls`) survives chart uninstalls. After a reinstall that
+> rotated the site CA, delete the stale secret so cert-manager reissues it:
+> `kubectl delete secret nico-site-health-probe-tls -n <ns>` (substitute the
+> override-derived name if set).
+
+<!-- TODO(#5360-followup): active lifecycle probes (machine_count: 1=canary,
+     all=scale test) and progress p50/p95/p99 reporting. -->
+
 ## Troubleshooting
 
-### ClusterIP already allocated
+### Use of external IPs is denied by admission control
 
 ```text
-creating service mat-bmc-host-xxx: Service is invalid: spec.clusterIP:
-provided IP is already allocated
+creating service mat-bmc-host-xxx: services "mat-bmc-host-xxx" is forbidden:
+Use of external IPs is denied by admission control
 ```
 
-The BMC IP conflicts with an existing Service. Either:
+The `DenyServiceExternalIPs` admission plugin is enabled on the apiserver. It
+has no per-namespace exemption and must be disabled.
 
-- Use a different `oobDhcpRelayAddress` range
-- Reserve a ServiceCIDR for machine-a-tron (K8s 1.29+)
+### BMC IP served by another Service
 
-### ClusterIP outside ServiceCIDR
+The BMC network overlaps the Kubernetes ServiceCIDR and the apiserver allocated
+a BMC address as the clusterIP of another Service. The controller recreates a
+colliding Service it manages itself; any other holder is left alone. Move the
+BMC network outside the ServiceCIDR (see Requirements).
+
+### Upgrading from a controller that set the BMC IP as clusterIP
+
+Those versions required the BMC network inside the ServiceCIDR; move it outside
+first (see Requirements). Each existing BMC Service is then deleted and
+recreated once, moving the address from `clusterIP` to `externalIPs`. While the
+BMC network still overlaps the ServiceCIDR, a recreated Service can be allocated
+another published BMC IP as its clusterIP and is recreated again on a later
+pass; the controller logs one warning per pass while this happens.
+
+### Invalid Peer Certificate After a Site Reprovision
 
 ```text
-failed to allocate IP: the provided network does not match the current range
+invalid peer certificate: BadSignature
 ```
 
-The BMC IP range is outside Kubernetes ServiceCIDR
+A reprovision recreates the site CA. cert-manager does not reissue a
+certificate that has not expired, and the per-pod `<release>-<pod>-tls`
+Secrets survive `helm uninstall`, so machine-a-tron keeps presenting a
+certificate from the old CA. Delete the issued Secrets and let cert-manager
+reissue them:
+
+```bash
+kubectl -n <namespace> delete secret -l controller.cert-manager.io/fao=true
+```
 
 ### No instances discovered
 
@@ -503,6 +752,18 @@ WRN no machine-a-tron instances discovered
 
 Check that bmc-mock Services have the `nvidia-infra-controller/mat-service=true`
 label.
+
+### Pod Killed During Startup (Exit 137)
+
+```text
+Startup probe failed: dial tcp ...:1266: connect: connection refused
+```
+
+machine-a-tron binds its Redfish port only after it has registered every
+expected rack, host, switch, and power shelf with nico-api. The default
+`startupProbe` allows 120 x 30 s = 60 min. If registration takes longer,
+raise `startupProbe.failureThreshold` in your values file; the sizing rule is
+in the `startupProbe` comment in the chart's `values.yaml`.
 
 ### View Generated Config
 

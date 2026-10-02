@@ -47,8 +47,9 @@ func TestUpgradeFirmwareEncryptsAuthenticationDataBeforeSubmittingTask(t *testin
 					},
 				},
 			},
-			TargetVersion:      &targetVersion,
-			AuthenticationData: authenticationData,
+			TargetVersion:        &targetVersion,
+			AuthenticationData:   authenticationData,
+			OverrideVersionCheck: true,
 		},
 	)
 
@@ -58,6 +59,7 @@ func TestUpgradeFirmwareEncryptsAuthenticationDataBeforeSubmittingTask(t *testin
 
 	var info operations.FirmwareControlTaskInfo
 	require.NoError(t, info.Unmarshal(manager.request.Operation.Info))
+	require.True(t, info.OverrideVersionCheck)
 	got, err := firmwareauth.DecryptFor(
 		cipher,
 		info.AuthenticationData,

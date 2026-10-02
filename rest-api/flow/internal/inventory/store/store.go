@@ -22,12 +22,13 @@ import (
 
 // ComponentDrift represents a drift detected between expected (local DB) and actual (source system) data.
 type ComponentDrift struct {
-	ID          uuid.UUID
-	ComponentID *uuid.UUID  // NULL for missing_in_expected
-	ExternalID  *string     // Component ID from the component manager service; NULL for missing_in_actual
-	DriftType   string      // "missing_in_expected", "missing_in_actual", "mismatch"
-	Diffs       []FieldDiff // Field-level differences (for mismatch type)
-	CheckedAt   time.Time
+	ID            uuid.UUID
+	ComponentID   *uuid.UUID  // NULL for missing_in_expected
+	ExternalID    *string     // Component ID from the component manager service; NULL for missing_in_actual
+	ComponentType *string     // Stable discriminator when external IDs overlap across component types
+	DriftType     string      // "missing_in_expected", "missing_in_actual", "mismatch"
+	Diffs         []FieldDiff // Field-level differences (for mismatch type)
+	CheckedAt     time.Time
 }
 
 // FieldDiff represents a single field difference between expected and actual values.
@@ -47,13 +48,15 @@ type Store interface {
 	// Rack operations
 	CreateExpectedRack(ctx context.Context, rack *rack.Rack) (uuid.UUID, error)
 	GetRackByID(ctx context.Context, id uuid.UUID, withComponents bool) (*rack.Rack, error)
+	GetRackByExternalID(ctx context.Context, externalID string, withComponents bool) (*rack.Rack, error)
 	GetRacksByIDs(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error)
+	GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error)
 	GetRackBySerial(ctx context.Context, manufacturer string, serial string, withComponents bool) (*rack.Rack, error)
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
 	PatchRack(ctx context.Context, rack *rack.Rack) (string, error)
 	DeleteRack(ctx context.Context, id uuid.UUID) error
 	PurgeRack(ctx context.Context, id uuid.UUID) error
-	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents bool) ([]*rack.Rack, int32, error)
+	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents, withExternalIDOnly bool) ([]*rack.Rack, int32, error)
 
 	// Component operations
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*component.Component, error)
@@ -71,9 +74,11 @@ type Store interface {
 	GetAllDrifts(ctx context.Context) ([]ComponentDrift, error)
 
 	// NVL Domain operations
+	GetNVLDomain(ctx context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error)
 	CreateNVLDomain(ctx context.Context, nvlDomain *nvldomain.NVLDomain) (uuid.UUID, error)
 	AttachRacksToNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, rackIDs []identifier.Identifier) error
 	DetachRacksFromNVLDomain(ctx context.Context, rackIDs []identifier.Identifier) error
-	GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination) ([]*nvldomain.NVLDomain, int32, error)
-	GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier) ([]*rack.Rack, error)
+	GetListOfNVLDomains(ctx context.Context, info dbquery.StringQueryInfo, pagination *dbquery.Pagination, options ...nvldomain.ListOptions) ([]*nvldomain.NVLDomain, int32, error)
+	GetRacksForNVLDomain(ctx context.Context, nvlDomainID identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
+	GetRacksForNVLDomains(ctx context.Context, domainIDs []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error)
 }

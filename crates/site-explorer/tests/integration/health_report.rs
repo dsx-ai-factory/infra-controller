@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,11 +67,13 @@ fn test_site_explorer(
         explorer_config,
         test_harness.test_meter.meter(),
         endpoint_exploration_service,
+        endpoint_explorer.clone(),
         api.common_pools().clone(),
         api.work_lock_manager_handle(),
         api.runtime_config.rack_profiles.clone(),
         None,
         api.credential_manager().clone(),
+        false,
     );
     TestSiteExplorer::new(site_explorer, endpoint_explorer)
 }
@@ -121,8 +119,13 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
         .await;
     let host_bmc_ip = build_data.host_bmc_ip();
 
-    let host_machine = find_machine(test_harness.api(), created_host.host.id).await?;
-    let alerts = &host_machine.health.as_ref().unwrap().alerts;
+    let host_machine = find_machine(test_harness.api(), created_host.host.id.into()).await?;
+    let alerts = &host_machine
+        .status
+        .as_ref()
+        .and_then(|status| status.health.as_ref())
+        .unwrap()
+        .alerts;
     assert!(
         alerts.is_empty(),
         "expected no health alerts after successful exploration, got: {alerts:#?}"
@@ -136,9 +139,15 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
 
     explorer.run_single_iteration().await?;
 
-    let host_machine = find_machine(test_harness.api(), created_host.host.id).await?;
+    let host_machine = find_machine(test_harness.api(), created_host.host.id.into()).await?;
 
-    let mut alerts = host_machine.health.as_ref().unwrap().alerts.clone();
+    let mut alerts = host_machine
+        .status
+        .as_ref()
+        .and_then(|status| status.health.as_ref())
+        .unwrap()
+        .alerts
+        .clone();
     assert_eq!(
         alerts.len(),
         1,
@@ -302,9 +311,10 @@ async fn test_orphan_managed_host_alert_emitted(
 
     // Run an iteration: audit_exploration_results should emit the orphan alert.
     explorer.run_single_iteration().await?;
-    let alerts = find_machine(test_harness.api(), created_host.host.id)
+    let alerts = find_machine(test_harness.api(), created_host.host.id.into())
         .await?
-        .health
+        .status
+        .and_then(|status| status.health)
         .unwrap()
         .alerts;
     assert!(
@@ -329,9 +339,10 @@ async fn test_orphan_managed_host_alert_emitted(
     txn.commit().await?;
 
     explorer.run_single_iteration().await?;
-    let alerts = find_machine(test_harness.api(), created_host.host.id)
+    let alerts = find_machine(test_harness.api(), created_host.host.id.into())
         .await?
-        .health
+        .status
+        .and_then(|status| status.health)
         .unwrap()
         .alerts;
     assert!(

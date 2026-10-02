@@ -21,22 +21,12 @@ const (
 	ExecutionStatusFailed    ExecutionStatus = "failed"
 )
 
-// CanTransitionTo reports whether a running execution may accept an attempt
-// result.
-func (s ExecutionStatus) CanTransitionTo(target ExecutionStatus) bool {
-	if s != ExecutionStatusRunning {
-		return false
-	}
-
-	return target == ExecutionStatusCompleted ||
-		target == ExecutionStatusDeferred ||
-		target == ExecutionStatusFailed
-}
-
 // CanBeClaimed reports whether the scheduler may allocate an attempt for the
 // execution after applying lane-specific eligibility checks.
 func (s ExecutionStatus) CanBeClaimed() bool {
-	return s == ExecutionStatusPending || s == ExecutionStatusDeferred
+	return s == ExecutionStatusPending ||
+		s == ExecutionStatusRunning ||
+		s == ExecutionStatusDeferred
 }
 
 // RequiresRetryScheduling reports whether the status requires the store to

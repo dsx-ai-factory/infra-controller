@@ -17,8 +17,11 @@
 
 use std::str::FromStr;
 
-use ::rpc::forge::{AstraAttachment, AstraConfig, AstraConfigStatus, AstraPhase};
-use carbide_uuid::machine::MachineId;
+use ::rpc::forge::{
+    AstraAttachment, AstraAttachmentOvs, AstraAttachmentVf, AstraConfig, AstraConfigStatus,
+    AstraPhase,
+};
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
@@ -72,7 +75,7 @@ pub(super) async fn get_astra_config(
     txn.commit().await?;
 
     if dpa_interfaces.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             machine_id = %snapshot.host_snapshot.id,
             "No Astra NICs found; skipping Astra config retrieval",
         );
@@ -156,27 +159,37 @@ pub(super) async fn get_astra_config(
 
             // Now we can create the Astra attachment and add it to the Astra config.
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: dpa_vni as u32,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
-                attachment_type: Some(SpxAttachmentType::Physical as i32),
-                virtual_function_id: None, // TODO: Add virtual function id if supported
-                network_name: None,        // TODO: Add network name when VMAAS support is added
+                attachment_type: Some(spx_attachment.attachment_type.clone() as i32),
                 revision: instance.spx_config_version.to_string(),
+                attachment_vf: spx_attachment
+                    .attachment_vf
+                    .as_ref()
+                    .map(|vf| AstraAttachmentVf {
+                        vf_index: vf.vf_index,
+                    }),
+                attachment_ovs: spx_attachment.attachment_ovs.as_ref().map(|ovs| {
+                    AstraAttachmentOvs {
+                        bridge_name: ovs.bridge_name.clone(),
+                        network_name: ovs.ovn_network_name.clone(),
+                    }
+                }),
             };
 
             astra_attachments.push(astra_attachment);
         } else {
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: 0,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
                 attachment_type: None,
-                virtual_function_id: None,
-                network_name: None,
                 revision: dpa_interface.network_config.version.to_string(),
+                attachment_vf: None,
+                attachment_ovs: None,
             };
 
             astra_attachments.push(astra_attachment);
@@ -197,7 +210,7 @@ pub(super) async fn get_astra_config(
 /// 2) Does the host associated with the DPU have any Astra NICs? If not, just return
 pub(super) async fn process_astra_config_status(
     api: &Api,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     astra_config_status: &AstraConfigStatus,
 ) -> Result<(), Status> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_astra_enabled() {
@@ -363,12 +376,15 @@ pub(super) async fn process_astra_config_status(
         observed_at: chrono::Utc::now(),
     };
 
-    db::machine::update_spx_status_observation(
+    if let db::ConditionalWrite::NotApplied(reason) = db::machine::update_spx_status_observation(
         &mut txn,
         &snapshot.host_snapshot.id,
         &machine_observation,
     )
-    .await?;
+    .await?
+    {
+        return Err(db::DatabaseError::from(reason).into());
+    }
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {e}"),

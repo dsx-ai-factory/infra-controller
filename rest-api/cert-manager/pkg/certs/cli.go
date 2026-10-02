@@ -4,8 +4,6 @@
 package certs
 
 import (
-	"time"
-
 	"github.com/sirupsen/logrus"
 	cli "github.com/urfave/cli/v2"
 
@@ -142,9 +140,10 @@ func NewCommand() *cli.Command {
 
 			<-ctx.Done()
 
-			gracePeriod := 5 * time.Second
-			log.Infof("Shut down requested, wait for %v grace period ...", gracePeriod)
-			time.Sleep(gracePeriod)
+			// Both services stop within core.DefaultShutDownGracePeriod;
+			// main flushes traces once this returns.
+			log.Infof("Shut down requested, waiting for HTTP services to stop ...")
+			<-s.Done()
 			log.Infof("Server terminated.")
 			return nil
 		},

@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -82,18 +81,6 @@ func ExecuteFlowGRPC(
 	return executeGRPCProxy(ctx, stc, grpcproxy.Flow, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
 }
 
-// FlowWorkflowID namespaces a derived workflow ID under the Flow gRPC proxy,
-// leaving the derivation rules themselves untouched. The namespace is what stops
-// a proxy request from attaching, under USE_EXISTING, to a bespoke per-method
-// execution of the same derived name: those still run on the site agent, and
-// their result is a type this proxy cannot decode.
-//
-// It can go once no bespoke Flow workflow is left to collide with, at which
-// point a shared ID costs duplicated work rather than an undecodable result.
-func FlowWorkflowID(derived string) string {
-	return "flow-grpc-" + derived
-}
-
 // ProxyFlowGRPC dispatches one already-validated request to Flow through the
 // generic proxy workflow, decoding the reply into resp, which may be nil for
 // methods with an empty response.
@@ -102,14 +89,15 @@ func FlowWorkflowID(derived string) string {
 // identical requests should coalesce onto one in-flight Flow call, and a fresh
 // ID with UNSPECIFIED where they must not.
 //
-// It returns nil on success and otherwise a rendered Echo response, so handlers
-// report failures without replacing Flow's status code and message with a
-// generic wrapper. The internal cause stays in the log: an error in the
-// response body serializes to an empty object, which tells a client nothing
-// and contradicts the null the schema promises.
+// It returns nil when Flow succeeds and an APIError when Flow fails. The HTTP
+// handler owns rendering that error so this transport helper cannot write a
+// response and then allow the handler to continue down its success path.
+//
+// The internal cause stays in the log: an error in the response body
+// serializes to an empty object, which tells a client nothing and contradicts
+// the null the schema promises.
 func ProxyFlowGRPC(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	fullMethod string,
@@ -117,9 +105,9 @@ func ProxyFlowGRPC(
 	resp proto.Message,
 	workflowID string,
 	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
-) error {
+) *cutil.APIError {
 	return proxyFlowGRPC(
-		ctx, c, logger, stc, fullMethod, req, resp, workflowID, conflictPolicy, "",
+		ctx, logger, stc, fullMethod, req, resp, workflowID, conflictPolicy, "",
 	)
 }
 
@@ -128,7 +116,6 @@ func ProxyFlowGRPC(
 // their original values encrypted with secretKey.
 func ProxyFlowGRPCWithSecrets(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	fullMethod string,
@@ -138,16 +125,15 @@ func ProxyFlowGRPCWithSecrets(
 	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
 	secretKey string,
 	secretFields ...string,
-) error {
+) *cutil.APIError {
 	return proxyFlowGRPC(
-		ctx, c, logger, stc, fullMethod, req, resp, workflowID, conflictPolicy,
+		ctx, logger, stc, fullMethod, req, resp, workflowID, conflictPolicy,
 		secretKey, secretFields...,
 	)
 }
 
 func proxyFlowGRPC(
 	ctx context.Context,
-	c echo.Context,
 	logger zerolog.Logger,
 	stc tclient.Client,
 	fullMethod string,
@@ -157,7 +143,7 @@ func proxyFlowGRPC(
 	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
 	secretKey string,
 	secretFields ...string,
-) error {
+) *cutil.APIError {
 	apiErr := ExecuteFlowGRPC(
 		ctx, stc, fullMethod, req, resp, workflowID, conflictPolicy,
 		secretKey, secretFields...,
@@ -167,7 +153,7 @@ func proxyFlowGRPC(
 	}
 
 	logger.Error().Err(apiErr.Diagnosis()).Str("Method", path.Base(fullMethod)).Msg("failed to proxy request to Flow")
-	return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	return apiErr
 }
 
 // proxyTimedOutError reports that no result arrived in time. The client-facing

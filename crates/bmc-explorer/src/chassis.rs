@@ -29,8 +29,7 @@ use nv_redfish::chassis::{Chassis as NvChassis, PowerSupply as NvPowerSupply};
 use nv_redfish::core::ODataId;
 use nv_redfish::hardware_id::{Manufacturer, Model};
 use nv_redfish::pcie_device::PcieDevice;
-use nv_redfish::resource::ResourceIdRef;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::network_adapter::ExploredNetworkAdapterCollection;
 use crate::{Error, network_adapter};
@@ -39,7 +38,7 @@ type AssemblyModelFilterFn = fn(Option<AssemblyModel<&str>>) -> bool;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 pub(crate) struct Config {
     pub(crate) network_adapter: network_adapter::Config,
-    pub(crate) need_assembly_sn: fn(ResourceIdRef) -> Option<AssemblyModelFilterFn>,
+    pub(crate) need_assembly_sn: fn(&str) -> Option<AssemblyModelFilterFn>,
     pub(crate) lazy_fetch: Option<fn(&ODataId) -> bool>,
 }
 
@@ -102,7 +101,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
         for chassis in &mut self.members {
             if linked_chassis_ids
                 .iter()
-                .any(|chassis_id| chassis_id == chassis.chassis.odata_id())
+                .any(|chassis_id| chassis_id == &chassis.chassis.raw().odata_id)
             {
                 chassis.network_adapters.fetch_ports().await;
             }
@@ -111,8 +110,8 @@ impl<B: Bmc> ExploredChassisCollection<B> {
 
     pub(crate) fn is_liteon_powershelf(&self) -> bool {
         self.members.iter().any(|m| {
-            m.chassis.id().into_inner() == "powershelf"
-                || (m.chassis.id().into_inner() == "chassis"
+            m.chassis.raw().id == "powershelf"
+                || (m.chassis.raw().id == "chassis"
                     && m.chassis
                         .hardware_id()
                         .manufacturer
@@ -131,14 +130,17 @@ impl<B: Bmc> ExploredChassisCollection<B> {
 
     /// Detects a Delta power shelf. Delta BMCs expose neither a `Vendor` in the
     /// service root nor a `/redfish/v1/Systems` collection, so classification
-    /// relies on a Delta manufacturer on the power-shelf chassis (id "chassis"
-    /// or "powershelf"). The manufacturer gate is what distinguishes Delta from
-    /// the Lite-On power shelf, which shares the generic "powershelf" chassis
-    /// id.
+    /// relies on a Delta manufacturer on the power-shelf chassis. The
+    /// manufacturer gate is what distinguishes Delta from the Lite-On power
+    /// shelf, which can share the generic "powershelf" chassis id.
     pub(crate) fn is_delta_powershelf(&self) -> bool {
-        self.members.iter().any(|m| {
+        self.delta_powershelf_chassis().is_some()
+    }
+
+    fn delta_powershelf_chassis(&self) -> Option<&ExploredChassis<B>> {
+        self.members.iter().find(|m| {
             is_delta_powershelf_chassis(
-                m.chassis.id().into_inner(),
+                &m.chassis.raw().id,
                 m.chassis
                     .hardware_id()
                     .manufacturer
@@ -178,19 +180,14 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     /// power-shelf chassis member (mirrors the libredfish Delta path).
     pub(crate) fn synthesized_powershelf_system(&self) -> ModelComputerSystem {
         let member = self
-            .members
-            .iter()
-            .find(|m| {
-                let id = m.chassis.id().into_inner();
-                id == "chassis" || id == "powershelf"
-            })
+            .delta_powershelf_chassis()
             .or_else(|| self.members.first());
 
         let (id, manufacturer, model, serial_number) = member
             .map(|m| {
                 let hw_id = m.chassis.hardware_id();
                 (
-                    m.chassis.id().to_string(),
+                    m.chassis.raw().id.clone(),
                     hw_id.manufacturer.map(|v| v.to_string()),
                     hw_id.model.map(|v| v.to_string()),
                     hw_id
@@ -237,7 +234,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     pub(crate) fn is_bluefield2(&self) -> bool {
         self.members
             .iter()
-            .find(|c| c.chassis.id().into_inner() == "Card1")
+            .find(|c| c.chassis.raw().id == "Card1")
             .is_some_and(|c| {
                 let hw_id = c.chassis.hardware_id();
                 hw_id.manufacturer == Some(Manufacturer::new("Nvidia"))
@@ -256,7 +253,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
         let maybe_sn = self
             .members
             .iter()
-            .find(|c| c.chassis.id().into_inner() == "Card1")
+            .find(|c| c.chassis.raw().id == "Card1")
             .ok_or_else(Error::bmc_not_provided("chassis with id Card1"))?
             .chassis
             .hardware_id()
@@ -280,18 +277,18 @@ impl<B: Bmc> ExploredChassisCollection<B> {
             let mac = self
                 .members
                 .iter()
-                .find(|c| c.chassis.id().into_inner() == chassis_id)
+                .find(|c| c.chassis.raw().id == chassis_id)
                 .and_then(|c| {
                     c.network_adapters
                         .members()
                         .iter()
-                        .find(|a| a.adapter.id().into_inner() == adapter_id)
+                        .find(|a| a.adapter.raw().id == adapter_id)
                 })
                 .and_then(|adapter| adapter.functions.as_ref())
                 .and_then(|functions| {
                     functions
                         .iter()
-                        .find(|f| f.id().into_inner() == function_id)
+                        .find(|f| f.raw().id == function_id)
                         .and_then(|f| f.ethernet_permanent_mac_address())
                 });
 
@@ -353,7 +350,8 @@ impl<B: Bmc> ExploredChassis<B> {
     async fn explore(chassis: NvChassis<B>, config: &Config) -> Result<Self, Error<B>> {
         let network_adapters =
             ExploredNetworkAdapterCollection::explore(&chassis, &config.network_adapter).await?;
-        let assembly_sn = if let Some(model_check_fn) = (config.need_assembly_sn)(chassis.id()) {
+        let chassis_raw = chassis.raw();
+        let assembly_sn = if let Some(model_check_fn) = (config.need_assembly_sn)(&chassis_raw.id) {
             match chassis.assembly().await {
                 Ok(Some(assembly)) => {
                     let assembly_data = assembly
@@ -392,7 +390,7 @@ impl<B: Bmc> ExploredChassis<B> {
                     .await
                     .map_err(Error::nv_redfish("LiteOn power supply"))?;
                 power_supplies.push(LiteOnPowerSupply {
-                    id: ps.base.id.clone(),
+                    id: ps.id.clone(),
                     serial_number: ps.serial_number.clone().and_then(std::convert::identity),
                     power_state: ps.power_state,
                 });
@@ -419,7 +417,7 @@ impl<B: Bmc> ExploredChassis<B> {
             let power_supplies = supplies
                 .iter()
                 .map(|ps| DeltaPowerSupply {
-                    id: ps.id().to_string(),
+                    id: ps.raw().id.clone(),
                     power_state: delta_psu_power_on(ps),
                 })
                 .collect();
@@ -439,7 +437,7 @@ impl<B: Bmc> ExploredChassis<B> {
 
     fn to_model(&self) -> Chassis {
         let network_adapters = self.network_adapters.to_model();
-        let chassis_id = self.chassis.id();
+        let chassis_id = self.chassis.raw().id.clone();
         let hw_id = self.chassis.hardware_id();
         let serial_number = self
             .assembly_sn
@@ -449,7 +447,7 @@ impl<B: Bmc> ExploredChassis<B> {
 
         let nvidia_oem = self.chassis.oem_nvidia_cbc().ok().and_then(identity);
         Chassis {
-            id: chassis_id.to_string(),
+            id: chassis_id,
             manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
             model: hw_id.model.map(|v| v.to_string()),
             part_number: hw_id.part_number.map(|v| v.to_string()),
@@ -503,14 +501,19 @@ fn delta_psu_power_on<B: Bmc>(ps: &NvPowerSupply<B>) -> Option<bool> {
     }
 }
 
-/// Delta power-shelf identity gate: a power-shelf chassis (id `chassis` or
-/// `powershelf`) whose manufacturer identifies as Delta. This is what
-/// distinguishes a Delta shelf from the Lite-On shelf, which shares the generic
-/// `powershelf` chassis id but reports a different manufacturer. Split out so
-/// the gate can be exercised in unit tests without a live BMC.
+/// Delta power-shelf identity gate: a `chassis` id or an id containing `power`
+/// before `shelf`, compared case-insensitively, whose manufacturer identifies
+/// as Delta. The manufacturer distinguishes Delta from Lite-On shelves that can
+/// share the generic `powershelf` chassis id. Split out so the gate can be
+/// exercised in unit tests without a live BMC.
 fn is_delta_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> bool {
-    (chassis_id == "chassis" || chassis_id == "powershelf")
-        && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
+    let chassis_id = chassis_id.to_ascii_lowercase();
+    let is_powershelf_id = chassis_id == "chassis"
+        || chassis_id
+            .split_once("power")
+            .is_some_and(|(_, suffix)| suffix.contains("shelf"));
+
+    is_powershelf_id && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
 }
 
 fn is_mgx_c2_processor_module(
@@ -618,26 +621,31 @@ mod tests {
         }
     }
 
-    // is_delta_powershelf_chassis gates Delta detection: a power-shelf chassis
-    // id ("chassis"/"powershelf") AND a Delta manufacturer. The manufacturer
-    // check is case-insensitive and substring-based, and is what separates a
-    // Delta shelf from a Lite-On shelf sharing the "powershelf" chassis id.
+    // is_delta_powershelf_chassis gates Delta detection on both a recognized
+    // power-shelf chassis id and a Delta manufacturer.
     #[test]
     fn is_delta_powershelf_chassis_gates_on_id_and_manufacturer() {
-        let cases: [(&str, Option<&str>, bool); 9] = [
-            // Delta manufacturer on either accepted power-shelf chassis id.
+        let cases: [(&str, Option<&str>, bool); 15] = [
+            // Legacy and power-before-shelf ids are case-insensitive.
             ("chassis", Some("DELTA"), true),
+            ("CHASSIS", Some("DELTA"), true),
             ("powershelf", Some("Delta"), true),
+            ("PowerShelf_0", Some("DELTA"), true),
+            ("delta-power-module-shelf_0", Some("DELTA"), true),
             // Case-insensitive, substring match on the manufacturer.
             ("chassis", Some("delta electronics"), true),
             ("powershelf", Some("Delta Energy Systems"), true),
-            // Right manufacturer but a non-power-shelf chassis id is ignored.
+            // Both words are required, with "power" before "shelf".
+            ("ShelfPower_0", Some("DELTA"), false),
+            ("PowerUnit_0", Some("DELTA"), false),
+            ("Shelf_0", Some("DELTA"), false),
+            // Unrelated chassis ids are ignored.
             ("Card1", Some("DELTA"), false),
             ("Baseboard", Some("delta"), false),
             // Power-shelf chassis id but a different (or missing) manufacturer.
             ("powershelf", Some("Lite-On"), false),
-            ("chassis", Some("NVIDIA"), false),
-            ("chassis", None, false),
+            ("PowerShelf_0", Some("NVIDIA"), false),
+            ("PowerShelf_0", None, false),
         ];
         for (id, mfg, expected) in cases {
             assert_eq!(

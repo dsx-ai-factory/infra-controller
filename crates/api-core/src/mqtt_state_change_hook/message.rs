@@ -17,7 +17,7 @@
 
 //! Message types shared by the MQTT state change hook and periodic republisher.
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::{DateTime, Utc};
 use model::machine::ManagedHostState;
 use serde::Serialize;
@@ -29,7 +29,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ManagedHostStateMessage<'a> {
     /// Unique identifier for the managed host machine.
-    pub(super) machine_id: &'a MachineId,
+    pub(super) machine_id: &'a HostMachineId,
     /// ISO 8601 timestamp when the state was observed for publishing.
     pub(super) timestamp: DateTime<Utc>,
     /// The managed host state.
@@ -67,8 +67,14 @@ mod tests {
     }
 
     #[allow(deprecated)]
-    fn test_machine_id() -> MachineId {
-        MachineId::default()
+    fn test_machine_id() -> HostMachineId {
+        carbide_uuid::machine::MachineId::new(
+            carbide_uuid::machine::MachineIdSource::ProductBoardChassisSerial,
+            [0; 32],
+            carbide_uuid::machine::MachineType::Host,
+        )
+        .try_into()
+        .unwrap()
     }
 
     #[test]

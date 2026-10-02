@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -120,8 +122,11 @@ func RunREPL(s *Session) error {
 	for {
 		line, err := readLineWithSuggestions(s, cmdNames)
 		if err != nil {
-			fmt.Println("\nGoodbye.")
-			return nil
+			if err == io.EOF {
+				fmt.Println("\nGoodbye.")
+				return nil
+			}
+			return err
 		}
 
 		line = strings.TrimSpace(line)
@@ -345,13 +350,22 @@ func splitCommandArguments(input string) ([]string, error) {
 	return args, nil
 }
 
-func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
+func readLineWithSuggestions(s *Session, cmdNames []string) (_ string, err error) {
 	restore, err := RawMode()
 	if err != nil {
 		return "", err
 	}
 	defer func() {
-		restore()
+		if restore != nil {
+			restoreErr := restore()
+			if restoreErr != nil {
+				if err == nil {
+					err = restoreErr
+				} else {
+					err = errors.Join(err, restoreErr)
+				}
+			}
+		}
 		ShowCursor()
 	}()
 
@@ -413,7 +427,7 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 
 		case key.Char == KeyCtrlD:
 			clearSuggestionLines(prevSuggestionCount)
-			return "", fmt.Errorf("EOF")
+			return "", io.EOF
 
 		case key.Char == KeyEnter || key.Char == KeyNewline:
 			suggestions := allSuggestions()
@@ -468,12 +482,18 @@ func readLineWithSuggestions(s *Session, cmdNames []string) (string, error) {
 				prevSuggestionCount = 0
 				ClearLine()
 				fmt.Print("\r" + prompt + line + "\r\n")
-				restore()
-				chosen := selectFromHistory()
-				var rawErr error
-				restore, rawErr = RawMode()
-				if rawErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to enter raw mode: %v\n", rawErr)
+				restoreErr := restore()
+				restore = nil
+				if restoreErr != nil {
+					return "", restoreErr
+				}
+				chosen, historyErr := selectFromHistory()
+				if historyErr != nil {
+					return "", historyErr
+				}
+				restore, err = RawMode()
+				if err != nil {
+					return "", err
 				}
 				if chosen != "" {
 					line = chosen
@@ -798,7 +818,7 @@ func runScopeSet(s *Session, resourceType, nameOrID string) {
 			return
 		}
 	} else {
-		item, err = s.Resolver.Resolve(context.Background(), resourceType, strings.ToUpper(resourceType[:1])+resourceType[1:])
+		item, err = s.Resolver.Resolve(context.Background(), resourceType, generatedParameterLabel(resourceType))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s %v\n\n", Red("Error:"), err)
 			return
@@ -856,9 +876,9 @@ type jwtAccessClaim struct {
 
 // selectFromHistory opens a windowed Select picker with the command history.
 // Returns the chosen command, or empty string if cancelled.
-func selectFromHistory() string {
+func selectFromHistory() (string, error) {
 	if len(history) == 0 {
-		return ""
+		return "", nil
 	}
 	// Show most recent first.
 	items := make([]SelectItem, len(history))
@@ -866,10 +886,13 @@ func selectFromHistory() string {
 		items[len(history)-1-i] = SelectItem{Label: cmd, ID: cmd}
 	}
 	selected, err := Select("History", items)
-	if err != nil {
-		return ""
+	if err == errSelectionCancelled {
+		return "", nil
 	}
-	return selected.ID
+	if err != nil {
+		return "", err
+	}
+	return selected.ID, nil
 }
 
 func extractOrgsFromJWT(tokenStr string) []string {

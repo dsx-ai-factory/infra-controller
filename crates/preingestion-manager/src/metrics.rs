@@ -748,7 +748,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_utils::test_support::test_meter::TestMeter;
     use prometheus_text_parser::ParsedPrometheusMetrics;
@@ -906,9 +906,10 @@ mod tests {
                 "carbide_preingestion_bfb_copy_duration_seconds",
                 &[("outcome", outcome)],
             );
-            assert!(
-                (sum - seconds).abs() < 1e-9,
-                "outcome={outcome} records {seconds}s, got {sum}"
+            assert_eq!(
+                sum,
+                ApproxHistogramSum(seconds),
+                "outcome={outcome} records {seconds}s"
             );
         }
     }

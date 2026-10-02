@@ -50,6 +50,226 @@ func RunExecutionContract(t *testing.T, factory ExecutionFactory) {
 	t.Run("concurrent claim fencing", func(t *testing.T) {
 		testConcurrentClaimFencing(t, factory)
 	})
+	t.Run("expired claim recovery", func(t *testing.T) {
+		testExpiredClaimRecovery(t, factory)
+	})
+	t.Run("exhausted retries report a full bounded scan", func(t *testing.T) {
+		testExhaustedRetriesReportFullScan(t, factory)
+	})
+	t.Run("late claim completion", func(t *testing.T) {
+		testLateClaimCompletion(t, factory)
+	})
+	t.Run("completion expiration race", func(t *testing.T) {
+		testCompletionExpirationRace(t, factory)
+	})
+}
+
+func testExhaustedRetriesReportFullScan(
+	t *testing.T,
+	factory ExecutionFactory,
+) {
+	t.Helper()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	store := factory(&now)
+
+	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
+	require.NoError(t, err)
+
+	request := claimRequest("scheduler-1", 1)
+	request.MaxAttempts = 2
+	first, err := claimPendingExecutions(store, ctx, request)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+
+	now = first[0].Execution.ClaimExpiresAt
+	request.Owner = "scheduler-2"
+	firstRetry, err := claimRetryExecutions(store, ctx, request)
+	require.NoError(t, err)
+	require.Len(t, firstRetry, 1)
+
+	_, err = store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
+	require.NoError(t, err)
+	second, err := claimPendingExecutions(store, ctx, request)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+
+	require.NoError(t, store.TransitionClaimedExecution(
+		ctx,
+		second[0].Execution.ID,
+		second[0].Token,
+		eventrule.DeferredExecutionResult(
+			eventrule.ExecutionReasonAttemptFailed,
+			"temporarily unavailable",
+			3*time.Minute,
+		),
+	))
+
+	// The first execution expires before the second execution becomes due, so a
+	// limit-one retry scan encounters and terminalizes the exhausted row first.
+	now = now.Add(3 * time.Minute)
+	request.Owner = "scheduler-3"
+	batch, err := store.ClaimRetryExecutions(ctx, request)
+	require.NoError(t, err)
+	require.Empty(t, batch.Claims)
+	require.True(t, batch.ScanLimitReached)
+
+	batch, err = store.ClaimRetryExecutions(ctx, request)
+	require.NoError(t, err)
+	require.Len(t, batch.Claims, 1)
+	require.Equal(t, second[0].Execution.ID, batch.Claims[0].Execution.ID)
+}
+
+func testLateClaimCompletion(t *testing.T, factory ExecutionFactory) {
+	t.Helper()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	store := factory(&now)
+	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
+	require.NoError(t, err)
+
+	claims, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
+	require.NoError(t, err)
+	require.Len(t, claims, 1)
+	now = claims[0].Execution.ClaimExpiresAt
+
+	require.NoError(t, store.TransitionClaimedExecution(
+		ctx,
+		claims[0].Execution.ID,
+		claims[0].Token,
+		eventrule.CompletedExecutionResult(),
+	))
+
+	recovered, err := claimRetryExecutions(store, ctx, claimRequest("scheduler-2", 1))
+	require.NoError(t, err)
+	require.Empty(t, recovered)
+}
+
+func testCompletionExpirationRace(t *testing.T, factory ExecutionFactory) {
+	t.Helper()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	store := factory(&now)
+	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
+	require.NoError(t, err)
+
+	first, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	now = first[0].Execution.ClaimExpiresAt
+
+	start := make(chan struct{})
+	transitionErr := make(chan error, 1)
+	retryResult := make(chan []eventrule.ClaimedExecution, 1)
+	retryErr := make(chan error, 1)
+	go func() {
+		<-start
+		transitionErr <- store.TransitionClaimedExecution(
+			ctx,
+			first[0].Execution.ID,
+			first[0].Token,
+			eventrule.CompletedExecutionResult(),
+		)
+	}()
+	go func() {
+		<-start
+		claims, err := claimRetryExecutions(store, ctx, claimRequest("scheduler-2", 1))
+		retryResult <- claims
+		retryErr <- err
+	}()
+	close(start)
+
+	claims := <-retryResult
+	require.NoError(t, <-retryErr)
+	err = <-transitionErr
+	if err == nil {
+		require.Empty(t, claims, "completion won the row lock")
+		return
+	}
+
+	require.ErrorIs(t, err, eventrule.ErrExecutionClaimLost)
+	require.Len(t, claims, 1, "reclamation won the row lock")
+	require.NotEqual(t, first[0].Token, claims[0].Token)
+}
+
+func testExpiredClaimRecovery(t *testing.T, factory ExecutionFactory) {
+	t.Helper()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	store := factory(&now)
+	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
+	require.NoError(t, err)
+
+	request := claimRequest("scheduler-1", 1)
+	request.MaxAttempts = 2
+	first, err := claimPendingExecutions(store, ctx, request)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	require.Equal(t, now.Add(time.Minute), first[0].Execution.ClaimExpiresAt)
+
+	now = now.Add(time.Minute)
+	request.Owner = "scheduler-2"
+	const schedulers = 20
+	results := make(chan []eventrule.ClaimedExecution, schedulers)
+	errs := make(chan error, schedulers)
+	var wg sync.WaitGroup
+	for range schedulers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			owner := "recovery-" + uuid.NewString()
+			recoveryRequest := request
+			recoveryRequest.Owner = owner
+			claims, err := claimRetryExecutions(store, ctx, recoveryRequest)
+			results <- claims
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	var reclaimed eventrule.ClaimedExecution
+	claimCount := 0
+	for claims := range results {
+		claimCount += len(claims)
+		if len(claims) == 1 {
+			reclaimed = claims[0]
+		}
+	}
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, claimCount)
+	require.Equal(t, 2, reclaimed.Execution.Attempts)
+	require.NotEqual(t, first[0].Token, reclaimed.Token)
+	require.Equal(t, now.Add(2*time.Minute), reclaimed.Execution.ClaimExpiresAt)
+
+	err = store.TransitionClaimedExecution(
+		ctx,
+		first[0].Execution.ID,
+		first[0].Token,
+		eventrule.CompletedExecutionResult(),
+	)
+	require.ErrorIs(t, err, eventrule.ErrExecutionClaimLost)
+
+	now = reclaimed.Execution.ClaimExpiresAt
+	request.Owner = "scheduler-3"
+	claims, err := claimRetryExecutions(store, ctx, request)
+	require.NoError(t, err)
+	require.Empty(t, claims, "an exhausted execution becomes terminal")
+
+	err = store.TransitionClaimedExecution(
+		ctx,
+		reclaimed.Execution.ID,
+		reclaimed.Token,
+		eventrule.CompletedExecutionResult(),
+	)
+	require.ErrorIs(t, err, eventrule.ErrExecutionClaimLost)
 }
 
 func testInterruptedAttemptRefund(t *testing.T, factory ExecutionFactory) {
@@ -61,10 +281,7 @@ func testInterruptedAttemptRefund(t *testing.T, factory ExecutionFactory) {
 	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
 	require.NoError(t, err)
 
-	claims, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	claims, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 
@@ -83,10 +300,7 @@ func testInterruptedAttemptRefund(t *testing.T, factory ExecutionFactory) {
 	))
 
 	now = now.Add(time.Minute)
-	claims, err = store.ClaimRetryExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	claims, err = claimRetryExecutions(store, ctx, claimRequest("scheduler-2", 1))
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 
@@ -119,18 +333,12 @@ func testExecutionClaimLimit(t *testing.T, factory ExecutionFactory) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 
-	first, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	first, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
 	require.NoError(t, err)
 	require.Len(t, first, 1)
 	requireValidClaims(t, first, "scheduler-1")
 
-	second, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	second, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
 	require.NoError(t, err)
 	require.Len(t, second, 1)
 	requireValidClaims(t, second, "scheduler-1")
@@ -173,10 +381,7 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 
-	claims, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 10,
-	})
+	claims, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 10))
 	require.NoError(t, err)
 	require.Len(t, claims, 1, "only the first event has a dispatchable execution")
 	requireValidClaims(t, claims, "scheduler-1")
@@ -226,10 +431,11 @@ func testConcurrentEventDeduplication(t *testing.T, factory ExecutionFactory) {
 	require.NoError(t, err)
 	require.Equal(t, deliveries+1, stored.Observations)
 
-	claims, err := store.ClaimPendingExecutions(context.Background(), eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: deliveries,
-	})
+	claims, err := claimPendingExecutions(
+		store,
+		context.Background(),
+		claimRequest("scheduler-1", deliveries),
+	)
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 	requireValidClaims(t, claims, "scheduler-1")
@@ -244,10 +450,7 @@ func testExecutionClaimLifecycle(t *testing.T, factory ExecutionFactory) {
 	_, err := store.CommitEventPlan(ctx, newEventDefinition(), newEventPlan())
 	require.NoError(t, err)
 
-	pending, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 1,
-	})
+	pending, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 1))
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	requireValidClaims(t, pending, "scheduler-1")
@@ -257,10 +460,7 @@ func testExecutionClaimLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.Equal(t, 1, first.Execution.Attempts)
 	require.NoError(t, first.Validate())
 
-	none, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	none, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-2", 1))
 	require.NoError(t, err)
 	require.Empty(t, none)
 	requireValidClaims(t, none, "scheduler-2")
@@ -277,19 +477,13 @@ func testExecutionClaimLifecycle(t *testing.T, factory ExecutionFactory) {
 	)
 	require.NoError(t, err)
 
-	none, err = store.ClaimRetryExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	none, err = claimRetryExecutions(store, ctx, claimRequest("scheduler-2", 1))
 	require.NoError(t, err)
 	require.Empty(t, none)
 	requireValidClaims(t, none, "scheduler-2")
 
 	now = now.Add(time.Minute)
-	deferred, err := store.ClaimRetryExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-2",
-		Limit: 1,
-	})
+	deferred, err := claimRetryExecutions(store, ctx, claimRequest("scheduler-2", 1))
 	require.NoError(t, err)
 	require.Len(t, deferred, 1)
 	requireValidClaims(t, deferred, "scheduler-2")
@@ -346,10 +540,7 @@ func testOrderedAtomicPlanCommit(t *testing.T, factory ExecutionFactory) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 
-	claims, err := store.ClaimPendingExecutions(ctx, eventrule.ExecutionClaimRequest{
-		Owner: "scheduler-1",
-		Limit: 2,
-	})
+	claims, err := claimPendingExecutions(store, ctx, claimRequest("scheduler-1", 2))
 	require.NoError(t, err)
 	require.Len(t, claims, 2)
 	requireValidClaims(t, claims, "scheduler-1")
@@ -382,12 +573,10 @@ func testConcurrentClaimFencing(t *testing.T, factory ExecutionFactory) {
 			defer wg.Done()
 
 			owner := "scheduler-" + uuid.NewString()
-			claims, err := store.ClaimPendingExecutions(
+			claims, err := claimPendingExecutions(
+				store,
 				context.Background(),
-				eventrule.ExecutionClaimRequest{
-					Owner: owner,
-					Limit: 1,
-				},
+				claimRequest(owner, 1),
 			)
 
 			results <- result{owner: owner, claims: claims}
@@ -408,6 +597,35 @@ func testConcurrentClaimFencing(t *testing.T, factory ExecutionFactory) {
 	}
 
 	require.Equal(t, 1, claimed)
+}
+
+func claimRequest(owner string, limit int) eventrule.ExecutionClaimRequest {
+	return eventrule.ExecutionClaimRequest{
+		Owner:         owner,
+		Limit:         limit,
+		ClaimDuration: time.Minute,
+		MaxAttempts:   4,
+	}
+}
+
+func claimPendingExecutions(
+	store EventExecutionStore,
+	ctx context.Context,
+	request eventrule.ExecutionClaimRequest,
+) ([]eventrule.ClaimedExecution, error) {
+	batch, err := store.ClaimPendingExecutions(ctx, request)
+
+	return batch.Claims, err
+}
+
+func claimRetryExecutions(
+	store EventExecutionStore,
+	ctx context.Context,
+	request eventrule.ExecutionClaimRequest,
+) ([]eventrule.ClaimedExecution, error) {
+	batch, err := store.ClaimRetryExecutions(ctx, request)
+
+	return batch.Claims, err
 }
 
 func requireValidClaims(

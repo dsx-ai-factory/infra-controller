@@ -18,7 +18,8 @@
 # setup.sh — install the NICo prerequisite stack
 #
 # Tool requirements:
-#   helmfile, helm, kubectl, jq, ssh-keygen
+#   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
+#   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
 #
 # Required environment:
 #   KUBECONFIG            Optional only if the current kubectl context already
@@ -44,6 +45,7 @@
 #                          StorageClass. Default: true.
 #   NICO_STORAGE_CLASS     StorageClass for Postgres and Vault data and audit PVCs.
 #                          Default: local-path-persistent.
+#   NICO_INSTALL_CONTOUR   Install Contour/Envoy after MetalLB. Default: false.
 #   VAULT_NS               Vault namespace. Default: vault
 #   CERT_MANAGER_NS        cert-manager namespace. Default: cert-manager
 #   PREFLIGHT_CHECK_IMAGE  Image for preflight per-node checks.
@@ -51,13 +53,19 @@
 #   NICO_SKIP_DPF          Skip the DPF (DOCA Platform Framework) DPU provisioning
 #                          stack, which installs by DEFAULT. Default: false.
 #                          Same as --skip-dpf. (NICO_INSTALL_DPF=false honored too.)
-#   NICO_DPF_VERSION       doca-platform tag to clone/install. Default: v26.4.0
-#   NICO_DPF_SRC_DIR       Where the doca-platform clone is cached.
-#                          Default: helm-prereqs/.dpf-src
+#   NICO_DPF_SRC           Local doca-platform checkout to install the DPF
+#                          operator chart from. Default: unset - the source is
+#                          the pinned helm-prereqs/doca-platform commit: the git
+#                          submodule in a git checkout of this repo, or a clone
+#                          of the commit in helm-prereqs/doca-platform.pin when
+#                          running from the packaged chart (both need git and
+#                          network; on airgapped hosts, clone doca-platform at
+#                          the pinned commit yourself and set this variable).
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: NICO_DPF_VERSION.
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.4.0, the release
+#                          the doca-platform submodule is pinned to.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -83,9 +91,12 @@
 #                          Default: "" (the kubeadm convention); set to "true"
 #                          on distributions that label with a value.
 #   NICO_DPF_BMC_ROOT_PASSWORD
-#                          Site-wide BMC root password. REQUIRED unless --skip-dpf.
-#                          setup.sh deploys Core with DPF off, sets this via
-#                          nico-admin-cli, then enables DPF and restarts carbide-api.
+#                          Site-wide BMC root password used to seed a
+#                          setup-managed version-0 credential Secret before
+#                          the single Core rollout. Optional when DPF is
+#                          installed; rejected with --skip-core or --skip-dpf.
+#                          When unset, setup reuses its existing Secret or
+#                          leaves the credential backend-managed.
 #   NICO_DPF_DPU_AGENT_CHART_VERSION
 #                          Helm chart version for nico-dpu-agent. Defaults to the
 #                          version baked into the carbide-api binary at build time
@@ -99,6 +110,26 @@
 #                          Same override for the nico-dhcp-server chart.
 #   NICO_DPF_OTEL_CHART_VERSION
 #                          Same override for the nico-otelcol chart.
+#   NICO_SKIP_RMS          Skip the NVIDIA Rack Manager Service (rack-manager
+#                          chart, phase 5c), which installs by DEFAULT.
+#                          Same as --skip-rms. (NICO_INSTALL_RMS=false honored too.)
+#   NICO_RMS_CHART         Local rack-manager chart path (directory or .tgz),
+#                          e.g. your own nv-rms checkout's helm/ dir. Default:
+#                          unset - the chart comes from the helm-prereqs/nv-rms
+#                          git submodule, pinned by this repo (initialized
+#                          automatically when git and network are available;
+#                          on airgapped hosts, clone nv-rms yourself and set
+#                          this variable).
+#   NICO_RMS_IMAGE_REPO    RMS API server image repository. Default: the NGC
+#                          rms-dev image, nvcr.io/0837451325059433/rms-dev/rms-api
+#                          (still entitlement-gated; point at your mirror
+#                          otherwise).
+#   NICO_RMS_IMAGE_TAG     RMS API server image tag (git-describe style, e.g.
+#                          v0.8.0). REQUIRED when RMS install is enabled — the
+#                          chart hard-fails at render without a tag.
+#   NICO_RMS_NGC_API_KEY   NGC API key for the rms-pull-secret. Required with
+#                          the default (entitlement-gated) image repo.
+#                          Default: $REGISTRY_PULL_SECRET
 #
 # Usage:
 #   export KUBECONFIG=/path/to/kubeconfig
@@ -110,12 +141,11 @@
 #   ./setup.sh -y                       # skip all prompts, deploy everything automatically
 #   ./setup.sh --skip-core              # skip Phase 6 NICo Core (print command, deploy manually)
 #   ./setup.sh --skip-rest              # skip Phase 7 NICo REST entirely (no repo needed)
-#   ./setup.sh --skip-flow              # skip Phase 7h NICo Flow (REST still installs)
-#                                       #   pair with helm-prereqs/values.yaml::flow.enabled=false
-#                                       #   to skip Flow prereqs (DBs / ESO / vault tokens) too
+#   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
+#   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
@@ -132,19 +162,45 @@
 # =============================================================================
 set -euo pipefail
 
+# Keep the password in this shell only. It is setup input, not runtime
+# configuration, and must not be inherited by any child process. Disable
+# xtrace while capturing it so `bash -x` cannot print the plaintext.
+# This script handles credentials in several later functions, whose local
+# variables would also be exported under allexport. Keep it disabled for the
+# entire setup process rather than restoring it after this initial capture.
+if [[ "$-" == *a* ]]; then
+    set +a
+fi
+_BMC_V0_CAPTURE_RESTORE_XTRACE=false
+if [[ "$-" == *x* ]]; then
+    set +x
+    _BMC_V0_CAPTURE_RESTORE_XTRACE=true
+fi
+_BMC_V0_BOOTSTRAP_PASSWORD="${NICO_DPF_BMC_ROOT_PASSWORD:-}"
+unset NICO_DPF_BMC_ROOT_PASSWORD
+if "${_BMC_V0_CAPTURE_RESTORE_XTRACE}"; then
+    set -x
+fi
+unset _BMC_V0_CAPTURE_RESTORE_XTRACE
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 AUTO_YES=false
 SKIP_CORE=false
 SKIP_REST=false
-SKIP_FLOW=false
 # DPF (DOCA Platform Framework) DPU provisioning installs by DEFAULT. Opt out
 # with --skip-dpf or NICO_SKIP_DPF=true (e.g. sites with no DPUs, or that still
 # use the deprecated iPXE DPU path). NICO_INSTALL_DPF=false is honored too.
 INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 [[ "${NICO_SKIP_DPF:-false}" == "true" ]] && INSTALL_DPF=false
+# RMS (Rack Manager Service) installs by DEFAULT, mirroring DPF. Opt out with
+# --skip-rms or NICO_SKIP_RMS=true (e.g. sites without rack management, or an
+# externally managed RMS). NICO_INSTALL_RMS=false is honored too.
+INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
+[[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
+INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
@@ -153,10 +209,12 @@ while [[ $# -gt 0 ]]; do
         -y)             AUTO_YES=true  ;;
         --skip-core)    SKIP_CORE=true ;;
         --skip-rest)    SKIP_REST=true ;;
-        --skip-flow)    SKIP_FLOW=true ;;
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
         --skip-dpf)     INSTALL_DPF=false ;;
+        --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
+        --skip-rms)     INSTALL_RMS=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
+        --install-contour) INSTALL_CONTOUR=true ;;
         --debug)        set -x         ;;
         --core-values)
             [[ -z "${2:-}" ]] && { echo "Error: --core-values requires a file path"; exit 1; }
@@ -173,7 +231,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--with-observability] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -183,7 +241,7 @@ done
 # (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Exits 1 if
 # user declines to continue.
 # ---------------------------------------------------------------------------
-export AUTO_YES SKIP_CORE SKIP_REST SKIP_FLOW INSTALL_DPF
+export AUTO_YES SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
 # Validate INSTALL_DPF BEFORE sourcing preflight — preflight gates its DPF
 # checks on INSTALL_DPF==true, so a garbage NICO_INSTALL_DPF would otherwise
 # silently skip those checks before erroring here.
@@ -191,6 +249,150 @@ case "${INSTALL_DPF}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_DPF must be true or false (got '${INSTALL_DPF}')"; exit 1 ;;
 esac
+case "${INSTALL_RMS}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
+esac
+case "${INSTALL_CONTOUR}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
+esac
+
+# `--debug` or `bash -x` may have enabled xtrace since the early capture.
+# Keep validation from expanding the password into the trace.
+_BMC_V0_VALIDATE_RESTORE_XTRACE=false
+if [[ "$-" == *x* ]]; then
+    set +x
+    _BMC_V0_VALIDATE_RESTORE_XTRACE=true
+fi
+if ! "${INSTALL_DPF}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-dpf." >&2
+    echo "  Unset the variable or install DPF." >&2
+    exit 1
+fi
+if "${SKIP_CORE}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-core." >&2
+    echo "  Unset the variable or install NICo Core." >&2
+    exit 1
+fi
+if "${_BMC_V0_VALIDATE_RESTORE_XTRACE}"; then
+    set -x
+fi
+unset _BMC_V0_VALIDATE_RESTORE_XTRACE
+
+# Reject the retired DPF source knobs, but only when DPF is being installed so
+# a stale env file does not abort a --skip-dpf run.
+_reject_retired_dpf_vars() {
+    local _v
+    [[ "${INSTALL_DPF}" == "true" ]] || return 0
+    for _v in NICO_DPF_VERSION NICO_DPF_SRC_DIR; do
+        if [[ -n "${!_v:-}" ]]; then
+            echo "Error: ${_v} is retired - the DPF source is the pinned helm-prereqs/doca-platform submodule."
+            echo "  → Set NICO_DPF_SRC for a local checkout, NICO_DPF_IMAGE_TAG for the image tag."
+            return 1
+        fi
+    done
+}
+_reject_retired_dpf_vars
+
+# The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
+# release does not provide an automatic migration for those workloads. Stop
+# before preflight creates temporary check Pods or any installation phase can
+# remove prerequisites the legacy managers still use.
+_reject_bundled_flow_manager_upgrade() {
+    local container_names
+    local container_name
+    local manager_containers
+    local rollout_state
+    local generation observed_generation desired_replicas updated_replicas
+    local ready_replicas available_replicas total_replicas
+    local pod_rows
+    local pod_name pod_phase pod_containers pod_container
+    local manager_pods
+
+    if ! container_names="$(
+        kubectl get deployment flow -n flow --ignore-not-found \
+            -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\n"}{end}'
+    )"; then
+        echo "ERROR: unable to inspect flow/flow for bundled manager containers; refusing to continue." >&2
+        return 1
+    fi
+
+    manager_containers=""
+    while IFS= read -r container_name; do
+        case "${container_name}" in
+            psm|nsm)
+                manager_containers="${manager_containers:+${manager_containers}, }${container_name}"
+                ;;
+        esac
+    done <<< "${container_names}"
+    if [[ -n "${manager_containers}" ]]; then
+        echo "ERROR: automatic upgrade from a Flow deployment that bundles ${manager_containers} is unsupported." >&2
+        echo "Preserve the existing release, or handle its dependencies and upgrade only the flow Helm release to the Flow-only chart before rerunning setup.sh." >&2
+        return 1
+    fi
+
+    # A failed manual Helm upgrade can update the Deployment template while an
+    # old PSM/NSM Pod remains active. Require a completed rollout before shared
+    # prerequisites or credentials can be changed.
+    if [[ -n "${container_names}" ]]; then
+        if ! rollout_state="$(
+            kubectl get deployment flow -n flow \
+                -o jsonpath='{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.spec.replicas}{"|"}{.status.updatedReplicas}{"|"}{.status.readyReplicas}{"|"}{.status.availableReplicas}{"|"}{.status.replicas}'
+        )"; then
+            echo "ERROR: unable to inspect flow/flow rollout status; refusing to continue." >&2
+            return 1
+        fi
+        IFS='|' read -r generation observed_generation desired_replicas \
+            updated_replicas ready_replicas available_replicas total_replicas \
+            <<< "${rollout_state}"
+        updated_replicas="${updated_replicas:-0}"
+        ready_replicas="${ready_replicas:-0}"
+        available_replicas="${available_replicas:-0}"
+        total_replicas="${total_replicas:-0}"
+        if [[ -z "${generation}" || -z "${observed_generation}" || \
+              -z "${desired_replicas}" || \
+              "${observed_generation}" != "${generation}" || \
+              "${updated_replicas}" != "${desired_replicas}" || \
+              "${ready_replicas}" != "${desired_replicas}" || \
+              "${available_replicas}" != "${desired_replicas}" || \
+              "${total_replicas}" != "${desired_replicas}" ]]; then
+            echo "ERROR: flow/flow rollout is incomplete; old manager Pods may still be running." >&2
+            echo "Complete or roll back the Flow-only Helm upgrade before rerunning setup.sh." >&2
+            return 1
+        fi
+    fi
+
+    if ! pod_rows="$(
+        kubectl get pods -n flow -l app=flow --ignore-not-found \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
+    )"; then
+        echo "ERROR: unable to inspect active Flow Pods for bundled manager containers; refusing to continue." >&2
+        return 1
+    fi
+    manager_pods=""
+    while IFS=$'\t' read -r pod_name pod_phase pod_containers; do
+        [[ -z "${pod_name}" ]] && continue
+        case "${pod_phase}" in
+            Succeeded|Failed) continue ;;
+        esac
+        for pod_container in ${pod_containers}; do
+            case "${pod_container}" in
+                psm|nsm)
+                    manager_pods="${manager_pods:+${manager_pods}, }${pod_name}/${pod_container}"
+                    ;;
+            esac
+        done
+    done <<< "${pod_rows}"
+    if [[ -n "${manager_pods}" ]]; then
+        echo "ERROR: active Flow Pods still contain bundled managers: ${manager_pods}." >&2
+        echo "Complete or roll back the Flow-only Helm upgrade before rerunning setup.sh." >&2
+        return 1
+    fi
+}
+
+_reject_bundled_flow_manager_upgrade
+
 # shellcheck source=preflight.sh
 source "${SCRIPT_DIR}/preflight.sh"
 
@@ -198,24 +400,34 @@ VAULT_NS="${VAULT_NS:-vault}"
 CERT_MANAGER_NS="${CERT_MANAGER_NS:-cert-manager}"
 NICO_MANAGE_DEFAULT_STORAGE_CLASS="${NICO_MANAGE_DEFAULT_STORAGE_CLASS:-true}"
 NICO_STORAGE_CLASS="${NICO_STORAGE_CLASS:-local-path-persistent}"
-NICO_DPF_VERSION="${NICO_DPF_VERSION:-v26.4.0}"
-NICO_DPF_SRC_DIR="${NICO_DPF_SRC_DIR:-${SCRIPT_DIR}/.dpf-src}"
+# The DPF operator chart comes from the pinned helm-prereqs/doca-platform
+# commit: the git submodule in a git checkout, or a clone of the commit in
+# doca-platform.pin from the packaged chart (bump both together to move
+# versions). NICO_DPF_SRC points at a local checkout instead (airgapped or
+# self-managed).
+NICO_DPF_SRC="${NICO_DPF_SRC:-}"
 NICO_DPF_NGC_API_KEY="${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
 NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}"
 # DPF operator image. Defaults to the public NGC image (anonymous pull). To use
 # your own registry (mirror or self-built, e.g. matching NICO_IMAGE_REGISTRY),
 # set NICO_DPF_IMAGE_REPO/_TAG and NICO_DPF_IMAGE_PULL_SECRET. The tag defaults
-# to the chart version (NICO_DPF_VERSION) but can differ for a self-built image.
+# to the release the doca-platform submodule is pinned to (bump both together)
+# but can differ for a self-built image.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-${NICO_DPF_VERSION}}"
-# Site-wide BMC root password. Optional: when provided, setup.sh calls
-# nico-admin-cli (phase 6b) to store the credential via the API so DPU
-# provisioning starts immediately. When omitted, carbide-api starts cleanly
-# without it (fixed in #4167 — the DPF SDK init is now best-effort when a
-# 60 s refresh interval is configured) and the operator must set the credential
-# manually via `nico-admin-cli credential add-bmc --kind=site-wide-root`
-# before DPU provisioning will work.
-NICO_DPF_BMC_ROOT_PASSWORD="${NICO_DPF_BMC_ROOT_PASSWORD:-}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.4.0}"
+# RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
+# git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
+# versions). Image tags are git-describe style and decoupled from the chart -
+# NICO_RMS_IMAGE_TAG has no default and preflight requires it when RMS install
+# is enabled.
+NICO_RMS_CHART="${NICO_RMS_CHART:-}"
+NICO_RMS_IMAGE_REPO="${NICO_RMS_IMAGE_REPO:-nvcr.io/0837451325059433/rms-dev/rms-api}"
+NICO_RMS_IMAGE_TAG="${NICO_RMS_IMAGE_TAG:-}"
+NICO_RMS_NGC_API_KEY="${NICO_RMS_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
+# The namespace is fixed: NICo Core's chart defaults dial
+# rms-api-server.rack-manager.svc.cluster.local, and the ESO sync,
+# health-check, and clean.sh all assume it. Not overridable by design.
+_RMS_NS="rack-manager"
 # Optional chart-version overrides for NICo-owned DPF services. Useful when
 # testing a dev/PR image whose baked-in version was never published to the
 # chart registry — point at the latest published version instead.
@@ -233,27 +445,231 @@ _SETUP_PHASE="initializing"
 # cold-start deadlock break, so the EXIT trap can restore Fail if we abort in
 # between and never leave admission validation fail-open.
 _KAMAJI_WH_RELAXED=false
+# Set after the normal-flow cleanup below succeeds. Until then, the EXIT trap
+# retries the cleanup so legacy plaintext credentials cannot survive a failure
+# in an earlier installation phase.
+_LEGACY_DPF_BOOTSTRAP_CLEANED=false
+_BMC_V0_BOOTSTRAP_SECRET_NAME="nico-bmc-v0-credentials"
+_BMC_V0_BOOTSTRAP_SECRET_KEY="credentials.yaml"
+_BMC_V0_BOOTSTRAP_PURPOSE="bmc-site-wide-root-v0"
+_BMC_V0_BOOTSTRAP_ENABLED=false
+_CORE_VALUES_INSPECTOR_CHART="${SCRIPT_DIR}/internal/core-values-inspector"
+
+_append_bmc_v0_core_values() {
+    NICO_CORE_CMD+=(
+        --set-string "nico-api.credentials.bmcSiteWideRootSource=local"
+        --set-string "nico-api.credentials.file.existingSecret.name=${_BMC_V0_BOOTSTRAP_SECRET_NAME}"
+        --set-string "nico-api.credentials.file.existingSecret.key=${_BMC_V0_BOOTSTRAP_SECRET_KEY}"
+    )
+}
+
+_nico_api_credential_file_secret_name() {
+    local _file="$1"
+    local _rendered=""
+    local _secret_json=""
+    local _secret_name=""
+
+    if ! _rendered="$(helm template core-values-inspector \
+            "${_CORE_VALUES_INSPECTOR_CHART}" \
+            -f "${_file}" \
+            --show-only templates/credential-file-secret-name.yaml)"; then
+        echo "Error: could not parse nico-api credential-file values in ${_file}." >&2
+        return 1
+    fi
+
+    _secret_json="$(printf '%s\n' "${_rendered}" | awk '
+        /^[[:space:]]*\{"credentialFileSecretName":/ {
+            sub(/^[[:space:]]*/, "")
+            print
+            exit
+        }
+    ')"
+    if [[ -z "${_secret_json}" ]] || \
+       ! _secret_name="$(printf '%s\n' "${_secret_json}" | \
+            jq -er '.credentialFileSecretName | strings')"; then
+        echo "Error: nico-api credential-file values in ${_file} did not render a Secret name." >&2
+        return 1
+    fi
+
+    printf '%s\n' "${_secret_name}"
+}
+
+_prepare_bmc_v0_bootstrap_secret_untraced() {
+    local _configured_secret="${1:-}"
+    local _secret_json=""
+    local _purpose=""
+    local _encoded_credentials=""
+    local _existing_password_b64=""
+    local _bootstrap_password_b64=""
+
+    _BMC_V0_BOOTSTRAP_ENABLED=false
+
+    # The setup-managed credential exists only to bootstrap DPF. A non-DPF
+    # rerun must not adopt a leftover Secret or force local credential
+    # ownership onto Core.
+    if ! "${INSTALL_DPF}"; then
+        return 0
+    fi
+
+    if [[ -n "${_configured_secret}" && \
+          "${_configured_secret}" != "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" ]]; then
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot replace the configured credential-file Secret '${_configured_secret}'." >&2
+            echo "  Add bmc_site_wide_root to that Secret and omit the environment variable." >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! _secret_json="$(kubectl get secret "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system --ignore-not-found -o json)"; then
+        echo "Error: could not inspect Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    if [[ -n "${_secret_json}" ]]; then
+        _purpose="$(jq -r \
+            '.metadata.annotations["nico.nvidia.com/credential-purpose"] // ""' \
+            <<< "${_secret_json}")"
+        if [[ "${_purpose}" != "${_BMC_V0_BOOTSTRAP_PURPOSE}" ]]; then
+            if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+                echo "Error: Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} exists but is not managed by setup.sh." >&2
+                echo "  Rename it, configure it explicitly without NICO_DPF_BMC_ROOT_PASSWORD, or remove it after verifying it is unused." >&2
+                return 1
+            fi
+            return 0
+        fi
+
+        if ! _encoded_credentials="$(jq -er \
+                --arg key "${_BMC_V0_BOOTSTRAP_SECRET_KEY}" \
+                '.data[$key] | strings' <<< "${_secret_json}")" || \
+           [[ -z "${_encoded_credentials}" ]] || \
+           ! _existing_password_b64="$(printf '%s' "${_encoded_credentials}" | base64 -d | \
+                jq -jer 'select(.bmc_site_wide_root.username == "admin") | .bmc_site_wide_root.password | strings | select(length > 0)' | \
+                base64 | tr -d '\n')" || \
+           [[ -z "${_existing_password_b64}" ]]; then
+            echo "Error: setup-managed Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} is malformed." >&2
+            return 1
+        fi
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            _bootstrap_password_b64="$(printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+                base64 | tr -d '\n')"
+            if [[ "${_existing_password_b64}" != "${_bootstrap_password_b64}" ]]; then
+                echo "Error: NICO_DPF_BMC_ROOT_PASSWORD differs from the existing setup-managed version-0 credential." >&2
+                echo "  setup.sh will not replace a credential that managed hardware may already use." >&2
+                return 1
+            fi
+        fi
+
+        _BMC_V0_BOOTSTRAP_ENABLED=true
+        echo "Reusing setup-managed site-wide BMC version-0 Secret"
+        return 0
+    fi
+
+    if [[ -n "${_configured_secret}" && -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+        echo "Error: configured credential-file Secret nico-system/${_configured_secret} does not exist." >&2
+        echo "  Create it or set NICO_DPF_BMC_ROOT_PASSWORD so setup.sh can seed it." >&2
+        return 1
+    fi
+
+    [[ -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]] && return 0
+
+    if ! printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+        jq -Rs '{bmc_site_wide_root: {username: "admin", password: .}}' | \
+        kubectl create secret generic "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system \
+            --from-file="${_BMC_V0_BOOTSTRAP_SECRET_KEY}=/dev/stdin" \
+            --dry-run=client -o json | \
+        jq --arg purpose "${_BMC_V0_BOOTSTRAP_PURPOSE}" '
+            .metadata.labels = ((.metadata.labels // {}) +
+                {"app.kubernetes.io/managed-by": "helm-prereqs"}) |
+            .metadata.annotations = ((.metadata.annotations // {}) +
+                {"nico.nvidia.com/credential-purpose": $purpose})
+        ' | kubectl create -f - >/dev/null; then
+        echo "Error: could not create Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    _BMC_V0_BOOTSTRAP_ENABLED=true
+    echo "Created setup-managed site-wide BMC version-0 Secret"
+}
+
+_prepare_bmc_v0_bootstrap_secret() {
+    local _restore_xtrace=false
+    local _prepare_rc=0
+
+    # This function reads and decodes the credential. Keep the complete path
+    # out of bash xtrace even when setup runs with --debug.
+    if [[ "$-" == *x* ]]; then
+        set +x
+        _restore_xtrace=true
+    fi
+    _prepare_bmc_v0_bootstrap_secret_untraced "$@" || _prepare_rc=$?
+    if "${_restore_xtrace}"; then
+        set -x
+    fi
+    return "${_prepare_rc}"
+}
+
+_current_core_uses_setup_bmc_v0_secret() {
+    local _release_names=""
+    local _current_values=""
+    local _jq_rc=0
+
+    if ! _release_names="$(helm list \
+            --namespace nico-system --filter '^nico$' --short)"; then
+        echo "Error: could not inspect installed NICo Core releases." >&2
+        return 2
+    fi
+    [[ "${_release_names}" == "nico" ]] || return 1
+
+    if ! _current_values="$(helm get values nico \
+            --namespace nico-system --output json)"; then
+        echo "Error: could not inspect installed NICo Core values." >&2
+        return 2
+    fi
+    jq -e \
+        --arg name "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+        --arg key "${_BMC_V0_BOOTSTRAP_SECRET_KEY}" '
+            .["nico-api"].credentials.bmcSiteWideRootSource == "local" and
+            .["nico-api"].credentials.file.existingSecret.name == $name and
+            .["nico-api"].credentials.file.existingSecret.key == $key
+        ' <<< "${_current_values}" >/dev/null || _jq_rc=$?
+    case "${_jq_rc}" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *)
+            echo "Error: installed NICo Core values are not valid JSON." >&2
+            return 2
+            ;;
+    esac
+}
+
+_cleanup_legacy_dpf_bootstrap_credentials() {
+    local _job_rc=0
+    local _secret_rc=0
+
+    # Stop the credential Job first: a still-running pod holds the BMC password
+    # in its environment, so it must be gone before its source Secrets.
+    kubectl delete job dpf-set-bmc-root -n nico-system \
+        --ignore-not-found --wait=true --timeout=60s >/dev/null || _job_rc=$?
+    kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
+        --ignore-not-found >/dev/null || _secret_rc=$?
+
+    if (( _job_rc != 0 )); then
+        return "${_job_rc}"
+    fi
+    return "${_secret_rc}"
+}
 
 _on_failure() {
     local _rc=$?
     local _cmd="${BASH_COMMAND}"
-    # Always remove the DPF two-phase rendered-values tempfiles (they hold the
-    # full site config) and the freshly issued admin client key/cert, regardless
-    # of success or failure. Runs on every EXIT, so the private key is wiped even
-    # when errexit aborts _dpf_set_bmc_root before its own explicit cleanup.
-    rm -f "${_DPF_ON_VALUES:-}" "${_DPF_OFF_VALUES:-}" 2>/dev/null || true
-    rm -rf "${_DPF_CERT_JSON:-}" "${_DPF_CERT_DIR:-}" 2>/dev/null || true
-    # Drop the ephemeral BMC-root + admin-cert Secrets if a mid-run errexit
-    # skipped _dpf_set_bmc_root's own cleanup — the plaintext site-wide BMC
-    # password must never linger in the cluster after setup exits.
-    if [[ "${INSTALL_DPF:-false}" == "true" ]]; then
-        # Stop the credential Job first: a still-running pod holds the BMC
-        # password in its environment, so it must be gone before (not after)
-        # its source Secrets are removed.
-        kubectl delete job dpf-set-bmc-root -n nico-system \
-            --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
-        kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
-            --ignore-not-found >/dev/null 2>&1 || true
+    # Always remove the rendered DPF values tempfile (it holds the full site
+    # config), regardless of success or failure.
+    rm -f "${_DPF_VALUES:-}" 2>/dev/null || true
+    if [[ "${_LEGACY_DPF_BOOTSTRAP_CLEANED:-false}" != "true" ]]; then
+        _cleanup_legacy_dpf_bootstrap_credentials >/dev/null 2>&1 || true
     fi
     # Restore Kamaji's DataStore webhook to Fail if a mid-run errexit left it
     # relaxed to Ignore during the deadlock break — never exit fail-open.
@@ -559,6 +975,42 @@ fi
 echo "MetalLB ready"
 
 # ---------------------------------------------------------------------------
+# 1d. Contour/Envoy — optional Ingress controller.
+#     Install after MetalLB so the Envoy LoadBalancer Service can receive an
+#     external address. Skip this when the cluster already has an Ingress
+#     controller.
+# ---------------------------------------------------------------------------
+if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
+    _SETUP_PHASE="[1d] Contour/Envoy"
+    echo "=== [1d] Contour/Envoy ==="
+    # helmfile sync runs `helm upgrade --install`, so a contour release already
+    # in projectcontour is upgraded rather than rejected. Left unchecked that
+    # reconfigures a site's own ingress controller with our values and stamps it
+    # with the ownership label clean.sh keys on, which would then delete it.
+    # Only a release using our own name reaches this: a foreign release under a
+    # different name makes the sync a fresh install, and Helm refuses that
+    # because the cluster-scoped IngressClass already belongs to another release.
+    if kubectl get deployment contour-contour -n projectcontour &>/dev/null; then
+        _CONTOUR_OWNER="$(kubectl get deployment contour-contour -n projectcontour \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null || true)"
+        if [[ "${_CONTOUR_OWNER}" != "nico" ]]; then
+            echo "ERROR: projectcontour already runs a Contour that NICo does not manage." >&2
+            echo "  Drop --install-contour and point nico-rest-api.ingress.className at it," >&2
+            echo "  or remove it first: helm uninstall contour -n projectcontour" >&2
+            exit 1
+        fi
+    fi
+    # No --include-needs. Phase 1c above already installed MetalLB, and pulling
+    # it in here would re-sync that release without the CRD apply/re-apply that
+    # phase 1c wraps around it. The release sets wait: true, so this returns
+    # only once Contour and the Envoy DaemonSet are ready.
+    helmfile sync -l name=contour
+    echo "Contour/Envoy ready"
+else
+    echo "Skipping Contour/Envoy (set NICO_INSTALL_CONTOUR=true or pass --install-contour to install it)"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. cert-manager + Prometheus CRDs + Vault TLS bootstrap
 #    cert-manager must be up before we can issue certs for vault.
 #    Vault pods need TLS secrets (nicoca-vault-client, vault-raft-tls)
@@ -595,6 +1047,54 @@ echo "=== [3/6] vault ==="
 helmfile sync -l name=vault \
     --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
     --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
+
+# updateStrategy is OnDelete: a changed pod template (for example the probe
+# settings in operators/values/vault.yaml) reaches a running pod only when that
+# pod is deleted, so name the pods that still run the previous revision. The
+# controller can lag helmfile sync, so wait (up to 60s) for it to observe the
+# current generation first. Best effort: a missing StatefulSet is skipped, and
+# an unobserved generation or a failed query reports the revision as unknown
+# instead of comparing pods against stale status.
+vault_rev_unknown=""
+vault_gen=""
+vault_observed_gen=""
+for _vault_i in $(seq 1 12); do
+    if vault_gen_out="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)"; then
+        read -r vault_gen vault_observed_gen <<<"${vault_gen_out}"
+        vault_rev_unknown=""
+        if [[ -z "${vault_gen}" || "${vault_gen}" == "${vault_observed_gen}" ]]; then
+            break
+        fi
+        echo "  vault StatefulSet generation ${vault_gen} not yet observed (${_vault_i}/12), retrying in 5s..."
+    else
+        vault_gen=""
+        vault_observed_gen=""
+        vault_rev_unknown="kubectl query failed"
+        echo "  vault StatefulSet query failed (${_vault_i}/12), retrying in 5s..."
+    fi
+    sleep 5
+done
+vault_update_rev=""
+vault_stale_pods=""
+if [[ -n "${vault_gen}" && "${vault_gen}" != "${vault_observed_gen}" ]]; then
+    vault_rev_unknown="generation ${vault_gen} not observed within 60s"
+elif [[ -z "${vault_rev_unknown}" ]]; then
+    vault_update_rev="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+    vault_stale_pods="$(kubectl -n "${VAULT_NS}" get pods -l app.kubernetes.io/name=vault,component=server \
+        -o jsonpath="{range .items[?(@.metadata.labels.controller-revision-hash!='${vault_update_rev}')]}{.metadata.name} {end}" \
+        2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+fi
+if [[ -n "${vault_rev_unknown}" ]]; then
+    echo "WARNING: could not verify the Vault StatefulSet revision (${vault_rev_unknown})."
+    echo "         If operators/values/vault.yaml changed the pod template, roll the pods"
+    echo "         as described in docs/manuals/upgrade.md."
+elif [[ -n "${vault_update_rev}" && -n "${vault_stale_pods// /}" ]]; then
+    echo "WARNING: Vault pods still running the previous StatefulSet revision: ${vault_stale_pods% }"
+    echo "         After this run, delete them one at a time, standbys first, wait for Running,"
+    echo "         and run helm-prereqs/unseal_vault.sh after each one. See docs/manuals/upgrade.md."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Initialize + unseal vault
@@ -677,6 +1177,102 @@ until ROLE_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
 done
 echo "Vault AppRole credentials ready"
 
+# The commit helm-prereqs/<name> is pinned to: the gitlink in a git checkout of
+# this repo, else the helm-prereqs/<name>.pin file that ships with the packaged
+# chart (tests keep the two equal). Prints nothing when neither exists.
+#   $1 submodule name under helm-prereqs/
+_pinned_submodule_commit() {
+    local _name="$1" _pin
+    _pin="$(git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | awk '$1 == "160000" { print $2 }')"
+    [[ -n "${_pin}" ]] || \
+        _pin="$(grep -E -m1 '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null || true)"
+    printf '%s' "${_pin}"
+}
+
+# Align a pinned helm-prereqs/<name> submodule to the commit this repo records.
+# The pin is the supply-chain boundary: the commit is pinned and reviewed here
+# and git verifies the hash on checkout, so setup.sh never clones a mutable
+# ref. In a checkout of this repository (the gitlink is recorded) the submodule
+# is initialized; otherwise (packaged chart, or unpacked inside an unrelated
+# repository) the commit in <name>.pin is cloned shallowly instead.
+# A dirty checkout is refused so the pin stays meaningful.
+#   $1 submodule name under helm-prereqs/   $2 upstream URL (airgap hint)
+#   $3 override to set on an airgapped host, e.g. NICO_RMS_CHART=<clone>/helm
+_sync_pinned_submodule() {
+    local _name="$1" _url="$2" _override="$3" _pin
+    local _dir="${SCRIPT_DIR}/${_name}"
+    if [[ -e "${_dir}/.git" ]] && \
+       [[ -n "$(git -C "${_dir}" status --porcelain 2>/dev/null)" ]]; then
+        echo "Error: helm-prereqs/${_name} has local modifications."
+        echo "  → Commit/stash them upstream, restore the submodule, or point"
+        echo "    ${_override%%=*} at your modified checkout explicitly."
+        return 1
+    fi
+    if git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 '; then
+        echo "Syncing the ${_name} submodule to the pinned commit..."
+        if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout --depth 1 -- "helm-prereqs/${_name}"; then
+            echo "Error: could not sync the ${_name} submodule to the pinned commit."
+            echo "  → On an airgapped host, clone ${_url} at the pinned commit"
+            echo "    (git -C ${SCRIPT_DIR}/.. submodule status) and set ${_override}."
+            return 1
+        fi
+        echo "helm-prereqs/${_name}: $(git -C "${_dir}" rev-parse --short HEAD 2>/dev/null || echo pinned)"
+        return 0
+    fi
+    _pin="$(_pinned_submodule_commit "${_name}")"
+    if [[ -z "${_pin}" ]]; then
+        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout of this repository and ${SCRIPT_DIR}/${_name}.pin is missing, so the ${_name} source cannot be synced."
+        echo "  → Run setup.sh from a git clone of this repository or the packaged"
+        echo "    nico-prereqs chart, or clone ${_url} at the pinned commit and set ${_override}."
+        return 1
+    fi
+    if [[ -e "${_dir}/.git" && "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" == "${_pin}" ]]; then
+        echo "helm-prereqs/${_name}: ${_pin:0:9} (already at the pinned commit)"
+        return 0
+    fi
+    echo "Cloning ${_name} at the pinned commit ${_pin:0:9} (${_name}.pin)..."
+    if [[ ! -e "${_dir}/.git" ]]; then
+        git init -q "${_dir}" && git -C "${_dir}" remote add origin "${_url}"
+    fi
+    # Fetch the commit by sha (GitHub allows it); a server that refuses a
+    # shallow fetch by sha gets a full fetch and a checkout of the sha.
+    if git -C "${_dir}" fetch -q --depth 1 origin "${_pin}" 2>/dev/null; then
+        git -C "${_dir}" checkout -q --detach FETCH_HEAD
+    else
+        echo "  shallow fetch by commit refused; fetching the full history..."
+        git -C "${_dir}" fetch -q origin && git -C "${_dir}" checkout -q --detach "${_pin}"
+    fi || {
+        echo "Error: could not clone ${_url} at the pinned commit ${_pin:0:9}."
+        echo "  → On an airgapped host, clone it at that commit and set ${_override}."
+        return 1
+    }
+    if [[ "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" != "${_pin}" ]]; then
+        echo "Error: helm-prereqs/${_name} HEAD is not the pinned commit ${_pin:0:9} after the clone."
+        return 1
+    fi
+    echo "helm-prereqs/${_name}: ${_pin:0:9}"
+}
+
+# Warn (never fail) when the doca-platform source in use is not at the pinned
+# helm-prereqs/doca-platform commit. Local git reads only, no network: a shallow
+# sync carries no tags, so the release tag is not compared.
+#   $1 doca-platform source dir
+_warn_dpf_source_mismatch() {
+    local _src="$1" _head _pin _top
+    _top="$(git -C "${_src}" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ ! -e "${_src}/.git" && "${_top}" != "$(cd "${_src}" 2>/dev/null && pwd -P)" ]]; then
+        echo "WARNING: ${_src} is not a git checkout; cannot verify it matches the pinned helm-prereqs/doca-platform commit."
+        return 0
+    fi
+    _head="$(git -C "${_src}" rev-parse HEAD 2>/dev/null || true)"
+    _pin="$(_pinned_submodule_commit doca-platform)"
+    if [[ -z "${_head}" || -z "${_pin}" ]]; then
+        echo "WARNING: could not read ${_src} HEAD or the pinned helm-prereqs/doca-platform commit to compare them."
+    elif [[ "${_head}" != "${_pin}" ]]; then
+        echo "WARNING: ${_src} HEAD ${_head:0:9} differs from the pinned helm-prereqs/doca-platform commit ${_pin:0:9}."
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 5b. DPF (DOCA Platform Framework) — optional DPU provisioning stack.
 #     Needs StorageClass (1), MetalLB (1c), cert-manager (2). Must complete
@@ -686,11 +1282,36 @@ echo "Vault AppRole credentials ready"
 #     targets the dpf-operator-system namespace created here.
 #     See docs/manuals/dpf.md for the full background.
 # ---------------------------------------------------------------------------
+# Remove credentials left by an obsolete two-phase DPF bootstrap that was
+# interrupted before its EXIT trap could run. The old Job must be gone before
+# its source Secrets so no surviving pod keeps either credential in memory.
+_cleanup_legacy_dpf_bootstrap_credentials
+_LEGACY_DPF_BOOTSTRAP_CLEANED=true
+
 if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
-    echo "=== [5b] DPF (DOCA Platform Framework) ${NICO_DPF_VERSION} ==="
+    echo "=== [5b] DPF (DOCA Platform Framework) ==="
 
-    # 5b.1 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
+    # 5b.1 Resolve the doca-platform source before anything touches the cluster,
+    #      so a missing or unfetchable pin cannot leave a partial install: an
+    #      explicit NICO_DPF_SRC override, or the pinned helm-prereqs/doca-platform
+    #      commit (the submodule in a git checkout, a clone of doca-platform.pin
+    #      from the packaged chart; same contract as the nv-rms submodule in 5c).
+    if [[ -n "${NICO_DPF_SRC}" ]]; then
+        _DPF_SRC="${NICO_DPF_SRC}"
+        echo "Using local doca-platform source: ${_DPF_SRC}"
+    else
+        _sync_pinned_submodule doca-platform https://github.com/NVIDIA/doca-platform \
+            'NICO_DPF_SRC=<clone>'
+        _DPF_SRC="${SCRIPT_DIR}/doca-platform"
+    fi
+    if [[ ! -d "${_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        echo "Error: '${_DPF_SRC}' has no deploy/charts/dpf-operator - not a doca-platform checkout."
+        exit 1
+    fi
+    _warn_dpf_source_mismatch "${_DPF_SRC}"
+
+    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
     #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
     #      dpf-operator-system, same as upstream.
     helmfile sync -l name=argo-cd
@@ -753,7 +1374,7 @@ if "${INSTALL_DPF}"; then
     kubectl rollout status statefulset -n dpf-operator-system \
         -l app.kubernetes.io/name=argocd-application-controller --timeout=300s
 
-    # 5b.2 Pull + repo secrets. Idempotent (apply of a dry-run render).
+    # 5b.3 Pull + repo secrets. Idempotent (apply of a dry-run render).
     #      The dpu.nvidia.com/image-pull-secret label makes DPF propagate the
     #      Secret into DPUService image-pull secrets on the DPU cluster.
     if [[ -n "${NICO_DPF_NGC_API_KEY}" ]]; then
@@ -821,7 +1442,7 @@ if "${INSTALL_DPF}"; then
     kubectl label secret hbn-user-password -n dpf-operator-system \
         dpu.nvidia.com/image-pull-secret="" --overwrite
 
-    # 5b.3 cert-manager approver policy. Only needed (and only appliable) when
+    # 5b.4 cert-manager approver policy. Only needed (and only appliable) when
     #      the cluster runs approver-policy; our stock cert-manager does not
     #      (built-in approver auto-approves — operators/values/cert-manager.yaml).
     if kubectl get crd certificaterequestpolicies.policy.cert-manager.io &>/dev/null; then
@@ -831,39 +1452,12 @@ if "${INSTALL_DPF}"; then
         echo "approver-policy not installed — built-in cert-manager approver auto-approves; skipping CertificateRequestPolicy."
     fi
 
-    # 5b.4 Clone doca-platform at the pinned tag (cached, shallow, idempotent).
-    if [[ -d "${NICO_DPF_SRC_DIR}/.git" ]]; then
-        echo "Reusing doca-platform clone at ${NICO_DPF_SRC_DIR} (tag ${NICO_DPF_VERSION})..."
-        git -C "${NICO_DPF_SRC_DIR}" fetch --depth 1 origin \
-            "refs/tags/${NICO_DPF_VERSION}:refs/tags/${NICO_DPF_VERSION}" 2>/dev/null || true
-        git -C "${NICO_DPF_SRC_DIR}" checkout -q -f "refs/tags/${NICO_DPF_VERSION}"
-    else
-        # A leftover non-git or partially-cloned directory (e.g. a clone killed
-        # mid-run, or disk-full) would make `git clone` fail with "destination
-        # path already exists and is not empty" on every retry — remove it first
-        # so a re-run always recovers. Guard the rm -rf against a dangerous
-        # NICO_DPF_SRC_DIR override (empty / root / $HOME) before deleting.
-        case "${NICO_DPF_SRC_DIR}" in
-            ""|"/"|"${HOME}"|"${HOME}/")
-                echo "ERROR: refusing to remove NICO_DPF_SRC_DIR='${NICO_DPF_SRC_DIR}' — set it to a dedicated clone dir."
-                exit 1 ;;
-        esac
-        if [[ -e "${NICO_DPF_SRC_DIR}" ]]; then
-            echo "ERROR: '${NICO_DPF_SRC_DIR}' exists but is not a doca-platform Git clone."
-            echo "  Remove it explicitly and re-run (refusing to auto-delete a non-clone path)."
-            exit 1
-        fi
-        echo "Cloning doca-platform ${NICO_DPF_VERSION}..."
-        git clone --depth 1 --branch "${NICO_DPF_VERSION}" \
-            https://github.com/NVIDIA/doca-platform.git "${NICO_DPF_SRC_DIR}"
-    fi
-
-    # 5b.5 DPF operator chart from the clone. NICo overrides (docs/manuals/dpf.md
+    # 5b.5 DPF operator chart from the source. NICo overrides (docs/manuals/dpf.md
     #      §2): NodeFeatureRules off because NFD labels nodes via its own config
     #      (PCI class 0200). The in-repo source chart ships EMPTY
     #      controllerManager.image (CI stamps it when publishing to NGC), so we
-    #      set it explicitly — matching the published nvidia/doca chart. Repo is
-    #      overridable; the tag tracks NICO_DPF_VERSION.
+    #      set it explicitly - matching the published nvidia/doca chart. Repo and
+    #      tag are overridable; the tag defaults to the pinned release.
     #      Image pull secret: the GA nvidia/doca images are PUBLIC, so by default
     #      the operator pulls them anonymously. Attaching a registry-scoped
     #      secret that lacks nvidia/doca entitlement makes nvcr.io 403 the pull
@@ -874,7 +1468,7 @@ if "${INSTALL_DPF}"; then
         _dpf_op_pull_args+=(--set "imagePullSecrets[0].name=${NICO_DPF_IMAGE_PULL_SECRET}")
     fi
     helm upgrade --install dpf-operator \
-        "${NICO_DPF_SRC_DIR}/deploy/charts/dpf-operator" \
+        "${_DPF_SRC}/deploy/charts/dpf-operator" \
         --namespace dpf-operator-system \
         --set "enableNodeFeatureRules=false" \
         ${_dpf_op_pull_args[@]+"${_dpf_op_pull_args[@]}"} \
@@ -928,156 +1522,13 @@ if "${INSTALL_DPF}"; then
         sleep 10
     done
 
-    # 5b.8 [dpf] is NOT enabled in the Core config here. The two-phase approach
-    #      (Core DPF-off first, then DPF-on after phase 6b) lets setup.sh call
-    #      nico-admin-cli to set the BMC root credential while carbide-api is
-    #      already up. carbide-api can start with DPF enabled even when the
-    #      credential is absent (#4167), but setting it before enabling DPF
-    #      ensures DPU provisioning begins immediately without waiting for the
-    #      first 60 s refresh tick.
-    echo "DPF stack installed (carbide-api DPF enablement happens after Core in phase 6)"
+    # 5b.8 Core is deployed with [dpf] enabled after these prerequisites exist.
+    #      carbide-api can initialize DPF without the site-wide BMC root and its
+    #      refresh task writes bmc-shared-password after the credential appears.
+    echo "DPF stack installed (Core will start with carbide-api DPF enabled in phase 6)"
 else
     echo "Skipping DPF (--skip-dpf / NICO_SKIP_DPF=true). DPUs, if any, use the deprecated iPXE path."
 fi
-
-# ---------------------------------------------------------------------------
-# Set the site-wide BMC root password via nico-admin-cli. Used by phase 6b.
-# Issues a short-lived admin client cert from the nicoca PKI (per
-# docs/provisioning/ingesting-hosts.md), then runs the CLI (bundled in the
-# NICo image at /opt/carbide/nico-admin-cli) as an in-cluster Job that reaches
-# carbide-api through its external LoadBalancer, verifying TLS with the
-# issued CA and authenticating with the client cert.
-# ---------------------------------------------------------------------------
-_dpf_set_bmc_root() {
-    local _hostname _lbip _vault_token
-    # `|| true` so a no-match grep (nothing to resolve) doesn't trip `set -e`
-    # via pipefail before the guard below can report a clean error.
-    # Strip an inline YAML "# comment" before quotes/space so a value left with
-    # the shipped trailing comment (hostname: "api.foo" # REQUIRED: ...) doesn't
-    # bleed the comment text into the hostname (which would break API_URL and the
-    # Job hostAliases). Matches preflight's _strip_comments.
-    _hostname="$( { grep -E '^[[:space:]]+hostname:' "${_CORE_VALUES_FILE}" | head -1 \
-        | sed -E "s/.*hostname:[[:space:]]*//; s/[[:space:]]+#.*$//; s/[\"']//g" | tr -d '[:space:]'; } || true)"
-    _lbip="$(kubectl get svc nico-api-external -n nico-system \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
-    if [[ -z "${_hostname}" || -z "${_lbip}" ]]; then
-        echo "ERROR: could not resolve nico-api hostname (${_hostname:-?}) or LB IP (${_lbip:-?})"
-        return 1
-    fi
-    echo "Setting site-wide BMC root password (api ${_hostname} -> ${_lbip})..."
-
-    # 1. Issue a short-lived admin client cert from the nicoca PKI.
-    _vault_token="$(kubectl -n "${VAULT_NS}" get secret vaultroottoken \
-        -o jsonpath='{.data.token}' | base64 -d)"
-    # Script-global (not local) so the EXIT trap wipes the private key if we
-    # fail before the explicit cleanup below — errexit skips the rest of the fn.
-    _DPF_CERT_JSON="$(mktemp)"; _DPF_CERT_DIR="$(mktemp -d)"
-    # Feed the Vault ROOT token via stdin, never as an exec argument: kubectl
-    # encodes argv into the API-server audit log (requestURI) and it surfaces in
-    # vault-0's process list, exposing the full-privilege root token. `read`
-    # pulls it from stdin inside the pod; the CN (not secret) rides in as $1.
-    printf '%s\n' "${_vault_token}" | kubectl -n "${VAULT_NS}" exec -i vault-0 -- \
-        sh -c 'read -r VAULT_TOKEN; export VAULT_TOKEN VAULT_SKIP_VERIFY=true
-               vault write -format=json nicoca/issue/nico-cluster \
-                 common_name="$1" ttl=1h' _ "${_hostname}" > "${_DPF_CERT_JSON}"
-    jq -r '.data.certificate' "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/client.crt"
-    jq -r '.data.private_key' "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/client.key"
-    jq -r '.data.issuing_ca'  "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/ca.crt"
-    kubectl create secret generic dpf-admincli-cert -n nico-system \
-        --from-file=client.crt="${_DPF_CERT_DIR}/client.crt" \
-        --from-file=client.key="${_DPF_CERT_DIR}/client.key" \
-        --from-file=ca.crt="${_DPF_CERT_DIR}/ca.crt" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    kubectl create secret generic dpf-bmc-root-pw -n nico-system \
-        --from-file=password=<(printf '%s' "${NICO_DPF_BMC_ROOT_PASSWORD}") \
-        --dry-run=client -o yaml | kubectl apply -f -
-    rm -rf "${_DPF_CERT_JSON}" "${_DPF_CERT_DIR}"; _DPF_CERT_JSON=""; _DPF_CERT_DIR=""
-
-    # 2. Run nico-admin-cli as a Job against carbide-api's external endpoint.
-    kubectl delete job dpf-set-bmc-root -n nico-system --ignore-not-found >/dev/null 2>&1
-    kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: dpf-set-bmc-root
-  namespace: nico-system
-spec:
-  backoffLimit: 3
-  # Hard-bound the Job so a stuck/retrying pod can't keep the BMC password in
-  # its environment past the poll deadline below.
-  activeDeadlineSeconds: 180
-  ttlSecondsAfterFinished: 600
-  template:
-    spec:
-      restartPolicy: Never
-      imagePullSecrets:
-        - name: imagepullsecret
-      hostAliases:
-        - ip: "${_lbip}"
-          hostnames: ["${_hostname}"]
-      volumes:
-        - name: cert
-          secret:
-            secretName: dpf-admincli-cert
-      containers:
-        - name: admincli
-          image: "${NICO_IMAGE_REGISTRY}/nvmetal-carbide:${NICO_CORE_IMAGE_TAG}"
-          command: ["/opt/carbide/nico-admin-cli"]
-          args:
-            - credential
-            - add-bmc
-            - --kind=site-wide-root
-            - --username=admin
-            - --password=\$(BMC_ROOT_PASSWORD)
-          env:
-            - name: API_URL
-              value: "https://${_hostname}:443"
-            - name: ROOT_CA_PATH
-              value: /certs/ca.crt
-            - name: CLIENT_CERT_PATH
-              value: /certs/client.crt
-            - name: CLIENT_KEY_PATH
-              value: /certs/client.key
-            - name: BMC_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: dpf-bmc-root-pw
-                  key: password
-          volumeMounts:
-            - name: cert
-              mountPath: /certs
-              readOnly: true
-EOF
-    # Poll for either terminal state so a failed Job (bad password, cert
-    # rejected) is caught immediately instead of burning the full timeout.
-    echo "Waiting for the BMC-root Job to complete..."
-    local _job_ok=false _deadline _s _f
-    _deadline=$(( $(date +%s) + 180 ))
-    while (( $(date +%s) < _deadline )); do
-        _s="$(kubectl get job dpf-set-bmc-root -n nico-system \
-            -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
-        _f="$(kubectl get job dpf-set-bmc-root -n nico-system \
-            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
-        [[ "${_s}" == "1" ]] && { _job_ok=true; break; }
-        [[ "${_f}" == "True" ]] && break
-        sleep 3
-    done
-    if [[ "${_job_ok}" != "true" ]]; then
-        echo "ERROR: nico-admin-cli BMC-root Job did not complete. Recent logs:"
-        kubectl logs job/dpf-set-bmc-root -n nico-system --tail=40 2>/dev/null || true
-        # Delete (and wait for) the Job so no pod keeps the BMC password in its
-        # environment before we remove the Secrets below.
-        kubectl delete job dpf-set-bmc-root -n nico-system \
-            --ignore-not-found --wait=true >/dev/null 2>&1 || true
-    fi
-    # Always remove the plaintext BMC password + client-cert secrets — on the
-    # failure path too, so the site-wide BMC password never lingers in the
-    # cluster after a failed enablement.
-    kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
-        --ignore-not-found >/dev/null 2>&1
-    [[ "${_job_ok}" == "true" ]] || return 1
-    echo "Site-wide BMC root password set."
-}
 
 if ! "${SKIP_CORE}"; then
     # Create imagepullsecret in nico-system so the API migrate hook can pull its
@@ -1099,8 +1550,137 @@ if ! "${SKIP_CORE}"; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5c. RMS (NVIDIA Rack Manager Service) — optional rack-management backend.
+#     nico-api's chart defaults already dial rms-api-server.rack-manager.svc
+#     :8801 with component-manager backends set to rms; this phase provides
+#     that server. Needs nico-pg-cluster + ESO (5: the rms database, user, and
+#     rms-db-eso sync are created by nico-prereqs when NICO_INSTALL_RMS=true)
+#     and the vault-nico-issuer ClusterIssuer (5) for the mTLS certificate.
+#     Runs before Core (6) only so rack operations work as soon as Core is up;
+#     Core's RMS client is lazy and tolerates RMS arriving later.
+# ---------------------------------------------------------------------------
+if "${INSTALL_RMS}"; then
+    _SETUP_PHASE="[5c] Rack Manager Service"
+    echo ""
+    echo "=== [5c] RMS (Rack Manager Service) ==="
+
+    # 5c.1 Resolve the chart before anything touches the cluster: an explicit
+    #      NICO_RMS_CHART override, or the pinned helm-prereqs/nv-rms git
+    #      submodule. Airgapped hosts clone nv-rms out-of-band and point
+    #      NICO_RMS_CHART at it.
+    if [[ -n "${NICO_RMS_CHART}" ]]; then
+        _RMS_CHART="${NICO_RMS_CHART}"
+        echo "Using local rack-manager chart: ${_RMS_CHART}"
+    else
+        _sync_pinned_submodule nv-rms https://github.com/dsx-ai-factory/nv-rms \
+            'NICO_RMS_CHART=<clone>/helm'
+        _RMS_CHART="${SCRIPT_DIR}/nv-rms/helm"
+    fi
+
+    # 5c.2 Namespace. Created here (not by the chart) so the pull secret and
+    #      the ESO credential sync have somewhere to land before helm runs.
+    #      The rms-db-eso ClusterExternalSecret selects it by metadata.name.
+    kubectl create namespace "${_RMS_NS}" --dry-run=client -o yaml \
+        | kubectl apply -f -
+
+    # 5c.3 Image pull secret. Same off-argv construction as the DPF secrets:
+    #      the NGC key must never appear in an exec argument.
+    if [[ -n "${NICO_RMS_NGC_API_KEY}" ]]; then
+        # Scope the credential to the registry the image actually pulls from
+        # (a mirror override included), and honor REGISTRY_PULL_USERNAME -
+        # kubelet matches pull secrets by registry host, so an nvcr.io-only
+        # entry is useless for a mirror.
+        _rms_registry="${NICO_RMS_IMAGE_REPO%%/*}"
+        _rms_pull_user="${REGISTRY_PULL_USERNAME:-\$oauthtoken}"
+        echo "Creating rms-pull-secret in ${_RMS_NS} (registry: ${_rms_registry})..."
+        _rms_auth="$(printf '%s' "${_rms_pull_user}:${NICO_RMS_NGC_API_KEY}" | base64 | tr -d '\n')"
+        kubectl create secret generic rms-pull-secret \
+            --namespace "${_RMS_NS}" \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson=<(printf \
+                '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+                "${_rms_registry}" "${_rms_pull_user}" "${NICO_RMS_NGC_API_KEY}" "${_rms_auth}") \
+            --dry-run=client -o yaml | kubectl apply -f -
+        unset _rms_auth
+    else
+        echo "NICO_RMS_NGC_API_KEY not set - skipping rms-pull-secret (mirror or pre-loaded registry)."
+    fi
+
+    # 5c.4 Wait for the ESO-synced DB credentials. The rms database/user are
+    #      declared on nico-pg-cluster by nico-prereqs (phase 5); the Zalando
+    #      operator mints the credentials Secret and rms-db-eso projects it here.
+    echo "Waiting for RMS DB credentials..."
+    _rms_creds_ok=false
+    for _rms_i in $(seq 1 36); do
+        if kubectl get secret rms.nico.nico-pg-cluster.credentials \
+            -n "${_RMS_NS}" &>/dev/null; then
+            _rms_creds_ok=true
+            break
+        fi
+        echo "  credentials not yet synced (${_rms_i}/36) — retrying in 5s..."
+        sleep 5
+    done
+    if [[ "${_rms_creds_ok}" == "false" ]]; then
+        echo "Error: rms.nico.nico-pg-cluster.credentials never appeared in ${_RMS_NS}."
+        echo "  → Check 'kubectl describe clusterexternalsecret rms-db-eso' and that the"
+        echo "    Zalando operator created the rms user (kubectl get secret -n postgres | grep rms)."
+        echo "  → Confirm nico-prereqs synced with NICO_INSTALL_RMS=true (phase 5 of this run)."
+        exit 1
+    fi
+    echo "RMS DB credentials ready"
+
+    # 5c.5 Install. No --wait: the pod cannot start until cert-manager writes
+    #      the TLS Secret, so waiting is done explicitly below where each
+    #      failure mode gets its own message instead of a generic helm timeout.
+    NICO_RMS_CMD=(
+        helm upgrade --install rack "${_RMS_CHART}"
+        --namespace "${_RMS_NS}"
+        -f "${SCRIPT_DIR}/values/rms.yaml"
+        # The chart renders into .Values.namespace, not the -n flag; set both.
+        --set "namespace=${_RMS_NS}"
+        --set-string "apiServer.image.repository=${NICO_RMS_IMAGE_REPO}"
+        --set-string "global.image.tag=${NICO_RMS_IMAGE_TAG}"
+    )
+    [[ -n "${NICO_RMS_NGC_API_KEY}" ]] && \
+        NICO_RMS_CMD+=(--set "global.imagePullSecrets[0].name=rms-pull-secret")
+    "${WITH_OBSERVABILITY}" && \
+        NICO_RMS_CMD+=(--set "apiServer.serviceMonitor.enabled=true")
+    echo "Installing rack-manager helm chart..."
+    "${NICO_RMS_CMD[@]}"
+
+    # 5c.6 Certificate first: issuance is async, and the deployment sits in
+    #      ContainerCreating until the Secret exists.
+    echo "Waiting for the RMS API server certificate..."
+    kubectl wait --for=condition=Ready certificate/rms-api-server-certificate \
+        -n "${_RMS_NS}" --timeout=180s
+
+    # The RMS binary refuses to start unless ca.crt is present in the TLS
+    # Secret (it is the client-CA for mTLS). cert-manager's Vault issuer does
+    # not populate ca.crt under every role/chain configuration, so verify it
+    # here with a targeted message rather than letting the pod crashloop.
+    if [[ -z "$(kubectl get secret rms-api-server-certificate \
+            -n "${_RMS_NS}" -o jsonpath='{.data.ca\.crt}' 2>/dev/null)" ]]; then
+        echo "Error: the issued Secret rms-api-server-certificate has no ca.crt."
+        echo "  → RMS requires ca.crt as the mTLS client CA and will not start without it."
+        echo "  → Check the vault-nico-issuer CA chain configuration, or pre-create a"
+        echo "    Secret with tls.crt/tls.key/ca.crt and set apiServer.tls.existingSecret."
+        exit 1
+    fi
+
+    echo "Waiting for rms-api-server rollout..."
+    kubectl rollout status deployment/rms-api-server \
+        -n "${_RMS_NS}" --timeout=300s
+    echo "RMS ready: rms-api-server.${_RMS_NS}.svc.cluster.local:8801"
+else
+    echo ""
+    echo "=== [5c] RMS (Rack Manager Service) ==="
+    echo "Skipped (RMS disabled via --skip-rms / NICO_SKIP_RMS / NICO_INSTALL_RMS=false)."
+fi
+
+# ---------------------------------------------------------------------------
 # NICo Core
 # ---------------------------------------------------------------------------
+_CORE_INSTALLED_THIS_RUN=false
 if "${SKIP_CORE}"; then
     echo "=== [6/6] NICo Core ==="
     echo "Skipped (--skip-core flag set)."
@@ -1109,33 +1689,22 @@ else
     _CORE_VALUES_ARG="${CORE_VALUES:-helm-prereqs/values/nico-core.yaml}"
 
     if "${INSTALL_DPF}"; then
-        # Two-phase DPF enablement: Core is deployed with DPF OFF first so that
-        # carbide-api is running when setup.sh tries to set the site-wide BMC
-        # root credential via nico-admin-cli (phase 6b). If the credential is
-        # not provided here the password step is skipped and DPF-on is still
-        # deployed — carbide-api tolerates a missing credential at startup
-        # (#4167) and writes the K8s Secret on the next refresh tick once the
-        # operator sets the credential manually. Build both value files.
-        _DPF_ON_VALUES="$(mktemp -t nico-core-dpf-on.XXXXXX)"
-        _DPF_OFF_VALUES="$(mktemp -t nico-core-dpf-off.XXXXXX)"
+        # Render one DPF-enabled values file. carbide-api's production DPF SDK
+        # always runs a 60 s BMC credential refresh. local_first/backend may
+        # start without the site-wide BMC root, but DPUDevice registration waits
+        # until the refresh publishes bmc-shared-password. Authoritative local
+        # mode requires version 0 before startup when v0 is current or the
+        # current target cannot be resolved.
+        _DPF_VALUES="$(mktemp -t nico-core-dpf.XXXXXX)"
         if [[ -n "${CORE_VALUES}" ]]; then
             # --core-values is expected to carry a [dpf] block with enabled=true.
-            cp "${_CORE_VALUES_FILE}" "${_DPF_ON_VALUES}"
+            cp "${_CORE_VALUES_FILE}" "${_DPF_VALUES}"
         else
             # default file: the [dpf] block ships '#dpf# '-commented; uncomment it.
-            sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_FILE}" > "${_DPF_ON_VALUES}"
+            sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_FILE}" > "${_DPF_VALUES}"
         fi
-        # DPF-OFF = DPF-ON with the [dpf] section's own `enabled` forced to false.
-        # Only the direct [dpf] key is targeted: entering any other top-level
-        # [section] clears the in-block state so we never flip a later
-        # section's `enabled` when [dpf] has no inline `enabled =` of its own.
-        awk '
-            /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
-            indpf==1 && /^[[:space:]]*enabled[[:space:]]*=/ { sub(/=[[:space:]]*true/, "= false"); indpf=0 }
-            { print }
-        ' "${_DPF_ON_VALUES}" > "${_DPF_OFF_VALUES}"
 
-        # Inject per-service chart-version overrides into both value files.
+        # Inject per-service chart-version overrides into the rendered values.
         # These let operators (and QA) pin NICo-owned DPF service charts to a
         # published version when testing a dev/PR image whose baked-in version
         # does not exist in the registry.
@@ -1195,14 +1764,13 @@ else
             ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
             rm -f "${_inject_file}"
         }
-        _dpf_inject_service_overrides "${_DPF_ON_VALUES}"
-        _dpf_inject_service_overrides "${_DPF_OFF_VALUES}"
+        _dpf_inject_service_overrides "${_DPF_VALUES}"
 
-        # Guard against a silent no-op: if the ON values don't actually enable
+        # Guard against a silent no-op: if the rendered values don't enable
         # [dpf] (e.g. --core-values with no/commented [dpf] block, or an inline
-        # [dpf] table the toggle can't read), the two-phase flow would deploy
-        # Core, "enable" nothing, restart, and falsely report success while
-        # carbide-api runs DPF-off. Fail early with an actionable message.
+        # [dpf] table the check can't read), setup would falsely report success
+        # while carbide-api runs without DPF. Fail early with an actionable
+        # message.
         _dpf_site_enabled() {   # prints the [dpf] section's `enabled` value, or "absent"
             awk '
                 /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
@@ -1214,7 +1782,7 @@ else
                 END { if (!found) print "absent" }
             ' "$1"
         }
-        if [[ "$(_dpf_site_enabled "${_DPF_ON_VALUES}")" != "true" ]]; then
+        if [[ "$(_dpf_site_enabled "${_DPF_VALUES}")" != "true" ]]; then
             echo "Error: DPF is enabled (the default), but the site config has no '[dpf]' table with"
             echo "  'enabled = true' on its own line."
             if [[ -n "${CORE_VALUES}" ]]; then
@@ -1225,40 +1793,7 @@ else
             fi
             exit 1
         fi
-        if [[ "$(_dpf_site_enabled "${_DPF_OFF_VALUES}")" == "true" ]]; then
-            echo "Error: could not disable [dpf] for the first-phase (DPF-off) Core deploy."
-            echo "  Write [dpf] as a standard table header with 'enabled = true' on its own line."
-            exit 1
-        fi
-
-        # Idempotent re-run: if the LIVE site config already has DPF enabled (a
-        # prior run reached phase 6b), carbide-api is already up with the site-wide
-        # BMC root set. Re-running the DPF-OFF phase would rewrite the ConfigMap to
-        # enabled=false and — if phase 6b then failed — leave the site DPF-disabled
-        # on the next pod restart ([dpf] is read only at startup). So detect that
-        # state and deploy DPF-ON directly, skipping the down-cycle and BMC step.
-        # The live ConfigMap's [dpf].enabled=true is only ever persisted by phase
-        # 6b's DPF-ON upgrade, which runs strictly AFTER _dpf_set_bmc_root sets the
-        # site-wide BMC root — so enabled=true alone implies BMC is set. Detect it
-        # from the ConfigMap ONLY: gating on live pod health would false-negative
-        # during a healthy in-progress rollout and wrongly re-run the destructive
-        # down-cycle this check exists to prevent. (A fresh install has no such
-        # ConfigMap; a prior run that failed before phase 6b left it enabled=false.)
-        _dpf_already_on=false
-        _live_site_toml="$(kubectl get configmap nico-api-site-config-files -n nico-system \
-            -o jsonpath='{.data.nico-api-site-config\.toml}' 2>/dev/null || true)"
-        if [[ -n "${_live_site_toml}" ]] \
-           && [[ "$(_dpf_site_enabled <(printf '%s\n' "${_live_site_toml}"))" == "true" ]]; then
-            _dpf_already_on=true
-        fi
-        if "${_dpf_already_on}"; then
-            echo "DPF already enabled in the live site config — skipping the DPF-off down-cycle;"
-            echo "the BMC-root credential is refreshed in phase 6b (idempotent re-run)."
-            _CORE_VALUES_ARG="${_DPF_ON_VALUES}"
-        else
-            # Deploy the DPF-OFF version in this phase; phase 6b upgrades to DPF-ON.
-            _CORE_VALUES_ARG="${_DPF_OFF_VALUES}"
-        fi
+        _CORE_VALUES_ARG="${_DPF_VALUES}"
     fi
 
     NICO_CORE_CMD=(
@@ -1273,6 +1808,21 @@ else
         # Create the nico-api-dpf Role/RoleBinding in dpf-operator-system so
         # carbide-api can manage DPF CRs (chart template dpf-rbac.yaml).
         NICO_CORE_CMD+=(--set "nico-api.dpf.rbacCreate=true")
+    elif _current_core_uses_setup_bmc_v0_secret; then
+        # `--skip-dpf` controls DPF installation; it must not silently remove
+        # a credential mount already used by Core. Preserve only the exact
+        # active setup configuration, not a merely existing Secret that Core
+        # has never adopted. Do this before rendering the manual command too.
+        _BMC_V0_BOOTSTRAP_ENABLED=true
+        echo "Preserving installed setup-managed site-wide BMC version-0 configuration"
+    else
+        _current_bmc_rc=$?
+        if (( _current_bmc_rc != 1 )); then
+            exit "${_current_bmc_rc}"
+        fi
+    fi
+    if "${_BMC_V0_BOOTSTRAP_ENABLED}"; then
+        _append_bmc_v0_core_values
     fi
     _NICO_CORE_CMD_DISPLAY=""
     for _arg in "${NICO_CORE_CMD[@]}"; do
@@ -1328,65 +1878,37 @@ else
         echo ""
     fi
     if [[ "${_reply:-Y}" =~ ^[Yy]$ ]]; then
+        if "${INSTALL_DPF}"; then
+            # Do not inspect or persist the bootstrap credential until the
+            # operator has accepted the Core deployment. A declined DPF run
+            # leaves any existing Secret and ownership mode alone.
+            _CONFIGURED_CREDENTIAL_FILE_SECRET="$(_nico_api_credential_file_secret_name \
+                "${_CORE_VALUES_FILE}")"
+            _prepare_bmc_v0_bootstrap_secret "${_CONFIGURED_CREDENTIAL_FILE_SECRET}"
+            if "${_BMC_V0_BOOTSTRAP_ENABLED}"; then
+                _append_bmc_v0_core_values
+            fi
+        fi
         _SETUP_PHASE="[6/6] NICo Core"
         echo "=== [6/6] NICo Core ==="
+        # The nico-api chart hashes its ConfigMap inputs into the pod
+        # template. A rerun with an unchanged image but changed site config
+        # therefore performs the required rollout within this single Helm
+        # upgrade; an unchanged rerun does not restart Core.
         (cd "${SCRIPT_DIR}/.." && "${NICO_CORE_CMD[@]}")
 
-        # -------------------------------------------------------------------
-        # 6b. DPF enablement in carbide-api. Core is up with DPF OFF; now set
-        #     the site-wide BMC root password (required by the DPF SDK) via
-        #     nico-admin-cli, then upgrade Core to DPF ON, which rolls
-        #     carbide-api so it initializes the DPF SDK.
-        # -------------------------------------------------------------------
-        if "${INSTALL_DPF}" && "${_dpf_already_on:-false}"; then
-            # Skip the destructive DPF-off down-cycle. If a BMC root password
-            # was supplied (e.g. a rotation), reconcile it via nico-admin-cli;
-            # otherwise carbide-api's 60 s refresh task will pick it up from
-            # Vault automatically — no action needed here.
-            _SETUP_PHASE="[6b] DPF already enabled — refreshing BMC-root credential"
-            echo "=== [6b] DPF already enabled — refreshing BMC-root credential ==="
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            if [[ -n "${NICO_DPF_BMC_ROOT_PASSWORD}" ]]; then
-                _dpf_set_bmc_root
-            else
-                echo "NICO_DPF_BMC_ROOT_PASSWORD not set — skipping BMC-root reconcile (carbide-api refresh task handles rotation automatically)."
-            fi
-        elif "${INSTALL_DPF}"; then
-            _SETUP_PHASE="[6b] DPF enablement"
-            echo "=== [6b] Enabling DPF in carbide-api ==="
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            if [[ -n "${NICO_DPF_BMC_ROOT_PASSWORD}" ]]; then
-                _dpf_set_bmc_root
-            else
-                echo "NICO_DPF_BMC_ROOT_PASSWORD not set — skipping BMC-root credential setup."
-                echo "Set the site-wide BMC root via: nico-admin-cli credential add-bmc --kind=site-wide-root --password='<password>'"
-                echo "carbide-api will pick it up within 60 s of it being set."
-            fi
-            echo "Upgrading NICo Core to enable [dpf]..."
-            (cd "${SCRIPT_DIR}/.." && helm upgrade --install nico ./helm \
-                --namespace nico-system -f "${_DPF_ON_VALUES}" \
-                --set-string "global.image.repository=${NICO_IMAGE_REGISTRY}/nvmetal-carbide" \
-                --set-string "global.image.tag=${NICO_CORE_IMAGE_TAG}" \
-                --set "nico-api.dpf.rbacCreate=true" \
-                --timeout 600s --wait)
-            # The helm upgrade only rewrites the site-config ConfigMap; the
-            # nico-api pod template is unchanged, so it does NOT roll on its own
-            # and carbide-api keeps its in-memory DPF-off config ([dpf] is read
-            # at startup only). Force a restart so it re-reads [dpf].enabled=true
-            # and creates the DPF init objects (BFB, DPUFlavor, DPUDeployment).
-            echo "Restarting carbide-api so it reads the DPF-enabled config..."
-            kubectl rollout restart deployment/nico-api -n nico-system
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            echo "DPF enabled in carbide-api"
+        if "${INSTALL_DPF}"; then
+            echo "DPF is enabled. DPU provisioning waits until the site-wide BMC root"
+            echo "is available from the watched credential file or persistent backend."
+            echo "See docs/manuals/dpf.md §3.6 for the supported credential workflows."
         fi
+        _CORE_INSTALLED_THIS_RUN=true
     elif "${INSTALL_DPF}"; then
-        # The DPF path deploys from a mktemp values file that the EXIT trap
-        # deletes, and enablement is a two-phase flow (deploy DPF-off, set the
-        # site-wide BMC root password, re-deploy DPF-on) that can't be reduced to
-        # a single command — so point back at setup.sh rather than print a stale
-        # helm command the operator can't actually run.
-        echo "Skipped. Re-run setup.sh to deploy NICo Core (DPF enablement is a two-phase"
-        echo "flow driven by this script), or pass --skip-dpf to deploy without DPF."
+        # The DPF path deploys from a rendered mktemp values file that the EXIT
+        # trap deletes, so point back at setup.sh rather than print a command
+        # whose values path will no longer exist.
+        echo "Skipped. Re-run setup.sh to deploy NICo Core with DPF enabled,"
+        echo "or pass --skip-dpf to deploy without DPF."
     else
         echo "Skipped. To deploy manually, run from $(dirname "${SCRIPT_DIR}"):"
         echo "  ${_NICO_CORE_CMD_DISPLAY}"
@@ -1413,16 +1935,33 @@ fi
 #   helm-prereqs/observability/install-observability.sh
 # Docs: helm-prereqs/observability/README.md
 # ---------------------------------------------------------------------------
+_resolve_nico_servicemonitors_mode() {
+    local core_installed_this_run="$1"
+    local requested_mode="${NICO_SERVICEMONITORS:-}"
+
+    if [[ "${core_installed_this_run}" == "true" ]]; then
+        printf '%s\n' "${requested_mode:-true}"
+    elif [[ "${requested_mode}" == "false" ]]; then
+        printf 'false\n'
+    else
+        # Never upgrade an existing Core release from this checkout unless the
+        # same setup run successfully installed it. This also covers a declined
+        # Core prompt in addition to --skip-core.
+        printf 'hint\n'
+    fi
+}
+
 _OBSERVABILITY_INSTALLED=false
 if "${WITH_OBSERVABILITY}"; then
     echo ""
     _SETUP_PHASE="observability"
     echo "=== Observability (--with-observability) ==="
     # The stack is optional: a failure here must not abort the rest of the install.
-    # NICO_SERVICEMONITORS=true is safe in this integrated path — Core was just installed
-    # from this same tree, so the release upgrade the installer performs is a no-op apart
-    # from adding the monitor objects.
-    if NICO_SERVICEMONITORS="${NICO_SERVICEMONITORS:-true}" \
+    # Reconcile Core metrics only when this run installed Core from the same tree.
+    # Otherwise use the standalone-safe hint path and leave any existing release untouched.
+    _nico_servicemonitors_mode="$(_resolve_nico_servicemonitors_mode \
+        "${_CORE_INSTALLED_THIS_RUN}")"
+    if NICO_SERVICEMONITORS="${_nico_servicemonitors_mode}" \
         "${SCRIPT_DIR}/observability/install-observability.sh"; then
         _OBSERVABILITY_INSTALLED=true
     else
@@ -1434,6 +1973,12 @@ else
     echo "=== Observability — skipped (pass --with-observability or run observability/install-observability.sh later) ==="
 fi
 
+# The initial guard proved that both the desired Deployment and active Flow
+# Pods are manager-free. After preflight and the Core phase completes or is
+# skipped, revoke predecessor hook credentials and RBAC before --skip-rest can
+# exit. Fresh installs have no legacy markers, so this is a read-only no-op.
+"${SCRIPT_DIR}/cleanup-legacy-flow-managers.sh"
+
 # ---------------------------------------------------------------------------
 # 7. NICo REST full stack
 #    Order of operations:
@@ -1444,7 +1989,7 @@ fi
 #      7e. Temporal namespace + TLS certs (issued by the NICo REST CA issuer)
 #      7f. Temporal helm chart
 #      7g. NICo REST helm chart (API, cert-manager, workflow, site-manager)
-#      7h. NICo Flow (Flow, PSM, NSM)
+#      7h. NICo Flow
 #      7i. NICo REST site-agent
 # ---------------------------------------------------------------------------
 echo ""
@@ -1494,12 +2039,30 @@ echo "=== [7b/7] NICo REST CA issuer ClusterIssuer ==="
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/cert-manager-io)
 
 # --- 7c. NICo REST postgres --------------------------------------------------------
-# Simple postgres StatefulSet with all NICo databases pre-initialised:
-# forge, temporal, temporal_visibility, keycloak.
-# Lives alongside nico-pg-cluster in the postgres namespace — different
-# service name ("postgres") so Temporal and NICo values work without changes.
+# Legacy standalone postgres StatefulSet with pre-initialised databases:
+# nico (orphaned — no live component targets it), temporal, temporal_visibility,
+# keycloak. Still the default target for both — see "Consolidating
+# Temporal/Keycloak onto nico-pg-cluster" in README.md for the opt-in path.
+#
+# Kubernetes rejects updates to a StatefulSet's volumeClaimTemplates (2.2 raised
+# the data request from 1Gi to 10Gi). When the server dry-run reports that
+# rejection, delete the StatefulSet with --cascade=orphan so the pod and PVC
+# survive, then let the regular apply recreate it and adopt the pod. The PVC of
+# an upgraded site keeps its original size; see docs/manuals/upgrade.md.
+_recreate_rest_postgres_statefulset() {
+    local dry_run_output
+    if dry_run_output="$(kubectl apply -k deploy/kustomize/base/postgres --dry-run=server 2>&1)"; then
+        return 0
+    fi
+    if ! grep -q 'updates to statefulset spec for fields other than' <<< "${dry_run_output}"; then
+        return 0
+    fi
+    echo "postgres StatefulSet has immutable spec changes; recreating it with --cascade=orphan (pod and PVC are kept)"
+    kubectl delete statefulset postgres -n postgres --cascade=orphan
+}
 _SETUP_PHASE="[7c/7] NICo REST postgres"
 echo "=== [7c/7] NICo REST postgres ==="
+(cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
 kubectl rollout status statefulset/postgres -n postgres --timeout=180s
 echo "NICo REST postgres ready"
@@ -1510,11 +2073,58 @@ echo "NICo REST postgres ready"
 # Dev OIDC IdP, pre-loaded with the configured NICo development realm + test users.
 # nico-rest-api talks to it at http://keycloak.nico-rest:8082
 _SETUP_PHASE="[7d/7] Keycloak"
-_KC_ENABLED="$(grep -A5 'keycloak:' "${SCRIPT_DIR}/values/nico-rest.yaml" \
-    | grep 'enabled:' | head -1 | awk '{print $2}' || echo "false")"
+_KC_ENABLED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)"
+[[ "${_KC_ENABLED}" == "true" ]] || _KC_ENABLED="false"
 
 if [[ "${_KC_ENABLED}" == "true" ]]; then
     echo "=== [7d/7] Keycloak ==="
+
+    # helm-prereqs/values.yaml::keycloak.useHaPostgres — DB consolidation opt-in,
+    # distinct from nico-rest.yaml's keycloak.enabled (deployed at all) above.
+    _KC_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak useHaPostgres)"
+    [[ "${_KC_DB_CONSOLIDATED}" == "true" ]] || _KC_DB_CONSOLIDATED="false"
+    # keycloak.namespace — must match what eso-external-secrets.yaml's
+    # nico-keycloak-db-eso targets, so KEYCLOAK_NS (read by keycloak/setup.sh)
+    # agrees with it. An operator-supplied KEYCLOAK_NS env var still wins, same
+    # as every other script in this feature (keycloak/setup.sh, clean.sh,
+    # migrate-temporal-keycloak-db.sh) — don't clobber it with the values.yaml
+    # default.
+    if [[ -z "${KEYCLOAK_NS:-}" ]]; then
+        export KEYCLOAK_NS="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak namespace)"
+        export KEYCLOAK_NS="${KEYCLOAK_NS:-nico-rest}"
+    fi
+
+    if [[ "${_KC_DB_CONSOLIDATED}" == "true" ]]; then
+        echo "Waiting for Keycloak DB credentials to be synced by ESO (nico-keycloak-pg-creds in ${KEYCLOAK_NS})..."
+        for _kc_i in $(seq 1 24); do
+            if kubectl get secret nico-keycloak-pg-creds -n "${KEYCLOAK_NS}" &>/dev/null; then
+                break
+            fi
+            if [[ "${_kc_i}" -eq 24 ]]; then
+                echo "ERROR: nico-keycloak-pg-creds not synced after 120s." >&2
+                echo "  Check: kubectl describe clusterexternalsecret nico-keycloak-db-eso" >&2
+                echo "  Ensure keycloak.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+                exit 1
+            fi
+            echo "  nico-keycloak-pg-creds not yet synced (${_kc_i}/24) — retrying in 5s..."
+            sleep 5
+        done
+        echo "Keycloak DB credentials ready — targeting nico-pg-cluster"
+        # Reference the ESO-synced Secret directly (secretKeyRef in
+        # deployment.yaml) rather than reading the password into this shell —
+        # it never needs to touch a plaintext env value or process argument.
+        export KEYCLOAK_DB_HOST="nico-pg-cluster.postgres.svc.cluster.local"
+        export KEYCLOAK_DB_NAME="keycloak"
+        export KEYCLOAK_DB_USER="keycloak.nico"
+        # nico-pg-cluster's pg_hba.conf requires TLS (see the tls.enabled note
+        # on the Temporal override below) — "require" encrypts the connection.
+        # It does not verify the server certificate/hostname; that needs a
+        # truststore wired to the operator's CA, not done here.
+        export KEYCLOAK_DB_SSLMODE="require"
+        export KEYCLOAK_DB_PASSWORD_SECRET_NAME="nico-keycloak-pg-creds"
+        export KEYCLOAK_DB_PASSWORD_SECRET_KEY="password"
+    fi
+
     "${SCRIPT_DIR}/keycloak/setup.sh"
     echo "Keycloak ready"
 else
@@ -1538,12 +2148,81 @@ kubectl wait --for=condition=Ready certificate/server-site-cert \
 echo "Temporal TLS certs ready"
 
 # --- 7f. Temporal ------------------------------------------------------------
+# helm-prereqs/values.yaml::temporal.useHaPostgres — see README's "Consolidating
+# Temporal/Keycloak onto nico-pg-cluster" for the transition story and
+# helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
+# workflow history over.
 _SETUP_PHASE="[7f/7] Temporal"
 echo "=== [7f/7] Temporal ==="
-helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal" \
-    --namespace temporal \
-    -f "${NICO_REST_DIR}/temporal-helm/temporal/values-kind.yaml" \
+
+_TEMPORAL_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" temporal useHaPostgres)"
+[[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]] || _TEMPORAL_DB_CONSOLIDATED="false"
+
+TEMPORAL_CMD=(
+    helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal"
+    --namespace temporal
+    -f "${NICO_REST_DIR}/temporal-helm/temporal/values-kind.yaml"
     --timeout 300s --wait
+)
+
+if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
+    echo "Waiting for Temporal DB credentials to be synced by ESO (nico-temporal-pg-creds in temporal)..."
+    for _tp_i in $(seq 1 24); do
+        if kubectl get secret nico-temporal-pg-creds -n temporal &>/dev/null; then
+            break
+        fi
+        if [[ "${_tp_i}" -eq 24 ]]; then
+            echo "ERROR: nico-temporal-pg-creds not synced after 120s." >&2
+            echo "  Check: kubectl describe clusterexternalsecret nico-temporal-db-eso" >&2
+            echo "  Ensure temporal.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+            exit 1
+        fi
+        echo "  nico-temporal-pg-creds not yet synced (${_tp_i}/24) — retrying in 5s..."
+        sleep 5
+    done
+    echo "Temporal DB credentials ready — targeting nico-pg-cluster"
+
+    # Mirror the nico-rest-workflow worker fix (#3284): override the chart's
+    # postgres.postgres defaults at install time rather than editing
+    # values-kind.yaml in place, so the legacy target keeps working unchanged
+    # for sites that haven't opted in. nico-temporal-pg-creds (synced by ESO
+    # above) already carries a "password" key, matching the chart's
+    # persistence.secretKey default — no need to copy it into another Secret.
+    #
+    # tls.enabled: true is required — nico-pg-cluster's pg_hba.conf only
+    # accepts encrypted connections (Zalando operator default), and any
+    # unrecognized key under persistence.default/visibility.sql passes
+    # straight through into the rendered SQL persistence config
+    # (server-configmap.yaml), so this is the supported way to turn it on.
+    # Without it, temporal-schema-update crash-loops on every attempt with
+    # "pg_hba.conf rejects connection ... no encryption" (verified on dev6).
+    _TEMPORAL_CREDS_FILE="$(mktemp)"
+    cat > "${_TEMPORAL_CREDS_FILE}" <<EOF
+server:
+  config:
+    persistence:
+      secretName: "nico-temporal-pg-creds"
+      default:
+        sql:
+          host: "nico-pg-cluster.postgres.svc.cluster.local"
+          database: "temporal"
+          user: "temporal.nico"
+          existingSecret: "nico-temporal-pg-creds"
+          tls:
+            enabled: true
+      visibility:
+        sql:
+          host: "nico-pg-cluster.postgres.svc.cluster.local"
+          database: "temporal_visibility"
+          user: "temporal.nico"
+          existingSecret: "nico-temporal-pg-creds"
+          tls:
+            enabled: true
+EOF
+    TEMPORAL_CMD+=(-f "${_TEMPORAL_CREDS_FILE}")
+fi
+
+"${TEMPORAL_CMD[@]}"
 echo "Temporal ready"
 
 # Create the Temporal namespaces required by NICo REST workers (requires mTLS)
@@ -1734,19 +2413,16 @@ else
 fi
 
 # --- 7h. NICo Flow ------------------------------------------------------------
-# Flow is the rack lifecycle orchestrator (formerly RLA). Single pod with three
-# containers — flow (50051), psm (50052), nsm (50053).  Runs in its own `flow`
-# namespace.
+# Flow is the task, policy, and automation service. It runs in its own `flow`
+# namespace and serves gRPC on port 50051.
 #
 # Runs BEFORE the site-agent (7i) so that flow.flow.svc.cluster.local:50051
 # exists when the site-agent starts and attempts its Flow gRPC connection.
 #
 # Prerequisites already in place by this point:
-#   - flow/psm/nsm databases on nico-pg-cluster (helm-prereqs postgresql.yaml)
-#   - flow.nico/psm.nico/nsm.nico DB credentials synced via ESO into the flow
-#     namespace by the flow-db-eso / psm-db-eso / nsm-db-eso ClusterExternalSecrets
-#   - psm-vault-token and nsm-vault-token Secrets in the flow namespace
-#     (provisioned by the flow-vault-tokens post-install hook)
+#   - flow database on nico-pg-cluster (helm-prereqs postgresql.yaml)
+#   - flow.nico DB credentials synced into the flow namespace by the
+#     flow-db-eso ClusterExternalSecret
 #   - Temporal `flow` namespace (created in phase 7f above)
 #   - nico-rest-ca-issuer ClusterIssuer (installed by phase 7b — issues the
 #     temporal-client-certs)
@@ -1755,118 +2431,101 @@ fi
 # Same pre-apply-cert dance as the site-agent: render the Certificate(s) ahead
 # of the helm install so cert-manager has time to issue them and the pod doesn't
 # hit a FailedMount race on the spiffe / temporal-client-certs secrets.
-if "${SKIP_FLOW}"; then
-    echo "=== [7h/7] NICo Flow — skipped (--skip-flow) ==="
-else
-    _SETUP_PHASE="[7h/7] NICo Flow"
-    echo "=== [7h/7] NICo Flow ==="
+_SETUP_PHASE="[7h/7] NICo Flow"
+echo "=== [7h/7] NICo Flow ==="
 
-    NICO_FLOW_CHART="${SCRIPT_DIR}/../helm/charts/nico-flow"
-    NICO_FLOW_NAMESPACE="flow"
+NICO_FLOW_CHART="${SCRIPT_DIR}/../helm/nico-flow"
+NICO_FLOW_NAMESPACE="flow"
 
-    NICO_FLOW_ARGS=(
-        --namespace "${NICO_FLOW_NAMESPACE}"
-        --create-namespace
-        --set "global.image.repository=${NICO_IMAGE_REGISTRY}"
-        ## Flow (nico-flow / nico-psm / nico-nsm) ships on the same image release
-        ## line as NICo REST — they're built and tagged together — so reuse
-        ## NICO_REST_IMAGE_TAG, not NICO_CORE_IMAGE_TAG (which is carbide-api).
-        --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
+NICO_FLOW_ARGS=(
+    --namespace "${NICO_FLOW_NAMESPACE}"
+    --create-namespace
+    --set "global.image.repository=${NICO_IMAGE_REGISTRY}"
+    ## Flow ships on the same image release line as NICo REST, so reuse
+    ## NICO_REST_IMAGE_TAG rather than NICO_CORE_IMAGE_TAG.
+    --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
+)
+
+# Render the dockerconfigjson for the chart-managed image-pull-secret. Same
+# pattern as the NICo REST common chart - keep the registry credential on
+# the helm command line so the chart template can install it as a
+# pre-install hook (pod can't pull from nvcr.io otherwise).
+if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
+    _flow_registry_server="${NICO_IMAGE_REGISTRY%%/*}"
+    _flow_docker_cfg="$(printf '{"auths":{"%s":{"username":"%s","password":"%s"}}}' \
+        "${_flow_registry_server}" \
+        "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
+        "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
+    NICO_FLOW_ARGS+=(
+        --set "global.imagePullSecrets[0].name=image-pull-secret"
+        --set "imagePullSecret.dockerconfigjson=${_flow_docker_cfg}"
     )
-
-    # Render the dockerconfigjson for the chart-managed image-pull-secret. Same
-    # pattern as the NICo REST common chart — keep the registry credential on
-    # the helm command line so the chart template can install it as a
-    # pre-install hook (pod can't pull from nvcr.io otherwise).
-    if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
-        _flow_registry_server="${NICO_IMAGE_REGISTRY%%/*}"
-        _flow_docker_cfg="$(printf '{"auths":{"%s":{"username":"%s","password":"%s"}}}' \
-            "${_flow_registry_server}" \
-            "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-            "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
-        NICO_FLOW_ARGS+=(
-            --set "global.imagePullSecrets[0].name=image-pull-secret"
-            --set "imagePullSecret.dockerconfigjson=${_flow_docker_cfg}"
-        )
-    fi
-
-    # Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-    echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-    helm template flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --show-only templates/namespace.yaml | kubectl apply -f -
-    helm template flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --show-only templates/certificate.yaml | kubectl apply -f -
-    kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-    kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-
-    # Annotate/label the namespace itself — the flow-vault-tokens-job (nico-prereqs
-    # helm hook) creates this namespace ahead of the flow release. Without Helm
-    # ownership metadata, helm install refuses to adopt it.
-    kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-
-    echo "Waiting for cert-manager to issue flow-certificate..."
-    kubectl wait --for=condition=Ready certificate/flow-certificate \
-        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-    echo "Waiting for cert-manager to issue temporal-client-certs..."
-    kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-
-    # Wait for the psm/nsm vault tokens and DB credential ESO syncs to land
-    # (provisioned by helm-prereqs hooks; may still be in flight if nico-prereqs
-    # was re-installed just before this phase). Fail-fast if any secret never
-    # shows up — the alternative (silently falling through to helm install) is
-    # 5 minutes of FailedMount-loop before helm gives up with an opaque message.
-    _wait_for_secret() {
-        local _name="$1"
-        local _ns="$2"
-        local _hint="$3"
-        for _i in $(seq 1 24); do
-            if kubectl get secret "${_name}" -n "${_ns}" >/dev/null 2>&1; then
-                echo "  ${_name} ready"
-                return 0
-            fi
-            echo "  Waiting for ${_name} (${_i}/24)..."
-            sleep 5
-        done
-        echo "ERROR: Secret ${_name} did not appear in namespace ${_ns} within 120s."
-        echo "  ${_hint}"
-        return 1
-    }
-
-    echo "Waiting for psm/nsm Vault tokens..."
-    for _s in psm-vault-token nsm-vault-token; do
-        _wait_for_secret "${_s}" "${NICO_FLOW_NAMESPACE}" \
-            "Provisioned by the flow-vault-tokens helm hook in nico-prereqs. Check 'kubectl logs -n nico-system job/flow-vault-tokens' and confirm helm-prereqs/values.yaml::flow.enabled=true."
-    done
-
-    echo "Waiting for flow/psm/nsm DB credentials..."
-    for _s in flow.nico.nico-pg-cluster.credentials \
-             psm.nico.nico-pg-cluster.credentials \
-             nsm.nico.nico-pg-cluster.credentials; do
-        _wait_for_secret "${_s}" "${NICO_FLOW_NAMESPACE}" \
-            "Synced by the flow-db-eso/psm-db-eso/nsm-db-eso ClusterExternalSecrets in nico-prereqs. Check 'kubectl describe clusterexternalsecret -A | grep flow' and confirm helm-prereqs/values.yaml::flow.enabled=true."
-    done
-
-    echo "Installing flow helm chart..."
-    helm upgrade --install flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --timeout 300s --wait
-    echo "NICo Flow deployed"
 fi
+
+# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
+echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
+helm template flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --show-only templates/namespace.yaml | kubectl apply -f -
+helm template flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --show-only templates/certificate.yaml | kubectl apply -f -
+kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+
+# Annotate/label the namespace itself so the Flow release can adopt the
+# namespace created before the main helm install.
+kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+
+echo "Waiting for cert-manager to issue flow-certificate..."
+kubectl wait --for=condition=Ready certificate/flow-certificate \
+    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+echo "Waiting for cert-manager to issue temporal-client-certs..."
+kubectl wait --for=condition=Ready certificate/temporal-client-certs \
+    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+
+# Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
+# never appears instead of allowing the helm install to enter an opaque
+# FailedMount loop.
+_wait_for_secret() {
+    local _name="$1"
+    local _ns="$2"
+    local _hint="$3"
+    for _i in $(seq 1 24); do
+        if kubectl get secret "${_name}" -n "${_ns}" >/dev/null 2>&1; then
+            echo "  ${_name} ready"
+            return 0
+        fi
+        echo "  Waiting for ${_name} (${_i}/24)..."
+        sleep 5
+    done
+    echo "ERROR: Secret ${_name} did not appear in namespace ${_ns} within 120s."
+    echo "  ${_hint}"
+    return 1
+}
+
+echo "Waiting for Flow DB credentials..."
+_wait_for_secret "flow.nico.nico-pg-cluster.credentials" \
+    "${NICO_FLOW_NAMESPACE}" \
+    "Synced by the flow-db-eso ClusterExternalSecret in nico-prereqs. Check 'kubectl describe clusterexternalsecret flow-db-eso'. Flow is mandatory: sites running an external PostgreSQL (helm-prereqs postgresql.enabled=false) must provision a flow database and create this Secret in the '${NICO_FLOW_NAMESPACE}' namespace themselves before running setup.sh."
+
+echo "Installing flow helm chart..."
+helm upgrade --install flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --timeout 300s --wait
+echo "NICo Flow deployed"
 
 # --- 7i. NICo REST site-agent -------------------------------------------------
 # The site-agent is a separate chart from the main NICo REST umbrella.
@@ -2060,13 +2719,9 @@ echo "Temporal namespace ready"
 # FLOW_GRPC_ENABLED toggles the site-agent's Flow gRPC client (see
 # carbide-rest/site-agent/pkg/components/config/config_manager.go —
 # strings.ToLower(env)=="true"). Without it, site-agent never opens a
-# connection to the Flow pod deployed in phase 7h. We default it ON when
-# Flow itself is being deployed; users can flip it back via --set when
-# pairing --skip-flow.
+# connection to the Flow pod deployed in phase 7h. Phase 7h has no skip flag
+# and runs whenever REST is installed, so this is always on.
 _FLOW_GRPC_ENABLED="true"
-if "${SKIP_FLOW}"; then
-    _FLOW_GRPC_ENABLED="false"
-fi
 
 helm upgrade --install nico-rest-site-agent "${NICO_SITE_AGENT_CHART}" \
     "${NICO_SITE_AGENT_ARGS[@]}" \

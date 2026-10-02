@@ -18,6 +18,7 @@
 mod helpers;
 mod maintenance_flow;
 mod sdk_device_registration;
+mod sdk_host_snapshot;
 mod sdk_initialization;
 mod sdk_join_set;
 mod sdk_maintenance_hold;

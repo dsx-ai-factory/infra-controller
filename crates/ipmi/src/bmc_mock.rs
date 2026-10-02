@@ -56,6 +56,27 @@ impl IPMIToolHttpImpl {
         }
     }
 
+    fn request_target(
+        proxy: Option<&HostPortPair>,
+        bmc_address: SocketAddr,
+    ) -> (String, Option<String>) {
+        match proxy {
+            Some(proxy) => {
+                let host = proxy.url_host().unwrap_or_else(|| "127.0.0.1".into());
+                let port = proxy.port().unwrap_or(443);
+                (
+                    format!("https://{host}:{port}/ipmi"),
+                    Some(format!("host={}", bmc_address.ip())),
+                )
+            }
+            None => {
+                // The caller supplies an IPMI port; the mock serves HTTPS on 443.
+                let https_address = SocketAddr::new(bmc_address.ip(), 443);
+                (format!("https://{https_address}/ipmi"), None)
+            }
+        }
+    }
+
     async fn execute_action(
         &self,
         command: IpmiCommand,
@@ -64,26 +85,7 @@ impl IPMIToolHttpImpl {
     ) -> Result<(), eyre::Report> {
         let action = Self::wire_action(command);
         let proxy = self.bmc_proxy.load();
-
-        // Determine the target URL and headers based on whether a proxy is configured
-        let (url, forwarded_header) = match proxy.as_ref() {
-            Some(proxy) => {
-                // Use proxy - send to proxy with Forwarded header containing BMC IP
-                let proxy_url = match proxy {
-                    HostPortPair::HostAndPort(h, p) => format!("https://{}:{}", h, p),
-                    HostPortPair::HostOnly(h) => format!("https://{}:443", h),
-                    HostPortPair::PortOnly(p) => format!("https://127.0.0.1:{}", p),
-                };
-                (
-                    format!("{}/ipmi", proxy_url),
-                    Some(format!("host={}", bmc_address.ip())),
-                )
-            }
-            None => {
-                // No proxy - send directly to BMC
-                (format!("https://{}/ipmi", bmc_address.ip()), None)
-            }
-        };
+        let (url, forwarded_header) = Self::request_target(proxy.as_ref().as_ref(), bmc_address);
 
         let credentials = self
             .credential_reader
@@ -182,5 +184,53 @@ impl IPMITool for IPMIToolHttpImpl {
         // Fall through to chassis_power_reset if legacy_boot fails or is false
         self.execute_action(IpmiCommand::ChassisPowerReset, bmc_address, credential_key)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn request_targets_preserve_hosts_ports_and_forwarded_headers() {
+        struct Target {
+            proxy: Option<&'static str>,
+            bmc_address: &'static str,
+        }
+
+        value_scenarios!(run = |Target { proxy, bmc_address }| {
+            let proxy = proxy.map(|proxy| proxy.parse().expect("valid proxy fixture"));
+            let (url, forwarded_header) = IPMIToolHttpImpl::request_target(
+                proxy.as_ref(),
+                bmc_address.parse().expect("valid BMC socket fixture"),
+            );
+            let url = reqwest::Url::parse(&url).expect("HTTP IPMI target must be a valid URL");
+            (url.to_string(), forwarded_header)
+        };
+            "IPv6 proxies preserve explicit and default HTTPS ports" {
+                Target { proxy: Some("[2001:db8::1]:8443"), bmc_address: "[2001:db8::2]:623" }
+                    => ("https://[2001:db8::1]:8443/ipmi".into(), Some("host=2001:db8::2".into())),
+                Target { proxy: Some("2001:db8::1"), bmc_address: "[2001:db8::2]:623" }
+                    => ("https://[2001:db8::1]/ipmi".into(), Some("host=2001:db8::2".into())),
+            }
+
+            "direct BMC requests use HTTPS rather than the IPMI port, without forwarding" {
+                Target { proxy: None, bmc_address: "[2001:db8::2]:623" }
+                    => ("https://[2001:db8::2]/ipmi".into(), None),
+                Target { proxy: None, bmc_address: "192.0.2.2:623" }
+                    => ("https://192.0.2.2/ipmi".into(), None),
+            }
+
+            "existing proxy forms keep their host and port defaults" {
+                Target { proxy: Some("192.0.2.1:8443"), bmc_address: "192.0.2.2:623" }
+                    => ("https://192.0.2.1:8443/ipmi".into(), Some("host=192.0.2.2".into())),
+                Target { proxy: Some("bmc-proxy.example"), bmc_address: "192.0.2.2:623" }
+                    => ("https://bmc-proxy.example/ipmi".into(), Some("host=192.0.2.2".into())),
+                Target { proxy: Some(":8443"), bmc_address: "192.0.2.2:623" }
+                    => ("https://127.0.0.1:8443/ipmi".into(), Some("host=192.0.2.2".into())),
+            }
+        );
     }
 }

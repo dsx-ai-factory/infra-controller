@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::SystemTime;
 
 use opentelemetry::logs::AnyValue;
@@ -56,6 +57,8 @@ const HEALTH_REPORT_ALERT_COUNT_KEY: &str = "health_report.alert_count";
 const HEALTH_REPORT_SUCCESSES_KEY: &str = "health_report.successes";
 const HEALTH_REPORT_SUCCESS_PROBE_ID_KEY: &str = "probe_id";
 const HEALTH_REPORT_SUCCESS_TARGET_KEY: &str = "target";
+const HEALTH_REPORT_POWERSUPPLY_ID_KEY: &str = "powersupply_id";
+const HEALTH_REPORT_PHYSICAL_CONTEXT_KEY: &str = "physical_context";
 
 fn severity_number(severity: LogSeverity) -> i32 {
     match severity {
@@ -86,65 +89,76 @@ fn resource_attributes(context: &EventContext) -> Vec<KeyValue> {
     match context.switch_endpoint_role() {
         Some(SwitchEndpointRole::Host) => {
             attrs.push(KeyValue::new(
-                "switch.endpoint",
+                "switch_endpoint",
                 context.endpoint_key.clone(),
             ));
-            attrs.push(KeyValue::new("switch.ip", context.addr.ip.to_string()));
+            attrs.push(KeyValue::new("switch_ip", context.addr.ip.to_string()));
         }
         _ => {
-            attrs.push(KeyValue::new("bmc.endpoint", context.endpoint_key.clone()));
-            attrs.push(KeyValue::new("bmc.ip", context.addr.ip.to_string()));
+            attrs.push(KeyValue::new("bmc_endpoint", context.endpoint_key.clone()));
+            attrs.push(KeyValue::new("bmc_ip", context.addr.ip.to_string()));
         }
     }
-    attrs.push(KeyValue::new("collector.type", context.collector_type));
+    attrs.push(KeyValue::new("collector_type", context.collector_type));
     if let Some(machine_id) = context.machine_id() {
-        attrs.push(KeyValue::new("machine.id", machine_id.to_string()));
+        attrs.push(KeyValue::new("machine_id", machine_id.to_string()));
     }
     if let Some(system_uuid) = context.system_uuid() {
-        attrs.push(KeyValue::new("system.uuid", system_uuid.to_string()));
+        attrs.push(KeyValue::new("system_uuid", system_uuid.to_string()));
     }
     if let Some(machine_serial) = context.machine_serial() {
-        attrs.push(KeyValue::new("machine.serial", machine_serial.to_string()));
+        attrs.push(KeyValue::new("machine_serial", machine_serial.to_string()));
     }
     if let Some(driver_version) = context.driver_version() {
-        attrs.push(KeyValue::new("driver.version", driver_version.to_string()));
+        attrs.push(KeyValue::new("driver_version", driver_version.to_string()));
     }
     if let Some(component_type) = context.component_type() {
-        attrs.push(KeyValue::new("component.type", component_type.to_string()));
+        attrs.push(KeyValue::new("component_type", component_type.to_string()));
+    }
+    if let Some(power_shelf_id) = context.power_shelf_id() {
+        attrs.push(KeyValue::new("power_shelf_id", power_shelf_id.to_string()));
+    }
+    if context.component_type() == Some("power_shelf")
+        && let Some(serial) = context.serial_number()
+    {
+        attrs.push(KeyValue::new(
+            "power_shelf_serial_number",
+            serial.to_string(),
+        ));
     }
     if let Some(switch_id) = context.switch_id() {
-        attrs.push(KeyValue::new("switch.id", switch_id.to_string()));
+        attrs.push(KeyValue::new("switch_id", switch_id.to_string()));
     }
     if let Some(serial) = context.switch_serial() {
-        attrs.push(KeyValue::new("switch.serial_number", serial.to_string()));
+        attrs.push(KeyValue::new("switch_serial_number", serial.to_string()));
     }
     if let Some(role) = context.switch_endpoint_role() {
         let endpoint_role = match role {
             SwitchEndpointRole::Bmc => "bmc",
             SwitchEndpointRole::Host => "host",
         };
-        attrs.push(KeyValue::new("switch.endpoint_role", endpoint_role));
+        attrs.push(KeyValue::new("switch_endpoint_role", endpoint_role));
     }
     if let Some(is_primary) = context.switch_is_primary() {
-        attrs.push(KeyValue::new("switch.is_primary", is_primary));
+        attrs.push(KeyValue::new("switch_is_primary", is_primary));
     }
     if let Some(rack_id) = context.rack_id() {
-        attrs.push(KeyValue::new("rack.id", rack_id.to_string()));
+        attrs.push(KeyValue::new("rack_id", rack_id.to_string()));
     }
     if let Some(slot) = context.slot_number() {
-        attrs.push(KeyValue::new("machine.slot_number", i64::from(slot)));
+        attrs.push(KeyValue::new("machine_slot_number", i64::from(slot)));
     }
     if let Some(tray) = context.tray_index() {
-        attrs.push(KeyValue::new("machine.tray_index", i64::from(tray)));
+        attrs.push(KeyValue::new("machine_tray_index", i64::from(tray)));
     }
     if let Some(domain) = context.nvlink_domain_uuid() {
-        attrs.push(KeyValue::new("nvlink.domain.uuid", domain.to_string()));
+        attrs.push(KeyValue::new("nvlink_domain_uuid", domain.to_string()));
     }
     if let Some(slot) = context.switch_slot_number() {
-        attrs.push(KeyValue::new("switch.slot_number", i64::from(slot)));
+        attrs.push(KeyValue::new("switch_slot_number", i64::from(slot)));
     }
     if let Some(tray) = context.switch_tray_index() {
-        attrs.push(KeyValue::new("switch.tray_index", i64::from(tray)));
+        attrs.push(KeyValue::new("switch_tray_index", i64::from(tray)));
     }
     attrs.extend(
         context
@@ -183,6 +197,22 @@ fn health_report_success_value(success: &HealthReportSuccess) -> AnyValue {
             Key::from_static_str(HEALTH_REPORT_SUCCESS_TARGET_KEY),
             AnyValue::from(target.clone()),
         );
+    }
+    if let Some(attribution) = &success.attribution {
+        for (key, value) in [
+            (
+                HEALTH_REPORT_POWERSUPPLY_ID_KEY,
+                &attribution.powersupply_id,
+            ),
+            (
+                HEALTH_REPORT_PHYSICAL_CONTEXT_KEY,
+                &attribution.physical_context,
+            ),
+        ] {
+            if let Some(value) = value {
+                entries.insert(Key::from_static_str(key), AnyValue::from(value.clone()));
+            }
+        }
     }
 
     AnyValue::Map(Box::new(entries))
@@ -259,6 +289,12 @@ struct AlertDetail<'a> {
 
     message: &'a str,
     classifications: Vec<&'static str>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    powersupply_id: Option<&'a str>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    physical_context: Option<&'a str>,
 }
 
 /// Serializes alert detail, truncating to [`MAX_SERIALIZED_ALERTS`].
@@ -278,6 +314,14 @@ fn alert_detail_attributes(alerts: &[HealthReportAlert]) -> Vec<(&'static str, A
                 .iter()
                 .map(|classification| classification.as_str())
                 .collect(),
+            powersupply_id: alert
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.powersupply_id.as_deref()),
+            physical_context: alert
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.physical_context.as_deref()),
         })
         .collect();
 
@@ -362,19 +406,26 @@ fn convert_event(
     }
 }
 
-/// Builds an OTLP log export request grouped by endpoint.
-///
-/// `include_alert_details` is the receiving target's policy, so one target can
-/// carry per-alert detail while another receives only the report counts.
-pub fn build_export_request(
-    batch: &[(EventContext, CollectorEvent)],
-    include_alert_details: bool,
-) -> ExportLogsServiceRequest {
-    let observed_nanos = SystemTime::now()
+/// Current time in nanoseconds since the Unix epoch, recorded once per export
+/// batch as its observed time.
+pub fn export_time_nanos() -> u64 {
+    SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as u64;
+        .as_nanos() as u64
+}
 
+/// Builds an OTLP log export request grouped by endpoint.
+///
+/// `observed_nanos` is the batch's export time; building the same batch with
+/// the same time yields the same records. `include_alert_details` is the
+/// receiving target's policy, so one target can carry per-alert detail while
+/// another receives only the report counts.
+pub fn build_export_request(
+    batch: &[(EventContext, CollectorEvent)],
+    observed_nanos: u64,
+    include_alert_details: bool,
+) -> ExportLogsServiceRequest {
     let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpLogRecord>)> = HashMap::new();
 
     for (context, event) in batch {
@@ -407,20 +458,50 @@ pub fn build_export_request(
     ExportLogsServiceRequest { resource_logs }
 }
 
-/// Builds an OTLP metric export request grouped by endpoint.
+/// Builds an OTLP metric export request grouped by endpoint and metric descriptor.
 ///
-/// Every sample maps to an OTLP `Gauge` point; Sum and Histogram mapping can
-/// be added when the health metric model exposes those temporality choices.
+/// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
+/// the batch's export time. Samples with the same name, type, and unit share
+/// one metric envelope within their endpoint, preserving their input order as
+/// datapoints. Sum and Histogram mapping can be added when the health metric
+/// model exposes those temporality choices.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
+    observed_nanos: u64,
     metric_name_prefix: &str,
 ) -> ExportMetricsServiceRequest {
-    let observed_nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(|(context, sample)| (context, sample)),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
 
-    let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpMetric>)> = HashMap::new();
+/// Builds the same wire format from owned or shared queue entries.
+pub(crate) fn build_queued_metrics_export_request(
+    batch: &[crate::sink::otlp::QueuedMetric],
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
+    build_metrics_export_request_from_pairs(
+        batch.iter().map(crate::sink::otlp::QueuedMetric::pair),
+        observed_nanos,
+        metric_name_prefix,
+    )
+}
+
+fn build_metrics_export_request_from_pairs<'a>(
+    batch: impl IntoIterator<Item = (&'a EventContext, &'a MetricSample)>,
+    observed_nanos: u64,
+    metric_name_prefix: &str,
+) -> ExportMetricsServiceRequest {
+    type EndpointMetrics<'a> = (
+        Vec<KeyValue>,
+        Vec<OtlpMetric>,
+        HashMap<(&'a str, &'a str, &'a str), usize>,
+    );
+
+    let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
         // Switch identity rides once on the resource attributes (switch.id,
@@ -439,31 +520,50 @@ pub fn build_metrics_export_request(
             ..Default::default()
         };
 
-        let otlp_metric = OtlpMetric {
-            // match the Prometheus sink's full series name exactly so Grafana queries
-            // resolve identically across both export paths.
-            name: format!(
-                "{}_{}_{}_{}",
-                metric_name_prefix, sample.name, sample.metric_type, sample.unit
-            ),
-            description: String::new(),
-            unit: sample.unit.clone(),
-            data: Some(metric::Data::Gauge(OtlpGauge {
-                data_points: vec![data_point],
-            })),
-            ..Default::default()
+        let (_, metrics, descriptor_indices) = by_endpoint
+            .entry((&context.endpoint_key, context.collector_type))
+            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+
+        let metric_index =
+            match descriptor_indices.entry((&sample.name, &sample.metric_type, &sample.unit)) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    entry.insert(metrics.len());
+
+                    metrics.push(OtlpMetric {
+                        // Match the Prometheus sink's full series name exactly so
+                        // Grafana queries resolve identically across both export paths.
+                        name: format!(
+                            "{}_{}_{}_{}",
+                            metric_name_prefix, sample.name, sample.metric_type, sample.unit
+                        ),
+                        description: String::new(),
+                        unit: sample.unit.clone(),
+                        data: Some(metric::Data::Gauge(OtlpGauge {
+                            data_points: vec![data_point],
+                        })),
+                        ..Default::default()
+                    });
+
+                    continue;
+                }
+            };
+
+        // Entries are created as Gauges above; adding a point must not replace
+        // earlier points that share this descriptor.
+        let Some(metric::Data::Gauge(gauge)) = metrics
+            .get_mut(metric_index)
+            .and_then(|metric| metric.data.as_mut())
+        else {
+            unreachable!("metric descriptor map contains only gauges");
         };
 
-        by_endpoint
-            .entry(resource_group_key(context))
-            .or_insert_with(|| (resource_attributes(context), Vec::new()))
-            .1
-            .push(otlp_metric);
+        gauge.data_points.push(data_point);
     }
 
     let resource_metrics = by_endpoint
         .into_values()
-        .map(|(attrs, metrics)| ResourceMetrics {
+        .map(|(attrs, metrics, _)| ResourceMetrics {
             resource: Some(Resource {
                 attributes: otlp_attributes(attrs),
                 ..Default::default()
@@ -502,7 +602,7 @@ mod tests {
     use crate::otlp::common::{AnyValue as OtlpAnyValue, any_value};
     use crate::sink::{
         Classification, HealthReport, HealthReportAlert, HealthReportSuccess, HealthReportTarget,
-        LogRecord, Probe, ReportSource,
+        LogRecord, Probe, ReportSource, SensorAttribution,
     };
 
     fn test_context() -> EventContext {
@@ -511,7 +611,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
@@ -605,7 +705,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -630,19 +730,19 @@ mod tests {
 
         let attrs = otlp_resource_attributes(&context);
 
-        assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_1"));
+        assert_eq!(attr_value(&attrs, "rack_id"), Some("RACK_1"));
         assert_eq!(attr_value(&attrs, "site"), Some("rno-dev7"));
         assert_eq!(
-            attr_value(&attrs, "system.uuid"),
+            attr_value(&attrs, "system_uuid"),
             Some("4c4c4544-0044-4710-8052-cac04f4b4632")
         );
-        assert_eq!(attr_value(&attrs, "machine.serial"), Some("MN-001"));
-        assert_eq!(attr_value(&attrs, "driver.version"), Some("570.82"));
-        assert_eq!(attr_value(&attrs, "component.type"), Some("compute_node"));
-        assert_eq!(attr_int_value(&attrs, "machine.slot_number"), Some(15));
-        assert_eq!(attr_int_value(&attrs, "machine.tray_index"), Some(5));
+        assert_eq!(attr_value(&attrs, "machine_serial"), Some("MN-001"));
+        assert_eq!(attr_value(&attrs, "driver_version"), Some("570.82"));
+        assert_eq!(attr_value(&attrs, "component_type"), Some("compute_node"));
+        assert_eq!(attr_int_value(&attrs, "machine_slot_number"), Some(15));
+        assert_eq!(attr_int_value(&attrs, "machine_tray_index"), Some(5));
         assert_eq!(
-            attr_value(&attrs, "nvlink.domain.uuid"),
+            attr_value(&attrs, "nvlink_domain_uuid"),
             Some("00000000-0000-0000-0000-000000000000")
         );
     }
@@ -655,7 +755,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             labels: Default::default(),
@@ -673,12 +773,12 @@ mod tests {
 
         let attrs = otlp_resource_attributes(&context);
 
-        assert_eq!(attr_value(&attrs, "machine.id"), None);
-        assert_eq!(attr_value(&attrs, "component.type"), Some("compute_node"));
-        assert_eq!(attr_value(&attrs, "machine.serial"), None);
-        assert_eq!(attr_value(&attrs, "system.uuid"), None);
-        assert_eq!(attr_value(&attrs, "driver.version"), None);
-        assert_eq!(attr_value(&attrs, "nvlink.domain.uuid"), None);
+        assert_eq!(attr_value(&attrs, "machine_id"), None);
+        assert_eq!(attr_value(&attrs, "component_type"), Some("compute_node"));
+        assert_eq!(attr_value(&attrs, "machine_serial"), None);
+        assert_eq!(attr_value(&attrs, "system_uuid"), None);
+        assert_eq!(attr_value(&attrs, "driver_version"), None);
+        assert_eq!(attr_value(&attrs, "nvlink_domain_uuid"), None);
     }
 
     #[test]
@@ -693,7 +793,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "test",
             labels: Default::default(),
@@ -714,16 +814,16 @@ mod tests {
         let attrs = otlp_resource_attributes(&context);
 
         assert_eq!(
-            attr_value(&attrs, "switch.id"),
+            attr_value(&attrs, "switch_id"),
             Some(switch_id_attr.as_str())
         );
-        assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_2"));
-        assert_eq!(attr_value(&attrs, "component.type"), Some("nvlink_switch"));
-        assert_eq!(attr_int_value(&attrs, "switch.slot_number"), Some(7));
-        assert_eq!(attr_int_value(&attrs, "switch.tray_index"), Some(3));
+        assert_eq!(attr_value(&attrs, "rack_id"), Some("RACK_2"));
+        assert_eq!(attr_value(&attrs, "component_type"), Some("nvlink_switch"));
+        assert_eq!(attr_int_value(&attrs, "switch_slot_number"), Some(7));
+        assert_eq!(attr_int_value(&attrs, "switch_tray_index"), Some(3));
 
         assert_eq!(
-            attr_value(&attrs, "nvlink.domain.uuid"),
+            attr_value(&attrs, "nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_attr.as_str())
         );
     }
@@ -737,7 +837,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
             labels: Default::default(),
@@ -757,29 +857,29 @@ mod tests {
 
         let attrs = otlp_resource_attributes(&context);
 
-        assert_eq!(attr_value(&attrs, "bmc.endpoint"), None);
-        assert_eq!(attr_value(&attrs, "bmc.ip"), None);
+        assert_eq!(attr_value(&attrs, "bmc_endpoint"), None);
+        assert_eq!(attr_value(&attrs, "bmc_ip"), None);
         assert_eq!(
-            attr_value(&attrs, "switch.endpoint"),
+            attr_value(&attrs, "switch_endpoint"),
             Some("11:22:33:44:55:66")
         );
-        assert_eq!(attr_value(&attrs, "switch.ip"), Some("10.0.1.1"));
+        assert_eq!(attr_value(&attrs, "switch_ip"), Some("10.0.1.1"));
         assert_eq!(
-            attr_value(&attrs, "switch.id"),
+            attr_value(&attrs, "switch_id"),
             Some(switch_id_attr.as_str())
         );
         assert_eq!(
-            attr_value(&attrs, "switch.serial_number"),
+            attr_value(&attrs, "switch_serial_number"),
             Some("SN-SWITCH-001")
         );
-        assert_eq!(attr_value(&attrs, "switch.endpoint_role"), Some("host"));
-        assert_eq!(attr_bool_value(&attrs, "switch.is_primary"), Some(true));
-        assert_eq!(attr_int_value(&attrs, "switch.slot_number"), Some(7));
-        assert_eq!(attr_int_value(&attrs, "switch.tray_index"), Some(3));
-        assert_eq!(attr_value(&attrs, "nvlink.domain.uuid"), None);
-        assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_2"));
-        assert_eq!(attr_value(&attrs, "collector.type"), Some("nvue_gnmi"));
-        assert_eq!(attr_value(&attrs, "component.type"), Some("nvlink_switch"));
+        assert_eq!(attr_value(&attrs, "switch_endpoint_role"), Some("host"));
+        assert_eq!(attr_bool_value(&attrs, "switch_is_primary"), Some(true));
+        assert_eq!(attr_int_value(&attrs, "switch_slot_number"), Some(7));
+        assert_eq!(attr_int_value(&attrs, "switch_tray_index"), Some(3));
+        assert_eq!(attr_value(&attrs, "nvlink_domain_uuid"), None);
+        assert_eq!(attr_value(&attrs, "rack_id"), Some("RACK_2"));
+        assert_eq!(attr_value(&attrs, "collector_type"), Some("nvue_gnmi"));
+        assert_eq!(attr_value(&attrs, "component_type"), Some("nvlink_switch"));
     }
 
     #[test]
@@ -793,7 +893,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("22:33:44:55:66:77").expect("valid mac"),
+                mac: Some(MacAddress::from_str("22:33:44:55:66:77").expect("valid mac")),
             },
             collector_type: "logs_collector",
             labels: Default::default(),
@@ -817,36 +917,36 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
             .expect("log resource metadata")
             .attributes;
 
-        assert_eq!(attr_value(attrs, "bmc.endpoint"), Some("22:33:44:55:66:77"));
-        assert_eq!(attr_value(attrs, "bmc.ip"), Some("10.0.2.1"));
-        assert_eq!(attr_value(attrs, "switch.endpoint"), None);
-        assert_eq!(attr_value(attrs, "switch.ip"), None);
+        assert_eq!(attr_value(attrs, "bmc_endpoint"), Some("22:33:44:55:66:77"));
+        assert_eq!(attr_value(attrs, "bmc_ip"), Some("10.0.2.1"));
+        assert_eq!(attr_value(attrs, "switch_endpoint"), None);
+        assert_eq!(attr_value(attrs, "switch_ip"), None);
         assert_eq!(
-            attr_value(attrs, "switch.id"),
+            attr_value(attrs, "switch_id"),
             Some(switch_id_attr.as_str())
         );
         assert_eq!(
-            attr_value(attrs, "switch.serial_number"),
+            attr_value(attrs, "switch_serial_number"),
             Some("SN-SWITCH-BMC-001")
         );
-        assert_eq!(attr_value(attrs, "switch.endpoint_role"), Some("bmc"));
-        assert_eq!(attr_bool_value(attrs, "switch.is_primary"), Some(false));
-        assert_eq!(attr_int_value(attrs, "switch.slot_number"), Some(8));
-        assert_eq!(attr_int_value(attrs, "switch.tray_index"), Some(4));
-        assert_eq!(attr_value(attrs, "rack.id"), Some("RACK_3"));
-        assert_eq!(attr_value(attrs, "collector.type"), Some("logs_collector"));
+        assert_eq!(attr_value(attrs, "switch_endpoint_role"), Some("bmc"));
+        assert_eq!(attr_bool_value(attrs, "switch_is_primary"), Some(false));
+        assert_eq!(attr_int_value(attrs, "switch_slot_number"), Some(8));
+        assert_eq!(attr_int_value(attrs, "switch_tray_index"), Some(4));
+        assert_eq!(attr_value(attrs, "rack_id"), Some("RACK_3"));
+        assert_eq!(attr_value(attrs, "collector_type"), Some("logs_collector"));
         assert_eq!(
-            attr_value(attrs, "nvlink.domain.uuid"),
+            attr_value(attrs, "nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_attr.as_str())
         );
-        assert_eq!(attr_value(attrs, "component.type"), Some("nvlink_switch"));
+        assert_eq!(attr_value(attrs, "component_type"), Some("nvlink_switch"));
     }
 
     #[test]
@@ -856,7 +956,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
                 port: Some(443),
-                mac: MacAddress::from_str("33:44:55:66:77:88").expect("valid mac"),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
             },
             collector_type: "logs_collector",
             labels: Default::default(),
@@ -880,54 +980,100 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
             .expect("log resource metadata")
             .attributes;
 
-        assert_eq!(attr_value(attrs, "bmc.endpoint"), Some("33:44:55:66:77:88"));
-        assert_eq!(attr_value(attrs, "bmc.ip"), Some("10.0.2.2"));
+        assert_eq!(attr_value(attrs, "bmc_endpoint"), Some("33:44:55:66:77:88"));
+        assert_eq!(attr_value(attrs, "bmc_ip"), Some("10.0.2.2"));
         assert_eq!(
-            attr_value(attrs, "switch.serial_number"),
+            attr_value(attrs, "switch_serial_number"),
             Some("SN-SWITCH-BMC-002")
         );
-        assert_eq!(attr_value(attrs, "switch.endpoint_role"), Some("bmc"));
-        assert_eq!(attr_bool_value(attrs, "switch.is_primary"), Some(true));
-        assert_eq!(attr_value(attrs, "component.type"), Some("nvlink_switch"));
-        assert_eq!(attr_value(attrs, "switch.id"), None);
-        assert_eq!(attr_int_value(attrs, "switch.slot_number"), None);
-        assert_eq!(attr_int_value(attrs, "switch.tray_index"), None);
-        assert_eq!(attr_value(attrs, "nvlink.domain.uuid"), None);
-        assert_eq!(attr_value(attrs, "rack.id"), None);
+        assert_eq!(attr_value(attrs, "switch_endpoint_role"), Some("bmc"));
+        assert_eq!(attr_bool_value(attrs, "switch_is_primary"), Some(true));
+        assert_eq!(attr_value(attrs, "component_type"), Some("nvlink_switch"));
+        assert_eq!(attr_value(attrs, "switch_id"), None);
+        assert_eq!(attr_int_value(attrs, "switch_slot_number"), None);
+        assert_eq!(attr_int_value(attrs, "switch_tray_index"), None);
+        assert_eq!(attr_value(attrs, "nvlink_domain_uuid"), None);
+        assert_eq!(attr_value(attrs, "rack_id"), None);
     }
 
     #[test]
-    fn resource_attributes_include_power_shelf_component_type() {
+    fn resource_attributes_include_power_shelf_identity() {
         let power_shelf_id =
             PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
                 .expect("valid power shelf id");
+        let power_shelf_id_string = power_shelf_id.to_string();
+        let nvlink_domain_uuid = NvLinkDomainId::new();
+        let nvlink_domain_uuid_attr = nvlink_domain_uuid.to_string();
         let context = EventContext {
             endpoint_key: "33:44:55:66:77:88".to_string(),
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("33:44:55:66:77:88").expect("valid mac"),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id),
-                serial: "SN-PS-001".to_string(),
+                serial: Some("SN-PS-001".to_string()),
+                nvlink_domain_uuid: Some(nvlink_domain_uuid),
             })),
             rack_id: Some(RackId::new("RACK_4")),
         };
 
         let attrs = otlp_resource_attributes(&context);
 
-        assert_eq!(attr_value(&attrs, "component.type"), Some("power_shelf"));
-        assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_4"));
+        assert_eq!(attr_value(&attrs, "component_type"), Some("power_shelf"));
+        assert_eq!(
+            attr_value(&attrs, "power_shelf_id"),
+            Some(power_shelf_id_string.as_str())
+        );
+        assert_eq!(
+            attr_value(&attrs, "power_shelf_serial_number"),
+            Some("SN-PS-001")
+        );
+        assert_eq!(attr_value(&attrs, "rack_id"), Some("RACK_4"));
+        assert_eq!(
+            attr_value(&attrs, "nvlink_domain_uuid"),
+            Some(nvlink_domain_uuid_attr.as_str())
+        );
+    }
+
+    #[test]
+    fn resource_attributes_omit_missing_power_shelf_serial() {
+        let context = EventContext {
+            endpoint_key: "33:44:55:66:77:88".to_string(),
+            addr: BmcAddr {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1)),
+                port: Some(443),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
+            },
+            collector_type: "sensor_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(
+                    PowerShelfId::from_str(
+                        "ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg",
+                    )
+                    .expect("valid power shelf id"),
+                ),
+                serial: None,
+                nvlink_domain_uuid: None,
+            })),
+            rack_id: Some(RackId::new("RACK_4")),
+        };
+
+        let attrs = otlp_resource_attributes(&context);
+
+        assert_eq!(attr_value(&attrs, "power_shelf_serial_number"), None);
+        assert_eq!(attr_value(&attrs, "nvlink_domain_uuid"), None);
     }
 
     #[test]
@@ -940,7 +1086,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
         assert_eq!(request.resource_logs.len(), 1);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
@@ -958,7 +1104,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "UNSPECIFIED");
@@ -974,7 +1120,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "FATAL");
@@ -1013,7 +1159,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
@@ -1036,7 +1182,7 @@ mod tests {
             (ctx.clone(), CollectorEvent::MetricCollectionStart),
             (ctx, CollectorEvent::MetricCollectionEnd),
         ];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
         assert!(request.resource_logs.is_empty());
     }
 
@@ -1070,6 +1216,7 @@ mod tests {
 
     fn sensor_alert() -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::Sensor,
             target: Some("Temp1".to_string()),
             message: "critical".to_string(),
@@ -1092,7 +1239,11 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(test_context(), report)], include_alert_details);
+        let request = build_export_request(
+            &[(test_context(), report)],
+            EXPORT_NANOS,
+            include_alert_details,
+        );
 
         request.resource_logs[0].scope_logs[0].log_records[0].clone()
     }
@@ -1113,6 +1264,56 @@ mod tests {
         let record = health_report_record(vec![sensor_alert()], false);
 
         assert_eq!(record.severity_text, "WARN");
+    }
+
+    /// Sensor placement rides on both the success kvlist and the alert JSON,
+    /// and only the fields the sensor carried appear.
+    #[test]
+    fn sensor_attribution_is_carried_on_successes_and_alerts() {
+        let attribution = Some(SensorAttribution {
+            powersupply_id: Some("PSU0".to_string()),
+            physical_context: None,
+        });
+        let report = CollectorEvent::HealthReport(
+            HealthReport {
+                source: ReportSource::BmcSensors,
+                target: Some(HealthReportTarget::PowerShelf),
+                observed_at: None,
+                successes: vec![HealthReportSuccess {
+                    attribution: attribution.clone(),
+                    probe_id: Probe::Sensor,
+                    target: Some("PSU0_Temp".to_string()),
+                }],
+                alerts: vec![HealthReportAlert {
+                    attribution,
+                    probe_id: Probe::Sensor,
+                    target: Some("PSU0_Power".to_string()),
+                    message: "critical".to_string(),
+                    classifications: vec![Classification::SensorCritical],
+                }],
+            }
+            .into(),
+        );
+
+        let request = build_export_request(&[(test_context(), report)], EXPORT_NANOS, true);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let attrs = record.attributes.as_slice();
+
+        let successes =
+            attr_array_value(attrs, HEALTH_REPORT_SUCCESSES_KEY).expect("success array");
+        let success = any_kvlist_value(&successes[0]).expect("structured success");
+        assert_eq!(
+            attr_value(success, HEALTH_REPORT_POWERSUPPLY_ID_KEY),
+            Some("PSU0")
+        );
+        assert_eq!(
+            attr_value(success, HEALTH_REPORT_PHYSICAL_CONTEXT_KEY),
+            None
+        );
+
+        let alert = &alert_details(record)[0];
+        assert_eq!(alert["powersupply_id"], "PSU0");
+        assert!(alert.get("physical_context").is_none());
     }
 
     /// Guards the per-target policy: scalar evidence remains available while
@@ -1144,6 +1345,7 @@ mod tests {
     fn health_report_serializes_alert_details_when_enabled() {
         let alerts = vec![
             HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some(
                     "/redfish/v1/Chassis/BMC_0/ThermalSubsystem/LeakDetection/LeakDetectors/1"
@@ -1214,6 +1416,7 @@ mod tests {
     #[test]
     fn health_report_alert_details_omit_absent_target() {
         let alert = HealthReportAlert {
+            attribution: None,
             target: None,
             ..sensor_alert()
         };
@@ -1232,6 +1435,7 @@ mod tests {
     fn health_report_alert_details_are_capped() {
         let alerts = (0..MAX_SERIALIZED_ALERTS + 3)
             .map(|index| HealthReportAlert {
+                attribution: None,
                 target: Some(format!("Temp{index}")),
                 ..sensor_alert()
             })
@@ -1261,10 +1465,12 @@ mod tests {
                 target: Some(HealthReportTarget::Switch),
                 observed_at: Some(observed_at),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some("LEAK1".to_string()),
                 }],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some("LEAK2".to_string()),
                     message: "NVUE leakage sensor LEAK2 reports leak".to_string(),
@@ -1274,7 +1480,7 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(ctx, report)], true);
+        let request = build_export_request(&[(ctx, report)], EXPORT_NANOS, true);
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
         let attrs = record.attributes.as_slice();
@@ -1337,6 +1543,8 @@ mod tests {
             alert["classifications"],
             serde_json::json!(["Leak", "SensorFailure"])
         );
+        assert!(alert.get("powersupply_id").is_none());
+        assert_eq!(attr_value(success, HEALTH_REPORT_POWERSUPPLY_ID_KEY), None);
         assert_eq!(attr_int_value(attrs, "health_report.alerts.dropped"), None);
     }
 
@@ -1357,6 +1565,7 @@ mod tests {
                 target: Some(HealthReportTarget::Machine),
                 observed_at,
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("Temp1".to_string()),
                 }],
@@ -1416,7 +1625,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
@@ -1441,7 +1650,7 @@ mod tests {
         };
 
         let batch = vec![log(ctx1.clone()), log(ctx2), log(ctx1)];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
 
         assert_eq!(request.resource_logs.len(), 2);
         let total_records: usize = request
@@ -1479,6 +1688,7 @@ mod tests {
                 (rest_ctx, sample("nvue_rest")),
                 (gnmi_ctx, sample("nvue_gnmi")),
             ],
+            EXPORT_NANOS,
             "carbide_hardware_health",
         );
 
@@ -1486,12 +1696,119 @@ mod tests {
             .resource_metrics
             .iter()
             .filter_map(|resource_metrics| resource_metrics.resource.as_ref())
-            .filter_map(|resource| attr_value(&resource.attributes, "collector.type"))
+            .filter_map(|resource| attr_value(&resource.attributes, "collector_type"))
             .collect();
 
         assert_eq!(request.resource_metrics.len(), 2);
         assert!(collector_types.contains("nvue_rest"));
         assert!(collector_types.contains("nvue_gnmi"));
+    }
+
+    #[test]
+    fn metric_points_share_descriptors_only_within_their_resource() {
+        let first = test_context();
+
+        let second = EventContext {
+            endpoint_key: "other-endpoint".to_string(),
+            ..first.clone()
+        };
+
+        let sample = |metric_type: &str, unit: &str, interface: &str, value: f64| MetricSample {
+            key: interface.to_string(),
+            name: "nvue_gnmi".to_string(),
+            metric_type: metric_type.to_string(),
+            unit: unit.to_string(),
+            value,
+            labels: vec![(Cow::Borrowed("interface_name"), interface.to_string())],
+            context: None,
+        };
+
+        let batch = [
+            (first.clone(), sample("status", "state", "swp1", 1.0)),
+            (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (first.clone(), sample("status", "state", "swp2", 0.0)),
+            (second, sample("status", "state", "swp3", 3.0)),
+            (first, sample("status", "state", "swp4", -0.0)),
+        ];
+
+        let request = build_metrics_export_request(&batch, EXPORT_NANOS, "health");
+
+        assert_eq!(request.resource_metrics.len(), 2);
+
+        let first_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("42:9e:b1:bd:9d:dd")
+                })
+            })
+            .expect("first endpoint resource");
+
+        let metrics = &first_resource.scope_metrics[0].metrics;
+
+        assert_eq!(metrics.len(), 2);
+
+        let status = metrics
+            .iter()
+            .find(|metric| metric.name == "health_nvue_gnmi_status_state")
+            .expect("status metric");
+
+        let metric::Data::Gauge(gauge) = status.data.as_ref().expect("gauge data") else {
+            panic!("status metric must be a gauge");
+        };
+
+        let points: Vec<_> = gauge
+            .data_points
+            .iter()
+            .map(|point| {
+                let value = match point.value.as_ref().expect("point value") {
+                    number_data_point::Value::AsDouble(value) => value.to_bits(),
+                    _ => panic!("point must contain a double"),
+                };
+
+                (
+                    attr_value(&point.attributes, "interface_name"),
+                    value,
+                    point.time_unix_nano,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            points,
+            [
+                (Some("swp1"), 1.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp2"), 0.0f64.to_bits(), EXPORT_NANOS),
+                (Some("swp4"), (-0.0f64).to_bits(), EXPORT_NANOS),
+            ]
+        );
+
+        let second_resource = request
+            .resource_metrics
+            .iter()
+            .find(|resource| {
+                resource.resource.as_ref().is_some_and(|resource| {
+                    attr_value(&resource.attributes, "bmc_endpoint") == Some("other-endpoint")
+                })
+            })
+            .expect("second endpoint resource");
+
+        let second_metrics = &second_resource.scope_metrics[0].metrics;
+
+        assert_eq!(second_metrics.len(), 1);
+
+        let metric::Data::Gauge(gauge) = second_metrics[0].data.as_ref().expect("gauge data")
+        else {
+            panic!("second resource metric must be a gauge");
+        };
+
+        assert_eq!(gauge.data_points.len(), 1);
+
+        assert_eq!(
+            attr_value(&gauge.data_points[0].attributes, "interface_name"),
+            Some("swp3")
+        );
     }
 
     #[test]
@@ -1507,7 +1824,8 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(ctx, sample)], "carbide_hardware_health");
+        let request =
+            build_metrics_export_request(&[(ctx, sample)], EXPORT_NANOS, "carbide_hardware_health");
         let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
 
         assert_eq!(metrics.len(), 1);
@@ -1527,7 +1845,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
             labels: Default::default(),
@@ -1554,7 +1872,11 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(context, sample)], "carbide_hardware_health");
+        let request = build_metrics_export_request(
+            &[(context, sample)],
+            EXPORT_NANOS,
+            "carbide_hardware_health",
+        );
         let resource_metrics = &request.resource_metrics[0];
         let metrics = &resource_metrics.scope_metrics[0].metrics;
 
@@ -1579,11 +1901,11 @@ mod tests {
             .expect("resource")
             .attributes;
         assert_eq!(
-            attr_value(resource_attrs, "switch.serial_number"),
+            attr_value(resource_attrs, "switch_serial_number"),
             Some("SN-SWITCH-001")
         );
         assert_eq!(
-            attr_value(resource_attrs, "switch.id"),
+            attr_value(resource_attrs, "switch_id"),
             Some(switch_id_attr.as_str())
         );
     }

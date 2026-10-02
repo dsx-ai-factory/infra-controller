@@ -16,6 +16,7 @@
  */
 
 use carbide_redfish::libredfish::conv::machine_last_reboot_requested_mode;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use chrono::Utc;
 use libredfish::model::BootProgress;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
@@ -28,7 +29,7 @@ use crate::write_ops::MachineWriteOp;
 #[track_caller]
 pub fn host_power_control(
     redfish_client: &dyn Redfish,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     action: SystemPowerControl,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> impl Future<Output = Result<(), RedfishError>> {
@@ -36,12 +37,46 @@ pub fn host_power_control(
     host_power_control_with_location(redfish_client, machine, action, ctx, trigger_location)
 }
 
+/// Advance lockdown recovery only after the BMC accepts the required restart.
+/// An unreadable, powered-off, or transitioning host stays at its retry boundary.
+#[track_caller]
+pub(crate) fn restart_host_for_lockdown(
+    redfish_client: &dyn Redfish,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> impl Future<Output = Result<bool, RedfishError>> {
+    let trigger_location = std::panic::Location::caller();
+    async move {
+        let power_state = redfish_client.get_power_state().await?;
+        if power_state != PowerState::On {
+            return Ok(false);
+        }
+
+        let action = SystemPowerControl::ForceRestart;
+        let requested_at = Utc::now();
+        tracing::info!(
+            machine_id = machine.id.to_string(),
+            action = action.to_string(),
+            trigger_location = %trigger_location,
+            "Host Power Control"
+        );
+        redfish_client.power(action).await?;
+        ctx.pending_db_writes
+            .push(MachineWriteOp::UpdateRebootRequestedTime {
+                machine_id: machine.id.into(),
+                mode: machine_last_reboot_requested_mode(action),
+                time: requested_at,
+            });
+        Ok(true)
+    }
+}
+
 /// redfish utility functions
 ///
 /// host_power_control allows control over the power of the host
 pub async fn host_power_control_with_location(
     redfish_client: &dyn Redfish,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     action: SystemPowerControl,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     trigger_location: &std::panic::Location<'_>,
@@ -63,7 +98,7 @@ pub async fn host_power_control_with_location(
     );
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id,
+            machine_id: machine.id.into(),
             mode: machine_last_reboot_requested_mode(action),
             time: Utc::now(),
         });

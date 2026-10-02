@@ -30,12 +30,12 @@ use std::time::Duration;
 
 use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::machine::{DpfState, DpuInitState, DpuInitStates, ManagedHostState};
 use model::machine_pending_action::MachinePendingActionKind::DpuServiceSync;
 use tokio::time::timeout;
 
-use super::dpf_config;
+use super::{dpf_config, expect_dpf_service_inventory};
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host_with_dpf, create_test_env_with_overrides,
@@ -68,6 +68,7 @@ pub(super) fn mock(
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(&mut mock);
 
     let outdated_calls = calls.clone();
     mock.expect_is_dpu_outdated().returning(move |_| {
@@ -139,14 +140,14 @@ pub(super) async fn provisioned_with_sync(
     }
 }
 
-pub(super) async fn request_sync(pool: &sqlx::PgPool, host_id: &MachineId) {
+pub(super) async fn request_sync(pool: &sqlx::PgPool, host_id: &HostMachineId) {
     let mut conn = pool.acquire().await.unwrap();
     db::machine_pending_action::request(&mut conn, host_id, DpuServiceSync)
         .await
         .expect("recorded pending action");
 }
 
-pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &MachineId) -> bool {
+pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &HostMachineId) -> bool {
     db::machine_pending_action::is_outstanding(pool, host_id, DpuServiceSync)
         .await
         .expect("read pending action")
@@ -156,8 +157,8 @@ pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &MachineId) -> 
 /// handler runs again without replaying the whole operator workflow.
 pub(super) async fn reset_host_to_waiting_for_ready(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state = ManagedHostState::DPUInit {
         dpu_states: DpuInitStates {

@@ -6,17 +6,16 @@ package site
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	siteActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/site"
 
+	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 )
 
@@ -39,15 +38,7 @@ func UpdateSiteConfigInventory(ctx workflow.Context, siteIDStr string, coreBuild
 		return err
 	}
 
-	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 5 * time.Minute,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    1 * time.Second,
-			BackoffCoefficient: 2.0,
-			MaximumInterval:    1 * time.Minute,
-			MaximumAttempts:    3,
-		},
-	}
+	options := cwi.ActivityOptions()
 	ctx = workflow.WithActivityOptions(ctx, options)
 
 	var manageSite siteActivity.ManageSite
@@ -102,22 +93,15 @@ func UpdateSiteConfigInventoryV2(ctx workflow.Context, siteIDStr string, invento
 		return err
 	}
 
-	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 5 * time.Minute,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    1 * time.Second,
-			BackoffCoefficient: 2.0,
-			MaximumInterval:    1 * time.Minute,
-			MaximumAttempts:    3,
-		},
-	}
+	options := cwi.ActivityOptions()
 	ctx = workflow.WithActivityOptions(ctx, options)
 
 	coreBuildInfo := inventory.GetCoreBuildInfo()
 
 	var manageSite siteActivity.ManageSite
 
-	siteUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateSiteInDB, siteID, coreBuildInfo, inventory.GetSiteAgentBuildInfo()).Get(ctx, nil)
+	siteUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateSiteInDB, siteID, coreBuildInfo,
+		inventory.GetSiteAgentBuildInfo()).Get(ctx, nil)
 	if siteUpdateErr != nil {
 		logger.Warn().Err(siteUpdateErr).Msg("failed to execute UpdateSiteInDB activity")
 	}

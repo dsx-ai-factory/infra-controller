@@ -44,9 +44,15 @@ echo
 echo "Uploading firmware to BMC..."
 
 resp_json="$(mktemp)"
+# IPv6 hosts need brackets in URLs; ping uses the original address.
+URL_HOST="$BMC_IP"
+if [[ "$URL_HOST" == *:* && "$URL_HOST" != \[*\] ]]; then
+  URL_HOST="[$URL_HOST]"
+fi
+
 if ! curl -ksu "${BMC_USER}:${BMC_PASS}" \
       -H "Content-Type:application/octet-stream" \
-      -X POST "https://${BMC_IP}/redfish/v1/UpdateService" \
+      -X POST "https://${URL_HOST}/redfish/v1/UpdateService" \
       -T "${FW_PKG}" \
       -o "$resp_json"; then
   echo "Upload POST failed"
@@ -91,7 +97,7 @@ while true; do
 
   task_json="$(mktemp)"
   if ! curl -ksu "${BMC_USER}:${BMC_PASS}" \
-        -X GET "https://${BMC_IP}${task_uri}" \
+        -X GET "https://${URL_HOST}${task_uri}" \
         -o "$task_json"; then
     # On transient failure, just note it and continue polling
     rm -f "$task_json"

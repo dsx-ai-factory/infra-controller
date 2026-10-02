@@ -1,7 +1,3 @@
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 mod io;
 use std::collections::HashMap;
 
@@ -52,13 +48,16 @@ impl TryFrom<Machine> for TrayData {
 
     fn try_from(value: Machine) -> Result<Self, Self::Error> {
         let id = value.id.ok_or(RvsError::MissingField("Machine.id"))?;
+        let status = value
+            .status
+            .ok_or(RvsError::MissingField("Machine.status"))?;
 
-        let nvl = value.nvlink_info.map(|info| TrayNvlData {
+        let nvl = status.nvlink_info.map(|info| TrayNvlData {
             domain_uuid: info.domain_uuid,
             gpu_count: info.gpus.len() as u32,
         });
 
-        let ib = value.ib_status.map(|status| {
+        let ib = status.infiniband.map(|status| {
             let port_count = status.ib_interfaces.len() as u32;
             let active_port_count = status
                 .ib_interfaces
@@ -115,6 +114,45 @@ impl TryFrom<Rack> for RackData {
             id: value.id.ok_or(RvsError::MissingField("Rack.id"))?,
             state: value.rack_state,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    #[test]
+    fn tray_data_rejects_missing_status() {
+        let machine = Machine {
+            id: Some(MachineId::new(
+                MachineIdSource::Tpm,
+                [1; 32],
+                MachineType::Host,
+            )),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            TrayData::try_from(machine),
+            Err(RvsError::MissingField("Machine.status"))
+        ));
+    }
+
+    #[test]
+    fn tray_data_accepts_empty_status() {
+        let id = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
+        let machine = Machine {
+            id: Some(id),
+            status: Some(Default::default()),
+            ..Default::default()
+        };
+
+        let tray = TrayData::try_from(machine).expect("present empty status should be valid");
+        assert_eq!(tray.id, id);
+        assert!(tray.nvl.is_none());
+        assert!(tray.ib.is_none());
     }
 }
 

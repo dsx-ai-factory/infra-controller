@@ -68,19 +68,23 @@ For each site controller node that participates in DPU mode, a single `/31` poin
 For managed hosts (ingested machines), the host OS IP comes from the **admin network** until the host is assigned to a tenant:
 
 - The admin network is a NICo-managed pool. Allocations are made by `nico-api` and pushed to the host via DHCP.
-- Size the admin network for at least one usable IP per managed server, plus network and broadcast addresses. Multiple admin segments may be declared in `[networks.<name>]`; each managed host sources its admin IP from whichever segment matches.
+- For IPv4, size the admin network for at least one usable IP per managed server, plus network and broadcast addresses. Multiple admin segments may be declared in `[networks.<name>]`; each managed host sources its admin IP from whichever segment matches.
 - When a tenant is assigned, the host's interfaces leave the admin network and join the relevant tenant networks (see [Network Prerequisites — Tenant Networks](../getting-started/prerequisites/network.md#tenant-networks)).
 
 The admin network is defined in the `[networks.admin]` block of `siteConfig`:
 
 ```toml
 [networks.admin]
+type = "admin"
 prefix = "10.180.64.0/24"
 gateway = "10.180.64.1"
 mtu = 1500
+reserve_first = 5
 ```
 
-> **Warning:** `[networks.admin]` `prefix` and `gateway` must be non-empty. `nico-api` panics at startup if either field is the empty string.
+This IPv4 definition requires a gateway within its prefix. For other prefix
+combinations and gateway omission rules, refer to
+[Initial Network Configuration](#initial-network-configuration).
 
 ### 1.3 Expected Interface IP Allocation
 
@@ -90,17 +94,21 @@ BMC, and host BMC interfaces. Every role supports three allocation policies:
 | Policy | Behavior |
 |---|---|
 | **Dynamic** | At DHCP discovery, NICo allocates an address from the segment selected by the DHCP relay or DHCPv6 link address. |
-| **Fixed** | NICo reserves the configured `fixed_ip` before DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
-| **Retained** | NICo allocates an address through DHCP, then keeps it static for the lifetime of the machine-interface record. |
+| **Fixed** | NICo reserves the configured `fixed_ip` as Static for its address family before serving DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
+| **Retained** | NICo selects an address through DHCP and immediately stores it as Static. It remains reserved until explicit removal or deletion of the machine-interface record. |
 
 All four interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
 all three policies. The default is Dynamic for every role except `host_bmc`,
 which defaults to Retained. A declaration with `fixed_ip` and no explicit
 policy remains Fixed for backward compatibility.
 
-Mixing policies within the same site and Expected Machine is supported.
-See [Configure Expected Machine Interfaces](expected-machine-interfaces.md)
-for the complete field reference and examples.
+NICo applies the current configuration separately to each family's first
+successful DHCP or Static allocation. Mixing policies within the same site
+and Expected Machine is supported.
+Refer to [Configure Expected Machine Interfaces](expected-machine-interfaces.md)
+for the complete field reference and examples, and
+[Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime)
+for per-family allocation, recovery, and rollout limits.
 
 #### Physical Management Networks
 
@@ -133,7 +141,7 @@ Explicit `unspecified`/`Unspecified` resets the policy to Auto.
 
 | Expected Machine configuration | Effective policy | Behavior |
 |---|---|---|
-| Omit both fields, or select Auto without an address | **Retained** (default) | DHCP selects an address; Site Explorer makes it static for that machine-interface row's lifetime. |
+| Omit both fields, or select Auto without an address | **Retained** (default) | DHCP selects the family's first address and immediately stores it as Static. |
 | Set `bmc_ip_address`; omit `bmc_ip_allocation` or select Auto | **Fixed** | NICo reserves and serves the configured address. |
 | Select Dynamic without an address | **Dynamic** | DHCP allocates a normal lease that can expire and change. |
 | Select Retained without an address | **Retained** | Same retained behavior as the default. |
@@ -159,9 +167,9 @@ segment.
 
 The conventional OOB management network is declared as one or more
 NICo-managed `Underlay` network segments in `siteConfig`
-`[networks.<name>]` blocks. Each segment carries its own prefix, gateway, and
-MTU. The switches **must run a DHCP relay** pointed at the `nico-dhcp`
-LoadBalancer VIP; they must not assign addresses themselves. See
+`[networks.<name>]` blocks. Each segment has its own prefixes, MTU, and
+IPv4 gateway when applicable. The switches **must run a DHCP relay** pointed
+at the `nico-dhcp` LoadBalancer VIP; they must not assign addresses themselves. See
 [BMC and Out-of-Band Setup](../getting-started/prerequisites/bmc-oob-setup.md)
 for switch-side relay configuration.
 
@@ -195,11 +203,12 @@ enum number `2` for the Underlay segment type:
 
 For this fixed declaration:
 
-- NICo records the fixed intent with the Expected Machine. The API update path
-  and Site Explorer reconciliation materialize the machine-interface
-  reservation; the DHCP path also restores it if the interface was deleted.
-- The first DHCP DISCOVER from that BMC's MAC is answered with the reserved
-  address; `nico-dhcp` does not draw another address for that host.
+- NICo records the fixed intent with the Expected Machine. The reservation
+  applies only before that family's first DHCP or Static allocation. Updating the
+  template does not guarantee immediate allocation of a missing family.
+- After NICo creates the reservation, DHCP DISCOVER from that BMC's MAC is
+  answered with the reserved address; `nico-dhcp` does not draw another address
+  for that host.
 - For a BMC on a managed segment, the address must fall within that segment's
   prefix. It can be inside the segment's otherwise-dynamic pool: once the
   reservation exists, NICo's address-uniqueness constraint prevents the
@@ -207,11 +216,10 @@ For this fixed declaration:
 - The optional `underlay` segment guard rejects the configuration if the
   containing segment has another type.
 
-Reconciliation can replace an existing DHCP or SLAAC address with the Fixed
-reservation. It does not automatically replace one Fixed Static address with
-another or return a Static address to Dynamic allocation. For those changes,
-follow the targeted procedure in
-[Retained Address Lifetime](expected-machine-interfaces.md#retained-address-lifetime).
+Expected Machine edits do not replace an existing DHCP or Static allocation.
+For the SLAAC exception, allocation lifetime, and targeted address changes,
+refer to
+[Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
 
 The legacy top-level `bmc_ip_address` and `bmc_ip_allocation` fields remain
 supported. They act as explicit overrides when a matching `host_bmc` entry is
@@ -240,8 +248,8 @@ The shared topology has these requirements:
   (the default) whenever either interface needs an unreserved DHCP allocation.
   A `reserved` segment answers only clients whose fixed reservation already
   exists.
-- Associate the segment with a valid DNS subdomain. Config-seeded network
-  creation requires one selected initial forward domain and associates the
+- Associate the segment with a valid DNS subdomain. Network creation at
+  startup requires one selected initial forward domain and associates the
   segment with it automatically; startup skips segment creation if no forward
   domain can be selected unambiguously. A segment created at runtime with
   `nico-admin-cli network-segment create` requires `--subdomain-id`.
@@ -285,18 +293,24 @@ an explicit site security decision.
 
 ## 2. DHCP Configuration
 
+IPv6 deployments are opt-in and use a separate Kea6 workload and relay VIP. [Deploy DHCPv6](dhcpv6-deployment.md) describes network requirements, stable server identity, values, and deployment verification.
+
 ### 2.1 How `nico-dhcp` Works
 
 `nico-dhcp` is **not** a standalone DHCP daemon. It is a [Kea DHCP](https://www.isc.org/kea/) hooks library (`cdylib`) loaded into the upstream Kea v4 server inside the `nico-dhcp` container. Every DHCPDISCOVER/REQUEST is intercepted by the hooks library and forwarded to `nico-api` over mTLS gRPC (the `discover_dhcp` RPC). `nico-api` decides what address to lease based on:
 
-- Whether the source MAC matches a Fixed Expected Machine interface
-  reservation, including one declared through the compatible top-level
-  `bmc_ip_address` field.
-- Otherwise, whether the source MAC has a Dynamic or Retained Expected Machine
-  policy or is a known host, host BMC, DPU BMC, or DPU OS interface.
-  `nico-api` uses relay metadata to select the applicable network segment.
-  Dynamic interfaces receive the next free address. Retained interfaces reuse
-  their existing static address, or receive a new address when none exists.
+- Whether the interface already has a DHCP or Static address for the requested
+  family. NICo reuses it without applying later Expected Machine edits.
+- For a family's first DHCP or Static allocation, the source MAC's current Expected
+  Machine policy. Fixed uses a matching-family configured address; Dynamic and
+  Retained use the segment selected by relay metadata. Retained stores the
+  address directly as Static. Without an applicable declaration, NICo uses
+  ordinary DHCP.
+- After a DHCP or Static address is removed while its interface record remains,
+  ordinary DHCP allocation rules apply instead of Fixed or Retained intent.
+  Refer to
+  [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime)
+  for the removal-history support boundary.
 - Vendor class (option 60) determines whether the client is a PXE/iPXE/BlueField boot client, which influences the boot options returned.
 
 The hook callouts (`lease4_select` and `lease4_renew`) overwrite the lease that Kea would have selected — `yiaddr`, valid lifetime, and DHCP options are replaced with the values `nico-api` produced, and the hook can return `SKIP` to cancel Kea's own lease assignment and database write. The result is written to Kea's memfile (`kea-leases4.csv`), but the authoritative record lives in `nico-api`. From an operator perspective this means:
@@ -322,16 +336,91 @@ otherwise falls back to prefix containment.
 | DPU OOB (ARM OS) | OOB management network | The relay-selected `Underlay` segment; it can share the DPU BMC segment or use another Underlay prefix |
 | Host OS NIC without managed DPUs | Host-facing physical network | The relay-selected `HostInband` segment |
 
-Each `[networks.<name>]` block declares:
+<a id="seed-network-configuration"></a>
+
+#### Initial Network Configuration
+
+Use `[networks.<name>]` blocks in `siteConfig` or the file specified by
+`initial_objects_file` to define the network segments that `nico-api` creates
+at startup. It creates missing segments and saves their initial definitions.
+Editing these definitions and restarting `nico-api` does not update existing
+segments.
+
+A network prefix identifies a range of IP addresses using CIDR notation, such
+as `192.0.2.0/24` for IPv4 or `2001:db8:1::/64` for IPv6. An IPv4-only segment
+has one IPv4 prefix; an IPv6-only segment has one IPv6 prefix. A dual-stack
+segment has one prefix of each address family.
+
+DPU provisioning requires an `admin` segment with an IPv4 prefix and gateway.
+NICo can create an IPv6-only admin segment, but DPU network configuration fails
+because it has no IPv4 admin prefix.
+
+The prefix and relay fields have the following contract:
 
 | Field | Purpose |
 |---|---|
-| `type` | Config-seeded segment classification: `admin`, `underlay`, or `hostinband`. Tenant segments are created through the API and are not config-declarable. Expected Interfaces can use the corresponding guard described in [Network Segment Selection](expected-machine-interfaces.md#network-segment-selection). |
-| `prefix` | The IPv4 CIDR for the segment. |
-| `gateway` | The IPv4 gateway associated with the prefix and returned in network configuration. It does not have to equal `giaddr`. |
-| `mtu` | MTU advertised to clients on this segment. |
+| `type` | Type of segment to create: `admin`, `underlay`, or `hostinband`. Tenant segments are created through the API, not through these configuration blocks. Expected Interfaces can use the corresponding guard described in [Network Segment Selection](expected-machine-interfaces.md#network-segment-selection). |
+| `prefix` | Required IPv4 or IPv6 CIDR. Use an IPv4 CIDR for IPv4-only or dual-stack definitions, or an IPv6 CIDR for IPv6-only definitions. |
+| `prefix_v6` | Optional IPv6 CIDR. Omit it for IPv4-only or IPv6-only definitions. Set it only alongside an IPv4 `prefix` to create a dual-stack segment. It cannot replace `prefix` or accompany an IPv6 `prefix`. |
+| `gateway` | Required when `prefix` is IPv4, including dual-stack definitions. Supply an IPv4 address within that prefix; it does not have to equal the relay's `giaddr`. IPv6-only definitions can omit it. This field does not configure an IPv6 gateway. |
+| `dhcpv6_link_address` | Optional IPv6 address, without a CIDR suffix, used to match a DHCPv6 relay's link-address. Requires an IPv6 prefix. It can lie outside that prefix but must be unique across network prefixes. Omission leaves no explicit link-address match; it does not infer a gateway or relay address. |
+| `mtu` | MTU advertised to clients on this segment, in bytes. Accepted range: 576–9000, inclusive. |
 | `reserve_first` | Number of leading addresses in the prefix to hold back from the dynamic pool. A typical value is 5. |
 | `allocation_strategy` | `dynamic` (default) permits pool allocation and Fixed reservations; `reserved` serves only reservations created before DHCP. Dynamic and Retained interfaces cannot acquire their first address on a reserved segment. |
+
+Supply `type`, `mtu`, and `reserve_first` in every definition. Optional address
+fields must be omitted rather than set to an empty string.
+
+For dual-stack or IPv6-only segments, configure an MTU of at least 1280 bytes,
+as required by [RFC 8200](https://www.rfc-editor.org/rfc/rfc8200.html#section-5).
+NICo's configuration validation does not enforce this IPv6-specific minimum.
+
+The following examples show the three prefix combinations. Replace the names
+and addresses with your site values:
+
+```toml
+[networks.oob-v4]
+type = "underlay"
+prefix = "192.0.2.0/24"
+gateway = "192.0.2.1"
+mtu = 1500
+reserve_first = 5
+
+[networks.oob-dual-stack]
+type = "underlay"
+prefix = "198.51.100.0/24"
+prefix_v6 = "2001:db8:1::/64"
+gateway = "198.51.100.1"
+dhcpv6_link_address = "2001:db8:ffff::1"
+mtu = 1500
+reserve_first = 5
+
+[networks.oob-v6]
+type = "underlay"
+prefix = "2001:db8:2::/64"
+mtu = 1500
+reserve_first = 5
+```
+
+In the dual-stack example, `gateway` belongs only to the IPv4 prefix.
+`dhcpv6_link_address` selects the segment by exact match even though the
+relay address is outside its IPv6 prefix. The IPv6-only example omits both fields;
+DHCPv6 segment selection can use prefix containment when no exact configured
+link-address match exists.
+
+Gateway omission for IPv6-only definitions requires a binary containing
+[IPv6-only gateway support](https://github.com/NVIDIA/infra-controller/pull/5952),
+tracked in [IPv6-only networks without a dummy gateway](https://github.com/NVIDIA/infra-controller/issues/5401).
+Existing IPv6-only definitions can keep a supplied gateway of either address
+family. NICo accepts that value for compatibility and retains it in the stored
+initial definition, but does not attach it to the IPv6 network prefix.
+
+If NICo created an IPv6-only network from a definition with a gateway, removing
+that gateway from the configuration and restarting `nico-api` produces a
+configuration drift warning. It does not rewrite the segment or its stored
+initial definition. Before creating an IPv6-only network without a gateway,
+check your rollback requirements: binaries predating this support cannot read
+stored initial definitions without a gateway.
 
 A conventional DPU site declares an `admin` segment and one or more `underlay`
 segments covering its OOB relay scopes. A site with hosts that have no managed
@@ -353,11 +442,10 @@ To configure these flows:
    it serves. In the shared HostInband topology, both the host BMC and host OS
    paths must produce relay metadata for that HostInband prefix.
 3. **For Fixed policies**, upload `expected_machines.json` with the applicable
-   interface reservations before the device first powers on. NICo can replace
-   an existing DHCP or SLAAC address with a Fixed reservation. If the interface
-   already has a Static address that blocks the change, follow the targeted
-   address update procedure in
-   [Retained Address Lifetime](expected-machine-interfaces.md#retained-address-lifetime).
+   interface reservations before the device first powers on. If the family
+   already has a DHCP or Static allocation, changing the template does not
+   replace it. Follow the targeted address update procedure in
+   [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
 4. **For reservation-only segments**, set
    `allocation_strategy = "reserved"` and configure every Fixed reservation
    before DHCP. Dynamic and Retained declarations cannot acquire their first
@@ -366,10 +454,7 @@ To configure these flows:
    reachable from bare-metal hosts. This list is informational and is passed
    through to agents; it does not change how `nico-dhcp` itself serves leases.
    May be left as `[]`.
-6. **Set `ntp_servers`** in `siteConfig` to your NTP server IPs. NICo uses this
-   list to configure BMC NTP through Redfish during pre-ingestion, includes it
-   in `DiscoverDhcp` responses, and passes it to DPU agents so their DHCP server
-   advertises the same NTP servers to managed hosts.
+6. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
 
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
@@ -377,8 +462,10 @@ The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, n
 - The Kea hook parameters in the `nico-dhcp` Helm chart (`nico-nameserver`, `nico-ntpserver`, etc.) — set these to the `unbound.nico` (or `unbound.nico`, see [section 3](#3-dns-configuration)) recursive resolver VIP. `nico-ntpserver` is used only as a fallback when `siteConfig.ntp_servers` is empty.
 - The per-segment definitions in `siteConfig` `[networks.<name>]` blocks — gateway, MTU, additional routes.
 
+The DPU-local DHCP server evaluates NTP precedence independently for each address family. Valid site-configured addresses replace service-discovered addresses only for the same family. When a family has no valid site-configured address, its service-discovered fallback is retained. Because `siteConfig.ntp_servers` accepts IPv4 addresses, it overrides DHCPv4 option 42 without suppressing service-discovered IPv6 servers advertised through DHCPv6 option 56.
+
 <Note>
-NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to your enterprise NTP servers. NICo also attempts to set those servers on host BMCs during pre-ingestion; if the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
+NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to your enterprise IPv4 NTP servers. NICo also attempts to set those servers on host BMCs during pre-ingestion. If the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
 </Note>
 
 ### 2.3 How to Verify DHCP Is Working
@@ -463,11 +550,11 @@ The resolver is responsible for:
 
 To configure `unbound`:
 
-1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with one A record per service VIP (see [section 3.3](#33-nico-dns-service-endpoints)).
+1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with an A record for each IPv4 service VIP. To advertise the NTP fallback through DHCPv6 option 56, also add AAAA records for reachable IPv6 NTP endpoints, as described in [NICo DNS Service Endpoints](#33-nico-dns-service-endpoints). The chart derives the record type from each address in `unbound.localData`.
 2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
 3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
-The `unbound` pod auto-reloads when the ConfigMap changes.
+The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements. For external resolver VIPs, refer to [Unbound External Services](../configuration/dns.md#unbound-external-services).
 
 ### 3.3 `.nico` DNS Service Endpoints
 
@@ -476,22 +563,22 @@ A fixed set of NICo service hostnames are resolved by DPU agents, host PXE loade
 Two TLD conventions exist:
 
 - **`.forge`** is the compiled default in `crates/agent/src/util.rs` and the host PXE loader scripts. The agent resolves `carbide-pxe.forge`, `carbide-ntp.forge`, etc. at startup. This is the TLD used by deployments built from the current binaries.
-- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/NVIDIA/infra-controller/blob/main/deploy/DNS.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
+- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
 
-Choose the convention that matches your binaries — do not mix. Verify by checking what the agent actually resolves at startup (`kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-pxe.forge` or the `.nico` equivalent).
+Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
-The required A records (shown for `.nico`; substitute `.nico` if your binaries use it) are:
+The required DNS records are shown with both NTP names where they differ:
 
 | Hostname | Port | Resolves to | Purpose | Configurable at runtime? |
 |---|---|---|---|---|
 | `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
 | `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `nico-static-pxe.nico` | 80 | Static PXE asset server VIP | `scout.squashfs`, `scout.efi`, BFB images, and other static boot artifacts | **No** — hardcoded in the host boot scripts that ship inside boot images |
-| `nico-ntp.nico` | 123 | Operator-supplied NTP server IP(s) — the record points at your existing NTP infrastructure, not a NICo-deployed service | Legacy NTP fallback for DPU agents when `siteConfig.ntp_servers` is empty | **Fallback only** — prefer `siteConfig.ntp_servers`, but keep this DNS record if any deployed agent still relies on it |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
-One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [`deploy/DNS.md`](https://github.com/NVIDIA/infra-controller/blob/main/deploy/DNS.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
+One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
 
 > **Note:** The `.nico` service zone is private and is not a publicly
 > registered TLD. It can be served on the conventional isolated OOB network or
@@ -581,12 +668,16 @@ service zone resolves:
 
 ```bash
 for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
-            nico-ntp.nico unbound.nico otel-receiver.nico; do
+            unbound.nico otel-receiver.nico; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
+
+# Stock agent: A is the IPv4 fallback; AAAA is required for DHCPv6 option 56.
+dig +short A carbide-ntp.forge @<UNBOUND_VIP>
+dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
 
-Substitute `.nico` if that is the TLD baked into your binaries. Every name must return a non-empty A record set; a `FAILED` or empty result means the `local_data.conf` ConfigMap is missing that record. If your environment also runs a SOCKS5 proxy, extend the loop with `socks.nico`.
+The loop shows the other rebranded `.nico` service names. NTP is checked separately because stock agents query the exact `carbide-ntp.forge` name. Do not derive it by replacing only the TLD. For an image rebuilt to query `nico-ntp.nico`, replace the complete NTP hostname in both commands. Every applicable name must return a non-empty A record set. For dual-stack NTP service, the explicit AAAA query must also return at least one address. Otherwise, the DPU server has no service-discovered IPv6 NTP address for DHCPv6 option 56. A `FAILED` or empty result means the `local_data.conf` ConfigMap is missing the corresponding record. If your environment also runs a SOCKS5 proxy, extend the loop with `socks.nico`.
 
 **Confirm reachability on the expected ports:**
 
@@ -613,7 +704,7 @@ the runtime checks as the first managed endpoints come online and before
 expanding the rollout to the rest of the fleet:
 
 - [ ] `siteConfig` `[pools.lo-ip]` and `[pools.vpc-dpu-lo]` populated with non-empty ranges.
-- [ ] `siteConfig` `[networks.admin]` has non-empty `prefix` and `gateway`.
+- [ ] `siteConfig` network definitions follow the [Initial Network Configuration](#initial-network-configuration) requirements, including a gateway whenever an IPv4 prefix is present.
 - [ ] Each required physical segment declared in `[networks.<name>]`:
       `underlay` capacity for every DPU BMC/OOB pair and isolated host BMC, and
       `hostinband` capacity for every shared host BMC and host OS NIC on a host
@@ -628,7 +719,7 @@ expanding the rollout to the rest of the fleet:
       managed DPUs, configured with a DHCP relay pointing to the `nico-dhcp`
       LoadBalancer VIP.
 - [ ] LoadBalancer VIPs assigned for `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
-- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`, `nico-pxe`, `nico-static-pxe`, `unbound`, and `otel-receiver` in the `.nico` zone; include `nico-ntp` pointing at your operator-supplied NTP server if you use the legacy fallback.
+- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`, `nico-pxe`, `nico-static-pxe`, `unbound`, and `otel-receiver` in the `.nico` zone. Include A records for the exact NTP hostname queried by the deployed agent and AAAA records for its DHCPv6 option-56 fallback (`carbide-ntp.forge` for stock agents).
 - [ ] `nico-dns` zone for `initial_domain_name` is delegated from upstream DNS, or `unbound` forwards the zone to the `nico-dns` VIPs.
 - [ ] `unbound.nico` resolves every NICo service hostname (verified with the `dig` loop in [section 3.4](#34-how-to-verify-dns-is-working)).
 - [ ] Select the bootstrap-CA mode intentionally.
@@ -650,4 +741,4 @@ When every item is checked, proceed to [Ingesting Hosts](ingesting-hosts.md).
 - [Quick Start Guide](../getting-started/quick-start.md) — the install flow that consumes the configuration described here.
 - [Reference Installation](../getting-started/installation-options/reference-install.md) — pointers to the manual, manifest-level install and troubleshooting references.
 - [Ingesting Hosts](ingesting-hosts.md) — `expected_machines.json` schema and upload commands.
-- [`deploy/DNS.md`](https://github.com/NVIDIA/infra-controller/blob/main/deploy/DNS.md) — canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.
+- [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md) — canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.

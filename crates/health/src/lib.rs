@@ -29,6 +29,7 @@ pub mod collectors;
 pub mod config;
 pub mod discovery;
 pub mod endpoint;
+mod inventory;
 pub mod limiter;
 pub mod metrics;
 pub mod otlp;
@@ -472,6 +473,8 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
             nmxc_schema_override,
         )?;
 
+        let collector_transition_notify = ctx.collector_transition_notify.clone();
+
         let interval = config.endpoint_discovery_interval;
         let iteration = ServiceDiscoveryIteration {
             endpoint_source: endpoint_source.clone(),
@@ -483,7 +486,12 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
             active_endpoints_gauge: active_endpoints_gauge.clone(),
         };
 
-        discovery::run_discovery_loop(interval, BackoffConfig::default(), iteration)
+        discovery::run_discovery_loop(
+            interval,
+            BackoffConfig::default(),
+            collector_transition_notify,
+            iteration,
+        )
     });
 
     tokio::select! {

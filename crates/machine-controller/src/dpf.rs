@@ -18,6 +18,7 @@
 //! DPF SDK trait abstraction for testability.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,10 +31,10 @@ use carbide_dpf::{
     DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository, ResourceLabeler,
     node_id_from_dpu_node_cr_name,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, ManagedHostStateSnapshot};
 use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKind};
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
@@ -50,7 +51,8 @@ const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
 /// carbide-controlled. Propagates to the DPU CR.
 const CONTROLLED_DEVICE_LABEL: &str = "carbide.nvidia.com/controlled.device";
 
-/// Label populated with the host BMC address on both DPUDevice and DPUNode resources.
+/// Host BMC address on DPUDevice and DPUNode resources.
+/// IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens.
 pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 
 /// Trait for DPF SDK operations used by Carbide.
@@ -93,6 +95,24 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         node_name: &str,
     ) -> Result<DpuPhase, DpfError>;
 
+    /// Read every requested DPU phase only when one deployment owns the full
+    /// set and each Ready DPU matches its flavor and provisioning source.
+    async fn get_dpu_phases_for_deployment_type(
+        &self,
+        dpu_device_names: &[String],
+        node_name: &str,
+        deployment_type: DpuDeploymentType,
+    ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError>;
+
+    /// Delete source deployment DPU CRs while preserving target replacements.
+    async fn delete_source_dpus_for_deployment_migration(
+        &self,
+        dpu_device_names: &[String],
+        node_name: &str,
+        source_deployment_type: DpuDeploymentType,
+        target_deployment_type: DpuDeploymentType,
+    ) -> Result<(), DpfError>;
+
     /// Check if a DPU node is waiting for external reboot.
     async fn is_reboot_required(&self, node_name: &str) -> Result<bool, DpfError>;
 
@@ -105,7 +125,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     /// profile. This returns `Err` when the DMI product name is absent.
     fn deployment_type_for_dpu(
         &self,
-        dpu: &Machine,
+        dpu: &DpuMachine,
         astra_nics: bool,
     ) -> Result<DpuDeploymentType, DpfError>;
 
@@ -116,6 +136,17 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         node_name: &str,
         deployment_type: DpuDeploymentType,
     ) -> Result<bool, DpfError>;
+
+    /// Atomically moves a DPUNode from one deployment selector to another.
+    ///
+    /// A completed transfer does nothing, while a node matching neither selector
+    /// is rejected.
+    async fn transfer_dpu_node_deployment_labels(
+        &self,
+        node_name: &str,
+        source_deployment_type: DpuDeploymentType,
+        target_deployment_type: DpuDeploymentType,
+    ) -> Result<(), DpfError>;
 
     /// Curated snapshot of all DPF CRs related to one host (DPUNode +
     /// DPUDevices + DPUs). `node_name` is the full DPUNode CR name.
@@ -271,7 +302,10 @@ impl ResourceLabeler for CarbideDPFLabeler {
     fn device_labels(&self, info: &DpuDeviceInfo) -> BTreeMap<String, String> {
         BTreeMap::from([
             (CONTROLLED_DEVICE_LABEL.to_string(), "true".to_string()),
-            (HOST_BMC_IP_LABEL.to_string(), info.host_bmc_ip.to_string()),
+            (
+                HOST_BMC_IP_LABEL.to_string(),
+                host_bmc_ip_label_value(info.host_bmc_ip),
+            ),
             (
                 "carbide.nvidia.com/is-primary-dpu".to_string(),
                 info.is_primary.to_string(),
@@ -305,11 +339,25 @@ impl ResourceLabeler for CarbideDPFLabeler {
     }
 
     fn node_context_labels(&self, info: &DpuNodeInfo) -> BTreeMap<String, String> {
-        BTreeMap::from([(HOST_BMC_IP_LABEL.to_string(), info.host_bmc_ip.to_string())])
+        BTreeMap::from([(
+            HOST_BMC_IP_LABEL.to_string(),
+            host_bmc_ip_label_value(info.host_bmc_ip),
+        )])
     }
 
     fn dpu_label_selector(&self) -> Option<String> {
         Some(format!("{CONTROLLED_DEVICE_LABEL}=true"))
+    }
+}
+
+fn host_bmc_ip_label_value(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        // Kubernetes labels cannot contain colons or start/end with a hyphen.
+        IpAddr::V6(ip) => ip
+            .segments()
+            .map(|segment| format!("{segment:04x}"))
+            .join("-"),
     }
 }
 
@@ -324,16 +372,19 @@ impl ResourceLabeler for CarbideDPFLabeler {
 pub struct CarbideBmcPasswordProvider {
     credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
     db_pool: sqlx::PgPool,
+    local_v0_authoritative: bool,
 }
 
 impl CarbideBmcPasswordProvider {
     pub fn new(
         credential_reader: Arc<dyn carbide_secrets::credentials::CredentialReader>,
         db_pool: sqlx::PgPool,
+        local_v0_authoritative: bool,
     ) -> Self {
         Self {
             credential_reader,
             db_pool,
+            local_v0_authoritative,
         }
     }
 
@@ -376,19 +427,85 @@ impl CarbideBmcPasswordProvider {
     }
 }
 
+fn require_nonempty_bmc_password(
+    password: String,
+    local_v0_authoritative: bool,
+) -> Result<String, DpfError> {
+    if password.is_empty() {
+        let message = "site-wide BMC root credential is empty".to_string();
+        if local_v0_authoritative {
+            Err(DpfError::LocalBmcPasswordSourceUnavailable(message))
+        } else {
+            Err(DpfError::BmcPasswordSourceUnavailable(message))
+        }
+    } else {
+        Ok(password)
+    }
+}
+
+async fn classify_unresolved_rotation_target(
+    credential_reader: &dyn carbide_secrets::credentials::CredentialReader,
+    error: DpfError,
+    local_v0_authoritative: bool,
+) -> DpfError {
+    use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+
+    if !local_v0_authoritative {
+        return error;
+    }
+
+    let v0_key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    match credential_reader.get_credentials(&v0_key).await {
+        Ok(Some(Credentials::UsernamePassword { password, .. })) if !password.is_empty() => error,
+        Ok(_) | Err(carbide_secrets::SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+            DpfError::LocalBmcPasswordSourceUnavailable(format!(
+                "cannot resolve the current site-wide BMC root and authoritative local version 0 is unavailable: {error}"
+            ))
+        }
+        Err(source_error) => DpfError::LocalBmcPasswordSourceUnavailable(format!(
+            "cannot resolve the current site-wide BMC root or verify authoritative local version 0: rotation target error: {error}; local source error: {source_error}"
+        )),
+    }
+}
+
 #[async_trait]
 impl BmcPasswordProvider for CarbideBmcPasswordProvider {
     async fn get_bmc_password(&self) -> Result<String, DpfError> {
         use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-        let version = self.current_sitewide_bmc_version().await?;
+        let version = match self.current_sitewide_bmc_version().await {
+            Ok(version) => version,
+            Err(error) => {
+                return Err(classify_unresolved_rotation_target(
+                    self.credential_reader.as_ref(),
+                    error,
+                    self.local_v0_authoritative,
+                )
+                .await);
+            }
+        };
         let key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::site_wide_root(version),
         };
         match self.credential_reader.get_credentials(&key).await {
-            Ok(Some(Credentials::UsernamePassword { password, .. })) => Ok(password),
-            Ok(_) => Err(DpfError::InvalidState(
-                "Site wide BMC root credentials not set".into(),
+            Ok(Some(Credentials::UsernamePassword { password, .. })) => {
+                require_nonempty_bmc_password(password, version == 0 && self.local_v0_authoritative)
+            }
+            Ok(None) => Err(DpfError::BmcPasswordSourceUnavailable(
+                "site-wide BMC root credential is not available from the configured sources"
+                    .to_string(),
             )),
+            Err(carbide_secrets::SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+                Err(DpfError::LocalBmcPasswordSourceUnavailable(
+                    "local site-wide BMC root version 0 is not available".to_string(),
+                ))
+            }
+            Err(error) if version == 0 && self.local_v0_authoritative => {
+                Err(DpfError::LocalBmcPasswordSourceUnavailable(format!(
+                    "failed to read authoritative local site-wide BMC root version 0: {error}"
+                )))
+            }
             Err(e) => Err(DpfError::InvalidState(format!(
                 "Failed to read BMC credentials: {e}"
             ))),
@@ -499,7 +616,7 @@ impl DpfSdkOps {
 /// Records that a host owes `kind`, returning the stored action.
 async fn record_pending_action(
     db_pool: &PgPool,
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     kind: MachinePendingActionKind,
 ) -> Result<MachinePendingAction, DpfError> {
     let mut conn = db_pool.acquire().await.map_err(|e| {
@@ -538,7 +655,7 @@ async fn enqueue_host(
         let mut conn = db_pool.acquire().await.map_err(|e| {
             DpfError::InvalidState(format!("Failed to acquire database connection: {e}"))
         })?;
-        db::machine_topology::find_machine_id_by_bmc_mac(&mut conn, bmc_mac)
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut conn, bmc_mac)
             .await
             .map_err(|e| {
                 DpfError::InvalidState(format!("DB error looking up host by BMC MAC: {e}"))
@@ -646,6 +763,34 @@ impl DpfOperations for DpfSdkOps {
         self.sdk.get_dpu_phase(dpu_device_name, node_name).await
     }
 
+    async fn get_dpu_phases_for_deployment_type(
+        &self,
+        dpu_device_names: &[String],
+        node_name: &str,
+        deployment_type: DpuDeploymentType,
+    ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError> {
+        self.sdk
+            .get_dpu_phases_for_deployment_type(dpu_device_names, node_name, deployment_type)
+            .await
+    }
+
+    async fn delete_source_dpus_for_deployment_migration(
+        &self,
+        dpu_device_names: &[String],
+        node_name: &str,
+        source_deployment_type: DpuDeploymentType,
+        target_deployment_type: DpuDeploymentType,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_source_dpus_for_deployment_migration(
+                dpu_device_names,
+                node_name,
+                source_deployment_type,
+                target_deployment_type,
+            )
+            .await
+    }
+
     async fn is_reboot_required(&self, node_name: &str) -> Result<bool, DpfError> {
         self.sdk.is_reboot_required(node_name).await
     }
@@ -656,7 +801,7 @@ impl DpfOperations for DpfSdkOps {
 
     fn deployment_type_for_dpu(
         &self,
-        dpu: &Machine,
+        dpu: &DpuMachine,
         astra_nics: bool,
     ) -> Result<DpuDeploymentType, DpfError> {
         let product_name = dpu
@@ -706,6 +851,21 @@ impl DpfOperations for DpfSdkOps {
             .await
     }
 
+    async fn transfer_dpu_node_deployment_labels(
+        &self,
+        node_name: &str,
+        source_deployment_type: DpuDeploymentType,
+        target_deployment_type: DpuDeploymentType,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .transfer_dpu_node_deployment_labels(
+                node_name,
+                source_deployment_type,
+                target_deployment_type,
+            )
+            .await
+    }
+
     async fn snapshot_host(&self, node_name: &str) -> Result<HostDpfSnapshot, DpfError> {
         self.sdk.snapshot_host(node_name).await
     }
@@ -744,7 +904,7 @@ impl DpfOperations for DpfSdkOps {
                 );
                 continue;
             };
-            let dpu_machine_id: MachineId = match machine_id_str.parse() {
+            let dpu_machine_id: DpuMachineId = match machine_id_str.parse() {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(
@@ -806,5 +966,95 @@ impl DpfOperations for DpfSdkOps {
         dpu_device_name: &str,
     ) -> Result<BTreeMap<String, String>, DpfError> {
         self.sdk.get_dpu_device_node_labels(dpu_device_name).await
+    }
+}
+
+#[cfg(test)]
+mod bmc_password_tests {
+    use carbide_secrets::MemoryCredentialStore;
+    use carbide_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
+
+    use super::*;
+
+    #[test]
+    fn empty_password_preserves_local_v0_source_policy() {
+        assert!(matches!(
+            require_nonempty_bmc_password(String::new(), true),
+            Err(DpfError::LocalBmcPasswordSourceUnavailable(_))
+        ));
+        assert!(matches!(
+            require_nonempty_bmc_password(String::new(), false),
+            Err(DpfError::BmcPasswordSourceUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unresolved_target_fails_closed_only_when_local_v0_is_unavailable() {
+        let store = MemoryCredentialStore::default();
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&store, error, true).await,
+            DpfError::LocalBmcPasswordSourceUnavailable(_)
+        ));
+
+        let key = CredentialKey::BmcCredentials {
+            credential_type: carbide_secrets::credentials::BmcCredentialType::SiteWideRoot,
+        };
+        store
+            .set_credentials(&key, &Credentials::new("root", "local-password"))
+            .await
+            .expect("seed local v0");
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&store, error, true).await,
+            DpfError::InvalidState(_)
+        ));
+
+        let empty_store = MemoryCredentialStore::default();
+        let error = DpfError::InvalidState("rotation table unavailable".to_string());
+        assert!(matches!(
+            classify_unresolved_rotation_target(&empty_store, error, false).await,
+            DpfError::InvalidState(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn host_bmc_ip_labels_preserve_ipv4_and_encode_ipv6() {
+        let labeler = CarbideDPFLabeler::new("test/deployment".to_string());
+        for (address, expected) in [
+            ("192.0.2.10", "192.0.2.10"),
+            ("::1", "0000-0000-0000-0000-0000-0000-0000-0001"),
+            ("2001:db8::", "2001-0db8-0000-0000-0000-0000-0000-0000"),
+        ] {
+            let host_bmc_ip = address.parse().unwrap();
+            let device = DpuDeviceInfo {
+                device_id: "device-1".to_string(),
+                dpu_bmc_ip: "192.0.2.20".parse().unwrap(),
+                host_bmc_ip,
+                serial_number: "SN1".to_string(),
+                dpu_machine_id: "machine-1".to_string(),
+                is_primary: true,
+            };
+            let node = DpuNodeInfo {
+                node_id: "node-1".to_string(),
+                host_bmc_ip,
+                device_ids: vec![device.device_id.clone()],
+                deployment_type: DpuDeploymentType::Bf3,
+            };
+            assert_eq!(labeler.device_labels(&device)[HOST_BMC_IP_LABEL], expected);
+            assert_eq!(
+                labeler.node_context_labels(&node)[HOST_BMC_IP_LABEL],
+                expected
+            );
+            assert_eq!(
+                expected.replace('-', ":").parse::<IpAddr>().unwrap(),
+                host_bmc_ip
+            );
+        }
     }
 }

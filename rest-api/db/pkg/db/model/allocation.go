@@ -8,10 +8,13 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -203,20 +206,17 @@ type AllocationDAO interface {
 type AllocationSQLDAO struct {
 	dbSession *db.Session
 	AllocationDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new Allocation from the given parameters
 // The returned Allocation will not have any related structs (InfrastructureProvider/Tenant/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input AllocationCreateInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input AllocationCreateInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.CreateFromParams")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-		asd.tracerSpan.SetAttribute(aDAOSpan, "name", input.Name)
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.CreateFromParams")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("name", input.Name))
 
 	a := &Allocation{
 		ID:                       uuid.New(),
@@ -245,13 +245,11 @@ func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input Allocat
 // GetByID returns a Allocation by ID
 // includedRelation are a subset of "InfrastructureProvider", "Tenant", "Site"
 // returns db.ErrDoesNotExist error if the record is not found
-func (asd AllocationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Allocation, error) {
+func (asd AllocationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetByID")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-		asd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.GetByID")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", id.String()))
 
 	a := &Allocation{}
 
@@ -272,10 +270,10 @@ func (asd AllocationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 	return a, nil
 }
 
-func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, query *bun.SelectQuery, allocationDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, query *bun.SelectQuery, allocationDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.Name != nil {
 		query = query.Where("a.name = ?", *filter.Name)
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "name", *filter.Name)
+		cotel.SetAttribute(allocationDAOSpan, attribute.String("name", *filter.Name))
 	}
 
 	if filter.InfrastructureProviderIDs != nil {
@@ -284,7 +282,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 		} else {
 			query = query.Where("a.infrastructure_provider_id IN (?)", bun.In(filter.InfrastructureProviderIDs))
 		}
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "infrastructure_provider_ids", filter.InfrastructureProviderIDs)
 	}
 
 	if filter.TenantIDs != nil {
@@ -293,7 +290,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 		} else {
 			query = query.Where("a.tenant_id IN (?)", bun.In(filter.TenantIDs))
 		}
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 
 	if filter.SiteIDs != nil {
@@ -302,7 +298,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 		} else {
 			query = query.Where("a.site_id IN (?)", bun.In(filter.SiteIDs))
 		}
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "site_id", filter.SiteIDs)
 	}
 
 	if len(filter.ResourceTypes) > 0 || len(filter.ResourceTypeIDs) > 0 || len(filter.ConstraintTypes) > 0 || len(filter.ConstraintValues) > 0 {
@@ -313,7 +308,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 			} else {
 				query = query.Where("ac.resource_type IN (?)", bun.In(filter.ResourceTypes))
 			}
-			asd.tracerSpan.SetAttribute(allocationDAOSpan, "resource_type", filter.ResourceTypes)
 		}
 		if len(filter.ResourceTypeIDs) > 0 {
 			if len(filter.ResourceTypeIDs) == 1 {
@@ -321,7 +315,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 			} else {
 				query = query.Where("ac.resource_type_id IN (?)", bun.In(filter.ResourceTypeIDs))
 			}
-			asd.tracerSpan.SetAttribute(allocationDAOSpan, "resource_type_id", filter.ResourceTypeIDs)
 		}
 		if len(filter.ConstraintTypes) > 0 {
 			if len(filter.ConstraintTypes) == 1 {
@@ -329,7 +322,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 			} else {
 				query = query.Where("ac.constraint_type IN (?)", bun.In(filter.ConstraintTypes))
 			}
-			asd.tracerSpan.SetAttribute(allocationDAOSpan, "constraint_type", filter.ConstraintTypes)
 		}
 		if len(filter.ConstraintValues) > 0 {
 			if len(filter.ConstraintValues) == 1 {
@@ -337,7 +329,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 			} else {
 				query = query.Where("ac.constraint_value IN (?)", bun.In(filter.ConstraintValues))
 			}
-			asd.tracerSpan.SetAttribute(allocationDAOSpan, "constraint_value", filter.ConstraintValues)
 		}
 	}
 
@@ -347,7 +338,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 		} else {
 			query = query.Where("a.status IN (?)", bun.In(filter.Statuses))
 		}
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "status", filter.Statuses)
 	}
 
 	if filter.AllocationIDs != nil {
@@ -356,7 +346,6 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 		} else {
 			query = query.Where("a.id IN (?)", bun.In(filter.AllocationIDs))
 		}
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "id", filter.AllocationIDs)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -368,7 +357,7 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 				WhereOr("a.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("a.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		asd.tracerSpan.SetAttribute(allocationDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(allocationDAOSpan, attribute.String("search_query", searchQuery))
 	}
 	return query, nil
 }
@@ -378,12 +367,10 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in AllocationOrderByDefault in ascending order
-func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AllocationFilterInput, page paginator.PageInput, includeRelations []string) ([]Allocation, int, error) {
+func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AllocationFilterInput, page paginator.PageInput, includeRelations []string) (_ []Allocation, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, activityDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetAll")
-	if activityDAOSpan != nil {
-		defer activityDAOSpan.End()
-	}
+	ctx, activityDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.GetAll")
+	defer func() { cotel.EndSpan(activityDAOSpan, retErr) }()
 
 	var allocations []Allocation
 
@@ -457,14 +444,11 @@ func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Alloca
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationUpdateInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationUpdateInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.Update")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		asd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationID.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.Update")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", input.AllocationID.String()))
 
 	a := &Allocation{
 		ID: input.AllocationID,
@@ -475,34 +459,32 @@ func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input Allocat
 	if input.Name != nil {
 		a.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(aDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		a.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "description", *input.Description)
-
+		cotel.SetAttribute(aDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.InfrastructureProviderID != nil {
 		a.InfrastructureProviderID = *input.InfrastructureProviderID
 		updatedFields = append(updatedFields, "infrastructure_provider_id")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "infrastructure_provider_id", input.InfrastructureProviderID.String())
+		cotel.SetAttribute(aDAOSpan, attribute.String("infrastructure_provider_id", input.InfrastructureProviderID.String()))
 	}
 	if input.TenantID != nil {
 		a.TenantID = *input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(aDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 	if input.SiteID != nil {
 		a.SiteID = *input.SiteID
 		updatedFields = append(updatedFields, "site_id")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "site_id", input.SiteID.String())
-
+		cotel.SetAttribute(aDAOSpan, attribute.String("site_id", input.SiteID.String()))
 	}
 	if input.Status != nil {
 		a.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		asd.tracerSpan.SetAttribute(aDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(aDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -526,12 +508,10 @@ func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input Allocat
 // parameters displayName, description, tenantID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is requireds that
 // this must be within a transaction
-func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationClearInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationClearInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.ClearFromParams")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.ClearFromParams")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
 
 	a := &Allocation{
 		ID: input.AllocationID,
@@ -563,14 +543,11 @@ func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Allocati
 // Delete deletes an Allocation by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (asd AllocationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (asd AllocationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.DeleteByID")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		asd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.DeleteByID")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", id.String()))
 
 	it := &Allocation{
 		ID: id,
@@ -586,10 +563,8 @@ func (asd AllocationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID)
 
 func (asd AllocationSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter AllocationFilterInput) (count int, err error) {
 	// Create a child span and set the attributes for current request
-	ctx, allocationDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetCount")
-	if allocationDAOSpan != nil {
-		defer allocationDAOSpan.End()
-	}
+	ctx, allocationDAOSpan := cotel.StartSpan(ctx, "AllocationDAO.GetCount")
+	defer func() { cotel.EndSpan(allocationDAOSpan, err) }()
 
 	query := db.GetIDB(tx, asd.dbSession).NewSelect().Model((*Allocation)(nil))
 	query, err = asd.setQueryWithFilter(filter, query, allocationDAOSpan)
@@ -603,7 +578,6 @@ func (asd AllocationSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Allo
 // NewAllocationDAO returns a new AllocationDAO
 func NewAllocationDAO(dbSession *db.Session) AllocationDAO {
 	return &AllocationSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

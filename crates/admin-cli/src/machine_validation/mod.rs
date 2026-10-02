@@ -16,7 +16,9 @@
  */
 
 mod external_config;
+mod logs;
 mod on_demand;
+mod plugins;
 mod results;
 mod runs;
 mod tests_cmd;
@@ -32,6 +34,12 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "External config", subcommand, visible_alias = "mve")]
     ExternalConfig(external_config::Args),
+    #[clap(
+        about = "Show or follow Machine Validation attempt logs",
+        subcommand,
+        override_usage = "nico-admin-cli machine-validation logs [--extended] [--sort-by <SORT_BY>] [-h|--help] <subcommands>"
+    )]
+    Logs(logs::Args),
     #[clap(about = "Ondemand Validation", subcommand, visible_alias = "mvo")]
     OnDemand(on_demand::Args),
     #[clap(
@@ -48,4 +56,6 @@ pub(crate) enum Cmd {
     Runs(runs::Args),
     #[clap(about = "Supported Tests ", subcommand, visible_alias = "mvs")]
     Tests(tests_cmd::Args),
+    #[clap(about = "Manage OCI Machine Validation plugins", subcommand)]
+    Plugins(plugins::Args),
 }

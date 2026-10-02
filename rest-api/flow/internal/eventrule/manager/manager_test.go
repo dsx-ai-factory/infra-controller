@@ -5,7 +5,9 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
@@ -13,6 +15,8 @@ import (
 	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/memory"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/google/uuid"
@@ -31,10 +35,15 @@ func TestNewArrangesBuiltInRules(t *testing.T) {
 
 func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
 	ctx := context.Background()
-	manager, err := New(testManagerConfig())
+	rackID := uuid.New()
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+	}
+	manager, err := New(config)
 	require.NoError(t, err)
 
-	input := testRuleCreate("other.event", "new rule")
+	input := testRuleCreate(leakage.TypeHardwareLeakDetected, "new rule")
 	created, err := manager.Create(ctx, input)
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, created.ID)
@@ -51,12 +60,31 @@ func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
 		require.Equal(t, id, rule.ID)
 	}
 
-	rules, err := manager.List(ctx, eventrule.RuleFilter{})
+	rules, err := manager.List(ctx, eventrule.RuleListRequest{Limit: 100})
 	require.NoError(t, err)
-	require.Len(t, rules, 2)
+	require.Equal(t, 2, rules.Total)
+	require.Len(t, rules.Rules, 2)
+	require.Equal(t, eventrule.RuleOriginPersisted, rules.Rules[0].Origin)
+	require.Equal(t, eventrule.RuleOriginBuiltIn, rules.Rules[1].Origin)
+
+	secondPage, err := manager.List(ctx, eventrule.RuleListRequest{Offset: 1, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 2, secondPage.Total)
+	require.Len(t, secondPage.Rules, 1)
+	require.Equal(t, eventrule.RuleOriginBuiltIn, secondPage.Rules[0].Origin)
 
 	_, err = manager.Create(ctx, eventrule.RuleCreate{})
 	require.Error(t, err)
+	_, err = manager.Create(ctx, testRuleCreate("unsupported.event", "unsupported"))
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(t, err, `unsupported event type "unsupported.event"`)
+
+	unsupportedEventType := eventrule.Type("unsupported.event")
+	_, err = manager.List(ctx, eventrule.RuleListRequest{
+		Filter: eventrule.RuleFilter{EventType: &unsupportedEventType},
+		Limit:  100,
+	})
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
 
 	require.Error(t, manager.UpdateMetadata(
 		ctx,
@@ -91,7 +119,7 @@ func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, updated.Enabled)
 
-	scope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}
+	scope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: rackID}
 	binding, err := manager.Bind(ctx, created.ID, scope)
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, binding.ID)
@@ -100,11 +128,143 @@ func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
 	require.Equal(t, scope, binding.Scope)
 }
 
+func TestManager_SetEnabled(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	config := testManagerConfig()
+	config.Store = memory.NewWithClock(func() time.Time { return now })
+	manager, err := New(config)
+	require.NoError(t, err)
+	rule, err := manager.Create(
+		context.Background(),
+		testRuleCreate(leakage.TypeHardwareLeakDetected, "test rule"),
+	)
+	require.NoError(t, err)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, true))
+	enabled, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.True(t, enabled.Enabled)
+	require.Equal(t, now, enabled.UpdatedAt)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, true))
+	unchanged, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.Equal(t, enabled.UpdatedAt, unchanged.UpdatedAt)
+
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, false))
+	disabled, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.False(t, disabled.Enabled)
+	require.Equal(t, now, disabled.UpdatedAt)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, false))
+	unchanged, err = manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.Equal(t, disabled.UpdatedAt, unchanged.UpdatedAt)
+}
+
+func TestManager_Bind(t *testing.T) {
+	ctx := context.Background()
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	rule, err := manager.Create(
+		ctx,
+		testRuleCreate(leakage.TypeHardwareLeakDetected, "rack binding"),
+	)
+	require.NoError(t, err)
+
+	missingRackID := uuid.New()
+	binding, err := manager.Bind(ctx, rule.ID, eventrule.Scope{
+		Type: eventrule.ScopeTypeRack,
+		ID:   missingRackID,
+	})
+
+	require.Nil(t, binding)
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(
+		t,
+		err,
+		fmt.Sprintf("rack scope id %s does not identify an existing rack", missingRackID),
+	)
+}
+
+func TestManager_GetEffective(t *testing.T) {
+	rackID := uuid.New()
+	componentID := uuid.New()
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+		component: &component.Component{
+			Info:   deviceinfo.DeviceInfo{ID: componentID},
+			Type:   devicetypes.ComponentTypeCompute,
+			RackID: rackID,
+		},
+	}
+	manager, err := New(config)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		target eventrule.ResourceIdentity
+	}{
+		{
+			name: "rack target",
+			target: eventrule.ResourceIdentity{
+				Kind: eventrule.ResourceKindRack,
+				ID:   rackID,
+			},
+		},
+		{
+			name: "component target",
+			target: eventrule.ResourceIdentity{
+				Kind: eventrule.ResourceKindComponent,
+				ID:   componentID,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule, err := manager.GetEffective(
+				context.Background(),
+				leakage.TypeHardwareLeakDetected,
+				test.target,
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, leakage.DefaultRule().ID, rule.ID)
+		})
+	}
+
+	_, err = manager.GetEffective(
+		context.Background(),
+		leakage.TypeHardwareLeakDetected,
+		eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: uuid.New()},
+	)
+	require.ErrorIs(t, err, eventrule.ErrRuleTargetNotFound)
+
+	_, err = manager.GetEffective(
+		context.Background(),
+		"unsupported.event",
+		eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: rackID},
+	)
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(t, err, `unsupported event type "unsupported.event"`)
+}
+
 func TestRuleResolver_GetEffective(t *testing.T) {
 	ctx := context.Background()
 	eventType := leakage.TypeHardwareLeakDetected
 	rackID := uuid.New()
-	manager, err := New(testManagerConfig())
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+	}
+	manager, err := New(config)
 	require.NoError(t, err)
 	resolver := &ruleResolver{builtIns: manager.builtIns, store: manager.store}
 
@@ -186,11 +346,77 @@ func TestManagerRejectsMissingIDs(t *testing.T) {
 		eventrule.Scope{Type: eventrule.ScopeTypeSite},
 	)
 	require.ErrorContains(t, err, "event rule id is required")
-	require.ErrorContains(
-		t,
-		manager.Unbind(context.Background(), uuid.Nil),
-		"event rule binding id is required",
-	)
+}
+
+func TestManager_Unbind(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		scope     eventrule.Scope
+		wantIs    error
+	}{
+		"invalid event type": {
+			eventType: "Invalid",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"invalid scope": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"unsupported event type": {
+			eventType: "unsupported.event",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"missing binding": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrBindingNotFound,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := manager.Unbind(context.Background(), test.eventType, test.scope)
+			require.ErrorIs(t, err, test.wantIs)
+		})
+	}
+}
+
+func TestManager_GetBindingForScope(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		scope     eventrule.Scope
+	}{
+		"invalid event type": {
+			eventType: "Invalid",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+		},
+		"invalid scope": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			binding, err := manager.GetBindingForScope(
+				context.Background(),
+				test.eventType,
+				test.scope,
+			)
+
+			require.Nil(t, binding)
+			require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+		})
+	}
 }
 
 func TestManagerRejectsBuiltInRuleMutations(t *testing.T) {
@@ -265,7 +491,7 @@ func TestManagerValidatesConfiguredActionExecutors(t *testing.T) {
 
 			_, err = manager.Create(context.Background(), eventrule.RuleCreate{
 				Metadata:  eventrule.RuleMetadata{Name: "alert"},
-				EventType: "test.event",
+				EventType: leakage.TypeHardwareLeakDetected,
 				Policy: eventrule.Policy{Actions: []eventrule.Action{
 					{
 						Name: "send",
@@ -278,6 +504,7 @@ func TestManagerValidatesConfiguredActionExecutors(t *testing.T) {
 			})
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
+				require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
 				return
 			}
 
@@ -312,13 +539,20 @@ func testRuleCreate(
 	}
 }
 
-type testInventory struct{}
+type testInventory struct {
+	component *component.Component
+	rack      *rack.Rack
+}
 
-func (testInventory) GetComponentByID(
-	context.Context,
-	uuid.UUID,
+func (i testInventory) GetComponentByID(
+	_ context.Context,
+	id uuid.UUID,
 ) (*component.Component, error) {
-	return nil, nil
+	if i.component == nil || i.component.Info.ID != id {
+		return nil, nil
+	}
+
+	return i.component, nil
 }
 
 func (testInventory) GetComponentsByExternalIDs(
@@ -328,12 +562,16 @@ func (testInventory) GetComponentsByExternalIDs(
 	return nil, nil
 }
 
-func (testInventory) GetRackByIdentifier(
-	context.Context,
-	identifier.Identifier,
-	bool,
+func (i testInventory) GetRackByIdentifier(
+	_ context.Context,
+	ref identifier.Identifier,
+	_ bool,
 ) (*rack.Rack, error) {
-	return nil, nil
+	if i.rack == nil || i.rack.Info.ID != ref.ID {
+		return nil, nil
+	}
+
+	return i.rack, nil
 }
 
 type testAlertSender struct{}

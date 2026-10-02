@@ -54,6 +54,7 @@ carbide-test-harness = { path = "../test-harness" }
 state-controller = { path = "../state-controller", features = ["test-support"] }
 chrono = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }

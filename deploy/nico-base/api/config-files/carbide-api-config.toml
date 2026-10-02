@@ -21,8 +21,11 @@
 # for the respective environment
 
 listen = "[::]:1079"
+# Required: the deployment's readinessProbe and livenessProbe target this
+# port. Removing metrics_endpoint leaves the pod permanently un-Ready.
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
+ssh_console_url = "https://nico-ssh-console-rs.nico-system.svc.cluster.local:1079"
 asn = 4294967000
 initial_dpu_agent_upgrade_policy = "up_only"
 max_concurrent_machine_updates = 10
@@ -34,7 +37,7 @@ bypass_rbac = true
 [dpu_config]
 dpu_nic_firmware_initial_update_enabled = false
 dpu_nic_firmware_reprovision_update_enabled = true
-dpu_nic_firmware_update_versions = ["24.47.2682", "32.47.2682"]
+dpu_nic_firmware_update_versions = ["24.47.3576", "32.47.3576"]
 
 [host_health]
 hardware_health_reports = "MonitorOnly"
@@ -91,14 +94,14 @@ failure_retry_time = "90m"
 vpc_prefix_drain_time = "5m"
 
 [network_security_group]
-# Controls whether additional config to support
-# stateful/reflexive ACLs will be inserted into
-# the HBN config.
-# This is expected to remain off at least until all sites
-# are running HBN 2.3 or higher.  The reflexive-acl
-# implementation in earlier versions exposes a way for
-# users to accidentally permit-all in both directions
-# with a single rule in one direction.
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
+# Earlier reflexive-ACL implementations allow one directional rule
+# to unintentionally permit traffic in both directions.
 stateful_acls_enabled = false
 
 # Maximum number of security groups rules
@@ -119,12 +122,20 @@ test_selection_mode = "EnableAll"
 
 # Optional per-site mTLS certificate bindings:
 # - [switch_state_controller].switch_mtls_services applies to switch state
-#   controller operations and direct ComponentConfigureSwitchCertificate RPC
-#   calls. It defaults to all four SwitchMtlsService values.
+#   controller and direct ComponentConfigureSwitchCertificate operations. Switch
+#   controller operations omit primary-only cluster apps on non-primary switches;
+#   direct RPC operations are unchanged.
+#   Rack ConfigureNmxCluster uses the effective service list for primary
+#   nmx-telemetry, but requires an explicit entry for gNMI.
+#   Switch and direct operations default to all four SwitchMtlsService values.
 # - [rack_state_controller].nmx_cluster_switch_mtls_services is accepted and
-#   ignored. Rack maintenance does not configure switch certificates.
-# A non-empty switch_mtls_services list replaces its default. An omitted or
-# empty list uses the default.
-# Service selection does not enable the underlying service. See
+#   ignored. Rack ConfigureNmxCluster uses a fixed nvue_api binding before RMS
+#   V2 selects the primary and binds NMX-C on that switch. NICo binds
+#   nmx-telemetry afterward when selected by the effective service list.
+# A non-empty switch_mtls_services list replaces the switch/direct default.
+# Omission or an empty list uses that default, including primary nmx-telemetry
+# but excluding rack-wide gNMI.
+# Cluster application bindings can enable cluster state on the target switch.
+# See
 # docs/architecture/state_machines/switch_configure_certificate.md for service
 # values and workflow scope.

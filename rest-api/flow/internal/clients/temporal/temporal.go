@@ -8,10 +8,11 @@ import (
 	"os"
 	"time"
 
+	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/converter"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 )
 
 const (
@@ -20,9 +21,10 @@ const (
 )
 
 type Client struct {
-	config  Config
-	options client.Options
-	client  client.Client
+	config     Config
+	options    client.Options
+	client     client.Client
+	dynamicTLS *dynamictls.DynTLSCfg
 }
 
 type Config struct {
@@ -59,7 +61,7 @@ func New(c Config) (*Client, error) {
 		return nil, err
 	}
 
-	tlsConfig, err := buildTLSConfig(c)
+	tlsConfig, dynamicConfig, err := buildTLSConfig(c)
 	if err != nil {
 		return nil, err
 	}
@@ -72,27 +74,34 @@ func New(c Config) (*Client, error) {
 			KeepAliveTime:    defaultKeepAliveTime,
 			KeepAliveTimeout: defaultKeepAliveTimeout,
 		},
-		DataConverter: converter.NewCompositeDataConverter(
-			converter.NewNilPayloadConverter(),
-			converter.NewByteSlicePayloadConverter(),
-			converter.NewProtoJSONPayloadConverterWithOptions(
-				converter.ProtoJSONPayloadConverterOptions{
-					AllowUnknownFields: true,
-				},
-			),
-			converter.NewProtoPayloadConverter(),
-			converter.NewJSONPayloadConverter(),
-		),
+	}
+	options, err = ctemporal.ConfigureClientOptions(options)
+	if err != nil {
+		if dynamicConfig != nil {
+			dynamicConfig.Close()
+		}
+		return nil, err
 	}
 
 	client, err := client.Dial(options)
 	if err != nil {
+		if dynamicConfig != nil {
+			dynamicConfig.Close()
+		}
 		return nil, err
 	}
 
-	return &Client{config: c, options: options, client: client}, nil
+	return &Client{config: c, options: options, client: client, dynamicTLS: dynamicConfig}, nil
 }
 
 func (c *Client) Client() client.Client {
 	return c.client
+}
+
+// Close closes the Temporal connection and stops certificate refreshes.
+func (c *Client) Close() {
+	c.client.Close()
+	if c.dynamicTLS != nil {
+		c.dynamicTLS.Close()
+	}
 }

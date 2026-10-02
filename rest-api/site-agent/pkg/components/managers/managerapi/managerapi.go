@@ -32,6 +32,7 @@ type ManagerAPI struct {
 	VPC                    VPCInterface
 	VpcPrefix              VpcPrefixInterface
 	VpcPeering             VpcPeeringInterface
+	SpectrumXPartition     SpectrumXPartitionInterface
 	Subnet                 SubnetInterface
 	Instance               InstanceInterface
 	Machine                MachineInterface
@@ -47,6 +48,7 @@ type ManagerAPI struct {
 	ExpectedMachine        ExpectedMachineInterface
 	ExpectedPowerShelf     ExpectedPowerShelfInterface
 	ExpectedRack           ExpectedRackInterface
+	ExpectedRackGroup      ExpectedRackGroupInterface
 	ExpectedSwitch         ExpectedSwitchInterface
 	SKU                    SKUInterface
 	DpuExtensionService    DpuExtensionServiceInterface

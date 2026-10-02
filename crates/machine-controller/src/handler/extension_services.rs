@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use carbide_uuid::extension_service::ExtensionServiceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::Versioned;
 use db::extension_service as db_extension_service;
@@ -38,6 +38,7 @@ use model::instance::status::extension_service::{
 };
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::StateHandlerError;
 
 use crate::dpf::DpfOperations;
@@ -72,37 +73,69 @@ pub(super) async fn get_extension_services_status(
         })
         .collect_vec();
 
-    // Derive network-targeted DPUs once. Kubernetes Pod status can tolerate an
-    // unavailable mapping, but live DPF placement must not proceed without it.
+    // ALL_ACTIVE uses the same network selection as Pod services. Other Helm policies
+    // remain independent of network mapping availability.
     let used_dpus = match mh_snapshot.host_snapshot.get_dpu_device_and_id_mappings() {
         Ok((_, device_to_id_map)) => instance.config.network.get_used_dpus(
             &device_to_id_map,
             mh_snapshot.host_snapshot.primary_attached_dpu_machine_id(),
         ),
-        Err(error)
-            if instance_deleted_at.is_none()
-                && !dpf_service_configs.is_empty()
-                && dpf_sdk.is_some() =>
-        {
-            return Err(StateHandlerError::GenericError(eyre!("{error}")));
+        Err(error) => {
+            tracing::warn!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                instance_id = %instance.id,
+                %error,
+                "cannot resolve network-targeted DPUs for extension services"
+            );
+            Vec::new()
         }
-        Err(_) => vec![],
     };
 
+    let attached_dpus = mh_snapshot
+        .dpu_snapshots
+        .iter()
+        .map(|dpu| dpu.id)
+        .collect_vec();
     let mut observations = instance.observations.extension_services.clone();
 
     if !dpf_service_configs.is_empty()
         && let Some(dpf_sdk) = dpf_sdk
     {
-        let target_dpu_ids = if instance_deleted_at.is_some() {
-            HashSet::new()
-        } else {
-            used_dpus.iter().copied().collect()
-        };
+        let mut target_dpu_ids = HashMap::new();
+        for config in &dpf_service_configs {
+            let Some(policy) = config.dpu_target else {
+                tracing::debug!(service_id = %config.service_id, "missing Helm registration target; resolve migration before placement");
+                continue;
+            };
+            let targets = if instance_deleted_at.is_some() || config.removed.is_some() {
+                Ok(Vec::new())
+            } else {
+                policy.resolve(
+                    &attached_dpus,
+                    mh_snapshot.host_snapshot.primary_attached_dpu_machine_id(),
+                    &used_dpus,
+                )
+            };
+            match targets {
+                Ok(targets) => {
+                    target_dpu_ids.insert(config.service_id, targets.into_iter().collect());
+                }
+                Err(error) => {
+                    tracing::debug!(service_id = %config.service_id, %error, "cannot resolve Helm placement targets")
+                }
+            }
+        }
+
+        // Do not patch unresolved services: an invented empty target set would delete their labels.
+        let resolvable_configs = dpf_service_configs
+            .iter()
+            .copied()
+            .filter(|config| target_dpu_ids.contains_key(&config.service_id))
+            .collect_vec();
         let placement_observations = reconcile_dpf_helm_chart_placement(
             mh_snapshot,
             instance.extension_services_config_version,
-            &dpf_service_configs,
+            &resolvable_configs,
             &target_dpu_ids,
             instance_deleted_at,
             dpf_sdk,
@@ -118,17 +151,6 @@ pub(super) async fn get_extension_services_status(
         }
     }
 
-    let all_dpus = mh_snapshot
-        .dpu_snapshots
-        .iter()
-        .map(|dpu| dpu.id)
-        .collect_vec();
-    let dpf_helm_chart_dpus = if instance_deleted_at.is_some() {
-        all_dpus
-    } else {
-        used_dpus.clone()
-    };
-
     Ok(
         InstanceExtensionServicesStatus::from_config_and_service_type_observations(
             Versioned::new(
@@ -137,7 +159,8 @@ pub(super) async fn get_extension_services_status(
             ),
             &service_types,
             &used_dpus,
-            &dpf_helm_chart_dpus,
+            &attached_dpus,
+            mh_snapshot.host_snapshot.primary_attached_dpu_machine_id(),
             instance_deleted_at,
             &observations,
         ),
@@ -196,11 +219,11 @@ pub(super) async fn reconcile_dpf_helm_chart_placement(
     mh_snapshot: &ManagedHostStateSnapshot,
     extension_services_config_version: config_version::ConfigVersion,
     dpf_service_configs: &[&InstanceExtensionServiceConfig],
-    target_dpu_ids: &HashSet<MachineId>,
+    target_dpu_ids: &HashMap<ExtensionServiceId, HashSet<DpuMachineId>>,
     instance_deleted_at: Option<&DateTime<Utc>>,
     dpf_sdk: &dyn DpfOperations,
     db_pool: &sqlx::PgPool,
-) -> Result<HashMap<MachineId, InstanceExtensionServiceStatusObservation>, StateHandlerError> {
+) -> Result<HashMap<DpuMachineId, InstanceExtensionServiceStatusObservation>, StateHandlerError> {
     if dpf_service_configs.is_empty() {
         return Ok(HashMap::new());
     }
@@ -212,20 +235,28 @@ pub(super) async fn reconcile_dpf_helm_chart_placement(
 
     let mut observations = HashMap::new();
     let mut ignored_non_target_failure_count = 0;
+    let has_removed_services = instance_deleted_at.is_some()
+        || dpf_service_configs
+            .iter()
+            .any(|config| config.removed.is_some());
     for dpu in &mh_snapshot.dpu_snapshots {
-        let is_target = target_dpu_ids.contains(&dpu.id);
-        let is_required = is_target || instance_deleted_at.is_some();
+        let dpu_id = dpu.id;
+        let target_services: HashSet<_> = target_dpu_ids
+            .iter()
+            .filter(|(_, targets)| targets.contains(&dpu_id))
+            .map(|(id, _)| *id)
+            .collect();
+        let is_required = !target_services.is_empty() || has_removed_services;
         let label_reconciliation = match dpu.dpf_id() {
             None => {
                 Err("cannot reconcile DPF helm chart placement: cannot find DPU dpf_id".to_string())
             }
             Some(dpu_device_name) => {
                 let changes =
-                    dpf_helm_chart_placement_label_changes(dpf_service_configs, is_target);
-                let requires_device = is_target
-                    && dpf_service_configs
-                        .iter()
-                        .any(|config| config.removed.is_none());
+                    dpf_helm_chart_placement_label_changes(dpf_service_configs, &target_services);
+                let requires_device = dpf_service_configs.iter().any(|config| {
+                    config.removed.is_none() && target_services.contains(&config.service_id)
+                });
                 match dpf_sdk
                     .merge_dpu_device_node_labels(&dpu_device_name, changes)
                     .await
@@ -268,16 +299,16 @@ pub(super) async fn reconcile_dpf_helm_chart_placement(
         };
 
         let observation = persist_dpf_helm_chart_placement_observation(
-            dpu.id,
+            dpu_id,
             extension_services_config_version,
             dpf_service_configs,
-            is_target,
+            &target_services,
             instance_deleted_at,
             evidence,
             db_pool,
         )
         .await?;
-        observations.insert(dpu.id, observation);
+        observations.insert(dpu_id, observation);
     }
 
     if ignored_non_target_failure_count > 0 {
@@ -310,135 +341,115 @@ enum PlacementEvidence<'a> {
 ///
 /// The write is intentionally per DPU rather than batched at the end of the
 /// pass, so a failure on a later DPU cannot discard the verified results of
-/// DPUs this pass already reconciled.
+/// DPUs this pass already reconciled. A rejected observation invalidates the
+/// pass before the caller can use it for readiness.
 async fn persist_dpf_helm_chart_placement_observation(
-    dpu_id: MachineId,
+    dpu_id: DpuMachineId,
     config_version: config_version::ConfigVersion,
     dpf_service_configs: &[&InstanceExtensionServiceConfig],
-    is_target: bool,
+    target_services: &HashSet<ExtensionServiceId>,
     instance_deleted_at: Option<&DateTime<Utc>>,
     evidence: PlacementEvidence<'_>,
     db_pool: &sqlx::PgPool,
 ) -> Result<InstanceExtensionServiceStatusObservation, StateHandlerError> {
     let observed_at = Utc::now();
-    let observation = dpf_helm_chart_placement_observation(
+    let observation = InstanceExtensionServiceStatusObservation {
         config_version,
-        dpf_service_configs,
-        is_target,
-        instance_deleted_at,
-        evidence,
+        instance_config_version: None,
         observed_at,
-    );
+        extension_service_statuses: dpf_service_configs
+            .iter()
+            .map(|config| {
+                dpf_helm_chart_placement_status(
+                    config,
+                    target_services.contains(&config.service_id),
+                    instance_deleted_at,
+                    evidence,
+                )
+            })
+            .collect(),
+    };
 
     let mut txn = db_pool.begin().await?;
-    let applied = db::machine::update_extension_service_status_observation(
+    db::machine::update_extension_service_status_observation(
         txn.as_mut(),
         &dpu_id,
         ExtensionServiceType::DpfHelmChart,
         &observation,
     )
-    .await?;
+    .await?
+    .check_applied()?;
     txn.commit().await?;
-
-    warn_if_superseded(applied, dpu_id, observed_at);
 
     Ok(observation)
 }
 
-/// A rejected write means another writer stored a newer observation for this
-/// DPU, so the caller is racing a concurrent reconciliation of the same host.
-fn warn_if_superseded(applied: bool, dpu_id: MachineId, observed_at: chrono::DateTime<Utc>) {
-    if !applied {
-        tracing::warn!(
-            dpu_machine_id = %dpu_id,
-            %observed_at,
-            "a newer DPF Helm chart placement observation already exists; discarding this one"
-        );
-    }
-}
-
-/// Builds one DPU's placement observation from the desired attachment and the
-/// evidence gathered for it. `Running` means the placement label is persisted
-/// on the DPUDevice, not that the Helm workload itself is healthy.
-fn dpf_helm_chart_placement_observation(
-    config_version: config_version::ConfigVersion,
-    dpf_service_configs: &[&InstanceExtensionServiceConfig],
+/// Builds one service's placement status on a DPU from the desired attachment
+/// and observed evidence. `Running` means the placement label is persisted on
+/// the DPUDevice, not that the Helm workload itself is healthy.
+fn dpf_helm_chart_placement_status(
+    config: &InstanceExtensionServiceConfig,
     is_target: bool,
     instance_deleted_at: Option<&DateTime<Utc>>,
     evidence: PlacementEvidence<'_>,
-    observed_at: chrono::DateTime<Utc>,
-) -> InstanceExtensionServiceStatusObservation {
-    let extension_service_statuses = dpf_service_configs
-        .iter()
-        .map(|config| {
-            let identity = DpfHelmChartIdentity::from_service_id(config.service_id);
-            let placement_is_desired =
-                instance_deleted_at.is_none() && config.removed.is_none() && is_target;
-            let (overall_state, message) = match evidence {
-                PlacementEvidence::Verified(labels) if placement_is_desired => (
-                    if labels
-                        .get(&identity.placement_label_key)
-                        .is_some_and(|value| value == DPF_HELM_CHART_PLACEMENT_LABEL_VALUE)
-                    {
-                        ExtensionServiceDeploymentStatus::Running
-                    } else {
-                        ExtensionServiceDeploymentStatus::Pending
-                    },
-                    String::new(),
-                ),
-                PlacementEvidence::Verified(labels) => (
-                    if labels.contains_key(&identity.placement_label_key) {
-                        ExtensionServiceDeploymentStatus::Terminating
-                    } else {
-                        ExtensionServiceDeploymentStatus::Terminated
-                    },
-                    String::new(),
-                ),
-                PlacementEvidence::Error(message) => {
-                    (ExtensionServiceDeploymentStatus::Error, message.to_owned())
-                }
-            };
-            ExtensionServiceStatusObservation {
-                service_id: config.service_id,
-                service_type: ExtensionServiceType::DpfHelmChart,
-                service_name: String::new(),
-                version: config.version,
-                removed: config
-                    .removed
-                    .as_ref()
-                    .or(instance_deleted_at)
-                    .map(ToString::to_string),
-                overall_state,
-                components: vec![],
-                message,
-            }
-        })
-        .collect();
-
-    InstanceExtensionServiceStatusObservation {
-        config_version,
-        instance_config_version: None,
-        extension_service_statuses,
-        observed_at,
+) -> ExtensionServiceStatusObservation {
+    let identity = DpfHelmChartIdentity::from_service_id(config.service_id);
+    let removed_at = config.removed.as_ref().or(instance_deleted_at);
+    let placement_is_desired = removed_at.is_none() && is_target;
+    let (overall_state, message) = match evidence {
+        PlacementEvidence::Verified(labels) if placement_is_desired => (
+            if labels
+                .get(&identity.placement_label_key)
+                .is_some_and(|value| value == DPF_HELM_CHART_PLACEMENT_LABEL_VALUE)
+            {
+                ExtensionServiceDeploymentStatus::Running
+            } else {
+                ExtensionServiceDeploymentStatus::Pending
+            },
+            String::new(),
+        ),
+        PlacementEvidence::Verified(labels) => (
+            if labels.contains_key(&identity.placement_label_key) {
+                ExtensionServiceDeploymentStatus::Terminating
+            } else {
+                ExtensionServiceDeploymentStatus::Terminated
+            },
+            String::new(),
+        ),
+        PlacementEvidence::Error(message) => {
+            (ExtensionServiceDeploymentStatus::Error, message.to_owned())
+        }
+    };
+    ExtensionServiceStatusObservation {
+        dpu_target: config.dpu_target,
+        service_id: config.service_id,
+        service_type: ExtensionServiceType::DpfHelmChart,
+        service_name: String::new(),
+        version: config.version,
+        removed: removed_at.map(ToString::to_string),
+        overall_state,
+        components: vec![],
+        message,
     }
 }
 
 /// Builds the NICo-owned label changes for one physical DPU.
 ///
 /// An active DPF Helm chart service is enabled only when this DPU is currently
-/// targeted by the instance network configuration. Removed services, and
+/// selected by the registration policy. Removed services, and
 /// active services on a DPU removed from that target set, are represented by a
 /// `None` value so the DPUDevice merge patch deletes only that service's
 /// placement label.
-pub(super) fn dpf_helm_chart_placement_label_changes(
+fn dpf_helm_chart_placement_label_changes(
     dpf_service_configs: &[&InstanceExtensionServiceConfig],
-    is_target: bool,
+    target_services: &HashSet<ExtensionServiceId>,
 ) -> BTreeMap<String, Option<String>> {
     dpf_service_configs
         .iter()
         .map(|config| {
             let identity = DpfHelmChartIdentity::from_service_id(config.service_id);
-            let value = if config.removed.is_none() && is_target {
+            let value = if config.removed.is_none() && target_services.contains(&config.service_id)
+            {
                 Some(DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_string())
             } else {
                 None
@@ -467,6 +478,14 @@ pub(super) async fn cleanup_terminated_extension_services(
         terminated_extension_services = ?terminated_service_keys,
         "Cleaning up fully terminated extension services from instance config"
     );
+    let terminated_attachment_ids: HashSet<_> = instance
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .filter(|service| terminated_service_keys.contains(&(service.service_id, service.version)))
+        .filter_map(|service| service.id)
+        .collect();
     let new_config = instance
         .config
         .extension_services
@@ -476,16 +495,37 @@ pub(super) async fn cleanup_terminated_extension_services(
         txn,
         instance.id,
         instance.extension_services_config_version,
+        &instance.config.extension_services,
         &new_config,
         false,
     )
-    .await?;
+    .await?
+    .check_applied()?;
 
-    extension_services_status.extension_services.retain(|svc| {
-        !terminated_service_keys
-            .iter()
-            .any(|&(id, ver)| id == svc.service_id && ver == svc.version)
-    });
+    // Service-interface records belong to an attachment. Remove them in the
+    // same transaction so the next snapshot never sees dangling ownership.
+    if !terminated_attachment_ids.is_empty() {
+        let mut network_config = instance.config.network.clone();
+        network_config
+            .service_interfaces
+            .retain(|service_interface| {
+                !terminated_attachment_ids.contains(&service_interface.attachment_id)
+            });
+        if network_config != instance.config.network {
+            db::instance::update_network_config(
+                txn,
+                instance.id,
+                instance.network_config_version,
+                &network_config,
+                false,
+            )
+            .await?;
+        }
+    }
+
+    extension_services_status
+        .extension_services
+        .retain(|svc| !terminated_service_keys.contains(&(svc.service_id, svc.version)));
     Ok(())
 }
 
@@ -509,23 +549,30 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let active = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: active_service,
             version,
             removed: None,
         };
         let removed = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: removed_service,
             version,
             removed: Some(Utc::now()),
         };
-        let configs = vec![&active, &removed];
+        let configs = [&active, &removed];
         let active_label =
             DpfHelmChartIdentity::from_service_id(active_service).placement_label_key;
         let removed_label =
             DpfHelmChartIdentity::from_service_id(removed_service).placement_label_key;
 
         assert_eq!(
-            dpf_helm_chart_placement_label_changes(&configs, true),
+            dpf_helm_chart_placement_label_changes(
+                &configs,
+                &HashSet::from([active_service, removed_service]),
+            ),
             BTreeMap::from([
                 (
                     active_label.clone(),
@@ -535,7 +582,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            dpf_helm_chart_placement_label_changes(&configs, false),
+            dpf_helm_chart_placement_label_changes(&configs, &HashSet::new()),
             BTreeMap::from([(active_label, None), (removed_label, None)])
         );
     }
@@ -548,16 +595,20 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let active = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: active_service,
             version,
             removed: None,
         };
         let removed = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: removed_service,
             version,
             removed: Some(Utc::now()),
         };
-        let configs = vec![&active, &removed];
+        let configs = [&active, &removed];
         let active_label =
             DpfHelmChartIdentity::from_service_id(active_service).placement_label_key;
         let removed_label =
@@ -573,18 +624,12 @@ mod tests {
                 DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_string(),
             ),
         ]);
-        let states: Vec<_> = dpf_helm_chart_placement_observation(
-            version,
-            &configs,
-            true,
-            None,
-            Verified(&labels),
-            Utc::now(),
-        )
-        .extension_service_statuses
-        .into_iter()
-        .map(|status| status.overall_state)
-        .collect();
+        let states: Vec<_> = configs
+            .iter()
+            .map(|config| {
+                dpf_helm_chart_placement_status(config, true, None, Verified(&labels)).overall_state
+            })
+            .collect();
         assert_eq!(
             states,
             vec![
@@ -594,18 +639,18 @@ mod tests {
         );
 
         let instance_deleted_at = Utc::now();
-        let states: Vec<_> = dpf_helm_chart_placement_observation(
-            version,
-            &configs,
-            false,
-            Some(&instance_deleted_at),
-            Verified(&BTreeMap::new()),
-            Utc::now(),
-        )
-        .extension_service_statuses
-        .into_iter()
-        .map(|status| status.overall_state)
-        .collect();
+        let states: Vec<_> = configs
+            .iter()
+            .map(|config| {
+                dpf_helm_chart_placement_status(
+                    config,
+                    false,
+                    Some(&instance_deleted_at),
+                    Verified(&BTreeMap::new()),
+                )
+                .overall_state
+            })
+            .collect();
         assert_eq!(
             states,
             vec![
@@ -623,26 +668,32 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let first = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: first_service,
             version,
             removed: None,
         };
         let second = InstanceExtensionServiceConfig {
+            id: Some(uuid::Uuid::new_v4()),
+            dpu_target: None,
             service_id: second_service,
             version,
             removed: None,
         };
-        let configs = vec![&first, &second];
+        let configs = [&first, &second];
 
-        let statuses = dpf_helm_chart_placement_observation(
-            version,
-            &configs,
-            true,
-            None,
-            PlacementEvidence::Error("failed to update DPF helm chart placement labels"),
-            Utc::now(),
-        )
-        .extension_service_statuses;
+        let statuses: Vec<_> = configs
+            .iter()
+            .map(|config| {
+                dpf_helm_chart_placement_status(
+                    config,
+                    true,
+                    None,
+                    PlacementEvidence::Error("failed to update DPF helm chart placement labels"),
+                )
+            })
+            .collect();
 
         assert_eq!(statuses.len(), 2);
         for status in statuses {

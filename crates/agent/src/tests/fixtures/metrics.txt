@@ -1,6 +1,9 @@
 # HELP agent_start_time_seconds Timestamp of the agent process's last start
 # TYPE agent_start_time_seconds gauge
 agent_start_time_seconds 1740171801
+# HELP carbide_dpu_agent_fmds_external_connected Result of the DPU agent's latest connection attempt to its configured external FMDS (1 for success, 0 before success or after failure)
+# TYPE carbide_dpu_agent_fmds_external_connected gauge
+carbide_dpu_agent_fmds_external_connected 1
 # HELP client_cert_expiry_time_seconds Timestamp when the agent's TLS client certificate expires
 # TYPE client_cert_expiry_time_seconds gauge
 client_cert_expiry_time_seconds 1742763762

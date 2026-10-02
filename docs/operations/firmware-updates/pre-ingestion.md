@@ -14,6 +14,29 @@ This page covers host firmware selected from the
 recovery also runs in the pre-ingestion state machine, but installs a DPU boot
 image to recover the DPU; it is not a host firmware-catalog workflow.
 
+## Rack compute trays
+
+An expected compute tray with a rack ID uses its rack profile instead of the
+host firmware catalog. When the profile has a `firmware_object`, NICo fetches
+that source-of-truth (SOT) document, reads the artifact token from the optional
+named credential, and calls the RMS compute firmware API with the BMC MAC as
+the node ID. The `firmware_global.autoupdate` setting does not gate this
+rack-profile workflow. NICo enforces a fixed 16 MiB maximum for the fetched SOT.
+Rack compute trays without a configured firmware object skip automatic firmware
+updates and continue ingestion. They never use the standalone host firmware
+catalog.
+
+This path is enabled only when the Component Manager compute-tray backend is
+`rms`. With another backend, compute trays keep the standard pre-ingestion
+behavior. The rack state machine can still use the profile's firmware object.
+
+NICo does not inspect or compare component versions in the SOT. RMS compares
+the SOT with its firmware inventory. A successful RMS response without a job
+lets NICo continue ingestion. When RMS creates a job, NICo persists the
+exact job ID in pre-ingestion state and waits for completion before continuing
+ingestion. Expected switches do not use this compute-tray path. Their existing
+rack state-machine firmware behavior is unchanged.
+
 ## When this path applies
 
 A host firmware update starts during pre-ingestion when all of the following
@@ -134,6 +157,7 @@ The states most relevant to host firmware are:
 | `ResetForNewFirmware` | Installation completed and NICo is performing activation resets or power drains. |
 | `NewFirmwareReportedWait` | NICo is waiting for refreshed inventory to report the target version. |
 | `RecheckVersions`, `RecheckVersionsAfterFailure` | NICo is checking the current component again or selecting the next one. |
+| `RackFirmwareUpdateWait` | Rack compute firmware submission or its exact RMS job is pending. |
 | `Complete` | No applicable pre-ingestion update remains, or firmware autoupdate was disabled. Ingestion can continue. |
 | `Failed` | Pre-ingestion stopped and requires operator action. The state includes the reason. |
 
@@ -159,6 +183,15 @@ progress, Redfish upload errors, and inventory that has not yet refreshed. A
 failed Redfish task causes NICo to refresh inventory and evaluate the component
 again. If an installed version is still not reported after 30 minutes, NICo can
 repeat the activation reset unless `firmware_global.no_reset_retries` is set.
+
+Rack compute pre-ingestion retries unavailable SOT downloads, BMC credentials,
+artifact-token credentials, RMS status reads, and submission failures that occur
+before RMS receives the request. If NICo restarts after submitting an update but
+before it persists the RMS job ID, NICo marks the tray `Failed` instead of
+risking a duplicate update. Reconcile the RMS job before clearing the error and
+retrying pre-ingestion. NICo also marks the tray `Failed` if RMS no longer
+recognizes a persisted job ID. A failed RMS submission is also terminal; when
+the response includes a job ID, reconcile that job before retrying.
 
 Some failures, including an unsuccessful upgrade script or exhausted BMC time
 synchronization attempts, move the endpoint to `Failed`. Correct the underlying

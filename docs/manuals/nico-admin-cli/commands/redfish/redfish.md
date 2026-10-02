@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish`
 
-_[Hardware commands](../../hardware.md) › **redfish**_
+*[Hardware commands](../../hardware.md) › **redfish***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-redfish - Redfish BMC actions
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish** \[**--extended**\] \<**--address**\>
-\[**--username**\] \[**--password**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli redfish [--extended] <--address>
+[--username] [--password] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -18,33 +20,38 @@ Redfish BMC actions
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--address** *\<ADDRESS\>*  
+`--address <ADDRESS>`
+
 IP:port of machine BMC. Port is optional and defaults to 443
 
-**--username** *\<USERNAME\>*  
+`--username <USERNAME>`
+
 Username for machine BMC
 
-**--password** *\<PASSWORD\>*  
+`--password <PASSWORD>`
+
 Password for machine BMC
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
@@ -117,7 +124,7 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 | [`get-base-mac-address`](./redfish-get-base-mac-address.md) | Get Base Mac Address (DPU only) |
 | [`clear-nvram`](./redfish-clear-nvram.md) | Clear Nvram (Viking only) |
 | [`set-bios`](./redfish-set-bios.md) | Set BIOS options |
-| [`reset-bios`](./redfish-reset-bios.md) | Reset BIOS settings to factory defaults |
+| [`reset-bios`](./redfish-reset-bios.md) | Reset BIOS settings to factory defaults. Returns once the BMC accepts the reset request. A system restart is required for the settings to take effect |
 | [`get-nic-mode`](./redfish-get-nic-mode.md) | Get DPU mode |
 | [`is-infinite-boot-enabled`](./redfish-is-infinite-boot-enabled.md) | Is infinite boot enable |
 | [`enable-infinite-boot`](./redfish-enable-infinite-boot.md) | Enable infinite boot |
@@ -135,4 +142,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

@@ -13,15 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -30,11 +21,19 @@ import (
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-const validDpfHelmChartDataForHandlerTest = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false}`
+const validDpfHelmChartData = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security":{"privileged":false,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"firewall"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}`
 
 // TestCreateDpuExtensionServiceHandler_Handle tests the Create DPU Extension Service handler
 func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
@@ -70,7 +69,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, existingDES)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374052"
@@ -178,10 +177,19 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		Name:        dpfServiceName,
 		Description: cutil.GetPtr("Test DPF Description"),
 		ServiceType: model.DpuExtensionServiceTypeDpfHelmChart,
+		DpuTarget:   cutil.GetPtr(model.DpuExtensionServiceDpuTargetAllActive),
 		SiteID:      st1.ID.String(),
-		Data:        validDpfHelmChartDataForHandlerTest,
+		Data:        validDpfHelmChartData,
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
+
+	missingDpuTargetBody := dpfBody
+	missingDpuTargetBody.DpuTarget = nil
+	missingDpuTargetBodyBytes, _ := json.Marshal(missingDpuTargetBody)
+
+	emptyDpuTargetBody := dpfBody
+	emptyDpuTargetBody.DpuTarget = cutil.GetPtr("")
+	emptyDpuTargetBodyBytes, _ := json.Marshal(emptyDpuTargetBody)
 
 	dpfUnknownLifecycleBody := dpfBody
 	dpfUnknownLifecycleBody.Name = dpfUnknownLifecycleServiceName
@@ -198,12 +206,13 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	invalidBodyBytes := []byte(`{"name": "test"}`)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		reqBody        string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
+		name              string
+		reqOrgName        string
+		reqBody           string
+		user              *cdbm.User
+		expectedErr       bool
+		expectedStatus    int
+		expectedErrorData map[string]string
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -236,6 +245,30 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		// A missing Helm target must return its field-level validation detail in the API error body.
+		{
+			name:           "error when DPF Helm chart omits DPU target",
+			reqOrgName:     tnOrg,
+			reqBody:        string(missingDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
+		},
+		// An empty Helm target must fail
+		{
+			name:           "error when DPF Helm chart DPU target is empty",
+			reqOrgName:     tnOrg,
+			reqBody:        string(emptyDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
 		},
 		{
 			name:           "error when site does not exist",
@@ -282,11 +315,10 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cdesh := CreateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        common.GetTestConfig(),
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       common.GetTestConfig(),
 			}
 
 			// Setup echo server/context
@@ -300,13 +332,20 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := cdesh.Handle(ec)
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+
+			if tt.expectedErrorData != nil {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tt.expectedErrorData, response.Data)
+			}
 
 			if !tt.expectedErr && rec.Code == http.StatusCreated {
 				var apiDES model.APIDpuExtensionService
@@ -326,6 +365,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				}
 				assert.Equal(t, expectedBody.Name, apiDES.Name)
 				assert.Equal(t, expectedBody.ServiceType, apiDES.ServiceType)
+				assert.Equal(t, expectedBody.DpuTarget, apiDES.DpuTarget)
 				assert.Equal(t, expectedBody.SiteID, apiDES.SiteID)
 				assert.Equal(t, version, *apiDES.Version)
 				assert.Equal(t, []string{version}, apiDES.ActiveVersions)
@@ -334,6 +374,8 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				assert.Equal(t, expectedBody.Name, capturedCreateRequest.ServiceName)
 				assert.Equal(t, expectedBody.Data, capturedCreateRequest.Data)
 				if expectedBody.ServiceType == model.DpuExtensionServiceTypeDpfHelmChart {
+					require.NotNil(t, capturedCreateRequest.DpuTarget)
+					assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *capturedCreateRequest.DpuTarget)
 					assert.Nil(t, capturedCreateRequest.Credential)
 					assert.Nil(t, capturedCreateRequest.Observability)
 					return
@@ -391,7 +433,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -474,10 +516,9 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gadesh := GetAllDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -503,8 +544,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gadesh.Handle(ec)
 			require.NoError(t, err)
@@ -569,7 +609,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	mockTC := &tmocks.Client{}
 
@@ -648,10 +688,9 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesh := GetDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -665,8 +704,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesh.Handle(ec)
 			require.NoError(t, err)
@@ -723,7 +761,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	version := "V1-T1761856992374065"
@@ -820,6 +858,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 	dpfBody := model.APIDpuExtensionServiceUpdateRequest{
 		Description: cutil.GetPtr("Updated DPF Description"),
+		Data:        cutil.GetPtr(validDpfHelmChartData),
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
 
@@ -973,11 +1012,10 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			capturedUpdateRequest = nil
 
 			udesh := UpdateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -991,8 +1029,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := udesh.Handle(ec)
 			require.NoError(t, err)
@@ -1011,6 +1048,8 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 					// Core did not report a lifecycle state, so the stored status is kept
 					assert.Equal(t, cdbm.DpuExtensionServiceStatusPending, apiDES.Status)
 					assert.Equal(t, *dpfBody.Description, *apiDES.Description)
+					require.NotNil(t, capturedUpdateRequest)
+					assert.Equal(t, *dpfBody.Data, capturedUpdateRequest.Data)
 				} else if strings.Contains(tt.name, "data/credentials") {
 					assert.Equal(t, *okBody2.Name, apiDES.Name)
 					assert.Equal(t, *okBody2.Description, *apiDES.Description)
@@ -1095,7 +1134,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1180,11 +1219,10 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesh := DeleteDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1198,8 +1236,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesh.Handle(ec)
 			require.NoError(t, err)
@@ -1255,7 +1292,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1364,11 +1401,10 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesvh := GetDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1382,8 +1418,7 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID, tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gdesvh.Handle(ec)
 			require.NoError(t, err)
@@ -1495,7 +1530,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal client
 	mockTC := &tmocks.Client{}
@@ -1633,11 +1668,10 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesvh := DeleteDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1651,8 +1685,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID.String(), tt.versionID)
 			ec.Set("user", tt.user)
 
-			testCtx := context.WithValue(ctx, otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(testCtx))
+			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ddesvh.Handle(ec)
 			require.NoError(t, err)

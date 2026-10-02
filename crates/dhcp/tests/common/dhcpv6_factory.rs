@@ -157,19 +157,20 @@ impl DHCPv6Factory {
         Self::relay_wrap(message, false)
     }
 
-    /// Build a SOLICIT carrying rapid-commit.
-    pub(crate) fn rapid_commit_solicit(idx: u8) -> Vec<u8> {
-        Self::relay_wrap(
-            Self::client_message(
-                idx,
-                MessageType::Solicit,
-                Self::duid_ll(idx),
-                None,
-                true,
-                true,
-            ),
+    /// Build a SOLICIT carrying the requested number of rapid-commit options.
+    pub(crate) fn solicit_with_rapid_commit_options(idx: u8, option_count: usize) -> Vec<u8> {
+        let mut message = Self::client_message(
+            idx,
+            MessageType::Solicit,
+            Self::duid_ll(idx),
+            None,
             true,
-        )
+            false,
+        );
+        for _ in 0..option_count {
+            message.opts_mut().insert(DhcpOption::RapidCommit);
+        }
+        Self::relay_wrap(message, true)
     }
 
     /// Build a stateless SOLICIT with no IA_NA.

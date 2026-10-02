@@ -48,7 +48,7 @@ Create a Subnet for the org.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-At least one IPv4 IP block or one IPv6 IP block must be specified.
+Subnets configure VPCs whose `networkVirtualizationType` is `ETHERNET_VIRTUALIZER` and support IPv4 only. FNN VPCs use VPC Prefixes. `ipv4BlockId` must identify a Ready, tenant-allocated IPv4 IP block.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

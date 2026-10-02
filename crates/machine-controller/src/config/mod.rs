@@ -68,6 +68,13 @@ pub struct MachineStateHandlerSiteConfig {
     /// regardless, for the host or an individual DPU.
     pub uefi_rotation_enabled: bool,
 
+    /// Site-wide kill-switch for the passive SuperNIC lockdown IKM rekey guard.
+    /// When `false` (the default), a Ready host never enters
+    /// `RotatingNicLockdown` on its own even if a card lags the staged site-wide
+    /// target; the per-host operator force-converge escape hatch still works
+    /// regardless.
+    pub nic_lockdown_ikm_rotation_enabled: bool,
+
     /// Site-wide opt-in for factory-resetting the host BMC during tenant
     /// release. When `false` (the default), tenant release skips the BMC
     /// factory-reset sub-flow and proceeds directly to `PowerCycle`.
@@ -96,6 +103,7 @@ impl MachineStateHandlerSiteConfig {
             spdm_enabled: false,
             bmc_rotation_enabled: false,
             uefi_rotation_enabled: false,
+            nic_lockdown_ikm_rotation_enabled: false,
             bmc_factory_reset_on_instance_termination_enabled: false,
             dpu_enable_secure_boot: true,
             restart_ovs_on_use_admin_network_change: false,

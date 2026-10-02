@@ -20,6 +20,7 @@ use std::sync::Arc;
 use bmc_mock::injection::InjectionStore;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
+use mac_address::MacAddress;
 use uuid::Uuid;
 
 use crate::DeviceHandle;
@@ -39,6 +40,8 @@ pub struct SimulatorRegistry {
 struct SimulatorRegistryInner {
     devices: Vec<DeviceSimulator>,
     by_mat_id: HashMap<Uuid, usize>,
+    /// Devices by BMC MAC, which is how an RMS power request names them.
+    by_bmc_mac: HashMap<MacAddress, usize>,
     racks: BTreeMap<RackId, RackInstance>,
 }
 
@@ -76,6 +79,7 @@ impl SimulatorRegistry {
         let devices =
             devices.ok_or_else(|| eyre::eyre!("simulator registry devices were not configured"))?;
         let mut by_mat_id = HashMap::with_capacity(devices.len());
+        let mut by_bmc_mac = HashMap::with_capacity(devices.len());
 
         for (index, device) in devices.iter().enumerate() {
             if by_mat_id.insert(device.mat_id(), index).is_some() {
@@ -84,6 +88,11 @@ impl SimulatorRegistry {
                 }
                 eyre::bail!("duplicate simulator identity: {}", device.mat_id());
             }
+            // The first device keeps a MAC two devices share; the BMC listener
+            // can serve only one of them anyway.
+            by_bmc_mac
+                .entry(device.handle().host_info().bmc_mac_address)
+                .or_insert(index);
         }
 
         let by_config_section = devices
@@ -131,6 +140,7 @@ impl SimulatorRegistry {
             inner: Arc::new(SimulatorRegistryInner {
                 devices,
                 by_mat_id,
+                by_bmc_mac,
                 racks,
             }),
         })
@@ -144,6 +154,13 @@ impl SimulatorRegistry {
         self.inner
             .by_mat_id
             .get(&mat_id)
+            .map(|index| &self.inner.devices[*index])
+    }
+
+    pub(crate) fn find_by_bmc_mac(&self, bmc_mac: MacAddress) -> Option<&DeviceSimulator> {
+        self.inner
+            .by_bmc_mac
+            .get(&bmc_mac)
             .map(|index| &self.inner.devices[*index])
     }
 

@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use carbide_uuid::machine::MachineId;
 use db::WithTransaction;
 use futures_util::FutureExt;
 use model::machine::LoadSnapshotOptions;
@@ -50,19 +52,18 @@ async fn host_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, 
     })
 }
 
-/// The host UEFI version a device currently carries, for authenticating against
-/// its existing password when clearing it. Returns the device's converged
-/// `current_version` (which can lag the site target mid-rotation, once the UEFI
-/// rotation engine exists), or the site target it was recorded against when
-/// `current_version` is NULL.
+/// Select the credential version to try when clearing a host's UEFI password.
+/// Prefer the device's `current_version`, which may lag the site target.
+/// When that version is unknown, the existing fallback tries the site target;
+/// it does not establish which password the device actually has.
 ///
 /// The caller must have already confirmed the host's UEFI password is set: a
 /// password-bearing host always has a `host_uefi` convergence row keyed by its
 /// BMC MAC, because NICo writes that row in the same transaction that stamps
 /// `bios_password_set_time` (see `set_host_uefi_password`), and the backfill
 /// seeded one for every pre-existing host with a password. A missing row is
-/// therefore a broken invariant -- error rather than guessing the site target
-/// and authenticating with the wrong password.
+/// therefore a broken invariant and returns an error. An existing row with an
+/// unknown version still uses the fallback above, which may fail authentication.
 async fn host_uefi_device_version(
     conn: &mut sqlx::PgConnection,
     bmc_mac: mac_address::MacAddress,
@@ -111,28 +112,11 @@ pub(super) async fn read_uefi_credentials(
         })
 }
 
-/// The `CredentialKey` for the site-wide host UEFI password to *set* on a
-/// device: the secret at the current `host_uefi` target version (table-driven;
-/// v0 = the legacy unversioned site-default).
-///
-/// This is the database half of resolving the credential -- it reads only the
-/// version and returns the key. The caller reads the secret with
-/// `read_uefi_credentials` after committing, so no connection is held across the
-/// remote reader (Vault) request.
-async fn host_uefi_set_credential_key(
-    conn: &mut sqlx::PgConnection,
-) -> Result<CredentialKey, CarbideError> {
-    let version = host_uefi_target_version(conn).await.map_err(|e| {
-        CarbideError::internal(format!("failed to read host UEFI target version: {e}"))
-    })?;
-    Ok(CredentialKey::host_uefi_site_default(version))
-}
-
 /// The `CredentialKey` for the host UEFI password a device currently holds, to
 /// authenticate a *clear* against its existing password (the device's converged
 /// version; see [`host_uefi_device_version`]).
 ///
-/// Like `host_uefi_set_credential_key`, this is only the database half: it reads
+/// This is only the database half: it reads
 /// the device version and returns the key. The caller reads the secret with
 /// `read_uefi_credentials` after committing, so no connection is held across the
 /// remote reader (Vault) request.
@@ -166,20 +150,6 @@ async fn dpu_uefi_target_version(conn: &mut sqlx::PgConnection) -> Result<u32, d
     u32::try_from(version).map_err(|e| db::DatabaseError::Internal {
         message: format!("dpu UEFI target_version {version} is out of range for u32: {e}"),
     })
-}
-
-/// The `CredentialKey` for the site-wide DPU UEFI password to *set* on a device:
-/// the secret at the current `dpu_uefi` target version (table-driven; v0 = the
-/// legacy unversioned site-default). The DPU analogue of
-/// [`host_uefi_set_credential_key`]; only the database half (reads the version
-/// and returns the key), so no connection is held across the remote reader.
-async fn dpu_uefi_set_credential_key(
-    conn: &mut sqlx::PgConnection,
-) -> Result<CredentialKey, CarbideError> {
-    let version = dpu_uefi_target_version(conn).await.map_err(|e| {
-        CarbideError::internal(format!("failed to read dpu UEFI target version: {e}"))
-    })?;
-    Ok(CredentialKey::dpu_uefi_site_default(version))
 }
 
 pub(crate) async fn clear_host_uefi_password(
@@ -283,27 +253,11 @@ pub(crate) async fn clear_host_uefi_password(
     // held across it, then read the actual secret.
     txn.commit().await?;
     let clear_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &clear_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                "unable to create redfish client",
-            );
-            CarbideError::Internal {
-                message: format!(
-                    "Could not create connection to Redfish API to {machine_id}, check logs"
-                ),
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &clear_key).await?;
 
     let job_id: Option<String> = api
-        .redfish_pool
-        .clear_host_uefi_password(redfish_client.as_ref(), clear_credentials)
+        .bmc_credential_ops
+        .clear_host_uefi_password(&bmc_access_info, clear_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run clear_host_uefi_password call");
@@ -392,36 +346,30 @@ pub(crate) async fn set_host_uefi_password(
     // Resolve the site-wide host UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
     // txn is open.
-    let host_uefi_key = host_uefi_set_credential_key(&mut txn).await?;
+    let host_uefi_version = host_uefi_target_version(&mut txn).await?;
+    let host_uefi_key = CredentialKey::host_uefi_site_default(host_uefi_version);
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
     let host_uefi_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &host_uefi_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                "unable to create redfish client",
-            );
-            CarbideError::RedfishClientCreation {
-                inner: e.into(),
-                machine_id,
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &host_uefi_key).await?;
 
     let job_id = api
-        .redfish_pool
-        .uefi_setup(redfish_client.as_ref(), false, host_uefi_credentials)
+        .bmc_credential_ops
+        .uefi_setup(&bmc_access_info, false, host_uefi_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call");
-            CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}"))
+            match e {
+                // Keep the Redfish-classified error code (and its operator
+                // mitigation text) for client-creation failures.
+                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
+                    inner: inner.into(),
+                    machine_id,
+                },
+                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
+            }
         })?;
     // uefi_setup returns a BMC job_id; the password change completes
     // asynchronously on the device and we do not poll it here. We optimistically
@@ -438,10 +386,11 @@ pub(crate) async fn set_host_uefi_password(
     api.with_txn(|txn| {
         async move {
             db::machine::update_bios_password_set_time(&machine_id, txn).await?;
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 txn,
                 host_bmc_mac,
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                Some(host_uefi_version as i32),
             )
             .await?;
             Ok::<(), db::DatabaseError>(())
@@ -479,7 +428,7 @@ pub(crate) async fn set_dpu_uefi_password(
 
     let request = request.into_inner();
 
-    let machine_id = if let Some(query) = request.machine_query {
+    let machine_id: MachineId = if let Some(query) = request.machine_query {
         match db::machine::find_by_query(&mut txn, &query).await? {
             Some(machine) => {
                 log_machine_id(&machine.id);
@@ -524,7 +473,7 @@ pub(crate) async fn set_dpu_uefi_password(
     let dpu = snapshot
         .dpu_snapshots
         .iter()
-        .find(|d| d.id == machine_id)
+        .find(|d| d.id.as_machine_id() == &machine_id)
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "dpu",
             id: machine_id.to_string(),
@@ -548,34 +497,31 @@ pub(crate) async fn set_dpu_uefi_password(
     // Resolve the site-wide DPU UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
     // txn is open.
-    let dpu_uefi_key = dpu_uefi_set_credential_key(&mut txn).await?;
+    let dpu_uefi_version = dpu_uefi_target_version(&mut txn).await?;
+    let dpu_uefi_key = CredentialKey::dpu_uefi_site_default(dpu_uefi_version);
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
     let dpu_uefi_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &dpu_uefi_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "unable to create redfish client");
-            CarbideError::RedfishClientCreation {
-                inner: e.into(),
-                machine_id,
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &dpu_uefi_key).await?;
 
     // A DPU stages the UEFI change through Redfish BIOS settings and schedules no
     // job (it commits on the next DPU restart), so there is no job id to return.
-    api.redfish_pool
-        .uefi_setup(redfish_client.as_ref(), true, dpu_uefi_credentials)
+    api.bmc_credential_ops
+        .uefi_setup(&bmc_access_info, true, dpu_uefi_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call for DPU");
-            CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}"))
+            match e {
+                // Keep the Redfish-classified error code (and its operator
+                // mitigation text) for client-creation failures.
+                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
+                    inner: inner.into(),
+                    machine_id,
+                },
+                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
+            }
         })?;
 
     // Mirror the host path's optimistic convergence record: the change is staged
@@ -586,10 +532,11 @@ pub(crate) async fn set_dpu_uefi_password(
     // optimism the host set path carries.
     api.with_txn(|txn| {
         async move {
-            db::credential_rotation::record_device_converged(
+            db::credential_rotation::record_device_enrolled(
                 txn,
                 dpu_bmc_mac,
                 db::credential_rotation::CredentialRotationType::DpuUefi,
+                Some(dpu_uefi_version as i32),
             )
             .await?;
             Ok::<(), db::DatabaseError>(())

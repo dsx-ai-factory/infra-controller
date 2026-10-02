@@ -82,22 +82,22 @@ func TestAPIExpectedRackCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc: "error when RackProfileID is missing",
+			desc: "ok when RackProfileID is missing",
 			obj: APIExpectedRackCreateRequest{
 				SiteID:        validSiteID,
 				RackID:        "rack-001",
 				RackProfileID: "",
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
-			desc: "error when RackProfileID is whitespace only",
+			desc: "ignored legacy RackProfileID is not validated",
 			obj: APIExpectedRackCreateRequest{
 				SiteID:        validSiteID,
 				RackID:        "rack-001",
 				RackProfileID: "   ",
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "error when Name is provided but empty",
@@ -174,19 +174,19 @@ func TestAPIExpectedRackUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc: "ok when only RackProfileID is provided",
+			desc: "error when only ignored RackProfileID is provided",
 			obj: APIExpectedRackUpdateRequest{
 				RackProfileID: &validRackProfileID,
 			},
-			expectErr: false,
+			expectErr: true,
 		},
 		{
-			desc: "ok when ID (valid UUID) and RackProfileID are provided",
+			desc: "error when ID and ignored RackProfileID are provided without mutable fields",
 			obj: APIExpectedRackUpdateRequest{
 				ID:            &validUUID,
 				RackProfileID: &validRackProfileID,
 			},
-			expectErr: false,
+			expectErr: true,
 		},
 		{
 			desc: "ok when RackID is provided (structural validation; immutability is enforced by the handler)",
@@ -417,7 +417,7 @@ func TestNewAPIExpectedRack(t *testing.T) {
 			assert.Equal(t, "rack-profile-001", got.RackProfileID)
 			assert.Equal(t, "rack-alpha", got.Name)
 			assert.Equal(t, "Primary compute rack", got.Description)
-			assert.Equal(t, map[string]string{"env": "production"}, got.Labels)
+			assert.Equal(t, APILabels{"env": "production"}, got.Labels)
 			assert.Equal(t, created, got.Created)
 			assert.Equal(t, updated, got.Updated)
 			assert.Nil(t, got.Site)

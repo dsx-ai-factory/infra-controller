@@ -32,7 +32,7 @@ The default stack includes:
 - cert-manager
 - the CloudNativePG operator and one PostgreSQL cluster
 - Vault in local development mode
-- NICo API, BMC proxy, DHCP server, and machine-a-tron
+- NICo API, BMC proxy, DHCP server, machine-a-tron, and mat-k8s-controller
 - Temporal and its local namespaces
 - Keycloak and the `nico-dev` realm
 - NICo REST API, database migrations, certificate manager, site manager,
@@ -113,11 +113,30 @@ All Tilt settings are in [`values.yaml`](values.yaml). NICo Core values are at
 the document root, while the `tilt` section contains the prerequisite and REST
 settings.
 
+## Machine-a-tron BMC routing
+
+Tilt runs machine-a-tron in controller mode. `mat-k8s-controller` polls the
+machine-a-tron status endpoint and creates one Kubernetes Service per simulated
+BMC, publishing the BMC address assigned by NICo as the Service's `externalIPs`.
+NICo therefore connects directly to each simulated BMC instead of routing every
+Redfish request through the shared machine-a-tron proxy.
+
+The Tilt BMC underlay is `10.200.0.0/18`. BMC addresses are Service externalIPs,
+which the apiserver neither allocates nor validates and for which kube-proxy
+programs forwarding rules on every node, so this range must stay outside the
+Kubernetes ServiceCIDR, the pod CIDR, the node network, and any network the
+nodes or pods must otherwise reach. On Kind the first two default to
+`10.96.0.0/16` and `10.244.0.0/16`. Refer to the chart's
+[Requirements](../../../helm/charts/nico-machine-a-tron/README.md#requirements)
+for the full contract.
+
 ## Image builds
 
 Core uses the existing Dockerfiles under
-[`dev/deployment/devspace/`](../devspace). REST and MCP use the existing
-Dockerfiles under [`rest-api/docker/local/`](../../../rest-api/docker/local).
+[`dev/deployment/devspace/`](../devspace); mat-k8s-controller uses its existing
+[`Dockerfile`](../../k8s/machine-a-tron-controller/Dockerfile). REST and MCP
+use the existing Dockerfiles under
+[`rest-api/docker/local/`](../../../rest-api/docker/local).
 The Tilt setup does not add or modify a Dockerfile.
 
 Each deployable image has its own Tilt resource and rebuild control. Images build

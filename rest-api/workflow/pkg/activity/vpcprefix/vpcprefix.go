@@ -20,6 +20,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -106,7 +107,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 		if vpcPrefix == nil {
 			// Inventory pushes are unordered Temporal workflows. A stale snapshot can still list a
 			// just-deleted prefix as TERMINATING/TERMINATED (or even READY). Never create/undelete
-			// from a terminal Site status — that re-claims IPAM and resurrects a user delete.
+			// from a terminal Site status, since that re-claims IPAM and resurrects a user delete.
 			reportedStatus, _ := getControllerVpcPrefixStatus(controllerVpcPrefix.GetStatus())
 			if reportedStatus == cdbm.VpcPrefixStatusDeleting || reportedStatus == cdbm.VpcPrefixStatusDeleted {
 				slogger.Info().Msgf("skipping create or undelete of VPC Prefix from Site inventory: Site reports status %s", reportedStatus)
@@ -168,7 +169,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 	vpcPrefixesToDelete := []*cdbm.VpcPrefix{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPrefixInventory.InventoryPage == nil || vpcPrefixInventory.InventoryPage.TotalPages == 0 || (vpcPrefixInventory.InventoryPage.CurrentPage == vpcPrefixInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPrefixInventory.GetInventoryPage()) {
 		for _, vpcPrefix := range existingVpcPrefixIDMap {
 			found := false
 
@@ -301,7 +302,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 		}
 		if len(vpcMatches) == 0 {
 			// Even if this happens, the VPC will be created based on the createOrUpdateVpcFromSite function in the vpc activity
-			// hence we are just returning nil and next inventory iteration VPC will be created in the vpc activity
+			// so we are just returning nil and next inventory iteration VPC will be created in the vpc activity
 			logger.Warn().Msgf("unable to create VPC Prefix found on Site: no VPC was found for ID: %s", parentVpcID)
 			return nil, nil
 		}
@@ -348,11 +349,20 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 				logger.Warn().Msgf("unable to create VPC Prefix found on Site: prefix differs in REST cache and Site record for VPC Prefix %s", controllerVpcPrefixID)
 				return nil, nil
 			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a VPC Prefix the snapshot
+			// never saw removed. Skip before the IPAM work below rather than after, so there is
+			// no allocation to unwind. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingVpcPrefix.Deleted) {
+				logger.Info().Msgf("not undeleting VPC Prefix %s yet because it was deleted more recently than the inventory interval", controllerVpcPrefixID)
+				return nil, nil
+			}
 		}
 
 		// Get the IP Block for the VPC Prefix
 		// if existingVpcPrefix is not nil, we use the stored IP Block ID
-		// otherwise we need to find the most specific Ready tenant IPBlock that contains its prefix
+		// otherwise we need to find the most specific Ready tenant IP Block created
+		// through Allocation that contains its prefix
 		ipBlockDAO := cdbm.NewIPBlockDAO(mvp.dbSession)
 		var ipBlock *cdbm.IPBlock
 		if existingVpcPrefix != nil {
@@ -385,12 +395,20 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			}
 		} else {
 			// Site inventory does not report the REST IPBlock ID for a new VPC Prefix.
-			// Find the most specific Ready tenant IPBlock that contains its prefix.
-			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
-				SiteIDs:   []uuid.UUID{site.ID},
-				TenantIDs: []uuid.UUID{vpc.TenantID},
-				Statuses:  []string{cdbm.IPBlockStatusReady},
-			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			// Find the most specific Ready tenant IP Block created through Allocation
+			// that contains its prefix.
+			filter := cdbm.IPBlockFilterInput{
+				SiteIDs:  []uuid.UUID{site.ID},
+				Statuses: []string{cdbm.IPBlockStatusReady},
+			}
+			filter.TenantAllocated(vpc.TenantID)
+			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(
+				ctx,
+				tx,
+				filter,
+				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				nil,
+			)
 			if ipBlockErr != nil {
 				return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to retrieve IP Blocks, DB error: %w", ipBlockErr)
 			}
@@ -512,7 +530,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			Prefix:       reportedVpcPrefix.Prefix,
 			PrefixLength: reportedPrefixLength,
 			Status:       cdbm.VpcPrefixStatusReady,
-			CreatedBy:    site.CreatedBy,
+			CreatedBy:    vpc.CreatedBy,
 		})
 		if createErr != nil {
 			return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to create VPC Prefix, DB error: %w", createErr)

@@ -26,20 +26,21 @@ func EventActionExecutionTo(
 	}
 
 	return &dbmodel.EventActionExecution{
-		ID:            execution.ID,
-		EventID:       execution.EventID,
-		ActionName:    execution.ActionName,
-		ActionType:    string(execution.Plan.Type()),
-		Plan:          plan,
-		Status:        string(execution.Status),
-		Reason:        cutil.GetPtrIfNotZero(string(execution.Reason)),
-		Attempts:      execution.Attempts,
-		ClaimToken:    cutil.GetPtrIfNotZero(execution.ClaimToken),
-		ClaimOwner:    cutil.GetPtrIfNotZero(execution.ClaimOwner),
-		StatusMessage: cutil.GetPtrIfNotZero(execution.StatusMessage),
-		CreatedAt:     execution.CreatedAt,
-		UpdatedAt:     execution.UpdatedAt,
-		NextAttemptAt: cutil.GetPtrIfNotZero(execution.NextAttemptAt),
+		ID:             execution.ID,
+		EventID:        execution.EventID,
+		ActionName:     execution.ActionName,
+		ActionType:     string(execution.Plan.Type()),
+		Plan:           plan,
+		Status:         string(execution.Status),
+		Reason:         cutil.GetPtrIfNotZero(string(execution.Reason)),
+		Attempts:       execution.Attempts,
+		ClaimToken:     cutil.GetPtrIfNotZero(execution.ClaimToken),
+		ClaimOwner:     cutil.GetPtrIfNotZero(execution.ClaimOwner),
+		ClaimExpiresAt: cutil.GetPtrIfNotZero(execution.ClaimExpiresAt),
+		StatusMessage:  cutil.GetPtrIfNotZero(execution.StatusMessage),
+		CreatedAt:      execution.CreatedAt,
+		UpdatedAt:      execution.UpdatedAt,
+		NextAttemptAt:  cutil.GetPtrIfNotZero(execution.NextAttemptAt),
 	}, nil
 }
 
@@ -85,8 +86,11 @@ func EventActionExecutionFrom(
 		Attempts:   persisted.Attempts,
 		ClaimToken: cutil.GetValueOrZero(persisted.ClaimToken),
 		ClaimOwner: cutil.GetValueOrZero(persisted.ClaimOwner),
-		CreatedAt:  timeFromPersistence(persisted.CreatedAt),
-		UpdatedAt:  timeFromPersistence(persisted.UpdatedAt),
+		ClaimExpiresAt: optionalTimeFromPersistence(
+			persisted.ClaimExpiresAt,
+		),
+		CreatedAt: timeFromPersistence(persisted.CreatedAt),
+		UpdatedAt: timeFromPersistence(persisted.UpdatedAt),
 	}
 
 	if err := execution.Validate(); err != nil {

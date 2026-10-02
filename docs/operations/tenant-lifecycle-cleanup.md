@@ -1,4 +1,4 @@
-# Tenant Lifecycle Cleanup <Badge intent="launch" minimal>New</Badge>
+# Tenant Lifecycle Cleanup
 
 Use this workflow to release an instance, track NICo cleanup progress, and
 verify that the host is ready for reuse.

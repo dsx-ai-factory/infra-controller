@@ -19,7 +19,6 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -72,7 +70,6 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-create", org, []string{authz.TenantAdminRole})
 
 	handler := NewCreateTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -151,8 +148,6 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -163,7 +158,7 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 
 			// Create must never coalesce onto another request's execution, so
 			// its ID is per-request and it declares no conflict policy.
-			assert.True(t, strings.HasPrefix(started.ID, "flow-grpc-task-run-create-"), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, "task-run-create-"), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.WorkflowIDConflictPolicy)
 
 			var got model.APITaskRun
@@ -194,7 +189,6 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 	providerUser := testRackBuildUser(t, dbSession, "provider-user-run-create-fresh", org, []string{authz.ProviderAdminRole})
 
 	handler := NewCreateTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	submit := func(t *testing.T) string {
 		t.Helper()
@@ -216,7 +210,6 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(org)
 		ec.Set("user", providerUser)
-		ec.SetRequest(ec.Request().WithContext(context.WithValue(context.Background(), otelecho.TracerKey, tracer)))
 
 		require.NoError(t, handler.Handle(ec))
 		require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
@@ -227,7 +220,7 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 	second := submit(t)
 
 	assert.NotEqual(t, first, second, "two creates shared a workflow ID")
-	assert.True(t, strings.HasPrefix(first, "flow-grpc-task-run-create-"), "workflow ID = %q", first)
+	assert.True(t, strings.HasPrefix(first, "task-run-create-"), "workflow ID = %q", first)
 }
 
 func TestGetTaskRunHandler_Handle(t *testing.T) {
@@ -246,7 +239,6 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 
 	handler := NewGetTaskRunHandler(dbSession, nil, scp, cfg)
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	found := &flowv1.OperationRun{
 		Summary: &flowv1.OperationRunSummary{
@@ -334,8 +326,6 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.runID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -344,13 +334,13 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 				return
 			}
 
-			// Reads coalesce onto an in-flight identical request, so the ID is
-			// derived from the query and namespaced away from the bespoke
-			// per-method workflows that still run on the site. includeStats is
-			// part of it because attaching to an execution started with the
-			// other value would answer with the wrong stats presence.
+			// Reads coalesce onto an in-flight identical request. The original
+			// ID can be reused now that the bespoke workflow is retired.
+			// includeStats is part of it because attaching to an execution
+			// started with the other value would answer with the wrong stats
+			// presence.
 			wantStats := tt.queryParams["includeStats"] == "true"
-			assert.Equal(t, fmt.Sprintf("flow-grpc-task-run-get-%s-%t", runID, wantStats), started.ID)
+			assert.Equal(t, fmt.Sprintf("task-run-get-%s-%t", runID, wantStats), started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 
 			var got model.APITaskRun
@@ -377,7 +367,6 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-list", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetAllTaskRunHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	listed := []*flowv1.OperationRunSummary{
 		{
@@ -458,8 +447,6 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -468,7 +455,7 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.True(t, strings.HasPrefix(started.ID, "flow-grpc-task-run-get-all-"), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, "task-run-get-all-"), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 			listIDs[tt.name] = started.ID
 
@@ -502,7 +489,6 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 
 	handler := NewGetAllTaskRunTargetHandler(dbSession, nil, scp, cfg)
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	listed := []*flowv1.OperationRunTarget{
 		{
@@ -585,8 +571,6 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.runID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -595,7 +579,7 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("flow-grpc-task-run-target-get-all-%s-", runID)), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("task-run-target-get-all-%s-", runID)), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 
 			var got []*model.APITaskRunTarget
@@ -624,7 +608,6 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-run-lifecycle", org, []string{authz.TenantAdminRole})
 
 	runID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	validBody := func(action string) any {
 		switch action {
@@ -698,8 +681,6 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 				ec.SetParamNames("orgName", "id")
 				ec.SetParamValues(org, tt.runID)
 				ec.Set("user", tt.user)
-				ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-				ec.SetRequest(ec.Request().WithContext(ctx))
 
 				_ = act.handle(ec)
 				require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -708,7 +689,7 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 					return
 				}
 
-				assert.Equal(t, fmt.Sprintf("flow-grpc-task-run-%s-%s", act.action, runID), started.ID)
+				assert.Equal(t, fmt.Sprintf("task-run-%s-%s", act.action, runID), started.ID)
 
 				var got model.APITaskRun
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))

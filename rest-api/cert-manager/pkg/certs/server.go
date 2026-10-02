@@ -54,7 +54,7 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 	appService.AddHealthRoute(ctx)
 	appService.AddVersionRoute(ctx)
 	appService.AddMetricsRoute(ctx)
-	appService.Use(core.NewHTTPMiddleware(ctx, core.WithRequestMetrics("cloud_cert_manager"))...)
+	appService.Use(core.NewHTTPMiddleware(ctx, core.WithRequestMetrics("nico_rest_cert_manager"))...)
 	appService.Path("/v1/pki/ca").Handler(s.PKICACertificateHandler(ctx)).Methods("GET")
 	appService.Path("/v1/pki/ca/pem").Handler(s.PKICACertificateHandler(ctx)).Methods("GET")
 	appService.Path("/v1/pki/cloud-cert").Handler(s.PKICloudCertificateHandler(ctx)).Methods("POST")
@@ -89,6 +89,19 @@ func (s *Server) Start(ctx context.Context) {
 		log.Fatalf("failed to start healt ep: %v", err)
 		return
 	}
+}
+
+// Done returns a channel closed once both HTTP services have stopped serving.
+func (s *Server) Done() <-chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		<-s.appService.Done()
+		<-s.insecService.Done()
+	}()
+
+	return done
 }
 
 // PKICACertificateHandler returns pkiCACertificateHandler

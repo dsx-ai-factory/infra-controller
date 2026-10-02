@@ -128,6 +128,14 @@ func (i *IPAMService) AcquireChildPrefix(ctx context.Context, req *connect.Reque
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
 	} else {
+		prefix, parseErr := netip.ParsePrefix(req.Msg.Cidr)
+		if parseErr != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, parseErr)
+		}
+		// Check the address family limit before narrowing the requested length to uint8.
+		if req.Msg.Length > uint32(prefix.Addr().BitLen()) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("prefix length must be at most %d", prefix.Addr().BitLen()))
+		}
 		resp, err = i.ipamer.AcquireChildPrefix(ctx, req.Msg.Cidr, uint8(req.Msg.Length))
 		if err != nil {
 			i.log.Error("acquirechildprefix", "error", err)
@@ -267,7 +275,8 @@ func (i *IPAMService) PrefixUsage(ctx context.Context, req *connect.Request[v1.P
 
 	subnetCount := i.ipamer.GetSubnetCount(ctx, req.Msg.Cidr)
 
-	u.AvailableIPs = u.AvailableIPs - 3*subnetCount
+	// A subnet's reserved address count can exceed the prefix size; do not wrap below zero.
+	u.AvailableIPs -= min(u.AvailableIPs, 3*subnetCount)
 
 	return &connect.Response[v1.PrefixUsageResponse]{
 		Msg: &v1.PrefixUsageResponse{

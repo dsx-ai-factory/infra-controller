@@ -30,7 +30,7 @@ Release an instance by id:
     $ nico-admin-cli instance release --instance 12345678-1234-5678-90ab-cdef01234567
 
 Release the instance on a machine:
-    $ nico-admin-cli instance release --machine 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli instance release --machine fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 
 Release every instance matching a label:
     $ nico-admin-cli instance release --label-key role --label-value training

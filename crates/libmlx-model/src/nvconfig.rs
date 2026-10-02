@@ -22,7 +22,16 @@
 // <https://docs.nvidia.com/networking/display/mftv4341lts/mlxconfig-%E2%80%93-changing-device-configuration-tool>
 // The generic recipe uses PCI_BUS00_SPEED=4, while the validated GB200/B3240
 // platform uses 5. Applying this profile requires a cold host power cycle.
-const GB200_B3240_V1_PARAMETERS: [&str; 18] = [
+/// Number of PF scalable functions required by the GB200 B3240 V1 profile.
+pub const GB200_B3240_V1_PF_TOTAL_SF: u32 = 128;
+
+const GB200_B3240_V1_PARAMETERS: [&str; 28] = [
+    "PF_NUM_PF_MSIX_VALID=1",
+    "PER_PF_NUM_SF=1",
+    "NUM_PF_MSIX_VALID=0",
+    "PF_BAR2_ENABLE=0",
+    "LINK_TYPE_P1=2",
+    "LINK_TYPE_P2=2",
     "OFF_BOARD_SERIALIZER=1",
     "PCI_BUS00_HIERARCHY_TYPE=1",
     "PCI_BUS00_SPEED=5",
@@ -39,6 +48,10 @@ const GB200_B3240_V1_PARAMETERS: [&str; 18] = [
     "PCI_BUS16_HIERARCHY_TYPE=1",
     "PCI_BUS16_SPEED=4",
     "PCI_BUS16_WIDTH=3",
+    "PF_TOTAL_SF=128",
+    "PF_SF_BAR_SIZE=10",
+    "PF_NUM_PF_MSIX=228",
+    "LAG_RESOURCE_ALLOCATION=1",
     "PCI_SWITCH0_UPSTREAM_PORT_BUS=0",
     "PCI_SWITCH0_UPSTREAM_PORT_PEX=0",
 ];
@@ -120,6 +133,12 @@ mod tests {
         assert_eq!(
             parameters,
             &[
+                "PF_NUM_PF_MSIX_VALID=1",
+                "PER_PF_NUM_SF=1",
+                "NUM_PF_MSIX_VALID=0",
+                "PF_BAR2_ENABLE=0",
+                "LINK_TYPE_P1=2",
+                "LINK_TYPE_P2=2",
                 "OFF_BOARD_SERIALIZER=1",
                 "PCI_BUS00_HIERARCHY_TYPE=1",
                 "PCI_BUS00_SPEED=5",
@@ -136,6 +155,10 @@ mod tests {
                 "PCI_BUS16_HIERARCHY_TYPE=1",
                 "PCI_BUS16_SPEED=4",
                 "PCI_BUS16_WIDTH=3",
+                "PF_TOTAL_SF=128",
+                "PF_SF_BAR_SIZE=10",
+                "PF_NUM_PF_MSIX=228",
+                "LAG_RESOURCE_ALLOCATION=1",
                 "PCI_SWITCH0_UPSTREAM_PORT_BUS=0",
                 "PCI_SWITCH0_UPSTREAM_PORT_PEX=0",
             ],

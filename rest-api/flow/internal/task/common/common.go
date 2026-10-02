@@ -71,8 +71,8 @@ const (
 	TaskStatusCompleted  TaskStatus = "completed"
 	TaskStatusFailed     TaskStatus = "failed"
 	TaskStatusTerminated TaskStatus = "terminated"
-	// TaskStatusWaiting means the task was queued due to a conflict and is
-	// waiting for the rack to become available. It is NOT a finished state.
+	// TaskStatusWaiting means the task is waiting for a pre-execution condition,
+	// such as rack availability or target linkage. It is NOT a finished state.
 	TaskStatusWaiting TaskStatus = "waiting"
 )
 

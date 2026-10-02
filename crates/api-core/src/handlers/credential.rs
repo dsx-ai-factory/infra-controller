@@ -27,6 +27,7 @@ use carbide_secrets::credentials::{
     BgpCredentialType, BmcCredentialType, CredentialKey, CredentialReader, CredentialType,
     Credentials, NicLockdownIkm,
 };
+use carbide_uuid::machine::MachineId;
 use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
@@ -48,6 +49,8 @@ const DEFAULT_FORGE_ADMIN_BMC_USERNAME: &str = "root";
 /// by FRR on the DPU.  NVUE will silently accept seemingly any length,
 /// but FRR reloads fail above this length.
 pub(crate) const MAX_BGP_PASSWORD_LENGTH: usize = 80;
+const MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME: &str =
+    "firmware artifact access token credential name is required";
 
 pub(crate) async fn create_credential(
     api: &Api,
@@ -73,13 +76,25 @@ pub(crate) async fn create_credential(
             ).into());
         }
         rpc::CredentialType::SiteWideBmcRoot => {
-            set_sitewide_bmc_root_credentials(api, password)
-                .await
-                .map_err(|e| {
-                    CarbideError::internal(format!(
-                        "error setting site wide BMC root credentials: {e:?} "
-                    ))
-                })?;
+            if password.is_empty() {
+                return Err(CarbideError::InvalidArgument(
+                    "site-wide BMC root password must not be empty".to_string(),
+                )
+                .into());
+            }
+            set_sitewide_bmc_root_credentials(api, password).await?;
+            if let Err(error) =
+                crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*api.credential_manager).await
+            {
+                // The requested credential write is already durable. Startup
+                // installs a retry task for this idempotent compatibility seed,
+                // so returning an RPC error would incorrectly invite the caller
+                // to repeat a write that already succeeded.
+                tracing::warn!(
+                    error = %error,
+                    "site-wide BMC root was stored; initial NIC lockdown IKM seeding is deferred to the background retry"
+                );
+            }
         }
         rpc::CredentialType::SiteWideNicLockdownIkm => {
             set_sitewide_nic_lockdown_ikm(api, password)
@@ -104,7 +119,7 @@ pub(crate) async fn create_credential(
                     )
                     .await
                     .map_err(|error| {
-                        map_ufm_credential_mutation_error(
+                        map_credential_mutation_error(
                             format!("error setting credential for ufm {username}"),
                             error,
                         )
@@ -315,6 +330,35 @@ pub(crate) async fn create_credential(
                     CarbideError::internal(format!("error setting BGP credential: {e:?}"))
                 })?;
         }
+        rpc::CredentialType::FirmwareArtifactAccessToken => {
+            let name = req
+                .credential_name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME.into())
+                })?;
+
+            if password.is_empty() {
+                return Err(CarbideError::InvalidArgument(
+                    "firmware artifact access token must not be empty".to_string(),
+                )
+                .into());
+            }
+
+            let key = CredentialKey::FirmwareArtifactAccessToken { name };
+
+            // Artifact tokens are opaque, while the credential store uses a
+            // username/password record. The empty username has no authentication
+            // meaning, and set_credentials replaces a token with the same name.
+            api.credential_manager
+                .set_credentials(&key, &Credentials::new("", password))
+                .await
+                .map_err(|error| {
+                    CarbideError::internal(format!(
+                        "error setting firmware artifact access token credential: {error:?}"
+                    ))
+                })?;
+        }
     };
 
     Ok(Response::new(rpc::CredentialCreationResult {}))
@@ -349,7 +393,7 @@ pub(crate) async fn delete_credential(
                     )
                     .await
                     .map_err(|error| {
-                        map_ufm_credential_mutation_error(
+                        map_credential_mutation_error(
                             format!("error deleting credential for ufm {username}"),
                             error,
                         )
@@ -400,14 +444,32 @@ pub(crate) async fn delete_credential(
                     CarbideError::internal(format!("error deleting BGP credential: {e:?}"))
                 })?;
         }
+        rpc::CredentialType::FirmwareArtifactAccessToken => {
+            let name = req
+                .credential_name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME.into())
+                })?;
+
+            api.credential_manager
+                .delete_credentials(&CredentialKey::FirmwareArtifactAccessToken { name })
+                .await
+                .map_err(|error| {
+                    CarbideError::internal(format!(
+                        "error deleting firmware artifact access token credential: {error:?}"
+                    ))
+                })?;
+        }
     };
 
     Ok(Response::new(rpc::CredentialDeletionResult {}))
 }
 
-fn map_ufm_credential_mutation_error(context: String, error: SecretsError) -> CarbideError {
+fn map_credential_mutation_error(context: String, error: SecretsError) -> CarbideError {
     match error {
-        error @ SecretsError::UfmCredentialMutationBlocked { .. } => {
+        error @ (SecretsError::UfmCredentialMutationBlocked { .. }
+        | SecretsError::BmcSiteWideRootV0CredentialMutationBlocked) => {
             CarbideError::FailedPrecondition(error.to_string())
         }
         error => CarbideError::internal(format!("{context}: {error:?}")),
@@ -423,7 +485,7 @@ pub(crate) async fn update_machine_credentials(
     tracing::Span::current().record("request", "MachineCredentialsUpdateRequest { }");
 
     let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mac_address = match request.mac_address {
         Some(v) => Some(v.parse().map_err(|_| {
@@ -518,12 +580,13 @@ pub(crate) async fn get_bmc_credentals(
         .await
         .map_err(|err| match err {
             crate::credentials::BmcSessionError::AvoidLockout { .. }
-            | crate::credentials::BmcSessionError::NoSessionService { .. } => {
-                // Both are "we refuse to attempt session creation" outcomes
-                // that the operator can resolve (rotate creds, or flip the
-                // basic-auth-fallback flag). FailedPrecondition matches the
-                // gRPC semantics: the request is well-formed but the
-                // server-side state forbids it.
+            | crate::credentials::BmcSessionError::NoSessionService { .. }
+            | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
+                // These are "we refuse to attempt session creation" outcomes
+                // that the operator can resolve (configure/rotate creds, or
+                // flip the basic-auth-fallback flag). FailedPrecondition
+                // matches the gRPC semantics: the request is well-formed but
+                // the server-side state forbids it.
                 Status::failed_precondition(err.to_string())
             }
             crate::credentials::BmcSessionError::Store(_) => Status::internal(err.to_string()),
@@ -716,7 +779,9 @@ async fn set_bmc_credentials(
     api.credential_manager
         .set_credentials(credential_key, credentials)
         .await
-        .map_err(|e| CarbideError::internal(format!("error setting credential for BMC: {e:?} ")))
+        .map_err(|error| {
+            map_credential_mutation_error("error setting credential for BMC".to_string(), error)
+        })
 }
 
 async fn write_ufm_certs(api: &Api, fabric: String) -> Result<(), CarbideError> {

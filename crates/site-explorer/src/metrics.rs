@@ -1286,7 +1286,7 @@ impl MetricHolder {
 #[cfg(test)]
 mod tests {
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
     use opentelemetry::metrics::MeterProvider;
@@ -1719,7 +1719,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         let failure = r#"Internal { message: "simulated iteration failure" }"#;
@@ -1735,7 +1735,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 125.0,
+                        histogram_sum_delta: ApproxHistogramSum(125.0),
                     },
                 },
                 Check {
@@ -1755,7 +1755,7 @@ mod tests {
                             error: Some(failure.to_string()),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 375.0,
+                        histogram_sum_delta: ApproxHistogramSum(375.0),
                     },
                 },
             ],

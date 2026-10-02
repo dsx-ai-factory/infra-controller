@@ -169,15 +169,15 @@ func validateEventPlan(
 func (s *Store) ClaimPendingExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claimExecutions(ctx, request, pendingExecutionClaim)
 }
 
-// ClaimRetryExecutions atomically allocates due deferred attempts.
+// ClaimRetryExecutions atomically allocates due deferred or expired attempts.
 func (s *Store) ClaimRetryExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	return s.claimExecutions(ctx, request, retryExecutionClaim)
 }
 
@@ -185,12 +185,12 @@ func (s *Store) claimExecutions(
 	ctx context.Context,
 	request eventrule.ExecutionClaimRequest,
 	kind executionClaimKind,
-) ([]eventrule.ClaimedExecution, error) {
+) (eventrule.ExecutionClaimBatch, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return eventrule.ExecutionClaimBatch{}, err
 	}
 
 	s.mu.Lock()
@@ -201,7 +201,7 @@ func (s *Store) claimExecutions(
 	for id := range s.executions {
 		execution, err := s.execution(id)
 		if err != nil {
-			return nil, err
+			return eventrule.ExecutionClaimBatch{}, err
 		}
 
 		if executionEligible(*execution, kind, now) {
@@ -211,7 +211,7 @@ func (s *Store) claimExecutions(
 
 	slices.SortFunc(eligible, func(a, b eventrule.Execution) int {
 		if kind == retryExecutionClaim {
-			if order := a.NextAttemptAt.Compare(b.NextAttemptAt); order != 0 {
+			if order := executionEligibilityTime(a).Compare(executionEligibilityTime(b)); order != 0 {
 				return order
 			}
 		} else if order := a.CreatedAt.Compare(b.CreatedAt); order != 0 {
@@ -220,47 +220,64 @@ func (s *Store) claimExecutions(
 
 		return cmp.Compare(a.ID.String(), b.ID.String())
 	})
-
-	if len(eligible) > request.Limit {
+	batch := eventrule.ExecutionClaimBatch{
+		Claims:           make([]eventrule.ClaimedExecution, 0, request.Limit),
+		ScanLimitReached: len(eligible) >= request.Limit,
+	}
+	if batch.ScanLimitReached {
 		eligible = eligible[:request.Limit]
 	}
 
 	type update struct {
-		id        uuid.UUID
-		persisted dbmodel.EventActionExecution
-		claim     eventrule.ClaimedExecution
+		id          uuid.UUID
+		persisted   dbmodel.EventActionExecution
+		disposition eventrule.ClaimDisposition
+		claim       eventrule.ClaimedExecution
 	}
-	updates := make([]update, len(eligible))
+	updates := make([]update, 0, len(eligible))
 	for i := range eligible {
 		execution := eligible[i].Clone()
 		token := uuid.New()
+		claimExpiresAt := now.Add(request.ClaimDuration)
 
-		if err := execution.Claim(request.Owner, token, now); err != nil {
-			return nil, err
+		disposition, err := execution.AcquireClaim(
+			request.Owner,
+			token,
+			now,
+			claimExpiresAt,
+			request.MaxAttempts,
+		)
+		if err != nil {
+			return eventrule.ExecutionClaimBatch{}, err
 		}
 
 		persisted, err := converterdao.EventActionExecutionTo(&execution)
 		if err != nil {
-			return nil, err
+			return eventrule.ExecutionClaimBatch{}, err
 		}
 
-		updates[i] = update{
-			id:        execution.ID,
-			persisted: *persisted,
-			claim: eventrule.ClaimedExecution{
+		item := update{
+			id:          execution.ID,
+			persisted:   *persisted,
+			disposition: disposition,
+		}
+		if disposition == eventrule.ClaimAcquired {
+			item.claim = eventrule.ClaimedExecution{
 				Execution: execution,
 				Token:     token,
-			},
+			}
+		}
+		updates = append(updates, item)
+	}
+
+	for _, update := range updates {
+		s.executions[update.id].persisted = update.persisted
+		if update.disposition == eventrule.ClaimAcquired {
+			batch.Claims = append(batch.Claims, update.claim)
 		}
 	}
 
-	claims := make([]eventrule.ClaimedExecution, len(updates))
-	for i, update := range updates {
-		s.executions[update.id].persisted = update.persisted
-		claims[i] = update.claim
-	}
-
-	return claims, nil
+	return batch, nil
 }
 
 func executionEligible(
@@ -272,10 +289,21 @@ func executionEligible(
 	case pendingExecutionClaim:
 		return execution.Status == eventrule.ExecutionStatusPending
 	case retryExecutionClaim:
-		return execution.RetryDue(now)
+		return execution.RetryDue(now) ||
+			(execution.Status == eventrule.ExecutionStatusRunning &&
+				!execution.ClaimExpiresAt.IsZero() &&
+				!now.Before(execution.ClaimExpiresAt))
 	default:
 		return false
 	}
+}
+
+func executionEligibilityTime(execution eventrule.Execution) time.Time {
+	if execution.Status == eventrule.ExecutionStatusRunning {
+		return execution.ClaimExpiresAt
+	}
+
+	return execution.NextAttemptAt
 }
 
 // TransitionClaimedExecution atomically persists an owned attempt result.

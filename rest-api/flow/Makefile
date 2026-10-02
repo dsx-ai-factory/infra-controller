@@ -21,6 +21,9 @@ gen-doc: ## Generate gRPC API documentation (Markdown for GitLab, HTML for local
 		-I proto/v1 proto/v1/flow.proto
 	protoc --doc_out=./docs --doc_opt=html,grpc-api.html \
 		-I proto/v1 proto/v1/flow.proto
+	@perl -pi -e 's!\[(\.?google\.protobuf\.([A-Za-z][A-Za-z0-9_]*))\]\(#google-protobuf-\2\)![$$1](https://protobuf.dev/reference/protobuf/google.protobuf/)!g' docs/grpc-api.md
+	@perl -pi -e 's!href="#google\.protobuf\.[A-Za-z][A-Za-z0-9_]*"!href="https://protobuf.dev/reference/protobuf/google.protobuf/"!g' docs/grpc-api.html
+	@perl -pi -e 's/[ \t]+$$//' docs/grpc-api.md docs/grpc-api.html
 	@echo "Generated docs/grpc-api.md (for GitLab) and docs/grpc-api.html (for local)"
 
 flow:

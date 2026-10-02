@@ -20,7 +20,7 @@ use ::rpc::forge as rpc;
 use carbide_network::virtualization::{VpcVirtualizationType, get_svi_ip};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineInterfaceId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use db::vpc::{self};
@@ -67,16 +67,9 @@ pub(crate) struct SiteFabricPrefixList {
 
 impl SiteFabricPrefixList {
     pub(crate) fn from_ipnetwork_vec(prefixes: Vec<IpNetwork>) -> Option<Self> {
-        // Under the current configuration semantics, an empty
-        // site_fabric_prefixes list in the site config means we are not using
-        // the VPC isolation feature built on top of it, and it is better not
-        // to construct one of these at all (and thus the Option-wrapped return
-        // type).
+        // Return `None` for an empty configured list so callers skip containment
+        // checks against operator ranges.
         prefixes.none_if_empty().map(|prefixes| Self { prefixes })
-    }
-
-    pub(crate) fn as_ip_slice(&self) -> &[IpNetwork] {
-        &self.prefixes
     }
 
     // Check whether the given network matches any of our site fabric prefixes.
@@ -190,16 +183,40 @@ fn find_ipv4_prefix(prefixes: &[NetworkPrefix]) -> Option<&NetworkPrefix> {
     prefixes.iter().find(|prefix| prefix.prefix.is_ipv4())
 }
 
+/// Resolves the SVI for one optional segment prefix with that family's prefix length.
+///
+/// Resolving one family at a time lets callers omit an unused sibling family without making the
+/// configured family fail.
+fn resolve_svi_ip(
+    prefix: Option<&NetworkPrefix>,
+    network_virtualization_type: VpcVirtualizationType,
+    is_l2_segment: bool,
+    field_name: &str,
+) -> Result<Option<String>, CarbideError> {
+    let svi_ip = prefix
+        .map(|prefix| {
+            get_svi_ip(
+                &prefix.svi_ip,
+                network_virtualization_type,
+                is_l2_segment,
+                prefix.prefix.prefix(),
+            )
+        })
+        .transpose()
+        .map_err(|e| CarbideError::Internal {
+            message: format!("failed to configure FlatInterfaceConfig.{field_name}: {e}"),
+        })?
+        .flatten()
+        .map(|ip| ip.to_string());
+    Ok(svi_ip)
+}
+
 impl<'a> PrefixPair<'a> {
     /// Find the IPv4 (optional) and IPv6 (optional) prefixes from a slice.
-    fn from_segment_prefixes(
-        prefixes: &'a [NetworkPrefix],
-        _instance_id: InstanceId,
-        _segment_id: carbide_uuid::network::NetworkSegmentId,
-    ) -> Result<Self, CarbideError> {
+    fn from_segment_prefixes(prefixes: &'a [NetworkPrefix]) -> Self {
         let v4 = find_ipv4_prefix(prefixes);
         let v6 = prefixes.iter().find(|p| p.prefix.is_ipv6());
-        Ok(Self { v4, v6 })
+        Self { v4, v6 }
     }
 
     /// Return the IPv4 prefix, if present.
@@ -258,41 +275,20 @@ impl<'a> PrefixPair<'a> {
         network_virtualization_type: VpcVirtualizationType,
         is_l2_segment: bool,
     ) -> Result<(Option<String>, Option<String>), CarbideError> {
-        let svi_ip = self
-            .v4
-            .map(|p| {
-                get_svi_ip(
-                    &p.svi_ip,
-                    network_virtualization_type,
-                    is_l2_segment,
-                    p.prefix.prefix(),
-                )
-            })
-            .transpose()
-            .map_err(|e| CarbideError::Internal {
-                message: format!("failed to configure FlatInterfaceConfig.svi_ip: {e}"),
-            })?
-            .flatten()
-            .map(|ip| ip.to_string());
-
-        let svi_ip_v6 = self
-            .v6
-            .and_then(|p| {
-                get_svi_ip(
-                    &p.svi_ip,
-                    network_virtualization_type,
-                    is_l2_segment,
-                    p.prefix.prefix(),
-                )
-                .transpose()
-            })
-            .transpose()
-            .map_err(|e| CarbideError::Internal {
-                message: format!("failed to configure FlatInterfaceConfig.svi_ip_v6: {e}"),
-            })?
-            .map(|ip| ip.to_string());
-
-        Ok((svi_ip, svi_ip_v6))
+        Ok((
+            resolve_svi_ip(
+                self.v4,
+                network_virtualization_type,
+                is_l2_segment,
+                "svi_ip",
+            )?,
+            resolve_svi_ip(
+                self.v6,
+                network_virtualization_type,
+                is_l2_segment,
+                "svi_ip_v6",
+            )?,
+        ))
     }
 }
 
@@ -307,7 +303,9 @@ fn tenant_vrf_loopback_for_legacy_ipv4_field(loopback_ip: Option<IpAddr>) -> Opt
 ///
 /// Values are emitted in V4/V6 order. The tenant VRF loopback is placed on the
 /// entry matching its address family, creating a loopback-only entry when that
-/// family has no interface address data.
+/// family has no interface address data. Routed tenant IPv6 keeps `gateway`
+/// absent: its segment `prefix` is the single source used to derive the DPU
+/// address and RA PIO, while `interface_prefix` remains the tenant allocation.
 #[allow(deprecated)]
 fn interface_address_configs(
     config: &rpc::FlatInterfaceConfig,
@@ -361,9 +359,10 @@ fn interface_address_configs(
 /// Builds the legacy IPv6 projection used by DPU agents.
 ///
 /// Existing non-SLAAC configurations still require a concrete host address.
-/// SLAAC instead sends the selected interface prefix with an intentionally
-/// empty host address so the agent can configure the IPv6 prefix in the DPU.
-/// Router advertisement (RA) support is tracked by
+/// Stateful FNN sends its tenant `/128`; the family-neutral segment prefix
+/// separately carries the containing `/127`. SLAAC instead sends the
+/// VPC-selected `/64` with an intentionally empty host address. Routed tenant
+/// interfaces use this distinction to render RA. Tenant IPv6 support is tracked by
 /// https://github.com/NVIDIA/infra-controller/issues/2398.
 fn build_ipv6_interface_config(
     address: Option<IpAddr>,
@@ -393,7 +392,7 @@ fn build_ipv6_interface_config(
 pub(crate) async fn admin_network(
     txn: &mut PgConnection,
     snapshot: &ManagedHostStateSnapshot,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     options: AdminNetworkOptions<'_>,
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {
@@ -463,7 +462,8 @@ pub(crate) async fn admin_network(
         .into());
     };
 
-    let prefix = match find_ipv4_prefix(&admin_segment.prefixes) {
+    let prefixes = PrefixPair::from_segment_prefixes(&admin_segment.prefixes);
+    let prefix = match prefixes.v4() {
         Some(p) => p,
         None => {
             return Err(CarbideError::Internal {
@@ -501,6 +501,11 @@ pub(crate) async fn admin_network(
                 active_interface.id
             ))
         })?;
+    let ipv6_address = active_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(IpAddr::is_ipv6);
 
     // On the admin network, the interface_prefix is always
     // just going to be a /32 derived from the machine interface
@@ -512,16 +517,50 @@ pub(crate) async fn admin_network(
     let svi_ip = if !fnn_enabled_on_admin {
         None
     } else {
-        get_svi_ip(
-            &prefix.svi_ip,
-            VpcVirtualizationType::Fnn,
-            true,
-            prefix.prefix.prefix(),
-        )
-        .map_err(|e| CarbideError::Internal {
-            message: format!("failed to configure FlatInterfaceConfig.svi_ip: {e}"),
-        })?
-        .map(|ip| ip.to_string())
+        resolve_svi_ip(prefixes.v4(), VpcVirtualizationType::Fnn, true, "svi_ip")?
+    };
+
+    let ipv6_prefix = prefixes.v6();
+    let ipv6_svi_address = ipv6_prefix.and_then(|prefix| prefix.svi_ip);
+
+    // The agent installs the segment network address as the IPv6 VRR. Host, SVI, and VRR
+    // therefore have distinct in-prefix roles; incomplete or stale IPv6 is omitted so the valid
+    // IPv4 admin response remains usable.
+    let (ipv6_interface_config, ipv6_segment_prefix) = match (
+        fnn_enabled_on_admin,
+        ipv6_prefix,
+        ipv6_address,
+        ipv6_svi_address,
+    ) {
+        (true, Some(ipv6_prefix), Some(ipv6_address), Some(ipv6_svi_address))
+            if ipv6_prefix.prefix.contains(ipv6_address)
+                && ipv6_prefix.prefix.contains(ipv6_svi_address)
+                && ipv6_address != ipv6_svi_address
+                && ipv6_address != ipv6_prefix.prefix.network()
+                && ipv6_svi_address != ipv6_prefix.prefix.network() =>
+        {
+            let ipv6_interface_prefix =
+                IpNetwork::new(ipv6_address, 128).map_err(|e| CarbideError::Internal {
+                    message: format!(
+                        "failed to build default admin address prefix for {ipv6_address}/128: {e}"
+                    ),
+                })?;
+            let ipv6_svi_ip = resolve_svi_ip(
+                Some(ipv6_prefix),
+                VpcVirtualizationType::Fnn,
+                true,
+                "svi_ip_v6",
+            )?;
+            (
+                Some(rpc::FlatInterfaceIpv6Config {
+                    ip: ipv6_address.to_string(),
+                    interface_prefix: ipv6_interface_prefix.to_string(),
+                    svi_ip: ipv6_svi_ip,
+                }),
+                Some(ipv6_prefix.prefix.to_string()),
+            )
+        }
+        _ => (None, None),
     };
 
     let (vpc_vni, tenant_vrf_loopback_ip) = if !fnn_enabled_on_admin {
@@ -602,12 +641,18 @@ pub(crate) async fn admin_network(
         network_security_group: None,
         internal_uuid: None,
         mtu: u32::try_from(admin_segment.config.mtu).ok(),
-        ipv6_interface_config: None,
+        ipv6_interface_config,
         vpc_routing_profile: admin_vpc_routing_profile.map(rpc::RoutingProfile::from),
         interface_routing_profile: None,
         addresses: vec![],
     };
-    cfg.addresses = interface_address_configs(&cfg, None, tenant_vrf_loopback_ip);
+    // Do not let an IPv6 VPC loopback create a canonical V6 entry by itself. The agent interprets
+    // any canonical admin V6 entry as admin-interface IPv6, which requires the complete host,
+    // segment-prefix, and SVI role set.
+    let canonical_loopback_ip =
+        tenant_vrf_loopback_ip.filter(|ip| ip.is_ipv4() || cfg.ipv6_interface_config.is_some());
+    cfg.addresses =
+        interface_address_configs(&cfg, ipv6_segment_prefix.as_deref(), canonical_loopback_ip);
     Ok((cfg, interface.id))
 }
 
@@ -632,7 +677,7 @@ pub(crate) async fn tenant_network(
     // Any stretchable segment is treated as L2 segment by FNN.
     let is_l2_segment = segment.status.can_stretch.unwrap_or(true);
 
-    let ds = PrefixPair::from_segment_prefixes(&segment.prefixes, instance_id, segment.id)?;
+    let ds = PrefixPair::from_segment_prefixes(&segment.prefixes);
     let address = match ds.v4() {
         Some(_) => Some(ds.v4_address(iface).ok_or_else(|| CarbideError::Internal {
             message: format!(
@@ -687,45 +732,44 @@ pub(crate) async fn tenant_network(
     if let Some(policy) = vpc_peering_policy_on_existing
         && let Some(vpc_id) = segment.config.vpc_id
     {
-        // The peer-ID universe depends on the site policy. Under
-        // `Exclusive`, the per-type capability layer dictates which
-        // peer types are compatible (e.g. an FNN VPC can have Flat
-        // peers via Flat's `peers_with` listing). Under `Mixed`, the
-        // operator opts out of capability enforcement and we accept
-        // any peering record. `None` disables peering entirely.
+        // The per-type capability layer dictates which peer types are
+        // compatible (e.g. an FNN VPC can have Flat peers via Flat's
+        // `peers_with` listing). Deprecated `Mixed` now has the same
+        // behavior as `Exclusive`; `None` disables all peer imports.
         let vpc_peer_ids: Vec<VpcId> = match policy {
-            VpcPeeringPolicy::Exclusive => {
+            VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
                 let allowed_peer_types = network_virtualization_type
                     .capabilities()
                     .peers_with
                     .to_vec();
-                db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
+                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
                     .await?
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
             }
-            VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, vpc_id).await?,
             VpcPeeringPolicy::None => vec![],
         };
 
         vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
 
-        // VNI-based peer route imports are independent of peering
-        // policy: they're a per-type question on both sides.
+        // VNI-based peer route imports are a per-type question on both sides
+        // when stored peerings are enabled.
         // - Self: does this VPC's DPU plumb peer VNIs into its VRF?
         //   (`imports_peer_vnis_into_overlay`, FNN-only today.)
         // - Peer: should this peer's VNI be exposed for the self-side
         //   to pick up? (`vni_advertised_to_peers`, FNN + Flat today --
         //   Flat advertises its VNI so pluggable SDN integrations on
         //   the network operator's fabric can use it.)
-        if network_virtualization_type.imports_peer_vnis_into_overlay() {
+        if policy != VpcPeeringPolicy::None
+            && network_virtualization_type.imports_peer_vnis_into_overlay()
+        {
             let vni_peer_types: Vec<_> = ALL_VPC_VIRTUALIZATION_TYPES
                 .iter()
                 .copied()
                 .filter(|t| t.vni_advertised_to_peers())
                 .collect();
-            vpc_peer_vnis = db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
+            vpc_peer_vnis = db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
                 .await?
                 .iter()
                 .map(|(_, vni)| *vni as u32)
@@ -1000,7 +1044,7 @@ mod test {
     fn ipv6_interface_config() -> rpc::FlatInterfaceIpv6Config {
         rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::2/64".to_string()),
         }
     }
@@ -1009,7 +1053,7 @@ mod test {
         rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V6.into(),
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             prefix: "2001:db8::/64".to_string(),
             gateway: None,
             svi_ip: Some("2001:db8::2/64".to_string()),

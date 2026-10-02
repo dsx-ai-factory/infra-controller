@@ -1007,6 +1007,9 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		require.Len(t, deletedVpcs, 1)
 		require.NotNil(t, deletedVpcs[0].Deleted)
 
+		// The undelete is deferred while the delete is newer than the staleness threshold, so
+		// backdate it past that.
+		cwu.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
 		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
 		_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)
@@ -1331,7 +1334,7 @@ func Test_VpcMetrics_Delete_DeletingOnly(t *testing.T) {
 
 	site := util.TestSetupSite(t, dbSession)
 	reg := prometheus.NewRegistry()
-	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession)
+	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession, "nico_rest_workflow")
 	testVpcID := uuid.New()
 
 	// Set precise timestamps
@@ -1351,7 +1354,7 @@ func Test_VpcMetrics_Delete_DeletingOnly(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify metric was emitted with correct duration (200ms)
-	util.TestAssertMetricExistsTimes(t, reg, "cloud_workflow_vpc_operation_latency_seconds", 1, map[string]string{
+	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_vpc_operation_latency_seconds", 1, map[string]string{
 		"operation_type": "delete",
 		"from_status":    cdbm.VpcStatusDeleting,
 		"to_status":      "Deleted",
@@ -1366,7 +1369,7 @@ func Test_VpcMetrics_Delete_MultipleDeleting(t *testing.T) {
 
 	site := util.TestSetupSite(t, dbSession)
 	reg := prometheus.NewRegistry()
-	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession)
+	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession, "nico_rest_workflow")
 	testVpcID := uuid.New()
 
 	// Set precise timestamps
@@ -1394,7 +1397,7 @@ func Test_VpcMetrics_Delete_MultipleDeleting(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify metric was emitted (should use first deleting timestamp, duration 300ms)
-	util.TestAssertMetricExistsTimes(t, reg, "cloud_workflow_vpc_operation_latency_seconds", 1, map[string]string{
+	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_vpc_operation_latency_seconds", 1, map[string]string{
 		"operation_type": "delete",
 		"from_status":    cdbm.VpcStatusDeleting,
 		"to_status":      "Deleted",
@@ -1409,7 +1412,7 @@ func Test_VpcMetrics_Delete_NoDeleting(t *testing.T) {
 
 	site := util.TestSetupSite(t, dbSession)
 	reg := prometheus.NewRegistry()
-	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession)
+	lifecycleMetrics := NewManageVpcLifecycleMetrics(reg, dbSession, "nico_rest_workflow")
 	testVpcID := uuid.New()
 
 	// Set precise timestamps
@@ -1428,5 +1431,5 @@ func Test_VpcMetrics_Delete_NoDeleting(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify NO metric was emitted (no deleting status found)
-	util.TestAssertMetricExistsTimes(t, reg, "cloud_workflow_vpc_operation_latency_seconds", 0, nil, 0)
+	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_vpc_operation_latency_seconds", 0, nil, 0)
 }

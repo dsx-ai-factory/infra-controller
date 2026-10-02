@@ -61,13 +61,19 @@ func handleMachineStatusRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func newStatusServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc(computils.SiteStatus, handleSiteStatusRequest)
+	mux.HandleFunc(computils.VPCStatus, handleVpcStatusRequest)
+	mux.HandleFunc(computils.SubnetStatus, handleSubnetStatusRequest)
+	mux.HandleFunc(computils.InstanceStatus, handleInstanceStatusRequest)
+	mux.HandleFunc(computils.MachineStatus, handleMachineStatusRequest)
+	return mux
+}
+
 // StartHTTPServer - start a web server on the specified port.
 func StartHTTPServer() {
-	port := os.Getenv("ESA_PORT")
-	http.HandleFunc(computils.SiteStatus, handleSiteStatusRequest)
-	http.HandleFunc(computils.VPCStatus, handleVpcStatusRequest)
-	http.HandleFunc(computils.SubnetStatus, handleSubnetStatusRequest)
-	http.HandleFunc(computils.InstanceStatus, handleInstanceStatusRequest)
-	http.HandleFunc(computils.MachineStatus, handleMachineStatusRequest)
-	go http.ListenAndServe(fmt.Sprintf("localhost:%v", port), nil)
+	port := ":" + os.Getenv("ESA_PORT")
+	mux := newStatusServeMux()
+	go http.ListenAndServe(port, mux)
 }

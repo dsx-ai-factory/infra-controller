@@ -30,6 +30,8 @@ use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
 mod test_create_domain;
+#[cfg(test)]
+mod test_explicit_columns;
 
 /// Validates a domain name according to DNS standards
 fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
@@ -49,6 +51,8 @@ fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
 pub struct DbDomain {
     pub id: DomainId,
     pub name: String,
+    /// Default record TTL; absence means the site default.
+    pub default_ttl: Option<model::dns::ZoneTtl>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -61,6 +65,7 @@ impl From<DbDomain> for Domain {
         Domain {
             id: db.id,
             name: db.name,
+            default_ttl: db.default_ttl,
             created: db.created,
             updated: db.updated,
             deleted: db.deleted,
@@ -98,8 +103,9 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     // Create default metadata entry
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
-    let query =
-        "INSERT INTO domains (name, soa, domain_metadata_id) VALUES ($1, $2, $3) returning *";
+    let query = "INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+                 VALUES ($1, $2, $3, $4)
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id";
     match persist_inner_with_metadata(&value, metadata_id, txn, query).await {
         Ok(Some(domain)) => Ok(domain),
         Ok(None) => Err(DatabaseError::NotFoundError {
@@ -120,9 +126,10 @@ pub async fn persist_first(
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
     let query = "
-            INSERT INTO domains (name, soa, domain_metadata_id) SELECT $1, $2, $3
+            INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+            SELECT $1, $2, $3, $4
             WHERE NOT EXISTS (SELECT name FROM domains)
-            RETURNING *";
+            RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id";
     persist_inner_with_metadata(value, metadata_id, txn, query).await
 }
 
@@ -136,6 +143,7 @@ async fn persist_inner_with_metadata(
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(metadata_id)
+        .bind(value.default_ttl)
         .fetch_optional(txn)
         .await
         .map(|opt| opt.map(Domain::from))
@@ -164,7 +172,10 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
     filter: ObjectColumnFilter<'a, C>,
     include_deleted: bool,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM domains").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id FROM domains",
+    )
+    .filter(&filter);
     if !include_deleted {
         query.push(" AND deleted IS NULL");
     }
@@ -174,6 +185,31 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
         .await
         .map(|domains| domains.into_iter().map(Domain::from).collect())
         .map_err(|e| DatabaseError::query(query.sql(), e))
+}
+
+/// Finds the live domain whose name is the longest entry in `candidates`.
+///
+/// `candidates` are the label suffixes of a queried name, lowercase and
+/// without a trailing dot (see `Fqdn::suffixes`). Names compare after
+/// `lower(rtrim(name, '.'))`, so a stored dotted or mixed-case spelling still
+/// matches. One query, bounded by the number of labels in the question, in
+/// place of loading every row.
+pub async fn find_longest_live_zone(
+    txn: impl DbReader<'_>,
+    candidates: &[String],
+) -> Result<Option<Domain>, DatabaseError> {
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id
+                 FROM domains
+                 WHERE deleted IS NULL
+                   AND lower(rtrim(name, '.')) = ANY($1)
+                 ORDER BY length(rtrim(name, '.')) DESC, name
+                 LIMIT 1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(candidates)
+        .fetch_optional(txn)
+        .await
+        .map(|domain| domain.map(Domain::from))
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Finds live domains named `name`.
@@ -198,7 +234,8 @@ pub async fn find_reverse_zone_by_normalized_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> Result<Vec<Domain>, DatabaseError> {
-    let query = "SELECT * FROM domains
+    let query = "SELECT id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id
+                 FROM domains
                  WHERE lower(rtrim(name, '.')) = $1
                    AND deleted IS NULL
                    AND (
@@ -254,7 +291,7 @@ pub async fn delete(value: Domain, txn: &mut PgConnection) -> Result<Domain, Dat
                      deleted = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
                  WHERE id = $1
                    AND updated = $2
-                 RETURNING *";
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id";
     sqlx::query_as::<_, DbDomain>(query)
         .bind(value.id)
         .bind(value.updated)
@@ -280,16 +317,18 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
     let query = "UPDATE domains
                  SET name = $1,
                      updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond'),
-                     soa = $2
+                     soa = $2,
+                     default_ttl = $5
                  WHERE id = $3
                    AND updated = $4
-                 RETURNING *";
+                 RETURNING id, name, default_ttl, created, updated, deleted, soa, domain_metadata_id";
 
     sqlx::query_as::<_, DbDomain>(query)
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(value.id)
         .bind(value.updated)
+        .bind(value.default_ttl)
         .fetch_one(txn)
         .await
         .map(Domain::from)
@@ -301,16 +340,140 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
         })
 }
 
+// Records are derived from inventory, so no single write path owns a zone's
+// content. Each inventory writer that changes what a zone publishes calls one
+// of these helpers in its own transaction. `bump_serial` holds the rule; the
+// other helpers only resolve which zones an inventory row publishes into.
+
+/// Advances the serial of every live zone in `domain_ids`.
+///
+/// `updated` advances as well, so `update` and `delete`, which compare it as
+/// an optimistic-lock token, fail with `ConcurrentModificationError` instead
+/// of writing a serial computed from the value they read before this bump.
+pub async fn bump_serial(txn: &mut PgConnection, domain_ids: &[DomainId]) -> DatabaseResult<()> {
+    if domain_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE domains
+                 SET soa = jsonb_set(soa, '{serial}', to_jsonb(GREATEST(
+                         (soa->>'serial')::bigint + 1,
+                         floor(extract(epoch FROM statement_timestamp()))::bigint))),
+                     updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond')
+                 WHERE id = ANY($1) AND deleted IS NULL AND soa ? 'serial'";
+    sqlx::query(query)
+        .bind(domain_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Advances the serial of the zone each of the given machine interfaces
+/// publishes into.
+pub async fn bump_serial_for_interfaces(
+    txn: &mut PgConnection,
+    interface_ids: &[carbide_uuid::machine::MachineInterfaceId],
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "SELECT DISTINCT domain_id FROM machine_interfaces
+                 WHERE id = ANY($1) AND domain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(interface_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
+}
+
+/// Advances the serial of the zone a machine interface publishes into.
+pub async fn bump_serial_for_interface(
+    txn: &mut PgConnection,
+    interface_id: carbide_uuid::machine::MachineInterfaceId,
+) -> DatabaseResult<()> {
+    bump_serial_for_interfaces(txn, &[interface_id]).await
+}
+
+/// Advances the serial of the zone each interface of a machine publishes into.
+pub async fn bump_serial_for_machine_interfaces(
+    txn: &mut PgConnection,
+    machine_id: &carbide_uuid::machine::MachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT DISTINCT domain_id FROM machine_interfaces
+                 WHERE machine_id = $1 AND domain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
+}
+
+/// Advances the serial of each segment's subdomain, the zone that publishes
+/// instance addresses allocated on that segment.
+pub async fn bump_serial_for_segments(
+    txn: &mut PgConnection,
+    segment_ids: &[carbide_uuid::network::NetworkSegmentId],
+) -> DatabaseResult<()> {
+    if segment_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "SELECT DISTINCT subdomain_id FROM network_segments
+                 WHERE id = ANY($1) AND subdomain_id IS NOT NULL";
+    let zones: Vec<DomainId> = sqlx::query_scalar(query)
+        .bind(segment_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    bump_serial(txn, &zones).await
+}
+
 #[cfg(test)]
-#[test]
-fn test_generate_domain_serial_format() {
-    use chrono::Utc;
-    let now = Utc::now();
-    let expected_serial = now.format("%Y%m%d01").to_string().parse::<u32>().unwrap();
+mod test_find_longest_live_zone {
+    use model::dns::NewDomain;
 
-    let serial = dns_record::SoaRecord::generate_new_serial();
+    use crate as db;
 
-    assert_eq!(serial, expected_serial);
+    #[crate::sqlx_test]
+    async fn picks_the_longest_live_suffix(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin");
+        for name in ["example.com", "mysite.example.com."] {
+            db::dns::domain::persist(NewDomain::new(name), &mut txn)
+                .await
+                .expect("persist domain");
+        }
+        let deleted = db::dns::domain::persist(NewDomain::new("gpu.mysite.example.com"), &mut txn)
+            .await
+            .expect("persist domain");
+        db::dns::domain::delete(deleted, &mut txn)
+            .await
+            .expect("delete domain");
+
+        let suffixes = |name: &str| {
+            model::dns::Fqdn::parse(name)
+                .expect("fixture name")
+                .suffixes()
+        };
+
+        let held = db::dns::domain::find_longest_live_zone(
+            txn.as_mut(),
+            &suffixes("gpu.mysite.example.com."),
+        )
+        .await
+        .expect("query")
+        .expect("a live zone encloses the name");
+        assert_eq!(
+            held.name, "mysite.example.com.",
+            "the longest live match wins over its parent and its deleted child, in stored spelling"
+        );
+
+        let none =
+            db::dns::domain::find_longest_live_zone(txn.as_mut(), &suffixes("www.example.org."))
+                .await
+                .expect("query");
+        assert!(none.is_none(), "no zone encloses example.org");
+    }
 }
 
 #[cfg(test)]

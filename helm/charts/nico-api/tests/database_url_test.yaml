@@ -1,0 +1,31 @@
+suite: database URL startup commands
+templates:
+  - templates/deployment.yaml
+  - templates/migration-job.yaml
+tests:
+  - it: prepares the host before updating each generated API URL
+    template: templates/deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '\*:\*\) DATASTORE_URL_HOST="\[\$DATASTORE_URL_HOST\]" ;;'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'DATASTORE_URL="postgres://\$\{DATASTORE_USER\}:\$\{DATASTORE_PASSWORD\}@\$\{DATASTORE_URL_HOST\}:\$\{DATASTORE_PORT\}/\$\{DATASTORE_NAME\}"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'if \[ "\$\{CARBIDE_API_DATABASE_URL-\}" = "\$GENERATED_DATASTORE_URL" \]; then\s+export CARBIDE_API_DATABASE_URL="\$DATASTORE_URL"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'if \[ "\$\{NICO_API_DATABASE_URL-\}" = "\$GENERATED_DATASTORE_URL" \]; then\s+export NICO_API_DATABASE_URL="\$DATASTORE_URL"'
+  - it: passes the prepared URL and configured SSL mode to migrations
+    template: templates/migration-job.yaml
+    set:
+      migrationJob.sslMode: verify-full
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'DATASTORE_URL_HOST="\$DATASTORE_HOST"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'exec "\$BIN" migrate --datastore="\$\{DATASTORE_URL\}\?sslmode=verify-full"'

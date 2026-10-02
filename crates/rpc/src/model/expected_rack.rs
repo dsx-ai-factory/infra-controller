@@ -26,6 +26,7 @@ impl From<ExpectedRack> for rpc::forge::ExpectedRack {
         rpc::forge::ExpectedRack {
             rack_id: Some(expected_rack.rack_id),
             rack_profile_id: Some(expected_rack.rack_profile_id),
+            rack_group_id: expected_rack.rack_group_id,
             metadata: Some(expected_rack.metadata.into()),
         }
     }
@@ -51,6 +52,7 @@ impl TryFrom<rpc::forge::ExpectedRack> for ExpectedRack {
         Ok(ExpectedRack {
             rack_id,
             rack_profile_id,
+            rack_group_id: rpc.rack_group_id,
             metadata,
         })
     }

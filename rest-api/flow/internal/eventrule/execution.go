@@ -39,8 +39,10 @@ type Execution struct {
 	Attempts   int
 	ClaimToken uuid.UUID
 	ClaimOwner string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// ClaimExpiresAt is the store-timed expiration of the active running claim.
+	ClaimExpiresAt time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Clone returns an independent execution snapshot.
@@ -51,93 +53,228 @@ func (e Execution) Clone() Execution {
 	return cloned
 }
 
-// Claim allocates the next attempt and moves an eligible execution to running.
-func (e *Execution) Claim(owner string, token uuid.UUID, now time.Time) error {
-	if e == nil {
-		return fmt.Errorf("execution is nil")
-	}
-
-	if !e.Status.CanBeClaimed() {
-		return fmt.Errorf("execution %s cannot be claimed from %q", e.ID, e.Status)
-	}
-
-	if err := ValidateExecutionClaimOwner(owner); err != nil {
-		return err
-	}
-	if token == uuid.Nil {
-		return fmt.Errorf("execution claim token is required")
-	}
-
+func (e *Execution) validateNow(now time.Time) error {
 	if now.IsZero() {
-		return fmt.Errorf("execution claim time is required")
+		return fmt.Errorf("execution time is required")
 	}
 	if now.Before(e.CreatedAt) {
-		return fmt.Errorf("execution claim time cannot precede creation time")
+		return fmt.Errorf("execution time cannot precede creation time")
 	}
 	if now.Before(e.UpdatedAt) {
-		return fmt.Errorf("execution claim time cannot precede update time")
+		return fmt.Errorf("execution time cannot precede update time")
 	}
-
-	e.ExecutionState = ExecutionState{
-		ExecutionStatusDetails: ExecutionStatusDetails{Status: ExecutionStatusRunning},
-	}
-	e.Attempts++
-	e.ClaimToken = token
-	e.ClaimOwner = owner
-	e.UpdatedAt = now
 
 	return nil
 }
 
+func (e *Execution) claimExpiredAt(t time.Time) bool {
+	return !t.Before(e.ClaimExpiresAt)
+}
+
+func invalidExecutionInputErrorf(format string, args ...any) error {
+	return fmt.Errorf("%w: %w", ErrInvalidExecutionInput, fmt.Errorf(format, args...))
+}
+
+func executionNotClaimableErrorf(format string, args ...any) error {
+	return fmt.Errorf("%w: %w", ErrExecutionNotClaimable, fmt.Errorf(format, args...))
+}
+
+func executionClaimLostErrorf(format string, args ...any) error {
+	return fmt.Errorf("%w: %w", ErrExecutionClaimLost, fmt.Errorf(format, args...))
+}
+
+// ClaimDisposition describes the durable result of acquiring an execution
+// claim.
+type ClaimDisposition uint8
+
+const (
+	// ClaimUnspecified means claim acquisition did not produce a disposition.
+	ClaimUnspecified ClaimDisposition = iota
+	// ClaimAcquired means ownership was assigned and the execution is running.
+	ClaimAcquired
+	// ClaimExhausted means an expired running execution reached its attempt
+	// limit and was failed instead of assigning new ownership.
+	ClaimExhausted
+)
+
+// AcquireClaim assigns the next attempt to an eligible execution or fails an
+// expired running execution whose attempt limit is exhausted. Invalid
+// arguments return ErrInvalidExecutionInput; an ineligible state returns
+// ErrExecutionNotClaimable.
+func (e *Execution) AcquireClaim(
+	owner string,
+	token uuid.UUID,
+	now time.Time,
+	claimExpiresAt time.Time,
+	maxAttempts int,
+) (ClaimDisposition, error) {
+	if maxAttempts <= 0 {
+		return ClaimUnspecified, invalidExecutionInputErrorf(
+			"execution claim max attempts must be positive",
+		)
+	}
+	if err := ValidateExecutionClaimOwner(owner); err != nil {
+		return ClaimUnspecified, invalidExecutionInputErrorf("%w", err)
+	}
+	if token == uuid.Nil {
+		return ClaimUnspecified, invalidExecutionInputErrorf(
+			"execution claim token is required",
+		)
+	}
+	if err := e.validateNow(now); err != nil {
+		return ClaimUnspecified, invalidExecutionInputErrorf("%w", err)
+	}
+	if !claimExpiresAt.After(now) {
+		return ClaimUnspecified, invalidExecutionInputErrorf(
+			"execution claim expiration must follow claim time",
+		)
+	}
+
+	if !e.Status.CanBeClaimed() {
+		return ClaimUnspecified, executionNotClaimableErrorf(
+			"execution %s cannot acquire claim from %q",
+			e.ID,
+			e.Status,
+		)
+	}
+
+	if e.Status == ExecutionStatusRunning {
+		if !e.claimExpiredAt(now) {
+			return ClaimUnspecified, executionNotClaimableErrorf(
+				"execution %s does not have an expired claim",
+				e.ID,
+			)
+		}
+
+		if e.Attempts >= maxAttempts {
+			e.ExecutionState = FailedExecutionResult(
+				fmt.Sprintf("execution claim expired after %d attempts", e.Attempts),
+			).stateAt(now)
+			e.ClaimToken = uuid.Nil
+			e.ClaimOwner = ""
+			e.ClaimExpiresAt = time.Time{}
+			e.UpdatedAt = now
+
+			return ClaimExhausted, nil
+		}
+
+		// The original claim may have expired because the configured duration
+		// underestimated a valid execution rather than because its worker died.
+		// Give every replacement attempt twice the configured duration so it has
+		// another bounded opportunity to finish without allowing recovery windows
+		// to grow exponentially across repeated reclamations.
+		claimExpiresAt = claimExpiresAt.Add(claimExpiresAt.Sub(now))
+	}
+
+	e.ExecutionState = ExecutionState{
+		ExecutionStatusDetails: ExecutionStatusDetails{
+			Status: ExecutionStatusRunning,
+		},
+	}
+	e.Attempts++
+	e.ClaimToken = token
+	e.ClaimOwner = owner
+	e.ClaimExpiresAt = claimExpiresAt
+	e.UpdatedAt = now
+
+	return ClaimAcquired, nil
+}
+
 // TransitionClaimedTo validates and applies the active attempt's result when
-// token still owns the execution.
+// token still owns the execution, including after its fixed expiration when it
+// has not yet been reclaimed. Invalid arguments return ErrInvalidExecutionInput;
+// lost ownership returns ErrExecutionClaimLost.
 func (e *Execution) TransitionClaimedTo(
 	token uuid.UUID,
 	result ExecutionResult,
 	now time.Time,
 ) error {
-	if e == nil {
-		return fmt.Errorf("execution is nil")
-	}
-
 	if token == uuid.Nil {
-		return fmt.Errorf("execution claim token is required")
-	}
-	if e.ClaimToken != token {
-		return fmt.Errorf("%w: execution %s", ErrExecutionClaimLost, e.ID)
-	}
-
-	if err := result.Validate(); err != nil {
-		return err
-	}
-	if !e.Status.CanTransitionTo(result.Status) {
-		return fmt.Errorf(
-			"execution %s cannot transition from %q to %q",
-			e.ID,
-			e.Status,
-			result.Status,
+		return invalidExecutionInputErrorf(
+			"execution claim token is required",
 		)
 	}
-
-	if now.IsZero() {
-		return fmt.Errorf("execution transition time is required")
+	if err := result.Validate(); err != nil {
+		return invalidExecutionInputErrorf("%w", err)
 	}
-	if now.Before(e.CreatedAt) {
-		return fmt.Errorf("execution transition time cannot precede creation time")
-	}
-	if now.Before(e.UpdatedAt) {
-		return fmt.Errorf("execution transition time cannot precede update time")
+	if err := e.validateNow(now); err != nil {
+		return invalidExecutionInputErrorf("%w", err)
 	}
 
-	if result.Status == ExecutionStatusDeferred &&
-		result.Reason == ExecutionReasonAttemptInterrupted {
+	if e.Status != ExecutionStatusRunning || e.ClaimToken != token {
+		return executionClaimLostErrorf("execution %s", e.ID)
+	}
+
+	if result.Reason == ExecutionReasonAttemptInterrupted {
 		e.Attempts--
 	}
 
 	e.ExecutionState = result.stateAt(now)
 	e.ClaimToken = uuid.Nil
 	e.ClaimOwner = ""
+	e.ClaimExpiresAt = time.Time{}
 	e.UpdatedAt = now
+
+	return nil
+}
+
+func (e *Execution) validateTimestamps() error {
+	if e.CreatedAt.IsZero() {
+		return fmt.Errorf("execution creation time is required")
+	}
+	if e.UpdatedAt.IsZero() {
+		return fmt.Errorf("execution updated time is required")
+	}
+	if e.UpdatedAt.Before(e.CreatedAt) {
+		return fmt.Errorf("execution updated time cannot precede creation time")
+	}
+
+	return nil
+}
+
+func (e *Execution) validateAttempts() error {
+	if e.Attempts < 0 {
+		return fmt.Errorf("execution attempts cannot be negative")
+	}
+	if (e.Status == ExecutionStatusPending || e.Status == ExecutionStatusSkipped) &&
+		e.Attempts != 0 {
+		return fmt.Errorf("%s execution cannot have attempts", e.Status)
+	}
+	if e.Status != ExecutionStatusPending &&
+		e.Status != ExecutionStatusSkipped &&
+		e.Attempts == 0 &&
+		!(e.Status == ExecutionStatusDeferred &&
+			e.Reason == ExecutionReasonAttemptInterrupted) {
+		return fmt.Errorf("%s execution requires an attempt", e.Status)
+	}
+
+	return nil
+}
+
+func (e *Execution) validateClaim() error {
+	if e.Status == ExecutionStatusRunning {
+		if e.ClaimToken == uuid.Nil {
+			return fmt.Errorf("running execution requires claim token")
+		}
+		if err := ValidateExecutionClaimOwner(e.ClaimOwner); err != nil {
+			return err
+		}
+		if e.claimExpiredAt(e.UpdatedAt) {
+			return fmt.Errorf("running execution claim expiration must follow update time")
+		}
+
+		return nil
+	}
+
+	if e.ClaimToken != uuid.Nil {
+		return fmt.Errorf("%s execution cannot have claim token", e.Status)
+	}
+	if e.ClaimOwner != "" {
+		return fmt.Errorf("%s execution cannot have claim owner", e.Status)
+	}
+	if !e.ClaimExpiresAt.IsZero() {
+		return fmt.Errorf("%s execution cannot have claim expiration", e.Status)
+	}
 
 	return nil
 }
@@ -160,46 +297,14 @@ func (e *Execution) Validate() error {
 	if err := e.ExecutionState.Validate(); err != nil {
 		return err
 	}
-
-	if e.Attempts < 0 {
-		return fmt.Errorf("execution attempts cannot be negative")
+	if err := e.validateTimestamps(); err != nil {
+		return err
 	}
-	if (e.Status == ExecutionStatusPending || e.Status == ExecutionStatusSkipped) &&
-		e.Attempts != 0 {
-		return fmt.Errorf("%s execution cannot have attempts", e.Status)
+	if err := e.validateAttempts(); err != nil {
+		return err
 	}
-	if e.Status != ExecutionStatusPending &&
-		e.Status != ExecutionStatusSkipped &&
-		e.Attempts == 0 &&
-		!(e.Status == ExecutionStatusDeferred &&
-			e.Reason == ExecutionReasonAttemptInterrupted) {
-		return fmt.Errorf("%s execution requires an attempt", e.Status)
-	}
-
-	if e.Status == ExecutionStatusRunning {
-		if e.ClaimToken == uuid.Nil {
-			return fmt.Errorf("running execution requires claim token")
-		}
-		if err := ValidateExecutionClaimOwner(e.ClaimOwner); err != nil {
-			return err
-		}
-	} else {
-		if e.ClaimToken != uuid.Nil {
-			return fmt.Errorf("%s execution cannot have claim token", e.Status)
-		}
-		if e.ClaimOwner != "" {
-			return fmt.Errorf("%s execution cannot have claim owner", e.Status)
-		}
-	}
-
-	if e.CreatedAt.IsZero() {
-		return fmt.Errorf("execution creation time is required")
-	}
-	if e.UpdatedAt.IsZero() {
-		return fmt.Errorf("execution updated time is required")
-	}
-	if e.UpdatedAt.Before(e.CreatedAt) {
-		return fmt.Errorf("execution updated time cannot precede creation time")
+	if err := e.validateClaim(); err != nil {
+		return err
 	}
 
 	return nil

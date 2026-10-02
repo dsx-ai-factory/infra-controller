@@ -66,6 +66,7 @@ async fn services(env: &ControllerEnv) -> PowerShelfStateHandlerServices {
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
         redfish_client_pool: env.redfish_sim.clone(),
+        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
             db::credential_rotation::CredentialRotationType::Bmc,
         ),
@@ -118,6 +119,7 @@ async fn error_with_power_on_maintenance_request_transitions_to_maintenance(
             transition,
             PowerShelfControllerState::Maintenance {
                 operation: PowerShelfMaintenanceOperation::PowerOn,
+                ..
             }
         ),
         "expected transition to Maintenance {{ PowerOn }}, got {:?}",
@@ -159,6 +161,7 @@ async fn error_with_power_off_maintenance_request_transitions_to_maintenance(
             transition,
             PowerShelfControllerState::Maintenance {
                 operation: PowerShelfMaintenanceOperation::PowerOff,
+                ..
             }
         ),
         "expected transition to Maintenance {{ PowerOff }}, got {:?}",

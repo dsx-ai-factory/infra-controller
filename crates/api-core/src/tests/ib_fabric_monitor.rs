@@ -1019,7 +1019,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
         txn.commit().await?;
     }
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let discovery_info = machine
         .status
         .as_ref()
@@ -1029,7 +1029,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
         .unwrap();
     let guid1 = discovery_info.infiniband_interfaces[0].guid.clone();
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1048,7 +1048,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
 
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1080,7 +1080,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
     env.run_ib_fabric_monitor_iteration().await;
 
     // Verify IbPortDown alert is cleared
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1114,7 +1114,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
         txn.commit().await?;
     }
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let discovery_info = machine
         .status
         .as_ref()
@@ -1132,7 +1132,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1169,7 +1169,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     ib_manager.set_port_state(&guid1, true);
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1199,7 +1199,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     ib_manager.set_port_state(&guid2, true);
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()

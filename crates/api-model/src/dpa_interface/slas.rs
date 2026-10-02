@@ -30,3 +30,7 @@ pub(super) const LOCKING: Duration = Duration::from_secs(15 * 60);
 pub(super) const APPLY_FIRMWARE: Duration = Duration::from_secs(30 * 60);
 pub(super) const APPLY_PROFILE: Duration = Duration::from_secs(15 * 60);
 pub(super) const UNLOCKING: Duration = Duration::from_secs(15 * 60);
+// Tenant-free NIC lockdown IKM rekey sub-states. Lock/unlock are as
+// instantaneous as their assignment-cycle counterparts, so mirror UNLOCKING.
+pub(super) const ROTATE_KEY_UNLOCKING: Duration = Duration::from_secs(15 * 60);
+pub(super) const ROTATE_KEY_LOCKING: Duration = Duration::from_secs(15 * 60);

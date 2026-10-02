@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Flow Service contract
+templates:
+  - service-grpc.yaml
+tests:
+  - it: exposes only the Flow gRPC Service
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: flow
+      - equal:
+          path: spec.ports[0].port
+          value: 50051

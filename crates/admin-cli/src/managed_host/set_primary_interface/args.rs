@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
 use clap::Parser;
 use rpc::forge as forgerpc;
 
@@ -35,7 +35,7 @@ Tip: list a host's interface ids with 'managed-host show <HOST_MACHINE_ID>'.
 ")]
 pub(crate) struct Args {
     #[clap(help = "ID of the host machine")]
-    host_machine_id: MachineId,
+    host_machine_id: StableHostMachineId,
     #[clap(help = "ID of the machine interface to make primary (the boot device)")]
     interface_id: MachineInterfaceId,
     #[clap(

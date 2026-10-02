@@ -186,23 +186,43 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test invalid VPC create request - routing profile is unsupported",
+			name: "test valid VPC create request - site-configured routing profile",
 			fields: fields{
 				Name:                      "test-name",
 				SiteID:                    uuid.NewString(),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				RoutingProfile:            cutil.GetPtr("tenant-edge"),
 			},
-			wantErr: true,
+			wantErr: false,
 		},
+		// The first VNI above the old 16-bit cap must pass validation.
 		{
-			name: "test invalid VPC create request - invalid VNI",
+			name: "accepts first VNI above 65535",
 			fields: fields{
 				Name:   "test-name",
 				SiteID: uuid.NewString(),
-				Vni:    cutil.GetPtr(70000),
+				Vni:    cutil.GetPtr(65536),
 			},
-			wantErr: true,
+		},
+		// The highest 24-bit VNI must remain valid.
+		{
+			name: "accepts maximum VNI",
+			fields: fields{
+				Name:   "test-name",
+				SiteID: uuid.NewString(),
+				Vni:    cutil.GetPtr(maxVpcRoutingVni),
+			},
+		},
+		// A VNI outside the 24-bit range must fail before the uint32 conversion.
+		{
+			name: "rejects VNI above maximum",
+			fields: fields{
+				Name:   "test-name",
+				SiteID: uuid.NewString(),
+				Vni:    cutil.GetPtr(maxVpcRoutingVni + 1),
+			},
+			wantErr:         true,
+			wantErrContains: "VNI must be an integer between 0 and 16777215",
 		},
 		{
 			name: "test valid VPC create request - invalid labels are specified key is empty",
@@ -616,11 +636,13 @@ func TestNewAPIVpc(t *testing.T) {
 			},
 		},
 		{
-			name: "get new APIVpc includes routing profile for FNN VPC",
+			name: "get new APIVpc preserves short custom profile and 24-bit active VNI",
 			args: args{
 				dbVpc: func() cdbm.Vpc {
 					fnnVpc := dbVpc
 					fnnVpc.NetworkVirtualizationType = cutil.GetPtr(cdbm.VpcFNN)
+					fnnVpc.RoutingProfile = cutil.GetPtr("x")
+					fnnVpc.ActiveVni = cutil.GetPtr(70000)
 					return fnnVpc
 				}(),
 				dbsds: dbsds,
@@ -635,10 +657,10 @@ func TestNewAPIVpc(t *testing.T) {
 				SiteID:                    util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				SlaacEnabled:              true,
-				RoutingProfile:            cutil.GetPtr(APIVpcRoutingProfileInternal),
+				RoutingProfile:            cutil.GetPtr("x"),
 				ControllerVpcID:           util.GetUUIDPtrToStrPtr(dbVpc.ControllerVpcID),
 				RequestedVni:              dbVpc.Vni,
-				Vni:                       dbVpc.ActiveVni,
+				Vni:                       cutil.GetPtr(70000),
 				Status:                    dbVpc.Status,
 				Labels: map[string]string{
 					"zone": "1",

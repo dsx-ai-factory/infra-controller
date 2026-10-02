@@ -31,6 +31,36 @@ pub enum RedfishClientCreationError {
     InvalidHeader(String),
     #[error("missing arguments: {0}")]
     MissingArgument(String),
+    /// The pool cannot serve this request as asked -- e.g. the proxied pool
+    /// rejecting explicit credentials or a non-443 BMC port. The payload is
+    /// the full operator-facing explanation.
+    #[error("{0}")]
+    Unsupported(String),
+}
+
+/// Error from a credential-lifecycle operation ([`super::BmcCredentialOps`]),
+/// separating "could not build the Redfish client" from "the operation
+/// itself failed". Callers retry `ClientCreation` and treat `Operation` as
+/// device-level (quarantine, vendor fallback). Note that client creation is
+/// not purely local: besides the credential store and TCP it includes the
+/// vendor auto-detect HTTP probe of the BMC, so a persistently broken BMC
+/// can surface here too. The operations create their clients internally, so
+/// without this split both failure classes would surface identically.
+#[derive(thiserror::Error, Debug)]
+pub enum CredentialOpError {
+    /// The operation's Redfish client could not be built: the credential
+    /// store, TCP, or the vendor auto-detect probe failed before the
+    /// operation was attempted. Callers retry.
+    #[error("creating redfish client: {0}")]
+    ClientCreation(#[source] RedfishClientCreationError),
+    /// The operation itself failed after the client was built. Callers treat
+    /// it as device-level (quarantine, vendor fallback). Only the
+    /// [`RedfishClientCreationError::RedfishError`] payload variant is ever
+    /// constructed; the wider type is kept so the transparent `Display`
+    /// keeps the `failed redfish request` prefix call sites record (e.g. in
+    /// quarantine rows).
+    #[error(transparent)]
+    Operation(RedfishClientCreationError),
 }
 
 impl From<SecretsError> for RedfishClientCreationError {

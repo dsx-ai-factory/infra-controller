@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use clap::{Parser, ValueEnum};
 use url::Url;
 
@@ -307,7 +307,7 @@ pub struct RunOptions {
         long,
         help = "Use this machine id instead of building it from hardware enumeration. Development/testing only"
     )]
-    pub override_machine_id: Option<MachineId>,
+    pub override_machine_id: Option<DpuMachineId>,
     #[clap(
         long,
         help = "Use this network_virtualization_type for both service network and all instances."
@@ -405,6 +405,11 @@ pub enum AgentPlatformType {
 impl AgentPlatformType {
     pub fn is_dpu_os(&self) -> bool {
         matches!(self, AgentPlatformType::DpuOs)
+    }
+
+    /// Returns `true` only for `AgentPlatformType::Containerized`.
+    pub fn is_containerized(&self) -> bool {
+        matches!(self, AgentPlatformType::Containerized)
     }
 }
 
@@ -582,6 +587,25 @@ mod tests {
                 },
             ],
             |t| t.is_dpu_os(),
+        );
+    }
+
+    #[test]
+    fn test_is_containerized_only_true_for_containerized() {
+        check_values(
+            [
+                Check {
+                    scenario: "dpu-os is not containerized",
+                    input: AgentPlatformType::DpuOs,
+                    expect: false,
+                },
+                Check {
+                    scenario: "containerized is containerized",
+                    input: AgentPlatformType::Containerized,
+                    expect: true,
+                },
+            ],
+            |t| t.is_containerized(),
         );
     }
 

@@ -9,7 +9,7 @@ How NICo components emit logs, where they go, what format they use and how to tu
 - All NICo components log to **stdout**. In Kubernetes the kubelet writes container stdout to
   files under `/var/log/pods/`, where a collector (typically an OpenTelemetry Collector DaemonSet)
   picks them up.
-- Most components use **logfmt** (key=value pairs). **nico-dns** uses JSON. **nico-ssh-console**
+- Most components, including **nico-dns**, use **logfmt** (key=value pairs). **nico-ssh-console**
   uses a compact single-line format. **nico-pxe** uses plain text.
 - Default log level is **INFO**. Override at startup with `RUST_LOG` or the `--debug` flag.
 - **nico-api** supports **runtime log-level changes** via `nico-admin-cli set log-filter`. Changes
@@ -37,7 +37,7 @@ sidecar - just configure your collector to read pod logs.
 > **Note**: nico-ssh-console is an exception - in addition to stdout, it writes **machine
 > console output** (BMC serial console streams) to local files. These are not service logs
 <Note>
-nico-ssh-console is an exception - in addition to stdout, it writes **machine console output** (BMC serial console streams) to local files. These are not service logs but captured output from managed machines. See [Machine console logs](#25-machine-console-logs-nico-ssh-console) for details.
+nico-ssh-console is an exception - in addition to stdout, it writes **machine console output** (BMC serial console streams) to local files. These are not service logs but captured output from managed machines. See [Machine console logs](#24-machine-console-logs-nico-ssh-console) for details.
 </Note>
 
 ---
@@ -47,17 +47,17 @@ nico-ssh-console is an exception - in addition to stdout, it writes **machine co
 | Component | Binary | Log format | Notes |
 |-----------|--------|------------|-------|
 | **nico-api** | `carbide-api` | logfmt | Primary control plane. Supports runtime level changes. |
-| **nico-dns** | `carbide-dns` | JSON | DNS resolution service. |
-| **nico-dhcp** | Kea + `libdhcp.so` | Kea format | See [Kea DHCP format](#26-kea-dhcp-format-nico-dhcp). |
+| **nico-dns** | `carbide-dns` | logfmt | DNS resolution service. |
+| **nico-dhcp** | Kea + `libdhcp.so` | Kea format | See [Kea DHCP format](#25-kea-dhcp-format-nico-dhcp). |
 | **nico-pxe** | `carbide` | plain text | iPXE boot service. Hand-rolled `println!`, no log levels. |
 | **nico-bmc-proxy** | `carbide-bmc-proxy` | logfmt | BMC credential proxy. |
 | **nico-hardware-health** | `forge-hw-health` | logfmt | Hardware health monitoring. |
-| **nico-ssh-console** | `ssh-console` | compact | SSH console access. Also captures machine/DPU console output to files (see [Machine console logs](#25-machine-console-logs-nico-ssh-console)). |
+| **nico-ssh-console** | `ssh-console` | compact | SSH console access. Also captures machine/DPU console output to files (see [Machine console logs](#24-machine-console-logs-nico-ssh-console)). |
 | **nico-dsx-exchange-consumer** | `carbide-dsx-exchange-consumer` | logfmt | DSX message consumer. |
 | **nico-dpu-otel-agent** | `forge-dpu-otel-agent` | full | mTLS cert renewal agent on DPUs. See note below. |
 
 <Note>
-`nico-dpu-otel-agent` currently ignores `RUST_LOG` due to a source bug (`fmt().init()` instead of `fmt::init()`). It logs at INFO level only until this is fixed. See [#3151](https://github.com/NVIDIA/infra-controller/issues/3151).
+`nico-dpu-otel-agent` currently ignores `RUST_LOG` due to a source bug (`fmt().init()` instead of `fmt::init()`). It logs at INFO level only until this is fixed. See [#3151](https://github.com/dsx-ai-factory/infra-controller/issues/3151).
 </Note>
 
 ### 2.1 logfmt format
@@ -66,11 +66,13 @@ Most NICo components use [logfmt](https://brandur.org/logfmt) - a line-oriented 
 space-separated `key=value` pairs, easy for both humans and machines to parse.
 
 **Event lines** — one per log call:
+
 ```text
 level=INFO component=nico-api span_id=0x4f… msg="Starting reconciliation" location="handlers/machine.rs:142"
 ```
 
 **Span lines** — emitted when a unit of work closes (`level=SPAN`), carrying timing data:
+
 ```text
 level=SPAN component=site-explorer span_id=0xf7… span_name=explore_site timing_elapsed_us=1523 timing_busy_ns=1200000 timing_idle_ns=323000
 ```
@@ -107,6 +109,7 @@ nico-api                       — API handlers, DB, startup: anything not in a 
 └── attestation_controller
 nico-bmc-proxy
 nico-dhcp
+nico-dns
 nico-dsx-exchange-consumer
 nico-fmds
 nico-hardware-health
@@ -119,6 +122,7 @@ nico-scout
 State-controller lines also carry a `controller=<name>` field with the same value.
 
 This enables filtering logs by component in your backend. For example, with Loki:
+
 ```logql
 {namespace="nico-system"} | logfmt | component="site-explorer"
 ```
@@ -132,21 +136,12 @@ Components that **do not** use the logfmt layer and carry no `component` field:
 
 | Component | Binary | Format | Notes |
 |-----------|--------|--------|-------|
-| nico-dns | `carbide-dns` | JSON | Uses tracing-subscriber JSON formatter |
 | nico-pxe | `carbide` | plain text | Hand-rolled `println!`, no log levels |
 | nico-ssh-console | `ssh-console` | compact | Uses tracing-subscriber compact formatter |
 | nico-dpu-otel-agent | `forge-dpu-otel-agent` | full | Default tracing-subscriber formatter. Ignores `RUST_LOG`. |
-| nico-dhcp | Kea + `libdhcp.so` | Kea | Production uses Kea logger, not Rust tracing (see [Kea DHCP format](#26-kea-dhcp-format-nico-dhcp)) |
+| nico-dhcp | Kea + `libdhcp.so` | Kea | Production uses Kea logger, not Rust tracing (see [Kea DHCP format](#25-kea-dhcp-format-nico-dhcp)) |
 
-### 2.2 JSON format (nico-dns)
-
-nico-dns uses `tracing-subscriber`'s JSON formatter. Each line is a self-contained JSON object:
-
-```json
-{"timestamp":"2026-01-15T10:23:45.123Z","level":"INFO","target":"carbide_dns","message":"DNS query","query_type":"A","name":"host1.example.com"}
-```
-
-### 2.3 Compact format (nico-ssh-console)
+### 2.2 Compact format (nico-ssh-console)
 
 nico-ssh-console uses `tracing-subscriber`'s compact formatter - a human-readable single-line
 format similar to traditional log output:
@@ -155,12 +150,12 @@ format similar to traditional log output:
 2026-01-15T10:23:45.123Z  INFO carbide_ssh_console: Session started session_id=abc-123
 ```
 
-### 2.4 Plain text (nico-pxe)
+### 2.3 Plain text (nico-pxe)
 
 nico-pxe uses `println!` for startup messages and request logging middleware. Output is
 unstructured plain text.
 
-### 2.5 Machine console logs (nico-ssh-console)
+### 2.4 Machine console logs (nico-ssh-console)
 
 In addition to its own service logs (compact format on stdout), nico-ssh-console captures
 **machine and DPU serial console output** to local files. This is separate from the service's
@@ -199,7 +194,7 @@ hardware issues.
 The nico-ssh-console Helm chart includes an optional OpenTelemetry Collector sidecar (`lokiLogCollector.enabled: true`) that ships console logs to Loki. The sidecar reads from `/var/log/consoles/*.log`, extracts the machine ID and BMC IP from filenames, and exports to your Loki endpoint. To use a different backend, customize the `configFiles.otelcolConfig` value in the chart. See [Machine and DPU Logs](machine-dpu-logs.md) for detailed collection workflows.
 </Tip>
 
-### 2.6 Kea DHCP format (nico-dhcp)
+### 2.5 Kea DHCP format (nico-dhcp)
 
 The nico-dhcp Helm chart runs [Kea DHCP](https://www.isc.org/kea/), with NICo's DHCP logic
 loaded as a Kea hook library (`libdhcp.so`). All logging from the hook routes through Kea's
@@ -210,7 +205,6 @@ logger, meaning:
 - Output goes to Kea's configured destinations (stdout by default in the container)
 
 Example Kea log output:
-
 
 To adjust log levels, modify the Kea configuration in the Helm chart's ConfigMap. The
 `loggers` section controls verbosity:
@@ -685,6 +679,7 @@ processors:
 ```
 
 Query example:
+
 ```text
 {k8s_container_name="nico-api"} | logfmt | level="ERROR"
 ```

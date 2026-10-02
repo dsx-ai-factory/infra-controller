@@ -39,7 +39,6 @@ const (
 	controllerMachineStatePrefixPostAssignedMeasuring = "PostAssignedMeasuring"
 	controllerMachineStatePrefixHostReprovisioning    = "HostReprovisioning"
 	controllerMachineStatePrefixReprovisioning        = "Reprovisioning"
-	controllerMachineStatePrefixReady                 = "Ready"
 	controllerMachineStatePrefixFailed                = "Failed"
 	controllerMachineStatePrefixCreated               = "Created"
 	controllerMachineStatePrefixForceDeletion         = "ForceDeletion"
@@ -115,6 +114,12 @@ const (
 	MachineDPUFirmwareUpdateStatusMessage = "Machine DPU firmware update is in progress"
 )
 
+// reconcileStampBackdate is how far before its start a reconcile stamps the Machines it writes.
+// Temporal schedules the next cron run from the previous run's start truncated to the second,
+// and delivery time varies. So a cycle can start sooner than one interval after the last. Without
+// the backdate, that cycle would skip those Machines as externally modified.
+const reconcileStampBackdate = 5 * time.Second
+
 // ManageMachine is an activity wrapper for Machine management tasks that allows injecting DB access
 type ManageMachine struct {
 	dbSession      *cdb.Session
@@ -125,6 +130,12 @@ type ManageMachine struct {
 func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr string, machineInventory *corev1.MachineInventory) error {
 	logger := log.With().Str("Activity", "UpdateMachinesInDB").Str("Site ID", siteIDStr).Logger()
 	logger.Info().Msg("starting activity")
+
+	// Every reported Machine this reconcile writes is stamped with this one time rather than the
+	// time each statement runs. The staleness guard below reads the same column, so stamping the
+	// current time instead would leave it less than one interval old when the next snapshot
+	// arrives, and that snapshot would skip the Machine as externally modified.
+	reconcileStamp := cdb.GetCurTime().Add(-reconcileStampBackdate)
 
 	siteID, err := uuid.Parse(siteIDStr)
 	if err != nil {
@@ -184,7 +195,10 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	// Get all machines for Site to allow faster lookups
 	mDAO := cdbm.NewMachineDAO(mm.dbSession)
 
-	filterInput := cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}
+	filterInput := cdbm.MachineFilterInput{
+		SiteIDs:        []uuid.UUID{site.ID},
+		IncludeDeleted: true,
+	}
 
 	existingMachines, _, err := mDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -359,6 +373,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Hostname:                 hostname,
 				Labels:                   labels,
 				Status:                   machineStatus,
+				Updated:                  &reconcileStamp,
 			}
 
 			newMachine, serr := mDAO.Create(ctx, txn, createInput)
@@ -432,27 +447,68 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			// There could be a race between inventory and human changes in nico-rest-api,
 			// so we need to grab a txn and also lock on the machine record.
 
+			wasDeleted := existingCloudMachine.Deleted != nil
+			if wasDeleted && site.IsTimeWithinStaleInventoryThreshold(*existingCloudMachine.Deleted) {
+				// A snapshot collected before the delete can arrive after it. Wait until the
+				// delete is older than the inventory staleness threshold before restoring.
+				slogger.Info().
+					Str("Machine ID", existingCloudMachine.ID).
+					Msg("not undeleting Machine yet because it was deleted more recently than the inventory interval")
+				continue
+			}
+
 			txn, err := cdb.BeginTx(ctx, mm.dbSession, &sql.TxOptions{})
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to start transaction")
 				continue
 			}
 
-			// Grab a fresh copy of the machine details and a lock on the record during the SELECT.
-			existingCloudMachine, err = mDAO.GetByID(ctx, txn, existingCloudMachine.ID, nil, true)
-			if err != nil {
-				slogger.Error().Err(err).Msg("failed to start transaction")
-				txn.Rollback()
-				continue
+			if wasDeleted {
+				// Restored Machines bypass the staleness check below, since Clear writes the
+				// row this reconcile is about to populate.
+				existingCloudMachine, err = mDAO.Clear(ctx, txn, cdbm.MachineClearInput{
+					MachineID: existingCloudMachine.ID,
+					Deleted:   true,
+					Updated:   &reconcileStamp,
+				})
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
+					terr := txn.Rollback()
+					if terr != nil {
+						slogger.Error().Err(terr).Msg("failed to rollback transaction")
+					}
+					continue
+				}
+			} else {
+				// Grab a fresh copy of the machine details and a lock on the record during the SELECT.
+				existingCloudMachine, err = mDAO.GetByID(ctx, txn, existingCloudMachine.ID, nil, true)
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to retrieve Machine in transaction")
+					terr := txn.Rollback()
+					if terr != nil {
+						slogger.Error().Err(terr).Msg("failed to rollback transaction")
+					}
+					continue
+				}
 			}
 
 			// If the machine was updated at all since this inventory was received, we
 			// should consider the inventory details stale for this machine.
-			// We'll add a 5 second buffer to account for a little clock skew/drift.
-			if site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
+			if !wasDeleted && site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
 				slogger.Warn().Msg("machine updated more recently than inventory received time, skipping processing")
 				txn.Rollback()
 				continue
+			}
+
+			// Use the assignment re-read under the row lock, not the initial inventory
+			// lookup: creation and release may have committed while inventory ran.
+			reportedMachine := cdbm.Machine{Status: machineStatus}
+			effectiveStatus := reportedMachine.StatusForAssignment(existingCloudMachine.IsAssigned)
+			if effectiveStatus != machineStatus {
+				machineStatus = effectiveStatus
+				// Keep this message equal to Core's Assigned message to avoid
+				// flip-flopping messages in status history.
+				statusMessage = cdbm.MachineStatusInUseMessage
 			}
 
 			// Update existing Machine record
@@ -475,6 +531,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Labels:                labels,
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
+				Updated:               &reconcileStamp,
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)
@@ -541,6 +598,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					MaintenanceMessage:   clearMaintenanceMessage,
 					NetworkHealthMessage: clearNetworkHealthMessage,
 					InstanceTypeID:       clearInstanceTypeID,
+					Updated:              &reconcileStamp,
 				}
 				_, serr = mDAO.Clear(ctx, txn, clearInput)
 				if serr != nil {
@@ -685,10 +743,11 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			machine = existingCloudMachine
 		}
 
-		// Update/create Machine Capabilities
-		// Check if discovery data is available
-		if discoveryInfo == nil {
-			logger.Warn().Msg("received MachineInfo without DiscoveryInfo, skipping Machine Capability processing")
+		// Capabilities are reported independently of DiscoveryInfo: Core can publish
+		// SpectrumX selectors from DPA inventory without hardware discovery data.
+		// An absent set is unavailable; an explicit empty set removes stale rows.
+		if controllerMachineStatus.GetCapabilities() == nil {
+			slogger.Warn().Msg("received MachineInfo without Capabilities, skipping Machine Capability processing")
 			continue
 		}
 
@@ -700,8 +759,12 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if machineInventory.InventoryPage == nil || machineInventory.InventoryPage.TotalPages == 0 || (machineInventory.InventoryPage.CurrentPage == machineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
 		for _, existingMachine := range existingMachines {
+			if existingMachine.Deleted != nil {
+				continue
+			}
+
 			_, found := reportedMachineIDMap[existingMachine.ID]
 			if found {
 				continue
@@ -727,6 +790,8 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
+			// This update stamps its own time rather than reconcileStamp. It takes no row lock, so
+			// a backdated stamp could predate an external write and cut short its staleness window.
 			_, serr := mDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: existingMachine.ID, Status: &status, IsMissingOnSite: cwutil.GetPtr(true), IsUsableByTenant: cwutil.GetPtr(false)})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update missing on Site flag in DB")
@@ -784,11 +849,11 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	cloudCapMap := make(map[string]*cdbm.MachineCapability)
 	for _, emc := range mcs {
 		cemc := emc
-		cloudCapMap[fmt.Sprintf(`%s:%s`, cemc.Type, cemc.Name)] = &cemc
+		cloudCapMap[cemc.MapKey()] = &cemc
 	}
 
 	for _, cpuCap := range controllerCapsCpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeCPU, cpuCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeCPU, cpuCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -806,11 +871,9 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, gpuCap := range controllerCapsGpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeGPU, gpuCap.Name)
-
 		// Set the device type to NVLink if it's an NVLink GPU capability.
 		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
+		// warning logged. Preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
 		// TODO: support other GPU device-type variants as the wire enum
 		// grows; currently only NVLink is recognized.
@@ -819,6 +882,8 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 		deviceType = &dtEmpty
 		if gpuCap.DeviceType != nil {
 			switch *gpuCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
 				dt := cdbm.MachineCapabilityDeviceTypeNVLink
 				deviceType = &dt
@@ -826,6 +891,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 				logger.Warn().Str("DeviceType", gpuCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty")
 			}
 		}
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeGPU, gpuCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:  &machine.ID,
@@ -843,7 +909,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, dpuCap := range controllerCapsDpu {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeDPU, dpuCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeDPU, dpuCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:        &machine.ID,
@@ -856,7 +922,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, memCap := range controllerCapsMemory {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeMemory, memCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeMemory, memCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -869,7 +935,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, ibCap := range controllerCapsInfiniband {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeInfiniBand, ibCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeInfiniBand, ibCap.Name, nil)
 
 		inactiveDevices := []int{}
 		if ibCap.InactiveDevices != nil {
@@ -890,26 +956,29 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, netCap := range controllerCapsNetwork {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeNetwork, netCap.Name)
-
-		// Set the device type to DPU if it's a DPU network capability.
+		// Preserve supported network device types so capability identity remains
+		// stable when otherwise identical generic, DPU, and SpectrumX entries coexist.
 		// Unknown wire values are coerced to the empty string with a
-		// warning logged — preserve the explicit `default` branch so
+		// warning logged. Preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
-		// TODO: support other Network device-type variants as the wire
-		// enum grows; currently only DPU is recognized.
 		var deviceType *cdbm.MachineCapabilityDeviceType
 		dtEmpty := cdbm.MachineCapabilityDeviceType("")
 		deviceType = &dtEmpty
 		if netCap.DeviceType != nil {
 			switch *netCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 				dt := cdbm.MachineCapabilityDeviceTypeDPU
+				deviceType = &dt
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+				dt := cdbm.MachineCapabilityDeviceTypeSpectrumX
 				deviceType = &dt
 			default:
 				logger.Warn().Str("DeviceType", netCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")
 			}
 		}
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeNetwork, netCap.Name, deviceType)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID:  &machine.ID,
@@ -923,7 +992,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 	}
 
 	for _, storageCap := range controllerCapsStorage {
-		mapId := fmt.Sprintf(`%s:%s`, cdbm.MachineCapabilityTypeStorage, storageCap.Name)
+		mapId := cdbm.MachineCapabilityMapKey(cdbm.MachineCapabilityTypeStorage, storageCap.Name, nil)
 
 		siteCapMap[mapId] = &cdbm.MachineCapability{
 			MachineID: &machine.ID,
@@ -1115,10 +1184,10 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is undergoing machine validation"
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
-			statusMessage = "Machine is being used by an Instance"
-		case controllerMachineStatePrefixReady:
+			statusMessage = cdbm.MachineStatusInUseMessage
+		case cdbm.ControllerMachineStateReady:
 			machineStatus = cdbm.MachineStatusReady
-			statusMessage = "Machine is ready for assignment"
+			statusMessage = cdbm.MachineStatusReadyMessage
 		case controllerMachineStatePrefixForceDeletion:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is being force deleted"

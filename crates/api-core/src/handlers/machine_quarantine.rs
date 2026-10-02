@@ -16,6 +16,7 @@
  */
 
 use ::rpc::forge as rpc;
+use carbide_uuid::machine::HostMachineId;
 use health_report::HealthReport;
 use model::machine::network::ManagedHostQuarantineState;
 use tonic::{Request, Response, Status};
@@ -85,7 +86,7 @@ pub(crate) async fn get_managed_host_quarantine_state(
 ) -> Result<Response<rpc::GetManagedHostQuarantineStateResponse>, Status> {
     log_request_data(&request);
     let rpc::GetManagedHostQuarantineStateRequest { machine_id } = request.into_inner();
-    let machine_id = convert_and_log_machine_id(machine_id.as_ref())?;
+    let machine_id: HostMachineId = convert_and_log_machine_id(machine_id.as_ref())?;
 
     let quarantine_state = db::machine::get_quarantine_state(&api.database_connection, &machine_id)
         .await?
@@ -103,7 +104,7 @@ pub(crate) async fn clear_managed_host_quarantine_state(
     log_request_data(&request);
 
     let rpc::ClearManagedHostQuarantineStateRequest { machine_id } = request.into_inner();
-    let machine_id = convert_and_log_machine_id(machine_id.as_ref())?;
+    let machine_id: HostMachineId = convert_and_log_machine_id(machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 
