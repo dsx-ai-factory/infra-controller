@@ -539,6 +539,109 @@ func TestWithTxResult_ReturnsZeroValueOnError(t *testing.T) {
 	assert.Equal(t, uuid.Nil, id)
 }
 
+func TestTx_WithSavepoint(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	testTxSetupSchema(t, dbSession)
+	ctx := context.Background()
+	errRejected := errors.New("candidate rejected")
+
+	tests := []struct {
+		name string
+		// endTx rolls back the outer transaction first, so the SAVEPOINT statement fails
+		endTx bool
+		// failStatement runs a failing statement in fn, which aborts the outer transaction unless it rolls back to the savepoint
+		failStatement bool
+		// cancelCtx cancels the context passed to WithSavepoint inside fn, so ROLLBACK TO SAVEPOINT fails
+		cancelCtx        bool
+		fnErr            error
+		wantFnCalled     bool
+		wantSavepointErr bool
+		// wantKept reports whether the write and advisory lock taken in fn outlive WithSavepoint
+		wantKept bool
+	}{
+		{
+			name:          "fn error rolls back its write and lock, transaction stays usable",
+			failStatement: true,
+			fnErr:         errRejected,
+			wantFnCalled:  true,
+		},
+		{
+			name:         "fn success keeps its write and lock",
+			wantFnCalled: true,
+			wantKept:     true,
+		},
+		{
+			name:             "savepoint creation failure is tagged, fn is skipped",
+			endTx:            true,
+			wantSavepointErr: true,
+		},
+		{
+			name:             "rollback failure is tagged alongside fn error",
+			cancelCtx:        true,
+			fnErr:            errRejected,
+			wantFnCalled:     true,
+			wantSavepointErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lockID := GetAdvisoryLockIDFromString(tc.name)
+			tx, err := BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			if tc.endTx {
+				require.NoError(t, tx.Rollback())
+			}
+
+			spCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			fnCalled := false
+			err = tx.WithSavepoint(spCtx, func(sp *Tx) error {
+				fnCalled = true
+				_, ierr := GetIDB(sp, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name}).Exec(ctx)
+				require.NoError(t, ierr)
+				require.NoError(t, sp.AcquireAdvisoryLock(ctx, lockID, false))
+				if tc.failStatement {
+					_, serr := GetIDB(sp, dbSession).ExecContext(ctx, "SELECT 1/0")
+					require.Error(t, serr)
+				}
+				if tc.cancelCtx {
+					cancel()
+				}
+				return tc.fnErr
+			})
+
+			assert.Equal(t, tc.wantFnCalled, fnCalled)
+			assert.Equal(t, tc.wantSavepointErr, errors.Is(err, ErrTransactionSavepoint))
+			if tc.fnErr != nil {
+				assert.ErrorIs(t, err, tc.fnErr)
+			}
+			if tc.wantSavepointErr {
+				return
+			}
+			if tc.fnErr == nil {
+				require.NoError(t, err)
+			}
+
+			// This query fails if the failed statement in fn left the outer transaction aborted.
+			count, cerr := GetIDB(tx, dbSession).NewSelect().Model((*TestTable)(nil)).Where("name = ?", tc.name).Count(ctx)
+			require.NoError(t, cerr)
+			assert.Equal(t, tc.wantKept, count == 1)
+
+			other, oerr := BeginTx(ctx, dbSession, nil)
+			require.NoError(t, oerr)
+			defer func() { _ = other.Rollback() }()
+			lerr := other.AcquireAdvisoryLock(ctx, lockID, false)
+			if tc.wantKept {
+				assert.ErrorIs(t, lerr, ErrXactAdvisoryLockFailed)
+			} else {
+				assert.NoError(t, lerr)
+			}
+		})
+	}
+}
+
 func TestGetBunTx(t *testing.T) {
 	dbSession := testTxGetTestSession(t)
 	defer dbSession.Close()
