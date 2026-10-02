@@ -34,8 +34,8 @@ leaves `Ready` and enters `Decommissioning`.
 nico-admin-cli -a <api-url> managed-host show <host-machine-id>
 ```
 
-**Expected result**: The state eventually reaches `Decommissioning/Decommissioned`. Use
-the state and handler message to identify a blocked operation.
+**Expected result**: Successful decommissioning ends in `Decommissioning/Decommissioned`.
+If progress stops or errors persist, refer to [Troubleshooting](index.md#troubleshooting).
 
 ## What the workflow changes
 

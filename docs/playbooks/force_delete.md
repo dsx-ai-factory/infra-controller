@@ -55,13 +55,11 @@ retained boot targets), add:
   --delete-bmc-suppressions --delete-retained-boot-interfaces
 ```
 
-### 3. Use the returned BMC IP and machine-id to reboot the host
+### 3. Power-cycle the host through its BMC
 
-See [Rebooting a machine](machine_reboot.md).
-`machine force-delete` returns the managed host BMC IP and machine IDs; it
-does not return a BMC port. Supply the returned BMC IP, port `443` unless you
-know the device uses a different management port, and `machine_id` as
-parameters.
+Use [`nico-admin-cli redfish ac-power-cycle`](../manuals/nico-admin-cli/commands/redfish/redfish-ac-power-cycle.md)
+with the returned BMC IP and current BMC credentials. This command connects
+directly to the BMC and does not require the deleted machine record.
 
 When Site Explorer configured BMC credentials for the host, force-delete
 retains the last set in Vault by default so the site controller can continue

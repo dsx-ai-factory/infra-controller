@@ -31,6 +31,20 @@ gRPC API.
 - [Decommission Managed Power Shelves](power-shelves.md): factory-reset the shelf BMC or
   PMC, then remove its managed BMC credential.
 
+## Troubleshooting
+
+If decommissioning stops progressing, check the device's controller state and
+handler message to identify the blocked operation.
+
+NICo retries temporary failures automatically. If an error persists or the message
+requests manual intervention, check connectivity, credentials, and the procedure's
+prerequisites. Resolve the reported problem, then monitor the device for progress.
+
+If the workflow cannot recover automatically, manually advance the controller
+state after resolving the failure, or force-delete the device and ingest it
+again. After the device returns to `Ready`, start a new decommissioning request.
+Force-delete removes records but does not complete unfinished cleanup.
+
 ## Force-delete after decommissioning
 
 Use these commands when you are removing decommissioned hardware from a

@@ -32,7 +32,8 @@ leaves `Ready` and enters `Decommissioning`.
 nico-admin-cli -a <api-url> power-shelf show <power-shelf-id>
 ```
 
-**Expected result**: The state reaches `Decommissioning/Decommissioned`. Use the state handler message to identify a blocked operation.
+**Expected result**: Successful decommissioning ends in `Decommissioning/Decommissioned`.
+If progress stops or errors persist, refer to [Troubleshooting](index.md#troubleshooting).
 
 ## What the workflow changes
 
