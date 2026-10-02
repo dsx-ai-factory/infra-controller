@@ -923,6 +923,9 @@ async fn initialize_dpf_sdk(
         carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
             .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
     let additional_managed_sf = carbide_config.dpu_config.additional_managed_sf;
+    let max_active_service_vpc_interfaces_per_dpu = carbide_config
+        .dpu_config
+        .max_active_service_vpc_interfaces_per_dpu;
 
     let repo = carbide_dpf::KubeRepository::new()
         .await
@@ -964,11 +967,20 @@ async fn initialize_dpf_sdk(
                 DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
                 DpuDeploymentType::Bf4Generic => &bf4_interfaces,
             };
-            let (service_vpc_slots, additional_managed_sf) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
+            // Service-capable deployments receive both limits; Astra remains explicitly unreserved.
+            let (
+                service_vpc_slots,
+                additional_managed_sf,
+                max_active_service_vpc_interfaces_per_dpu,
+            ) = match deployment_type {
+                DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0, 0),
                 DpuDeploymentType::Bf3
                 | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => (service_vpc_slots, additional_managed_sf),
+                | DpuDeploymentType::Bf4Generic => (
+                    service_vpc_slots,
+                    additional_managed_sf,
+                    max_active_service_vpc_interfaces_per_dpu,
+                ),
             };
             let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
                 .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
@@ -988,6 +1000,10 @@ async fn initialize_dpf_sdk(
                 .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
                 .additional_managed_sf(additional_managed_sf)
                 .service_vpc_slots(service_vpc_slots)
+                .max_active_service_vpc_interfaces_per_dpu(
+                    max_active_service_vpc_interfaces_per_dpu,
+                )
+                .max_sf_per_pf(deployment.max_sf_per_pf)
                 .interfaces(interfaces.clone())
                 .extra_bfcfg_parameters(
                     carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
@@ -1075,6 +1091,7 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
+    // Each config was validated by build() before the shared Secret write; retain deployment context on failure.
     for (name, config) in &init_configs {
         sdk.create_initialization_objects(config)
             .await

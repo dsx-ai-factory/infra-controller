@@ -629,13 +629,13 @@ pub(crate) fn dhcp_server_service(
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
-        service_nad: Some(ServiceNAD {
+        service_nads: vec![ServiceNAD {
             name: DHCP_SERVER_SERVICE_NAD_NAME.to_string(),
             bridge: Some("br-sfc".to_string()),
             resource_type: ServiceNADResourceType::Sf,
             ipam: Some(false),
             mtu: Some(DHCP_SERVER_SERVICE_MTU),
-        }),
+        }],
 
         ..ServiceDefinition::new(
             &cfg.name,
@@ -679,13 +679,13 @@ pub(crate) fn fmds_service(
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
-        service_nad: Some(ServiceNAD {
+        service_nads: vec![ServiceNAD {
             name: FMDS_SERVICE_NAD_NAME.to_string(),
             bridge: Some("br-sfc".to_string()),
             resource_type: ServiceNADResourceType::Sf,
             ipam: Some(false),
             mtu: Some(FMDS_SERVICE_MTU),
-        }),
+        }],
 
         ..ServiceDefinition::new(
             &cfg.name,
@@ -874,10 +874,13 @@ pub(crate) fn mandatory_services(
     service_vpc_slots: ServiceVpcSlots,
     node_auth: &NodeAuthConfig,
 ) -> Vec<ServiceDefinition> {
+    // Slot listeners attach directly to their own bridge, so each needs its own NAD.
+    let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
+    service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
-        dhcp_server_service(&resolved.base.dhcp_server, interfaces),
+        dhcp,
         dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca),
         // Not `node_auth.enabled` directly: an operator staging a disable
         // moves fmds off tokens first, while the API still accepts them.
@@ -956,6 +959,7 @@ mod tests {
     }
 
     /// Verifies every service definition consumes the same configured effective inventory.
+    /// Mandatory-service assembly must pass slots to DHCP as well as HBN to avoid listener gaps.
     #[test]
     fn configured_inventory_drives_hbn_dhcp_and_fmds_definitions() {
         // Build a complete replacement inventory containing one PF and one VF.
@@ -1004,14 +1008,26 @@ mod tests {
         );
 
         // DHCP receives both configured entries, while FMDS receives only the PF.
-        let dhcp = dhcp_server_service(&default_dhcp_server_service(), &interfaces);
+        // Mandatory-service assembly also adds the fixed slot listener.
+        let config = crate::cfg::file::DpfConfig::default();
+        let services = mandatory_services(
+            &config.resolved_services_for(&config.deployments.bf3, DpuDeploymentType::Bf3),
+            &config.dpu_agent_bootstrap_ca,
+            &interfaces,
+            service_vpc_slots,
+            &NodeAuthConfig::default(),
+        );
+        let dhcp = services
+            .iter()
+            .find(|service| service.name == DHCP_SERVER_SERVICE_NAME)
+            .expect("mandatory DHCP service");
         let fmds = fmds_service(&default_fmds_service(), &interfaces, false);
         assert_eq!(
             dhcp.interfaces
                 .iter()
                 .map(|interface| interface.name.as_str())
                 .collect::<Vec<_>>(),
-            ["d_pf0hpf_if", "d_pf0vf4_if"]
+            ["d_pf0hpf_if", "d_pf0vf4_if", "d_iface_svc_0"]
         );
         assert_eq!(
             fmds.interfaces

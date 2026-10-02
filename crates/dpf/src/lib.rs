@@ -80,13 +80,13 @@ pub use sdk::{
     build_service_interface, build_service_nad, build_service_template, calculate_pf_total_sf,
     dpu_cr_name, dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
 };
-pub use service_vpc_slot::ServiceVpcSlots;
+pub use service_vpc_slot::{SERVICE_VPC_MTU, ServiceVpcSlots};
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
 pub use types::{
     BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType, DEFAULT_DPU_NUM_OF_VFS,
-    DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_ENABLED_NODE_LABEL,
-    DetachedDpuServiceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
-    DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
+    DEFAULT_MAX_SF_PER_PF, DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
+    DPU_ENABLED_NODE_LABEL, DetachedDpuServiceDefinition, DetachedDpuServiceSecurity,
+    DetachedHelmChart, DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
     DetachedServiceDaemonSetUpdateStrategy, DpfInterceptBridge, DpfInterceptBridging,
     DpfInterfaceIdentity, DpuDeploymentType, DpuDeviceInfo, DpuErrorEvent, DpuEvent, DpuMismatch,
     DpuNodeInfo, DpuPhase, DpuReadyEvent, DpuServiceDaemonSetObservation,

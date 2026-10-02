@@ -71,6 +71,8 @@ pub const DOCA_XPLANE_SERVICE_NAME: &str = "doca-xplane";
 pub const DEFAULT_DPU_NUM_OF_VFS: u32 = 16;
 /// Default SF capacity reserved beyond configured NICo-managed service endpoints.
 pub const DEFAULT_PF_TOTAL_SF_RESERVED: u32 = 30;
+/// Default operator-declared SF ceiling per parent PF for BF3 and generic BF4.
+pub const DEFAULT_MAX_SF_PER_PF: u32 = 126;
 // Keep direct SDK validation aligned with api-core's general BlueField provisioning bound without
 // coupling this lightweight crate to the complete API configuration model.
 pub(crate) const MAX_BLUEFIELD_VFS_PER_PF: u32 = 126;
@@ -122,6 +124,13 @@ pub struct InitDpfResourcesConfig {
     pub(crate) additional_managed_sf: u32,
     /// NICo-managed service-VPC slots wired from HBN to dedicated OVS bridges.
     pub(crate) service_vpc_slots: crate::ServiceVpcSlots,
+    /// SFs reserved for active or terminating service-VPC interfaces (default zero).
+    /// Sharing a VPC slot does not reduce this endpoint reservation.
+    pub(crate) max_active_service_vpc_interfaces_per_dpu: u32,
+    /// Operator-declared SF ceiling per parent PF (default 126, positive when slots are enabled).
+    /// BF3/generic BF4 ignore it with zero slots; GB200 retains its fixed 128-SF ceiling.
+    /// Astra does not use this field; a ceiling does not establish physical BAR qualification.
+    pub(crate) max_sf_per_pf: u32,
     /// Enables deployment-scoped DPUServiceInterface names and node selectors.
     /// False preserves the legacy global resource naming and selector mode for
     /// BF3 (including BF3 GB200) and generic BF4. BF4 Astra requires this to be true for the
@@ -192,6 +201,8 @@ impl Default for InitDpfResourcesConfig {
             pf_total_sf_reserved: DEFAULT_PF_TOTAL_SF_RESERVED,
             additional_managed_sf: 0,
             service_vpc_slots: crate::ServiceVpcSlots::default(),
+            max_active_service_vpc_interfaces_per_dpu: 0,
+            max_sf_per_pf: DEFAULT_MAX_SF_PER_PF,
             deployment_scoped_service_interfaces: false,
             intercept_bridging: None,
             interfaces: Vec::new(),
@@ -305,8 +316,9 @@ pub struct ServiceDefinition {
     pub service_daemon_set_annotations: Option<std::collections::BTreeMap<String, String>>,
     /// Optional extended resources requested by the service DaemonSet.
     pub service_daemon_set_resources: Option<BTreeMap<String, IntOrString>>,
-    /// Optional service Network Attachment Definition specification
-    pub service_nad: Option<ServiceNAD>,
+    /// Deployment-local NADs referenced by this service's interfaces.
+    /// Empty creates no NADs; each name is remapped to the deployment's suffix.
+    pub service_nads: Vec<ServiceNAD>,
 }
 
 /// Interface kind rendered into a DPUServiceInterface template.

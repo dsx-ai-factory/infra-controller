@@ -112,7 +112,8 @@ use crate::types::{
     DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceSecurityObservation,
     DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
     MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
+    ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD, ServiceNADResourceType,
+    ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -389,7 +390,7 @@ where
         self,
         config: &InitDpfResourcesConfig,
     ) -> Result<DpfSdk<R, L>, DpfError> {
-        // Validate before `init_secret_and_task` writes the shared BMC Secret.
+        // Validate inventory and capacity before writing the shared BMC Secret.
         let resolved = resolve_initialization_inventory(config)?;
         let sdk = self.init_secret_and_task().await?;
         sdk.create_initialization_objects_resolved(config, resolved)
@@ -1112,12 +1113,9 @@ pub fn build_service_configuration(
     }
 }
 
-pub fn build_service_nad(
-    svc: &ServiceDefinition,
-    namespace: &str,
-    suffix: &str,
-) -> Option<DPUServiceNAD> {
-    svc.service_nad.as_ref().map(|service_nad| DPUServiceNAD {
+/// Renders one deployment-local NAD so each fixed listener can select its own bridge.
+pub fn build_service_nad(service_nad: &ServiceNAD, namespace: &str, suffix: &str) -> DPUServiceNAD {
+    DPUServiceNAD {
         metadata: ObjectMeta {
             name: Some(service_cr_name(&service_nad.name, suffix)),
             namespace: Some(namespace.to_string()),
@@ -1136,7 +1134,7 @@ pub fn build_service_nad(
             service_mtu: service_nad.mtu,
         },
         status: None,
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1813,6 +1811,13 @@ fn resolve_initialization_inventory<'a>(
         )));
     }
 
+    // Provisioning slots without endpoint admission is valid; the reverse cannot serve a VPC.
+    if config.max_active_service_vpc_interfaces_per_dpu > 0 && config.service_vpc_slots.is_empty() {
+        return Err(DpfError::ConfigError(
+            "max_active_service_vpc_interfaces_per_dpu requires service-VPC slots".to_string(),
+        ));
+    }
+
     // Astra's static interface inventory is safe only when deployment selectors isolate it from
     // BF3 and generic-BF4 nodes.
     if matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
@@ -1833,7 +1838,7 @@ fn resolve_initialization_inventory<'a>(
         && !config.service_vpc_slots.is_empty()
     {
         return Err(DpfError::ConfigError(
-            "BF4 Astra does not support service-VPC slots".to_string(),
+            "BF4 Astra does not support service-VPC slots or endpoint reservations".to_string(),
         ));
     }
 
@@ -1919,16 +1924,99 @@ fn resolve_initialization_inventory<'a>(
         .service_vpc_slots
         .apply(&config.services, interfaces.to_mut())?;
 
+    // Direct-to-bridge SFs are present in service/NAD inventory but absent from service chains.
+    // Exclude chained endpoints (including ordinary DHCP) so each SF is committed exactly once.
+    let sf_networks = config
+        .services
+        .iter()
+        .flat_map(|service| &service.service_nads)
+        .filter(|nad| matches!(nad.resource_type, ServiceNADResourceType::Sf))
+        .map(|nad| nad.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let direct_sf_endpoints = config.services.iter().try_fold(0u32, |total, service| {
+        service
+            .interfaces
+            .iter()
+            .filter(|endpoint| {
+                sf_networks.contains(endpoint.network.as_str())
+                    && !interfaces
+                        .iter()
+                        .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+                        .any(|(name, interface_name)| {
+                            name == &service.name && interface_name == &endpoint.name
+                        })
+            })
+            .try_fold(total, |total, _| {
+                total.checked_add(1).ok_or_else(|| {
+                    DpfError::ConfigError("DPF direct SF endpoint count exceeds u32".to_string())
+                })
+            })
+    })?;
+    let additional_managed_sf = config
+        .additional_managed_sf
+        .checked_add(config.max_active_service_vpc_interfaces_per_dpu)
+        .and_then(|total| total.checked_add(direct_sf_endpoints))
+        .ok_or_else(|| {
+            DpfError::ConfigError("DPF managed SF reservation exceeds u32".to_string())
+        })?;
+
     let pf_total_sf = match config.deployment_type {
         DpuDeploymentType::Bf4Astra => calculate_astra_pf_total_sf(interfaces.as_ref())?,
         DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 | DpuDeploymentType::Bf4Generic => {
             calculate_pf_total_sf(
                 interfaces.as_ref(),
                 config.intercept_bridging.as_ref(),
-                config.pf_total_sf_reserved,
-                config.additional_managed_sf,
+                // GB200 emits a fixed pool, so a larger site-wide reserve cannot enlarge it.
+                if config.deployment_type == DpuDeploymentType::Bf3Gb200
+                    && config.intercept_bridging.is_none()
+                {
+                    config
+                        .pf_total_sf_reserved
+                        .min(carbide_libmlx_model::nvconfig::GB200_B3240_V1_PF_TOTAL_SF)
+                } else {
+                    config.pf_total_sf_reserved
+                },
+                additional_managed_sf,
             )?
         }
+    };
+
+    // GB200's firmware profile fixes both the SF ceiling and its BAR envelope; reject instead of
+    // allowing flavor generation to conceal an excessive calculated requirement.
+    let (sf_limit, sf_bar_exponent) = match config.deployment_type {
+        DpuDeploymentType::Bf3Gb200 => (
+            carbide_libmlx_model::nvconfig::GB200_B3240_V1_PF_TOTAL_SF,
+            10,
+        ),
+        DpuDeploymentType::Bf3 => (config.max_sf_per_pf, 10),
+        DpuDeploymentType::Bf4Generic => (config.max_sf_per_pf, 14),
+        // Astra's separate static profile is outside service-VPC capacity.
+        DpuDeploymentType::Bf4Astra => {
+            return Ok(ResolvedInitialization {
+                interfaces,
+                pf_total_sf,
+            });
+        }
+    };
+    // Preserve legacy BF3/BF4 pool overrides when service slots are disabled; GB200 is always fixed.
+    if (config.deployment_type == DpuDeploymentType::Bf3Gb200
+        || !config.service_vpc_slots.is_empty())
+        && pf_total_sf > sf_limit
+    {
+        // These platform-sized allocations fit in u64; the ceiling does not qualify physical BAR support.
+        let sf_bar_kib = 1_u64 << sf_bar_exponent;
+        let configured_bar_kib = u64::from(pf_total_sf) * sf_bar_kib;
+        let ceiling_bar_kib = u64::from(sf_limit) * sf_bar_kib;
+        return Err(DpfError::ConfigError(format!(
+            "{:?} requires PF_TOTAL_SF={pf_total_sf} ({configured_bar_kib} KiB SF BAR per PF), exceeding the SF ceiling {sf_limit} ({ceiling_bar_kib} KiB per PF)",
+            config.deployment_type,
+        )));
+    }
+    // Keep the resolved total aligned with GB200's fixed emitted profile.
+    let pf_total_sf = if config.deployment_type == DpuDeploymentType::Bf3Gb200 {
+        sf_limit
+    } else {
+        pf_total_sf
     };
 
     Ok(ResolvedInitialization {
@@ -2301,7 +2389,7 @@ async fn create_flavor_services_and_deployment<
     let suffix = deployment_cr_suffix(deployment_type);
     let nad_rename: BTreeMap<String, String> = services
         .iter()
-        .filter_map(|svc| svc.service_nad.as_ref())
+        .flat_map(|svc| &svc.service_nads)
         .map(|nad| (nad.name.clone(), service_cr_name(&nad.name, suffix)))
         .collect();
 
@@ -2313,8 +2401,9 @@ async fn create_flavor_services_and_deployment<
             &build_service_configuration(svc, namespace, suffix, &nad_rename),
         )
         .await?;
-        if let Some(nad) = build_service_nad(svc, namespace, suffix).as_ref() {
-            DpuServiceNADRepository::apply(repo, nad).await?;
+        for nad in &svc.service_nads {
+            DpuServiceNADRepository::apply(repo, &build_service_nad(nad, namespace, suffix))
+                .await?;
         }
     }
 
@@ -4795,6 +4884,120 @@ mod tests {
 
         // The maximum supported topology remains below HBN's 32-interface boundary.
         assert_eq!(interface_counts(&configured_interfaces), (0, 19, 19, 17, 1));
+    }
+
+    /// Verifies complete slots and endpoint reservations obey independent HBN, SF and platform limits.
+    /// Sharing a slot cannot hide endpoint SF demand, and GB200 must reject rather than clamp.
+    #[test]
+    fn service_vpc_capacity_validates_complete_inventory() {
+        scenarios!(
+            run = |(deployment_type, slot_count, active_limit, extra, pool, ceiling, intercept): (DpuDeploymentType, u32, u32, u32, u32, u32, bool)| {
+                // Use production inventory; only the limits and topology mode vary by case.
+                let slots = crate::ServiceVpcSlots::new(slot_count).expect("bounded test slot count");
+                let topology = intercept.then(configured_topology);
+                let interfaces = build_deployment_dpu_interfaces(
+                    deployment_type, DEFAULT_DPU_NUM_OF_VFS, topology.as_ref(),
+                );
+                // Ordinary DHCP/FMDS consumers use SF NADs but are already reserved by their chains.
+                let chained_service = |name: &str, network: &str| {
+                    let mut service = ServiceDefinition {
+                        interfaces: interfaces.iter()
+                            .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+                            .filter(|(service, _)| service == name)
+                            .map(|(_, name)| crate::ServiceInterface {
+                                name: name.clone(), network: network.to_string(),
+                            }).collect(),
+                        ..ServiceDefinition::new(name, "repo", "chart", "1")
+                    };
+                    // HBN's shared network is external; DHCP and FMDS own their SF NADs on br-sfc.
+                    if name != DOCA_HBN_SERVICE_NAME {
+                        service.service_nads.push(ServiceNAD {
+                            name: network.to_string(),
+                            bridge: Some("br-sfc".to_string()),
+                            resource_type: ServiceNADResourceType::Sf,
+                            ipam: Some(false),
+                            mtu: Some(crate::SERVICE_VPC_MTU),
+                        });
+                    }
+                    service
+                };
+                let mut hbn = chained_service(DOCA_HBN_SERVICE_NAME, crate::types::DOCA_HBN_SERVICE_NETWORK);
+                slots.append_hbn_interfaces(&mut hbn.interfaces);
+                let mut dhcp = chained_service(DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp");
+                slots.append_dhcp_interfaces(&mut dhcp);
+                let fmds = chained_service(FMDS_SERVICE_NAME, "mybrsfc-fmds");
+                let mut builder = InitDpfResourcesConfigBuilder::default()
+                    .deployment_type(deployment_type)
+                    .deployment_scoped_service_interfaces(true)
+                    .services(vec![hbn, dhcp, fmds])
+                    .interfaces(interfaces)
+                    .service_vpc_slots(slots)
+                    .max_active_service_vpc_interfaces_per_dpu(active_limit)
+                    .additional_managed_sf(extra)
+                    .pf_total_sf_reserved(pool)
+                    .max_sf_per_pf(ceiling);
+                if let Some(topology) = topology {
+                    builder = builder.intercept_bridging(topology);
+                }
+
+                // The validated total is also the total supplied to flavor generation.
+                builder.build().and_then(|config| {
+                    resolve_initialization_inventory(&config).map(|resolved| resolved.pf_total_sf)
+                }).map_err(drop)
+            };
+            "service capacity" {
+                // Disabled counts preserve the 30-SF flavor without recounting ordinary DHCP/FMDS SFs.
+                (DpuDeploymentType::Bf3, 0, 0, 0, 30, 126, false) => Yields(30),
+                // Disabled slots preserve BF3 overrides above the new operator ceiling.
+                (DpuDeploymentType::Bf3, 0, 0, 0, 129, 126, false) => Yields(129),
+                // Generic BF4 keeps the same legacy override behavior with no service slots.
+                (DpuDeploymentType::Bf4Generic, 0, 0, 0, 129, 126, false) => Yields(129),
+                // BF3 omits hidden PF1 and reserves ten fixed slot SFs before endpoint admission.
+                (DpuDeploymentType::Bf3, 5, 0, 0, 37, 126, false) => Yields(37),
+                // Endpoint reservations add five SFs beyond the ten fixed slot SFs.
+                (DpuDeploymentType::Bf3, 5, 5, 0, 42, 126, false) => Yields(42),
+                // Generic BF4 retains PF1, requiring one more SF for the same service limits.
+                (DpuDeploymentType::Bf4Generic, 5, 5, 0, 43, 126, false) => Yields(43),
+                // Available slots do not compensate for one missing endpoint SF.
+                (DpuDeploymentType::Bf3, 5, 5, 0, 41, 126, false) => Fails,
+                // The configured PF/VF topology has seven base SFs; reserve stays additional.
+                (DpuDeploymentType::Bf3, 5, 5, 2, 30, 126, true) => Yields(54),
+                // Two endpoints sharing one slot remain independent SF commitments (7 + 2 + 2 + 30).
+                (DpuDeploymentType::Bf3, 1, 2, 0, 30, 126, true) => Yields(41),
+                // Fourteen slots fill HBN's remaining interface capacity exactly.
+                (DpuDeploymentType::Bf4Generic, 14, 0, 0, 56, 126, false) => Yields(56),
+                // A larger SF pool cannot extend the pinned 32-interface HBN limit.
+                (DpuDeploymentType::Bf4Generic, 15, 0, 0, 58, 126, false) => Fails,
+                // Endpoint reservations require at least one VPC slot.
+                (DpuDeploymentType::Bf3, 0, 1, 0, 30, 126, false) => Fails,
+                // Independent headroom cannot wrap when endpoint reservations are added.
+                (DpuDeploymentType::Bf3, 1, 1, u32::MAX, 126, 126, false) => Fails,
+                // A direct DHCP SF cannot wrap after the headroom-plus-endpoint addition succeeds.
+                (DpuDeploymentType::Bf3, 1, 0, u32::MAX, 126, 126, false) => Fails,
+                // Generic BF4 can reach its operator-declared SF/BAR envelope exactly.
+                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 126, 126, false) => Yields(126),
+                // The same inventory must reject a pool above the declared BF4 envelope.
+                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 127, 126, false) => Fails,
+                // An operator may select a smaller qualified envelope for BF3.
+                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 30, false) => Fails,
+                // Enabled slots require a positive operator ceiling even when the inventory fits its pool.
+                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 0, false) => Fails,
+                // GB200 uses its fixed profile, independently of the generic platform ceiling.
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 128, 126, false) => Yields(128),
+                // A larger shared pool cannot invalidate a GB200 commitment that fits its fixed profile.
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 129, 126, false) => Yields(128),
+                // A smaller reserve still limits commitment before GB200's fixed profile is rendered.
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 29, 126, false) => Fails,
+                // The 129-SF commitment itself exceeds GB200's fixed profile, regardless of shared reserve.
+                (DpuDeploymentType::Bf3Gb200, 1, 100, 0, 130, 126, false) => Fails,
+                // Intercept reserve is additional commitment and must not be clamped before validation.
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 119, 126, true) => Fails,
+                // GB200's fixed ceiling still applies with slots disabled (7 base SFs + 122 reserve).
+                (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 122, 126, true) => Fails,
+                // Astra remains excluded even with scoped selectors and ample reserve.
+                (DpuDeploymentType::Bf4Astra, 1, 1, 0, 126, 126, false) => Fails,
+            }
+        );
     }
 
     /// Verifies legacy managed endpoints cannot overcommit the unchanged SF pool.
