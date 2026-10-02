@@ -202,3 +202,13 @@ config:
 
 # -- Extra container environment, name->value. Mainly for OTEL_* variables.
 extraEnv: {}
+
+## caBundle is a PEM-encoded CA certificate (or concatenated bundle) that the API
+## should add to its trusted CA store via SSL_CERT_FILE. Set this when the API
+## needs to verify TLS connections to services whose certificates are signed by a
+## private CA (e.g. an internal PKI or a cluster CA).
+##
+## Provide the full PEM content, or a concatenation of multiple PEM certificates.
+## When set, a ConfigMap is created and mounted at /etc/ssl/certs/ca-bundle.crt;
+## SSL_CERT_FILE is set to that path so Go's TLS stack picks it up automatically.
+caBundle: ""

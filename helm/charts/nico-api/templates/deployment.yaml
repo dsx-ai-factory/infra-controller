@@ -272,10 +272,12 @@ spec:
               mountPath: /etc/forge/carbide-api
             - name: {{ include "nico-api.name" . }}-config-files
               mountPath: /etc/nico/nico-api
+            {{- if .Values.siteConfig.enabled }}
             - name: {{ include "nico-api.name" . }}-site-config-files
               mountPath: /etc/forge/carbide-api/site
             - name: {{ include "nico-api.name" . }}-site-config-files
               mountPath: /etc/nico/nico-api/site
+            {{- end }}
             {{- if .Values.credentials.file.existingSecret.name }}
             - name: credentials-file
               mountPath: {{ required "nico-api.credentials.file.mountPath is required when credentials.file.existingSecret.name is set" .Values.credentials.file.mountPath | quote }}
@@ -313,9 +315,11 @@ spec:
         - name: {{ include "nico-api.name" . }}-config-files
           configMap:
             name: {{ include "nico-api.name" . }}-config-files
+        {{- if .Values.siteConfig.enabled }}
         - name: {{ include "nico-api.name" . }}-site-config-files
           configMap:
             name: {{ include "nico-api.name" . }}-site-config-files
+        {{- end }}
         {{- if .Values.credentials.file.existingSecret.name }}
         - name: credentials-file
           secret:
