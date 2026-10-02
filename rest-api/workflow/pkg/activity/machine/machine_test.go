@@ -953,6 +953,29 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			},
 		},
 		{
+			// The Site sends the ID list on the last page alone, so a middle page gives Cloud
+			// no basis to mark anything missing even though 4 of the Site's 38 Machines have
+			// stopped being reported.
+			name: "test paged Machine inventory processing, middle page without item IDs",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:    context.Background(),
+				siteID: site3.ID,
+				machineInventory: &corev1.MachineInventory{
+					Machines:  pagedInvMInfos[10:20],
+					Timestamp: timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 2,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+					},
+				},
+			},
+		},
+		{
 			name: "test paged Machine inventory processing, last page",
 			fields: fields{
 				dbSession: dbSession,
@@ -1323,6 +1346,19 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 
 					// Check that no Machine status is Error due to being missing
 					filterInput = cdbm.MachineFilterInput{
+						SiteIDs:  []uuid.UUID{tt.args.siteID},
+						Statuses: []string{cdbm.MachineStatusError},
+					}
+					_, missingCount, serr := mDAO.GetAll(tt.args.ctx, nil, filterInput, cdbp.PageInput{}, nil)
+					assert.Nil(t, serr)
+					assert.Equal(t, 0, missingCount)
+				}
+
+				// A page that is not the last one carries no ID list, so the deletion sweep
+				// must not run: the 4 Machines the Site no longer reports stay untouched
+				// until the page that carries the complete list arrives.
+				if tt.args.machineInventory.InventoryPage.CurrentPage == 2 {
+					filterInput := cdbm.MachineFilterInput{
 						SiteIDs:  []uuid.UUID{tt.args.siteID},
 						Statuses: []string{cdbm.MachineStatusError},
 					}

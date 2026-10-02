@@ -35,7 +35,7 @@ func NewManageIpxeTemplateInventory(config ManageInventoryConfig) ManageIpxeTemp
 //
 // It uses the shared paged inventory pipeline (see manageInventoryImpl). The Site Controller
 // exposes only a list-style API for iPXE templates (no find-by-ID), so collection goes
-// through the fallback path, and the full reported ID set travels in each page's
+// through the fallback path, and the full reported ID set travels in the final page's
 // InventoryPage.ItemIds for the cloud reconciler to detect deletions.
 func (mii *ManageIpxeTemplateInventory) DiscoverIpxeTemplateInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverIpxeTemplateInventory").Logger()
