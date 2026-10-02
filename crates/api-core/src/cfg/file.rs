@@ -4559,6 +4559,21 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
             restart_ovs_on_use_admin_network_change: value
                 .dpu_config
                 .restart_ovs_on_use_admin_network_change,
+            database_pool_acquire_timeout_ms: value
+                .database_pool_acquire_timeout
+                .as_millis()
+                .try_into()
+                .unwrap_or_default(),
+            database_pool_idle_timeout_ms: value
+                .database_pool_idle_timeout
+                .as_millis()
+                .try_into()
+                .unwrap_or_default(),
+            database_pool_max_lifetime_ms: value
+                .database_pool_max_lifetime
+                .as_millis()
+                .try_into()
+                .unwrap_or_default(),
         }
     }
 }

@@ -10628,9 +10628,12 @@ type RuntimeConfig struct {
 	// GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
 	// enforced. An explicit list is returned without checking tenant coverage.
 	// Older Core versions omit this field; an empty items list is authoritative.
-	SiteFabricNullRoutes *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	SiteFabricNullRoutes         *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
+	DatabasePoolAcquireTimeoutMs uint64      `protobuf:"varint,59,opt,name=database_pool_acquire_timeout_ms,json=databasePoolAcquireTimeoutMs,proto3" json:"database_pool_acquire_timeout_ms,omitempty"`
+	DatabasePoolIdleTimeoutMs    uint64      `protobuf:"varint,60,opt,name=database_pool_idle_timeout_ms,json=databasePoolIdleTimeoutMs,proto3" json:"database_pool_idle_timeout_ms,omitempty"`
+	DatabasePoolMaxLifetimeMs    uint64      `protobuf:"varint,61,opt,name=database_pool_max_lifetime_ms,json=databasePoolMaxLifetimeMs,proto3" json:"database_pool_max_lifetime_ms,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *RuntimeConfig) Reset() {
@@ -11033,6 +11036,27 @@ func (x *RuntimeConfig) GetSiteFabricNullRoutes() *StringList {
 		return x.SiteFabricNullRoutes
 	}
 	return nil
+}
+
+func (x *RuntimeConfig) GetDatabasePoolAcquireTimeoutMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolAcquireTimeoutMs
+	}
+	return 0
+}
+
+func (x *RuntimeConfig) GetDatabasePoolIdleTimeoutMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolIdleTimeoutMs
+	}
+	return 0
+}
+
+func (x *RuntimeConfig) GetDatabasePoolMaxLifetimeMs() uint64 {
+	if x != nil {
+		return x.DatabasePoolMaxLifetimeMs
+	}
+	return 0
 }
 
 type EchoRequest struct {
@@ -70375,7 +70399,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0f_runtime_config\"\x16\n" +
 	"\x14GetRmsVersionRequest\"1\n" +
 	"\x15GetRmsVersionResponse\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\tR\aversion\"\xf2\x18\n" +
+	"\aversion\x18\x01 \x01(\tR\aversion\"\xbe\x1a\n" +
 	"\rRuntimeConfig\x12\x16\n" +
 	"\x06listen\x18\x01 \x01(\tR\x06listen\x12)\n" +
 	"\x10metrics_endpoint\x18\x02 \x01(\tR\x0fmetricsEndpoint\x12!\n" +
@@ -70431,7 +70455,10 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\fsvpc_enabled\x187 \x01(\bR\vsvpcEnabled\x12#\n" +
 	"\rastra_enabled\x188 \x01(\bR\fastraEnabled\x12)\n" +
 	"\x10ewethers_enabled\x189 \x01(\bR\x0fewethersEnabled\x12N\n" +
-	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x1aN\n" +
+	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x12F\n" +
+	" database_pool_acquire_timeout_ms\x18; \x01(\x04R\x1cdatabasePoolAcquireTimeoutMs\x12@\n" +
+	"\x1ddatabase_pool_idle_timeout_ms\x18< \x01(\x04R\x19databasePoolIdleTimeoutMs\x12@\n" +
+	"\x1ddatabase_pool_max_lifetime_ms\x18= \x01(\x04R\x19databasePoolMaxLifetimeMs\x1aN\n" +
 	" DpuNicFirmwareUpdateVersionEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +

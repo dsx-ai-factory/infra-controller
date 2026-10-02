@@ -2022,6 +2022,10 @@ message RuntimeConfig {
   // enforced. An explicit list is returned without checking tenant coverage.
   // Older Core versions omit this field; an empty items list is authoritative.
   optional common.StringList site_fabric_null_routes = 58;
+
+  uint64 database_pool_acquire_timeout_ms = 59;
+  uint64 database_pool_idle_timeout_ms = 60;
+  uint64 database_pool_max_lifetime_ms = 61;
 }
 
 message EchoRequest {
