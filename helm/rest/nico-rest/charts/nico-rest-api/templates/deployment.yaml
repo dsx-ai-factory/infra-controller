@@ -55,6 +55,10 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+            {{- if .Values.caBundle }}
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-bundle.crt
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml
@@ -77,6 +81,12 @@ spec:
             {{- end }}
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.caBundle }}
+            - name: ca-bundle
+              mountPath: /etc/ssl/certs/ca-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+            {{- end }}
             {{- if .Values.config.powerProvisioning.dps.enabled }}
             - name: dps-creds
               mountPath: /var/secrets/dps
@@ -128,6 +138,11 @@ spec:
             items:
               - key: password
                 path: password
+        {{- end }}
+        {{- if .Values.caBundle }}
+        - name: ca-bundle
+          configMap:
+            name: {{ include "nico-rest-api.name" . }}-ca-bundle
         {{- end }}
         {{- if .Values.config.powerProvisioning.dps.enabled }}
         - name: dps-creds
