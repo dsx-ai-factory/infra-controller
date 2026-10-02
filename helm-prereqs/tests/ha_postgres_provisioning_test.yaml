@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Temporal and Keycloak databases on nico-pg-cluster
+templates:
+  - templates/postgresql.yaml
+  - templates/eso-external-secrets.yaml
+tests:
+  - it: provisions both databases and their credentials by default
+    asserts:
+      - equal:
+          path: spec.users["temporal.nico"]
+          value: []
+        template: templates/postgresql.yaml
+        documentSelector: &cluster
+          path: kind
+          value: postgresql
+      - equal:
+          path: spec.databases.temporal
+          value: temporal.nico
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - equal:
+          path: spec.databases.temporal_visibility
+          value: temporal.nico
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - equal:
+          path: spec.users["keycloak.nico"]
+          value: []
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - equal:
+          path: spec.databases.keycloak
+          value: keycloak.nico
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - containsDocument: &temporalEso
+          apiVersion: external-secrets.io/v1beta1
+          kind: ClusterExternalSecret
+          name: nico-temporal-db-eso
+          any: true
+        template: templates/eso-external-secrets.yaml
+      - containsDocument: &keycloakEso
+          apiVersion: external-secrets.io/v1beta1
+          kind: ClusterExternalSecret
+          name: nico-keycloak-db-eso
+          any: true
+        template: templates/eso-external-secrets.yaml
+
+  - it: leaves out only Temporal when temporal.useHaPostgres is false
+    set:
+      temporal.useHaPostgres: false
+    asserts:
+      - notExists:
+          path: spec.users["temporal.nico"]
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - notExists:
+          path: spec.databases.temporal
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - containsDocument: *temporalEso
+        not: true
+        template: templates/eso-external-secrets.yaml
+      - equal:
+          path: spec.databases.keycloak
+          value: keycloak.nico
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - containsDocument: *keycloakEso
+        template: templates/eso-external-secrets.yaml
+
+  - it: leaves out only Keycloak when keycloak.useHaPostgres is false
+    set:
+      temporal.useHaPostgres: true
+      keycloak.useHaPostgres: false
+    asserts:
+      - notExists:
+          path: spec.users["keycloak.nico"]
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - notExists:
+          path: spec.databases.keycloak
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - containsDocument: *keycloakEso
+        not: true
+        template: templates/eso-external-secrets.yaml
+      - equal:
+          path: spec.databases.temporal
+          value: temporal.nico
+        template: templates/postgresql.yaml
+        documentSelector: *cluster
+      - containsDocument: *temporalEso
+        template: templates/eso-external-secrets.yaml
+
+  - it: fails on a value other than true, false, or auto
+    set:
+      keycloak.useHaPostgres: sometimes
+    asserts:
+      - failedTemplate:
+          errorPattern: keycloak.useHaPostgres must be true, false, or auto \(got sometimes\)
+        template: templates/postgresql.yaml

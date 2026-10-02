@@ -136,16 +136,17 @@ echo "nico-pg-cluster master pod: ${NICO_PG_POD}"
 
 # ---------------------------------------------------------------------------
 # Preflight: target database/user already provisioned by the postgres
-# operator (i.e. the corresponding useHaPostgres toggle was applied before this
-# script ran). Checked for every database up front, before any Deployment is
-# scaled down, so a missing target aborts cleanly with nothing stopped.
+# operator (i.e. nico-prereqs synced with the corresponding useHaPostgres value
+# set to auto or true before this script ran). Checked for every database up
+# front, before any Deployment is scaled down, so a missing target aborts
+# cleanly with nothing stopped.
 # ---------------------------------------------------------------------------
 _require_target_db() {
     local _db="$1"
     if ! kubectl exec -n postgres "${NICO_PG_POD}" -- \
         psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null | grep -q 1; then
         echo "ERROR: database '${_db}' does not exist on nico-pg-cluster yet." >&2
-        echo "  Set the matching useHaPostgres toggle in ${PREREQS_DIR}/values.yaml and run 'helmfile sync' (or setup.sh) first." >&2
+        echo "  Set the matching useHaPostgres value to true in ${PREREQS_DIR}/values.yaml and run 'helmfile sync -l name=nico-prereqs' first." >&2
         exit 1
     fi
 }
@@ -315,10 +316,10 @@ echo "setup.sh repoints them at nico-pg-cluster, so nothing writes to the"
 echo "already-migrated legacy database in the meantime."
 echo "Next steps:"
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
-    echo "  - Confirm temporal.useHaPostgres: true in ${PREREQS_DIR}/values.yaml"
+    echo "  - Set temporal.useHaPostgres: true in ${PREREQS_DIR}/values.yaml (auto keeps Temporal on postgres.postgres)"
 fi
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
-    echo "  - Confirm keycloak.useHaPostgres: true in ${PREREQS_DIR}/values.yaml"
+    echo "  - Set keycloak.useHaPostgres: true in ${PREREQS_DIR}/values.yaml (auto keeps Keycloak on postgres.postgres)"
 fi
 echo "  - Re-run setup.sh so phases 7d/7f point Temporal/Keycloak at nico-pg-cluster and scale workloads back up"
 echo "  - Once verified, the legacy temporal/temporal_visibility/keycloak databases on postgres.postgres can be dropped"

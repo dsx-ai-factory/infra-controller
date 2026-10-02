@@ -1,4 +1,6 @@
 {{- if .Values.postgresql.enabled }}
+{{- $temporalHaPostgres := include "prereqs.provisionHaPostgres" (dict "component" "temporal" "value" .Values.temporal.useHaPostgres) }}
+{{- $keycloakHaPostgres := include "prereqs.provisionHaPostgres" (dict "component" "keycloak" "value" .Values.keycloak.useHaPostgres) }}
 ## =============================================================================
 ## nico-pg-cluster-env — injected into every postgres pod as env vars.
 ## Created here (nico-prereqs chart) so Values.siteName flows in at install.
@@ -58,13 +60,13 @@ spec:
     # the RMS migrations create tables/indexes there and need nothing wider.
     rms.nico: []
     {{- end }}
-    {{- if .Values.temporal.useHaPostgres }}
+    {{- if $temporalHaPostgres }}
     # No role flags: temporal.nico owns only the temporal/temporal_visibility
     # databases (databases: below); Temporal's own schema-update job creates
     # tables/indexes there as the owner and needs nothing wider.
     temporal.nico: []
     {{- end }}
-    {{- if .Values.keycloak.useHaPostgres }}
+    {{- if $keycloakHaPostgres }}
     # No role flags: keycloak.nico owns only the keycloak database (databases:
     # below); Keycloak's own Liquibase migrations create tables there as the
     # owner and need nothing wider.
@@ -79,11 +81,11 @@ spec:
     {{- if .Values.rms.enabled }}
     rms: rms.nico
     {{- end }}
-    {{- if .Values.temporal.useHaPostgres }}
+    {{- if $temporalHaPostgres }}
     temporal: temporal.nico
     temporal_visibility: temporal.nico
     {{- end }}
-    {{- if .Values.keycloak.useHaPostgres }}
+    {{- if $keycloakHaPostgres }}
     keycloak: keycloak.nico
     {{- end }}
   patroni:
