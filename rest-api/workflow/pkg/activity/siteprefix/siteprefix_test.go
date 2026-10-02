@@ -183,7 +183,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, prefix.Config.Prefix, blocks[0].Name)
 			require.Nil(t, blocks[0].Description)
 		}},
-		{"adopts root preserving REST identity and allocated child", func(t *testing.T, f fixture) {
+		{"adopts root and applies lifecycle preserving REST identity and allocated child", func(t *testing.T, f fixture) {
 			root := f.root(t, false)
 			allocator := cipam.NewWithStorage(ipam.NewIpamStorage(f.session.DB, nil))
 			allocator.SetNamespace(f.namespace())
@@ -191,6 +191,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			prefix := testPrefix()
 			prefix.Metadata = &corev1.Metadata{}
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
@@ -198,6 +199,12 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NotNil(t, blocks[0].SitePrefixID)
 			require.Equal(t, root.Name, blocks[0].Name)
 			require.Nil(t, blocks[0].Description)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, blocks[0].Status)
+			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
+				cdbm.StatusDetailFilterInput{EntityIDs: []string{root.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, details, 1)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, details[0].Status)
 			retained, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, child.Cidr, f.namespace())
 			require.NoError(t, err)
 			require.Equal(t, *child, retained)
