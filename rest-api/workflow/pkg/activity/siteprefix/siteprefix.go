@@ -21,6 +21,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
+const sitePrefixInventoryStatusMessage = "Reported by Core SitePrefix inventory"
+
 // ManageSitePrefix reconciles reported Core roots without inferring absence.
 type ManageSitePrefix struct {
 	dbSession *cdb.Session
@@ -32,6 +34,8 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 }
 
 // UpdateSitePrefixesInDB reconciles each reported prefix in its own transaction.
+// It looks up the linked IP Block, creates or adopts one only when missing, then
+// applies reported metadata and lifecycle without changing the block's identity.
 // Publication, absence processing, and retiring the legacy importer belong to
 // the subsequent complete-inventory implementation.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
@@ -88,7 +92,90 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
 				return false, invalid("Site provider changed while acquiring inventory lock")
 			}
-			return manager.reconcile(ctx, tx, lockedSite, prefix)
+			id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
+			cidr := netip.MustParsePrefix(prefix.Config.Prefix)
+			family := cdbm.IPBlockProtocolVersionV6
+			if cidr.Addr().Is4() {
+				family = cdbm.IPBlockProtocolVersionV4
+			}
+			dao := cdbm.NewIPBlockDAO(manager.dbSession)
+			// Look up the identity under the Site locks, including deleted links:
+			// unlike inventories that undelete resources, a retired Core ID cannot be reused.
+			block, err := dao.GetBySitePrefixID(ctx, tx, id)
+			if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
+				return false, err
+			}
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				block = nil
+			}
+			var tenantID *uuid.UUID
+			if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
+				tenants, _, err := cdbm.NewTenantDAO(manager.dbSession).GetAll(ctx, tx,
+					cdbm.TenantFilterInput{Orgs: []string{prefix.Config.GetTenantOrganizationId()}},
+					paginator.PageInput{Limit: cutil.GetPtr(2)}, nil)
+				if err != nil {
+					return false, err
+				}
+				if len(tenants) != 1 {
+					return false, invalid("tenant organization for SitePrefix %s is unknown or ambiguous", id)
+				}
+				tenantID = &tenants[0].ID
+			}
+			if block == nil {
+				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID)
+				if err != nil {
+					return false, err
+				}
+				if block == nil {
+					return true, nil
+				}
+			} else {
+				// Existing links may change metadata and lifecycle, but not ownership or CIDR.
+				if block.Deleted == nil {
+					block, err = dao.GetByIDForUpdate(ctx, tx, block.ID)
+					if err != nil {
+						return false, err
+					}
+				}
+				if block.Deleted != nil || block.SiteID != lockedSite.ID || block.InfrastructureProviderID != lockedSite.InfrastructureProviderID ||
+					(block.TenantID == nil) != (tenantID == nil) || (tenantID != nil && *block.TenantID != *tenantID) ||
+					block.Prefix != cidr.Addr().String() || block.PrefixLength != cidr.Bits() ||
+					block.ProtocolVersion != family || block.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly {
+					return false, invalid("Core SitePrefix %s conflicts with its immutable REST identity", id)
+				}
+			}
+
+			// Apply reported metadata and lifecycle to existing, adopted, and newly
+			// created blocks. Unchanged reports must not produce writes or status details.
+			status := getSitePrefixStatus(prefix.Status.LifecycleState)
+			update := cdbm.IPBlockUpdateInput{IPBlockID: block.ID}
+			if prefix.Metadata.Name != "" && prefix.Metadata.Name != block.Name {
+				update.Name = &prefix.Metadata.Name
+			}
+			// Empty operator metadata must not erase provider-maintained values.
+			// Tenant descriptions remain authoritative, including an explicit clear.
+			if (tenantID != nil || prefix.Metadata.Description != "") &&
+				(block.Description == nil || prefix.Metadata.Description != *block.Description) {
+				update.Description = &prefix.Metadata.Description
+			}
+			if status != block.Status {
+				update.Status = &status
+			}
+			if update.Name != nil || update.Description != nil || update.Status != nil {
+				_, err = dao.Update(ctx, tx, update)
+				if err != nil {
+					return false, err
+				}
+			}
+			if status != block.Status {
+				_, err = cdbm.NewStatusDetailDAO(manager.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: block.ID.String(), Status: status, Message: cutil.GetPtr(sitePrefixInventoryStatusMessage),
+				})
+				if err != nil {
+					return false, err
+				}
+			}
+			return false, nil
 		})
 		if err != nil {
 			logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
@@ -104,13 +191,15 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	return nil
 }
 
-// reconcile applies one validated Core prefix to its linked REST IP Block, adopting
-// a compatible unlinked operator root or creating a block when necessary. The
-// caller holds the Site fabric and active Site row locks in tx; all IP Block,
-// IPAM, and status-detail writes participate in that transaction.
-// It returns true without writes when an operator replacement must wait for its
-// predecessor to be removed. It never removes roots or infers absence.
-func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix) (bool, error) {
+// createOrUpdateSitePrefixFromSite adopts a compatible unlinked operator root or
+// creates an IP Block for a validated prefix with no linked REST identity. The
+// caller checks for existing (including deleted) links under the Site fabric and
+// active Site row locks, and keeps this helper and subsequent updates in one tx.
+// Adoption preserves the REST ID, IPAM tree, and allocations. Only newly created
+// blocks receive an initial status detail here; ordinary updates belong to the caller.
+// A nil block without an error defers an operator replacement until its predecessor
+// is removed. This helper never removes roots or infers absence.
+func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) (*cdbm.IPBlock, error) {
 	id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 	cidr := netip.MustParsePrefix(prefix.Config.Prefix)
 	family := cdbm.IPBlockProtocolVersionV6
@@ -118,69 +207,27 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 		family = cdbm.IPBlockProtocolVersionV4
 	}
 	dao := cdbm.NewIPBlockDAO(manager.dbSession)
-	// Include deleted identities so a retired Core ID cannot be reused.
-	block, err := dao.GetBySitePrefixID(ctx, tx, id)
-	if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
-		return false, err
-	}
-	if errors.Is(err, cdb.ErrDoesNotExist) {
-		block = nil
-		err = nil
-	}
-	var tenantID *uuid.UUID
-	if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
-		tenants, _, err := cdbm.NewTenantDAO(manager.dbSession).GetAll(ctx, tx,
-			cdbm.TenantFilterInput{Orgs: []string{prefix.Config.GetTenantOrganizationId()}},
-			paginator.PageInput{Limit: cutil.GetPtr(2)}, nil)
-		if err != nil {
-			return false, err
-		}
-		if len(tenants) != 1 {
-			return false, invalid("tenant organization for SitePrefix %s is unknown or ambiguous", id)
-		}
-		tenantID = &tenants[0].ID
-	}
-	status := map[corev1.SitePrefixLifecycleState]string{
-		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING: cdbm.IPBlockStatusProvisioning,
-		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY:        cdbm.IPBlockStatusReady,
-		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING:     cdbm.IPBlockStatusDeleting,
-		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_ERROR:        cdbm.IPBlockStatusError,
-	}[prefix.Status.LifecycleState]
-	if block != nil {
-		// Existing links may change metadata and lifecycle, but not ownership or CIDR.
-		if block.Deleted == nil {
-			block, err = dao.GetByIDForUpdate(ctx, tx, block.ID)
-			if err != nil {
-				return false, err
-			}
-		}
-		if block.Deleted != nil || block.SiteID != site.ID || block.InfrastructureProviderID != site.InfrastructureProviderID ||
-			(block.TenantID == nil) != (tenantID == nil) || (tenantID != nil && *block.TenantID != *tenantID) ||
-			block.Prefix != cidr.Addr().String() || block.PrefixLength != cidr.Bits() ||
-			block.ProtocolVersion != family || block.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly {
-			return false, invalid("Core SitePrefix %s conflicts with its immutable REST identity", id)
-		}
-	} else if tenantID == nil {
+	if tenantID == nil {
 		// Adopt only an exact, compatible, unlinked operator root. Linking it in
 		// place preserves its REST ID, IPAM tree, and existing allocations.
 		roots, _, err := dao.GetAll(ctx, tx, cdbm.IPBlockFilterInput{SiteIDs: []uuid.UUID{site.ID}, ExcludeDerived: true},
 			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		var exact []cdbm.IPBlock
 		deferReplacement := false
 		for _, root := range roots {
 			other, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", root.Prefix, root.PrefixLength))
 			if err != nil {
-				return false, invalid("existing operator IP Block %s has an invalid prefix", root.ID)
+				return nil, invalid("existing operator IP Block %s has an invalid prefix", root.ID)
 			}
 			if other.Masked() == cidr {
 				exact = append(exact, root)
 			} else if other.Overlaps(cidr) {
 				if root.SitePrefixID == nil || root.InfrastructureProviderID != site.InfrastructureProviderID ||
 					root.ProtocolVersion != family || root.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly {
-					return false, invalid("operator SitePrefix %s overlaps an existing root", id)
+					return nil, invalid("operator SitePrefix %s overlaps an existing root", id)
 				}
 				// Preserve reported lifecycle changes regardless of which identity arrives first.
 				// The replacement must wait until its linked predecessor is removed.
@@ -188,28 +235,25 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 			}
 		}
 		if len(exact) > 1 {
-			return false, invalid("operator SitePrefix %s has ambiguous adoption candidates", id)
+			return nil, invalid("operator SitePrefix %s has ambiguous adoption candidates", id)
 		}
 		if len(exact) == 1 {
 			candidate, err := dao.GetByIDForUpdate(ctx, tx, exact[0].ID)
 			if err != nil {
-				return false, err
+				return nil, err
 			}
 			if candidate.InfrastructureProviderID != site.InfrastructureProviderID || candidate.ProtocolVersion != family ||
 				candidate.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly || candidate.SiteID != site.ID ||
 				candidate.TenantID != nil || candidate.Prefix != cidr.Addr().String() || candidate.PrefixLength != cidr.Bits() {
-				return false, invalid("operator SitePrefix %s has an incompatible adoption candidate", id)
+				return nil, invalid("operator SitePrefix %s has an incompatible adoption candidate", id)
 			}
 			if candidate.SitePrefixID != nil || deferReplacement {
-				return true, nil
+				return nil, nil
 			}
-			block, err = dao.LinkSitePrefix(ctx, tx, candidate.ID, id)
-			if err != nil {
-				return false, err
-			}
+			return dao.LinkSitePrefix(ctx, tx, candidate.ID, id)
 		}
 		if deferReplacement {
-			return true, nil
+			return nil, nil
 		}
 	}
 	// Empty operator metadata must not erase provider-maintained values.
@@ -218,56 +262,47 @@ func (manager ManageSitePrefix) reconcile(ctx context.Context, tx *cdb.Tx, site 
 	if tenantID != nil || prefix.Metadata.Description != "" {
 		description = &prefix.Metadata.Description
 	}
-	previousStatus := ""
-	if block == nil {
-		// Only operator roots need a cloud-IPAM entry here; tenant prefixes are
-		// represented by private IP Blocks without a cloud-IPAM tree.
-		if tenantID == nil {
-			storage := ipam.NewIpamStorage(manager.dbSession.DB, tx.GetBunTx())
-			_, err = ipam.CreateIpamEntryForIPBlock(ctx, storage, cidr.Addr().String(), cidr.Bits(),
-				cdbm.IPBlockRoutingTypeDatacenterOnly, site.InfrastructureProviderID.String(), site.ID.String())
-			if err != nil {
-				return false, err
-			}
-		}
-		name := prefix.Metadata.Name
-		if name == "" {
-			name = cidr.String()
-		}
-		block, err = dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
-			Name: name, Description: description,
-			SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
-			SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
-			ProtocolVersion: family, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly,
-			Status: status, CreatedBy: &site.CreatedBy,
-		})
-	} else {
-		// Write only changed fields so replaying an unchanged report is a no-op.
-		previousStatus = block.Status
-		update := cdbm.IPBlockUpdateInput{IPBlockID: block.ID}
-		if prefix.Metadata.Name != "" && prefix.Metadata.Name != block.Name {
-			update.Name = &prefix.Metadata.Name
-		}
-		if description != nil && (block.Description == nil || *description != *block.Description) {
-			update.Description = description
-		}
-		if status != block.Status {
-			update.Status = &status
-		}
-		if update.Name != nil || update.Description != nil || update.Status != nil {
-			_, err = dao.Update(ctx, tx, update)
+	// Only operator roots need a cloud-IPAM entry here; tenant prefixes are
+	// represented by private IP Blocks without a cloud-IPAM tree.
+	if tenantID == nil {
+		storage := ipam.NewIpamStorage(manager.dbSession.DB, tx.GetBunTx())
+		_, err := ipam.CreateIpamEntryForIPBlock(ctx, storage, cidr.Addr().String(), cidr.Bits(),
+			cdbm.IPBlockRoutingTypeDatacenterOnly, site.InfrastructureProviderID.String(), site.ID.String())
+		if err != nil {
+			return nil, err
 		}
 	}
+	name := prefix.Metadata.Name
+	if name == "" {
+		name = cidr.String()
+	}
+	status := getSitePrefixStatus(prefix.Status.LifecycleState)
+	block, err := dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
+		Name: name, Description: description,
+		SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
+		SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
+		ProtocolVersion: family, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Status: status, CreatedBy: &site.CreatedBy,
+	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	// Record the initial status or a change from the stored status.
-	if previousStatus != status {
-		_, err = cdbm.NewStatusDetailDAO(manager.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
-			EntityID: block.ID.String(), Status: status, Message: cutil.GetPtr("Reported by Core SitePrefix inventory"),
-		})
+	_, err = cdbm.NewStatusDetailDAO(manager.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+		EntityID: block.ID.String(), Status: status, Message: cutil.GetPtr(sitePrefixInventoryStatusMessage),
+	})
+	if err != nil {
+		return nil, err
 	}
-	return false, err
+	return block, nil
+}
+
+func getSitePrefixStatus(state corev1.SitePrefixLifecycleState) string {
+	return map[corev1.SitePrefixLifecycleState]string{
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING: cdbm.IPBlockStatusProvisioning,
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY:        cdbm.IPBlockStatusReady,
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING:     cdbm.IPBlockStatusDeleting,
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_ERROR:        cdbm.IPBlockStatusError,
+	}[state]
 }
 
 func invalid(format string, args ...any) error {
