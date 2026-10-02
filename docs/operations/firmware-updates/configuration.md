@@ -249,7 +249,7 @@ contain that script.
 Other host models require their own inventory mapping and Scout script. To add
 support for another model:
 
-- Follow the [contributing guide](../../../CONTRIBUTING.md).
+- Follow the [contributing guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/CONTRIBUTING.md).
 - Add the catalog component regex for `FirmwareComponentType::Cx7` to the
   [host firmware inventory mappings](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/firmware.rs)
   for the model.
