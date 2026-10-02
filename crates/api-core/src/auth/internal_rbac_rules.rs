@@ -545,7 +545,6 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("GetMachineValidationRuns", vec![ForgeAdminCLI, SiteAgent]);
-        // Scout reads a run's items to run its machine validation plugins.
         x.perm(
             "FindMachineValidationRunItemIds",
             vec![ForgeAdminCLI, SiteAgent, Scout],
@@ -1438,8 +1437,6 @@ mod rbac_rule_tests {
             )]
         ));
 
-        // Scout runs machine validation plugins with the machine's own
-        // certificate, which names no admin.
         for method in [
             "FindMachineValidationRunItemIds",
             "FindMachineValidationRunItemsByIds",

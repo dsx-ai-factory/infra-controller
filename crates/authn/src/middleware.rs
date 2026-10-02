@@ -535,9 +535,7 @@ impl<T: Authorization> Default for AuthContext<T> {
 // extensions typemap, so .get::<Arc<ConnectionAttributes>>() is what you want.
 pub struct ConnectionAttributes {
     pub peer_address: SocketAddr,
-    /// The client's certificates as it sent them. Only the first, its
-    /// end-entity certificate, was verified; the rest are whatever the client
-    /// chose to append.
+    /// As the client sent them: TLS verified only the first.
     pub peer_certificates: Vec<CertificateDer<'static>>,
 }
 
@@ -557,11 +555,8 @@ pub struct ConnectionAttributes {
 )]
 struct AuthenticationConnectionAttributesMissing;
 
-/// A request whose end-entity certificate failed to map to a principal,
-/// counted once per request with that certificate's error. The certificates after it are
-/// never mapped, so a healthy chain whose intermediates don't map -- CA
-/// certificates never do -- is not a rejection. The peer and the exact error
-/// ride the log line at the DEBUG level this site has always logged at.
+/// A request whose end-entity certificate failed to map to a principal. The
+/// peer and the error ride the DEBUG log line.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "client_cert_rejected",
@@ -666,12 +661,8 @@ where
 
         let extensions = request.extensions_mut();
         if let Some(conn_attrs) = extensions.get::<Arc<ConnectionAttributes>>() {
-            // Only the end-entity certificate, which rustls presents first,
-            // names the caller: it is the one the TLS verifier checked against
-            // the trusted roots, using the certificates after it only as
-            // candidate intermediates. A client can append any certificate it
-            // likes after its own, verified by nothing, so none of them may
-            // mint a principal.
+            // TLS verified only the end-entity certificate; the client can
+            // append anything after it.
             if let Some(end_entity) = conn_attrs.peer_certificates.first() {
                 let refused_machine_cert = match Principal::try_from_client_certificate(
                     end_entity,
@@ -702,20 +693,9 @@ where
                         false
                     }
                 };
-                // Regardless of whether we were able to get a specific
-                // Principal flavor out of the certificate, having a trusted
-                // certificate presented by the client is worth recording on
-                // its own.
-                //
-                // Except when it is a machine certificate we just refused.
-                // `TrustedCertificate` is not a bookkeeping marker -- the
-                // shipped Casbin policy grants it `forge/*` and `nico/*`, so
-                // handing it out here would re-authorize the very request the
-                // machine-cert gate above declined, and `mtls_enabled = false`
-                // would filter the machine principal while leaving the caller
-                // fully authorized under another name. Scoped to that case, so
-                // service and admin-CLI certs keep it, as does a cert that
-                // failed to mint a principal for unrelated reasons.
+                // Not for a refused machine certificate: the shipped Casbin
+                // policy grants `TrustedCertificate` `forge/*` and `nico/*`,
+                // which would undo the refusal.
                 if !refused_machine_cert {
                     auth_context.principals.push(Principal::TrustedCertificate);
                 }
@@ -1113,9 +1093,6 @@ mod tests {
         svc.oneshot(request).await.unwrap()
     }
 
-    /// The principals a client gets for presenting certificates with the
-    /// SPIFFE paths `chain`, in order, when machine certificates are
-    /// `machine_certs_enabled`.
     async fn principals_for_chain(
         (machine_certs_enabled, chain): (bool, &[&str]),
     ) -> Vec<Principal> {
@@ -1128,9 +1105,7 @@ mod tests {
         principals_for_certs(middleware, None, chain).await
     }
 
-    /// Only the client's end-entity certificate names it: TLS verifies that
-    /// one alone, so a certificate the client appends after it names no one,
-    /// and cannot restore the trust a refused machine certificate lost.
+    /// Certificates after the end-entity one yield no principals.
     #[tokio::test]
     async fn only_the_end_entity_certificate_names_the_caller() {
         check_cases_async(
