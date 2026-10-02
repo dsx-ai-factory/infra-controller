@@ -23,18 +23,19 @@
 # Also sourced automatically at the start of every setup.sh run.
 #
 # Checks (in order — fails fast so the most actionable issues appear first):
-#   1. Environment variables    — presence and format
-#   2. Required tools           — helm, helmfile, kubectl, jq, ssh-keygen
-#                                  Core VIP validation also needs python3 + PyYAML
-#   3. values/metallb-config.yaml — YAML, pools, advertisement mode, ASNs
-#   4. Cluster reachability     — kubectl can reach the API server
-#   5. Node resources           — at least 3 schedulable (Ready + untainted) nodes
-#   6. MetalLB BGPPeer nodes    — hostnames in config exist in the cluster
-#   7. Per-node checks          — kernel params (sysctl) and DNS on every node
-#   8. Temporal/Keycloak DB     — opt-in nico-pg-cluster migration wasn't skipped
-#   9. Registry/image access    — registry host and rendered NICo image refs
-#                                  are reachable with the supplied credentials
-#   10. NICo REST source/charts  — in-tree rest-api/ and helm/rest/ are present
+#   1. Environment variables:    presence and format
+#   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
+#                                Core VIP validation also needs python3 + PyYAML
+#   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
+#   4. Cluster reachability:     kubectl can reach the API server
+#   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
+#   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
+#   7. Per-node checks:          kernel params (sysctl) and DNS on every node
+#   8. Temporal/Keycloak DB:     resolve useHaPostgres, check a migration to
+#                                nico-pg-cluster wasn't skipped
+#   9. Registry/image access:    registry host and rendered NICo image refs
+#                                are reachable with the supplied credentials
+#   10. NICo REST source/charts: in-tree rest-api/ and helm/rest/ are present
 #
 # Configurable:
 #   PREFLIGHT_CHECK_IMAGE — image used for per-node pod checks (default: busybox:1.36)
@@ -689,6 +690,71 @@ _yaml_toplevel_value() {
     ' "${_file}"
 }
 
+# Prints the PostgreSQL host the deployed Temporal or Keycloak connects to, or
+# nothing when it isn't deployed. Fails when the cluster can't be read.
+_deployed_db_host() {
+    local _release _values _kc_ns _kc_url
+    case "$1" in
+        temporal)
+            _release="$(helm list -n temporal --short --filter '^temporal$')" || return 1
+            [[ -n "${_release}" ]] || return 0
+            _values="$(helm get values temporal -n temporal -o json)" || return 1
+            # An unset host is the chart default, the standalone StatefulSet.
+            jq -r '.server.config.persistence.default.sql.host // "postgres.postgres"' <<< "${_values}"
+            ;;
+        keycloak)
+            _kc_ns="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)}"
+            _kc_url="$(kubectl get deployment keycloak -n "${_kc_ns:-nico-rest}" --ignore-not-found \
+                -o jsonpath='{.spec.template.spec.containers[?(@.name=="keycloak")].env[?(@.name=="KC_DB_URL")].value}')" \
+                || return 1
+            _kc_url="${_kc_url#jdbc:postgresql://}"
+            printf '%s\n' "${_kc_url%%[:/]*}"
+            ;;
+    esac
+}
+
+# Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
+# _USE_HA_POSTGRES as true or false. `auto` keeps a deployed workload on the
+# database it already uses, and keeps a Site that still runs the standalone
+# postgres StatefulSet on it, so an upgrade never points a Site at an empty
+# database. Only a new Site gets nico-pg-cluster. Records an error and leaves
+# _USE_HA_POSTGRES empty when it can't decide.
+_resolve_use_ha_postgres() {
+    local _component="$1" _value _db_host _legacy_sts
+    _USE_HA_POSTGRES=""
+    _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
+    case "${_value}" in
+        true|false)
+            _USE_HA_POSTGRES="${_value}"
+            return 0
+            ;;
+        auto) ;;
+        *)
+            ERRORS+=("values.yaml: ${_component}.useHaPostgres must be true, false, or auto (got '${_value}')")
+            return 0
+            ;;
+    esac
+
+    if ! _db_host="$(_deployed_db_host "${_component}" 2>/dev/null)" \
+        || ! _legacy_sts="$(kubectl get statefulset postgres -n postgres \
+            --ignore-not-found -o name 2>/dev/null)"; then
+        ERRORS+=("${_component}.useHaPostgres: auto could not read which PostgreSQL the deployed ${_component} uses. Check cluster access, or set it to true or false")
+        return 0
+    fi
+    if [[ -n "${_db_host}" ]]; then
+        if [[ "${_db_host}" == nico-pg-cluster.* ]]; then
+            _USE_HA_POSTGRES=true
+        else
+            _USE_HA_POSTGRES=false
+        fi
+    elif [[ -n "${_legacy_sts}" ]]; then
+        _USE_HA_POSTGRES=false
+    else
+        _USE_HA_POSTGRES=true
+    fi
+    return 0
+}
+
 if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     # nico-api.hostname must be a real external hostname
     if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE '^[[:space:]]*hostname:[[:space:]]*("")?[[:space:]]*$'; then
@@ -1043,17 +1109,28 @@ EOF
     _cleanup_preflight_pods
 
     # -----------------------------------------------------------------------
-    # 8. Temporal/Keycloak DB consolidation — opt-in transition safety.
-    # See "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md
-    # for the full story. Short version: temporal.useHaPostgres/keycloak.useHaPostgres
-    # point Temporal/Keycloak at nico-pg-cluster instead of postgres.postgres;
-    # this fails closed rather than let setup.sh silently redirect a site with
-    # un-migrated legacy data onto an empty/incomplete target database.
+    # 8. Temporal/Keycloak database. Resolves temporal.useHaPostgres and
+    # keycloak.useHaPostgres for setup.sh phases 7c/7d/7f, and warns while
+    # either stays on the deprecated standalone postgres.postgres StatefulSet.
+    # Fails closed rather than let setup.sh redirect a Site with un-migrated
+    # legacy data onto an empty or incomplete database. See "Consolidating
+    # Temporal/Keycloak onto nico-pg-cluster" in README.md.
     # -----------------------------------------------------------------------
-    _TEMPORAL_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" temporal useHaPostgres)"
-    _KEYCLOAK_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak useHaPostgres)"
+    _resolve_use_ha_postgres temporal
+    _TEMPORAL_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
+    _resolve_use_ha_postgres keycloak
+    _KEYCLOAK_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
 
-    if [[ "${_TEMPORAL_TOGGLE}" == "true" || "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
+    # Also read by setup.sh for its closing summary.
+    _STANDALONE_PG_WORKLOADS=""
+    [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "false" ]] && _STANDALONE_PG_WORKLOADS="Temporal"
+    [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "false" ]] && \
+        _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
+    if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
+        WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in a future release. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
+    fi
+
+    if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" || "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
         _LEGACY_PG_POD="$(kubectl get pods -n postgres -l app=postgres \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
         _NICO_PG_POD="$(kubectl get pods -n postgres \
@@ -1125,7 +1202,7 @@ EOF
             return 0
         }
 
-        if [[ "${_TEMPORAL_TOGGLE}" == "true" ]]; then
+        if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" ]]; then
             _check_db_migration_needed \
                 "temporal.useHaPostgres" "temporal" "SELECT count(*) FROM namespaces" \
                 "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
@@ -1138,7 +1215,7 @@ EOF
                 "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
                 "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
         fi
-        if [[ "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
+        if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
             _check_db_migration_needed \
                 "keycloak.useHaPostgres" "keycloak" "SELECT count(*) FROM realm" \
                 "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db keycloak"
