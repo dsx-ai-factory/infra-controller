@@ -423,6 +423,37 @@ pub async fn generic_ami_bmc() -> TestBmcHandle {
     .await
 }
 
+/// Build a router from the recorded GH200 system with swapped Managers order.
+/// `HGX_BMC_0` is intentionally listed before `BMC_0`, to check that the explorer
+/// picks `BMC_0` (linked to `System_0`) regardless of the order.
+pub fn nvidia_gh200_swapped_managers_router() -> Router {
+    let archive_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gh200.tar.gz");
+    let default_router =
+        crate::tar_router::tar_router(crate::tar_router::TarGzOption::Disk(&archive_path), None)
+            .expect("NVIDIA GH200 archive must be readable");
+
+    let router = Router::new().route(
+        "/redfish/v1/Managers",
+        get(|| async move {
+            Json(serde_json::json!({
+                    "@odata.id": "/redfish/v1/Managers",
+                    "@odata.type": "#ManagerCollection.ManagerCollection",
+                    "Members": [
+                        {
+                            "@odata.id": "/redfish/v1/Managers/HGX_BMC_0"
+                        },
+                        {
+                            "@odata.id": "/redfish/v1/Managers/BMC_0"
+                        }
+                    ],
+                    "Members@odata.count": 2,
+                    "Name": "Manager Collection"
+            }))
+        }),
+    );
+    router.fallback_service(default_router)
+}
+
 /// Builds a router from the recorded Lenovo ThinkSystem SR670 Redfish tree.
 pub fn lenovo_thinksystem_sr670_router() -> Router {
     let archive_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
