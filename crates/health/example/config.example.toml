@@ -341,7 +341,8 @@ logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 exclude_services = ["Journal"]
 # Skip history only during a new service's first successful baseline.
 # Numeric IDs must grow between resets; existing entries remain unchanged.
-# Nonnumeric entries are emitted during full scans and ignored during incremental scans.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
 # A missing saved entry or changed mapped log record triggers replay at the next poll.
 # Changes below an unchanged anchor are not detected.
 # Default: false (emit retained history). Auto reads this after downgrade.
@@ -370,7 +371,8 @@ logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 exclude_services = ["Journal"]
 # Skip history only during a new service's first successful baseline.
 # Numeric IDs must grow between resets; existing entries remain unchanged.
-# Nonnumeric entries are emitted during full scans and ignored during incremental scans.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
 # A missing saved entry or changed mapped log record triggers replay at the next poll.
 # Changes below an unchanged anchor are not detected.
 # Default: false (emit retained history).

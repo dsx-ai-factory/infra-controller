@@ -101,6 +101,14 @@ struct ServiceLogState {
     /// `None` represents an empty source or a service that needs a full scan.
     anchor: Option<LogAnchor>,
 
+    /// Remembers that a nonempty initial scan skipped history but found no numeric ID.
+    /// Without this flag, `anchor: None` would replay the skipped records on later
+    /// polls or after restart. An empty initial scan leaves the flag unset so its
+    /// first future entry is collected. Saving a numeric anchor clears the flag
+    /// so reset recovery can replay all retained records, including nonnumeric IDs.
+    #[serde(default)]
+    skip_nonnumeric: bool,
+
     /// Reprobe filter support after restart; this hint is not collection progress.
     #[serde(skip)]
     filter_disabled: bool,
@@ -688,6 +696,9 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             .collect_entry_uris(&base, &service.entries, cursor, filter_disabled)
             .await?;
 
+        // An empty baseline must still collect its first future entry.
+        let skip_nonnumeric = previous.skip_nonnumeric || (baseline && !members.is_empty());
+
         let mut latest = original.cloned();
         let mut first = None;
         let mut emitted = 0;
@@ -705,6 +716,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             }
 
             if cursor.is_some_and(|cursor| anchor.as_ref().is_none_or(|anchor| anchor.id <= cursor))
+                || (skip_nonnumeric && anchor.is_none())
             {
                 *filter_disabled |= anchor.is_some();
                 continue;
@@ -753,8 +765,11 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             self.verify_anchor(service, witness).await?;
         }
 
+        let skip_nonnumeric = skip_nonnumeric && latest.is_none();
+
         let saved = ServiceLogState {
             anchor: latest,
+            skip_nonnumeric,
             filter_disabled: *filter_disabled,
         };
 
@@ -1563,9 +1578,11 @@ mod tests {
         rig.collect(&[(1, "one"), (2, "two")], Some(2), &["one", "two"])
             .await;
 
-        let mut empty = Rig::new(true);
-        empty.collect::<i64>(&[], None, &[]).await;
-        empty.collect(&[(1, "first")], Some(1), &["first"]).await;
+        for (id, anchor) in [("1", Some(1)), ("opaque", None)] {
+            let mut empty = Rig::new(true);
+            empty.collect::<i64>(&[], None, &[]).await;
+            empty.collect(&[(id, "first")], anchor, &["first"]).await;
+        }
     }
 
     #[tokio::test]
@@ -1753,6 +1770,34 @@ mod tests {
             )
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn opaque_baselines_stay_skipped_until_numeric_progress() {
+        let mut rig = Rig::new(true);
+        rig.source.lock().unwrap().ignore_filter = true;
+
+        rig.collect(&[("opaque", "skipped-history")], None, &[])
+            .await;
+
+        rig.collector.state = None;
+        rig.collect(&[("opaque", "skipped-history")], None, &[])
+            .await;
+
+        rig.collect(
+            &[("opaque", "skipped-history"), ("1", "new-numeric")],
+            Some(1),
+            &["new-numeric"],
+        )
+        .await;
+
+        // A numeric anchor restores reset recovery for all retained entries.
+        rig.collect(
+            &[("opaque", "reset-history"), ("2", "reset-numeric")],
+            Some(2),
+            &["reset-history", "reset-numeric"],
+        )
+        .await;
     }
 
     #[tokio::test]

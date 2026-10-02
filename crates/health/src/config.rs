@@ -1531,7 +1531,8 @@ impl SseLogConfig {
 /// remain unchanged. Each poll validates the highest saved entry. A missing entry
 /// or changed mapped record triggers replay of retained history. Changes below an
 /// unchanged anchor are not detected.
-/// Nonnumeric entries are emitted during full scans and ignored during incremental scans.
+/// Nonnumeric entries are emitted when collecting or replaying retained history.
+/// Incremental scans and completed history-skipping baselines ignore them.
 ///
 /// Paginated collections must report a stable `Members@odata.count` and return
 /// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
