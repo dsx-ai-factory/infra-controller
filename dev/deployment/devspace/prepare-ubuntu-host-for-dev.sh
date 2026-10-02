@@ -514,6 +514,7 @@ configure_kea_apparmor() {
     {
       printf '# Managed by prepare-ubuntu-host-for-dev.sh\n'
       printf '/tmp/** rwk,\n'
+      printf '"%s" r,\n' "${OPENSSL_COMPAT_CONFIG}"
       # kind shares the host kernel, including the native Kea AppArmor profile.
       printf '/run/kea/* rwk,\n'
       printf '/usr/lib/kea/hooks/*.so mr,\n'
