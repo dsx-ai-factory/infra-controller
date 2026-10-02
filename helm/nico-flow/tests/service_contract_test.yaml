@@ -12,15 +12,16 @@ tests:
       - equal:
           path: metadata.name
           value: flow
-      - equal:
-          path: spec.ports[0].port
-          value: 50051
-      - equal:
-          path: spec.ports[0].targetPort
-          value: grpc
-      - equal:
-          path: spec.ports[1]
-          value:
+      - contains:
+          path: spec.ports
+          content:
+            port: 50051
+            targetPort: grpc
+            name: grpc
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
             port: 9360
             targetPort: metrics
             name: metrics

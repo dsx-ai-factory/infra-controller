@@ -12,9 +12,11 @@ Deployment and Service name this port `metrics`; override it with
 `ports.metrics` when required. Metrics include Go and process collectors plus
 completed gRPC request counts and handling duration.
 
-Configure tracing with `OTEL_*` variables in `extraEnv.flow` and injection
-annotations in `podAnnotations`. This example requires the OpenTelemetry
-Operator and the referenced Instrumentation and OpenTelemetryCollector resources:
+Flow can export traces directly to a reachable OTLP endpoint by setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` and other `OTEL_*` variables in `extraEnv.flow`;
+injection annotations are not required for direct export. The following example
+uses optional OpenTelemetry Operator SDK and sidecar injection, so it requires
+the referenced Instrumentation and OpenTelemetryCollector resources:
 
 ```yaml
 podAnnotations:
