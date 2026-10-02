@@ -70,63 +70,142 @@ The request supports these controls in addition to `siteId`:
 
 | Field | Purpose |
 |---|---|
-| `version` | Target passed to the component backend. For current rack-scale RMS paths, this is a complete SOT firmware-object JSON document serialized as a string. Legacy backends can accept a plain version string. |
+| `version` | Target firmware input serialized as a string. Its format depends on the selected backend. See [Choose the firmware object format](#choose-the-firmware-object-format). |
 | `targets` | Optional component subset for tray requests. When present, `version` must also be present. Rack handlers do not forward this field, so do not send it with a rack request. |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 | `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
 | `authenticationData` | Optional firmware-download credentials, shared or scoped by component type. See [Firmware authentication](#firmware-authentication). |
 
-Although the API permits `version` to be omitted when `targets` is empty, that
-is not portable across component backends. Rack-scale RMS updates require SOT
-JSON. Supply an explicit version unless the selected backend and operation rule
-are known to resolve one.
+`version` carries the target firmware input. Its representation is a contract
+between the caller and the component backend selected for the target, so the
+REST API does not assign it one universal schema. Flow preserves the string
+except when it unwraps the optional per-component-type mapping described below;
+the selected component manager or its backend validates and interprets the
+value.
 
-### SOT firmware-object JSON
+How `version` is used depends on the backend. Core's built-in non-rack-scale
+host firmware controller does not use it to select the bundle that is applied;
+Core resolves that bundle from the effective host firmware catalog. RMS-backed
+updates require an explicit SOT firmware object that identifies the bundle.
+
+### Choose the firmware object format
+
+The two NICo compute firmware paths resolve their target bundles differently:
+
+| System and backend | Version behavior |
+|---|---|
+| Conventional, non-rack-scale compute using Core's built-in host firmware controller (`nicolegacy`) | Core resolves the bundle and artifacts from the effective [host firmware catalog](configuration.md#host-firmware-catalog), not from the request. For a normal on-demand update, omit `version`. If it is provided, `nicolegacy` accepts only a complete component-to-version JSON map that exactly matches a desired catalog entry, and uses it for preflight validation and the already-up-to-date check; it does not select the bundle Core applies. This path applies the configured bundle rather than an individual BMC or BIOS target. |
+| Rack-scale compute, NVSwitch, or power shelf using the Core Component Manager and RMS | The complete SOT firmware-object JSON document produced by the firmware release process. NICo passes the document to RMS as the firmware-object configuration. |
+
+Do not send a SOT document to the legacy Core host firmware controller. For an
+on-demand conventional host update, use a compute tray endpoint without
+`version` or `targets`; a rack endpoint's default rule also includes NVSwitch
+and is not a compute-only legacy update.
+
+#### SOT firmware-object JSON
 
 RMS firmware is described by a source-of-truth (SOT) firmware object: a JSON
 document containing the bundle identity and the artifacts RMS must apply. The
-document comes from the platform's firmware release process; it is not the
-same as the host firmware catalog described in
+document comes from the platform's firmware release process through the
+[SOT portal](https://sot.nvidia.com/); it is not the same as the host firmware
+catalog described in
 [Configure firmware versions](configuration.md).
 
-The REST `version` field is a string, so the complete JSON document must be
-serialized into that string. Build the request body with a JSON tool instead
-of escaping the document by hand:
+A SOT export has the following structure. This abbreviated example documents
+the field hierarchy; it is not valid firmware-update input. Always submit the
+complete document produced by the release process.
 
-```sh
-SOT_JSON=$(jq -c . compute-firmware-object.json)
-
-jq -n \
-  --arg siteId "$SITE_ID" \
-  --arg version "$SOT_JSON" \
-  '{siteId: $siteId, version: $version, targets: ["bmc", "bios"]}'
+```json
+{
+  "ProductName": "ExampleRackSystem",
+  "Milestones": [
+    {
+      "Name": "example-release",
+      "State": "Onboarded",
+      "BoardSKUs": [
+        {
+          "Name": "Example-Switch-Tray",
+          "Type": "Switch Tray",
+          "Components": {
+            "Software": [],
+            "Firmware": [
+              {
+                "Component": "BMC+CPLD",
+                "Version": "1.2.3",
+                "Type": "Prod",
+                "FileNames": ["switch-firmware.fwpkg"],
+                "Locations": [
+                  {
+                    "Location": "/firmware/example/switch-firmware.fwpkg",
+                    "LocationType": "FILE",
+                    "PackageName": "",
+                    "Type": "Firmware",
+                    "FileName": "switch-firmware.fwpkg"
+                  }
+                ],
+                "SubComponents": [
+                  {
+                    "Component": "BMC",
+                    "Version": "1.2.3",
+                    "Type": null
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
 ```
+
+The REST `version` field is a string, so the complete JSON document must be
+serialized into that string.
 
 For a rack request, `version` can hold one shared firmware object for all
 selected tray types. No additional flag is required. The firmware object must
-be suitable for every selected tray type. The exact lowercase top-level keys
-`compute`, `nvswitch`, and `powershelf` are reserved for per-tray mappings;
-a shared firmware object must not contain any of them.
+contain the board SKUs and artifacts needed by every component type selected
+by the operation rule. Its decoded shape is:
+
+```text
+{
+  "ProductName": "ExampleRackSystem",
+  "Milestones": [{
+    "Name": "example-release",
+    "BoardSKUs": [
+      {"Type": "Compute Node", "Components": { ... }},
+      {"Type": "Switch Tray", "Components": { ... }},
+      {"Type": "Power Shelf", "Components": { ... }}
+    ]
+  }]
+}
+```
+
+The ellipses represent the complete component and artifact metadata from the
+SOT export; they are not literal request content. Because this object has none
+of the reserved top-level keys `compute`, `nvswitch`, and `powershelf`, Flow
+passes the same serialized document unchanged to every component manager
+selected by the operation rule.
 
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and
 `powershelf` keys. Flow extracts the relevant value before calling each
-component manager. For example, this builds a layered value from two complete
-SOT documents:
+component manager. Its decoded shape is:
 
-```sh
-COMPUTE_SOT=$(jq -c . compute-firmware-object.json)
-SWITCH_SOT=$(jq -c . switch-firmware-object.json)
-
-LAYERED_VERSION=$(jq -cn \
-  --argjson compute "$COMPUTE_SOT" \
-  --argjson nvswitch "$SWITCH_SOT" \
-  '{compute: $compute, nvswitch: $nvswitch}')
+```text
+{
+  "compute": {"ProductName": "ExampleComputeSystem", "Milestones": [ ... ]},
+  "nvswitch": {"ProductName": "ExampleSwitchSystem", "Milestones": [ ... ]},
+  "powershelf": {"ProductName": "ExamplePowerSystem", "Milestones": [ ... ]}
+}
 ```
 
-Each mapping value may be a JSON object or a string containing the firmware
-input. The outer REST `version` field remains a string in both forms.
+Each mapping value represents one complete SOT document; the ellipses are not
+literal request content. A mapping value may be a JSON object or a string
+containing the firmware input. The outer REST `version` field remains a string
+in both the shared and layered forms.
 
 If a layered document omits a component-type key, Flow passes an empty target
 to that component manager. Use an operation rule that excludes the component
@@ -150,7 +229,8 @@ encryption configuration. Keep credentials out of shell arguments and logs.
 
 ## Submit an update
 
-This request updates only the BMC and BIOS targets on one compute tray:
+This rack-scale RMS request updates only the BMC and BIOS targets on one
+compute tray:
 
 ```json
 {
