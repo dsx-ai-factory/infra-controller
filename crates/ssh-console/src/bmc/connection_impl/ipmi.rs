@@ -39,6 +39,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection_impl::echo_connected_message;
+use crate::bmc::connection_impl::ipmi::CancelPhase::WaitingForReady;
 use crate::bmc::message_proxy::{ExecReply, ToBmcMessage, ToFrontendMessage};
 use crate::bmc::pending_output_line::PendingOutputLine;
 use crate::bmc::vendor::IPMITOOL_ESCAPE_SEQUENCE;
@@ -72,7 +73,7 @@ pub(in crate::bmc) async fn spawn(
     cancel_token: CancellationToken,
 ) -> Result<Handle, SpawnError> {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
-    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = oneshot::channel::<ReadyResult>();
     let ready_tx = Some(ready_tx); // only send it once
 
     let machine_id = connection_details.machine_id;
@@ -131,7 +132,7 @@ pub(in crate::bmc) async fn spawn(
         ipmitool_process,
         output_buf: [0u8; 4096],
         captured_output: VecDeque::with_capacity(MAX_CAPTURED_IPMITOOL_OUTPUT_SIZE),
-        cancel_token,
+        cancel_token: cancel_token.clone(),
         pty_master,
         from_frontend_rx,
         to_frontend_tx,
@@ -176,22 +177,66 @@ pub(in crate::bmc) async fn spawn(
                     ipmitool_proxy
                         .config
                         .force_deactivate_conflicting_ipmi_sol_sessions,
-                    || deactivate_sol(&ipmitool_proxy.connection_details, &ipmitool_proxy.config),
+                    || {
+                        deactivate_conflicting_sol(
+                            &ipmitool_proxy.connection_details,
+                            &ipmitool_proxy.config,
+                        )
+                    },
                 )
                 .await)
             }
             None => {
-                // Process is still running (normal shutdown), we can kill it.
-                tracing::debug!(%machine_id, "killing ipmitool process");
+                // Process is still running (normal shutdown), we can kill it. First deactivate it,
+                // if it was an operational session.
+                if ipmitool_proxy.sol_session_operational {
+                    tracing::debug!(%machine_id, "shutdown: deactivating IPMI SOL session");
+
+                    match run_sol_deactivate_command(
+                        sol_deactivate_command(
+                            &ipmitool_proxy.connection_details,
+                            &ipmitool_proxy.config,
+                        ),
+                        SOL_DEACTIVATE_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(%machine_id, "shutdown: IPMI SOL session deactivated");
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                %machine_id,
+                                %error,
+                                "shutdown: failed to deactivate IPMI SOL"
+                            );
+                        }
+                    }
+                }
+
+                tracing::debug!(%machine_id, "shutdown: killing ipmitool process");
                 // Kill and wait() on the process (to avoid zombies), but in the background (so we don't
                 // block if it's unresponsive.)
-                tokio::spawn(async move { ipmitool_proxy.ipmitool_process.kill().await });
+                ipmitool_proxy.ipmitool_process.start_kill().ok();
+                tokio::spawn(async move {
+                    ipmitool_proxy.ipmitool_process.wait().await.ok();
+                });
+
+                if ipmitool_proxy.cancel_token.is_cancelled()
+                    && let Some(ready_tx) = ipmitool_proxy.ready_tx.take()
+                {
+                    ready_tx.send(ReadyResult::Cancelled).ok();
+                }
+
                 Ok(())
             }
         }
     });
 
-    ready_rx.await.map_err(|_| SpawnError::WaitingForReady)?;
+    match ready_rx.await.map_err(|_| SpawnError::WaitingForReady)? {
+        ReadyResult::Cancelled => return Err(SpawnError::Cancelled(WaitingForReady)),
+        ReadyResult::Ready => {}
+    };
 
     Ok(Handle {
         to_bmc_msg_tx: from_frontend_tx,
@@ -251,11 +296,22 @@ pub(in crate::bmc) enum SpawnError {
         error: ProcessLoopError,
         output: String,
     },
+    #[error("cancelled while {0:?}")]
+    Cancelled(CancelPhase),
+}
+
+#[derive(Debug)]
+pub(in crate::bmc) enum CancelPhase {
+    WaitingForReady,
 }
 
 impl SpawnError {
     pub(crate) fn retry_immediately(&self) -> bool {
         matches!(self, Self::ConflictingSolSessionDeactivated { .. })
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
     }
 }
 
@@ -312,7 +368,7 @@ fn is_sol_payload_already_active(output: &str) -> bool {
     output.contains(SOL_PAYLOAD_ALREADY_ACTIVE)
 }
 
-async fn deactivate_sol(
+async fn deactivate_conflicting_sol(
     connection_details: &ConnectionDetails,
     config: &Config,
 ) -> Result<(), SolDeactivateError> {
@@ -414,7 +470,7 @@ struct IpmitoolMessageProxy {
     pty_master: AsyncFd<OwnedFd>,
     from_frontend_rx: mpsc::Receiver<ToBmcMessage>,
     to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
-    ready_tx: Option<oneshot::Sender<()>>,
+    ready_tx: Option<oneshot::Sender<ReadyResult>>,
     metrics: Arc<BmcPoolMetrics>,
     // Once ipmitool confirms activation, later console output must not trigger activation recovery.
     sol_session_operational: bool,
@@ -427,6 +483,11 @@ struct IpmitoolMessageProxy {
     // Keep track of when the connection started
     connected_since: DateTime<Utc>,
     output_last_received: Option<DateTime<Utc>>,
+}
+
+enum ReadyResult {
+    Ready,
+    Cancelled,
 }
 
 enum PtyReadResult {
@@ -560,7 +621,7 @@ impl IpmitoolMessageProxy {
         // ipmitool always emits a message after either connecting or rejecting activation.
         if let Some(ready_tx) = self.ready_tx.take() {
             self.connected_since = Utc::now();
-            ready_tx.send(()).ok();
+            ready_tx.send(ReadyResult::Ready).ok();
         }
         self.output_last_received = Some(Utc::now());
         self.metrics
@@ -778,7 +839,7 @@ fn ipmitool_command(
     connection_details: &ConnectionDetails,
     config: &Config,
 ) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("ipmitool");
+    let mut command = tokio::process::Command::new(&config.ipmitool_path);
     configure_ipmitool_connection(&mut command, connection_details);
 
     if config.insecure_ipmi_ciphers {
@@ -1071,6 +1132,7 @@ mod tests {
         let connection_details = connection_details();
         let config = Config {
             insecure_ipmi_ciphers: true,
+            ipmitool_path: "/test/ipmitool".into(),
             ..Default::default()
         };
         let expected_common_args = [
@@ -1100,7 +1162,7 @@ mod tests {
                 "deactivate",
             ),
         ] {
-            assert_eq!(command.as_std().get_program(), OsStr::new("ipmitool"));
+            assert_eq!(command.as_std().get_program(), OsStr::new("/test/ipmitool"));
             let args: Vec<_> = command
                 .as_std()
                 .get_args()

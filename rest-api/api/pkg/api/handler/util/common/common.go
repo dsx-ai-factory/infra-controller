@@ -70,6 +70,8 @@ var (
 	ErrAllocationConstraintNotFound = errors.New("Allocation does not have an associated Constraint")
 	// ErrInstanceTypeMachineNotFound
 	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
+	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
+	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
 	// ErrInvalidFunctionParams
 	ErrInvalidFunctionParams = errors.New("invalid function parameters")
 
@@ -346,8 +348,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	)
 
 	var infiniBandInterfaces []cam.APIInfiniBandInterfaceCreateOrUpdateRequest
+	var spectrumXAttachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
 	if apiRequest != nil {
 		infiniBandInterfaces = apiRequest.InfiniBandInterfaces
+		spectrumXAttachments = apiRequest.SpectrumXAttachments
 	}
 	requireInfiniBandMatch := len(infiniBandInterfaces) > 0
 	var suggestedByDevice map[string][]int
@@ -372,6 +376,16 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 			machineIbCapsByMachineID[*cap.MachineID] = append(machineIbCapsByMachineID[*cap.MachineID], cap)
 		}
 	}
+
+	compatible, err := FilterMachinesBySpectrumXAttachments(ctx, tx, dbSession, machines, spectrumXAttachments)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+		return nil, err
+	}
+	if len(machines) > 0 && len(compatible) == 0 {
+		return nil, ErrSpectrumXMachineSelection
+	}
+	machines = compatible
 
 	if len(machines) > 0 {
 		for _, mc := range machines {

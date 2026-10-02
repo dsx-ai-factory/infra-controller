@@ -34,6 +34,8 @@ Important configuration fields:
   to a BMC at a time; see [`class`](#class)
 - `admission`: optional limit on the requests the proxy sends to each BMC; see
   [`admission`](#admission)
+- `redirects.mode`: redirect policy, either `follow_same_origin` (default) or
+  `return_to_client`
 
 Example shape:
 
@@ -41,6 +43,9 @@ Example shape:
 listen = "[::]:1079"
 metrics_endpoint = "[::]:1080"
 allowed_principals = ["spiffe-service-id/dpf"]
+
+[redirects]
+mode = "follow_same_origin"
 
 [tls]
 identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -63,6 +68,37 @@ additional_issuer_cns = []
 [auth.acls]
 "spiffe-service-id/dpf" = ["/redfish/v1/**"]
 ```
+
+### `redirects.mode`
+
+`follow_same_origin` follows up to five redirects within the original scheme, host, and effective
+port. Redirects are returned instead when a `307` or `308` requires replaying a streamed request
+body, or when chaining produces a redirect to the BMC's direct HTTPS address on port 443.
+
+Automatically followed redirects do not re-run ACL authorization. Same-origin checks protect
+credential scope; they do not establish that the redirected path is allowed for the principal.
+
+For safe redirects returned to the client, the proxy removes the scheme and authority from
+`Location`, preserving the path, query, and fragment. The client must send the same `Forwarded`
+target on its follow-up request.
+
+The proxy does not follow any other origin because the BMC credential includes the Redfish
+`X-Auth-Token` header, which Reqwest does not strip automatically on a cross-origin redirect. Such
+a redirect returns `502` without exposing its `Location`.
+
+This is a deliberate security change from the earlier unrestricted five-hop policy: a
+cross-origin redirect is rejected instead of being followed.
+
+`return_to_client` disables automatic following and returns safe redirects using the same rewrite
+so the caller can make a separately authorized request. This mode is experimental.
+
+Both modes reject non-HTTP(S), malformed, ambiguous, credential-bearing, and other cross-origin
+redirect targets. On a non-redirect response such as a Redfish session creation `201`, the proxy
+rewrites a safe same-BMC `Location` and omits an unsafe one without changing the response status.
+
+`NICO_BMC_PROXY__REDIRECTS__MODE` overrides the TOML value because environment providers are merged
+after the configuration file. The Helm chart always sets that variable from
+`bmcProxy.redirectMode`.
 
 ### `auth.acls`
 

@@ -8988,6 +8988,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -9393,6 +9396,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -21285,7 +21291,7 @@ components:
         slaacEnabled:
           type: boolean
           readOnly: true
-          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -21543,7 +21549,7 @@ components:
         slaacEnabled:
           type: boolean
           default: false
-          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -24766,7 +24772,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. A nonempty list is validated against the individual Machine capabilities persisted by inventory reconciliation, not Instance Type capability summaries. The selected Machine must satisfy every attachment; Instance Type placement considers only compatible Machines. Invalid explicit-machine selectors return 400. If available Instance Type candidates are all incompatible, the 400 response identifies SpectrumX capabilities as the reason. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24942,7 +24948,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its individual persisted capabilities, not Instance Type capability summaries. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. The response identifies SpectrumX when filtering reduces otherwise sufficient capacity below the requested count, and identifies both SpectrumX and topology constraints when filtering removes candidates and no single NVLink domain has enough compatible Machines. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -25141,9 +25147,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance''s SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -25607,11 +25615,12 @@ components:
           description: ID of the SpectrumX Partition the attachment should associate with
         device:
           type: string
-          description: 'SpectrumX device to attach over, matching the device description reported for the Machine''s SpectrumX interfaces'
+          description: 'Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.'
         deviceInstance:
           type: integer
           minimum: 0
-          description: 'Index of the device, used to identify which interface card to attach the Partition to'
+          maximum: 4294967295
+          description: 'Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.'
         attachmentType:
           type: string
           enum:
@@ -29489,7 +29498,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -29660,7 +29669,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
           type:
             - string
@@ -29861,7 +29870,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30004,7 +30013,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30807,7 +30816,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30976,7 +30985,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string

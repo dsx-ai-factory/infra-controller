@@ -640,6 +640,12 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	bmcIPAddress := apiRequest.BmcIpAddress
+	clearBmcIPAddress := bmcIPAddress != nil && *bmcIPAddress == ""
+	if clearBmcIPAddress {
+		bmcIPAddress = nil
+	}
+
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Update(
@@ -647,7 +653,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			tx,
 			cdbm.ExpectedSwitchUpdateInput{
 				ExpectedSwitchID:   expectedSwitch.ID,
-				BmcIpAddress:       apiRequest.BmcIpAddress,
+				BmcIpAddress:       bmcIPAddress,
 				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
 				NvosMacAddresses:   apiRequest.NvosMacAddresses,
 				RackID:             apiRequest.RackID,
@@ -664,6 +670,17 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to update ExpectedSwitch record in DB")
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
+		}
+
+		if clearBmcIPAddress {
+			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+				ExpectedSwitchID: expectedSwitch.ID,
+				BmcIpAddress:     true,
+			})
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch BMC IP address in DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
+			}
 		}
 
 		patchExpectedSwitchRequest := apiRequest.ToProto(es)

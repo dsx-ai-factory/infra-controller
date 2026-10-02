@@ -31,13 +31,21 @@ use uuid::Uuid;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod tests;
+
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key";
 
 pub async fn find_by_bmc_mac_address(
     txn: impl DbReader<'_>,
     bmc_mac_address: MacAddress,
 ) -> Result<Option<ExpectedMachine>, DatabaseError> {
-    let sql = "SELECT * FROM expected_machines WHERE bmc_mac_address=$1";
+    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -49,7 +57,12 @@ pub async fn find_by_id(
     txn: impl DbReader<'_>,
     id: Uuid,
 ) -> Result<Option<ExpectedMachine>, DatabaseError> {
-    let sql = "SELECT * FROM expected_machines WHERE id=$1";
+    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines WHERE id=$1";
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -61,7 +74,12 @@ pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedMachine>> {
-    let sql = "SELECT * FROM expected_machines WHERE bmc_mac_address=ANY($1)";
+    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedMachine> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -138,7 +156,12 @@ pub async fn find_by_interface_mac_address(
     txn: &mut PgConnection,
     interface_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedMachine>> {
-    let query = "SELECT * FROM expected_machines WHERE host_nics @> $1::jsonb";
+    let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines WHERE host_nics @> $1::jsonb";
     let mac_address = serde_json::json!([{ "mac_address": interface_mac_address.to_string() }]);
     sqlx::query_as(query)
         .bind(sqlx::types::Json(mac_address))
@@ -174,7 +197,12 @@ FROM expected_machines em
 }
 
 pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedMachine>> {
-    let sql = "SELECT * FROM expected_machines";
+    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -195,7 +223,12 @@ pub async fn find_all_for_replace(txn: &mut PgConnection) -> DatabaseResult<Vec<
         .await
         .map_err(|error| DatabaseError::query(lock, error))?;
 
-    let query = "SELECT * FROM expected_machines ORDER BY id";
+    let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines ORDER BY id";
     sqlx::query_as(query)
         .fetch_all(txn)
         .await
@@ -207,7 +240,12 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedMachine>> {
-    let sql = "SELECT * FROM expected_machines WHERE rack_id=$1";
+    let sql = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+        sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+        bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+        host_lifecycle_profile
+        FROM expected_machines WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -329,7 +367,12 @@ pub async fn create(
     let query = "INSERT INTO expected_machines
             (id, bmc_mac_address, bmc_username, bmc_password, serial_number, fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels, sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled, bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation, host_lifecycle_profile)
             VALUES
-            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::text[], $7, $8, $9::jsonb, $10::varchar, $11::jsonb, $12, $13, $14, $15::inet, $16, $17, $18, $19::jsonb) RETURNING *";
+            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::text[], $7, $8, $9::jsonb, $10::varchar, $11::jsonb, $12, $13, $14, $15::inet, $16, $17, $18, $19::jsonb)
+            RETURNING id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+                sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+                bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+                host_lifecycle_profile";
 
     sqlx::query_as(query)
         .bind(id)
@@ -416,7 +459,12 @@ pub async fn find_for_update(
 
     match selector {
         Selector::Id(id) => {
-            let query = "SELECT * FROM expected_machines WHERE id=$1 FOR UPDATE";
+            let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+                sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+                bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+                host_lifecycle_profile
+                FROM expected_machines WHERE id=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(id)
                 .fetch_optional(txn)
@@ -424,7 +472,12 @@ pub async fn find_for_update(
                 .map_err(|err| DatabaseError::query(query, err))
         }
         Selector::BmcMacAddress(mac_address) => {
-            let query = "SELECT * FROM expected_machines WHERE bmc_mac_address=$1 FOR UPDATE";
+            let query = "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
+                sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
+                bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
+                host_lifecycle_profile
+                FROM expected_machines WHERE bmc_mac_address=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(mac_address)
                 .fetch_optional(txn)

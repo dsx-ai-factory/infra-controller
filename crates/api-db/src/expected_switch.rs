@@ -31,7 +31,12 @@ pub async fn find_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE bmc_mac_address=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -46,7 +51,12 @@ pub async fn find_by_nvos_mac_address(
     txn: &mut PgConnection,
     nvos_mac_address: MacAddress,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE $1::macaddr = ANY(nvos_mac_addresses)";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE $1::macaddr = ANY(nvos_mac_addresses)";
     sqlx::query_as(sql)
         .bind(nvos_mac_address)
         .fetch_optional(txn)
@@ -85,11 +95,19 @@ async fn find_nvos_mac_claimed_elsewhere(
 
     let (sql, exclude_key) = match switch.expected_switch_id {
         Some(id) => (
-            "SELECT * FROM expected_switches WHERE expected_switch_id != $1::uuid AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE expected_switch_id != $1::uuid AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
             id.to_string(),
         ),
         None => (
-            "SELECT * FROM expected_switches WHERE bmc_mac_address != $1::macaddr AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE bmc_mac_address != $1::macaddr AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
             switch.bmc_mac_address.to_string(),
         ),
     };
@@ -116,7 +134,12 @@ pub async fn find_by_serial_number(
     txn: &mut PgConnection,
     serial_number: &str,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE serial_number=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE serial_number=$1";
     sqlx::query_as(sql)
         .bind(serial_number)
         .fetch_optional(txn)
@@ -128,7 +151,12 @@ pub async fn find_by_id(
     txn: &mut PgConnection,
     id: Uuid,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE expected_switch_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE expected_switch_id=$1";
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -140,7 +168,12 @@ pub async fn find_by_rack_id(
     txn: &mut PgConnection,
     rack_id: String,
 ) -> Result<Option<ExpectedSwitch>, DatabaseError> {
-    let sql = "SELECT * FROM expected_switches WHERE rack_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_optional(txn)
@@ -152,7 +185,12 @@ pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches WHERE bmc_mac_address=ANY($1)";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedSwitch> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -180,7 +218,12 @@ pub async fn find_many_by_bmc_mac_address(
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -192,7 +235,12 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedSwitch>> {
-    let sql = "SELECT * FROM expected_switches WHERE rack_id=$1";
+    let sql =
+        "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+        bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+        nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+        nvos_ip_address
+        FROM expected_switches WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -275,7 +323,11 @@ pub async fn create(
     let query = "INSERT INTO expected_switches
              (expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number, bmc_ip_address, metadata_name, metadata_description, rack_id, metadata_labels, nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials, nvos_ip_address)
              VALUES
-             ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7::varchar, $8::varchar, $9::varchar, $10::jsonb, $11::varchar, $12::varchar, $13::macaddr[], $14, $15::inet) RETURNING *";
+             ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7::varchar, $8::varchar, $9::varchar, $10::jsonb, $11::varchar, $12::varchar, $13::macaddr[], $14, $15::inet)
+             RETURNING expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                 bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                 nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                 nvos_ip_address";
 
     sqlx::query_as(query)
         .bind(id)
@@ -329,12 +381,20 @@ pub async fn find_for_update(
 
     let (query, key) = if let Some(id) = req.expected_switch_id {
         (
-            "SELECT * FROM expected_switches WHERE expected_switch_id=$1::uuid FOR UPDATE",
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE expected_switch_id=$1::uuid FOR UPDATE",
             id.to_string(),
         )
     } else if let Some(mac) = req.bmc_mac_address {
         (
-            "SELECT * FROM expected_switches WHERE bmc_mac_address=$1::macaddr FOR UPDATE",
+            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
+                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
+                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
+                nvos_ip_address
+                FROM expected_switches WHERE bmc_mac_address=$1::macaddr FOR UPDATE",
             mac.to_string(),
         )
     } else {
