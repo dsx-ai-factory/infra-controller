@@ -99,7 +99,7 @@ pub(super) async fn handle_show_version(
         let describe_duration_ms = |ms| match ms {
             0 => "<unknown>".to_string(),
             // this is probably always going to be configured in seconds, but just in case...
-            ms if ms % 1000 != 0 => format!("{}ms", ms / 1000),
+            ms if ms % 1000 != 0 => format!("{}ms", ms),
             _ => format!("{}s", ms / 1000),
         };
 
