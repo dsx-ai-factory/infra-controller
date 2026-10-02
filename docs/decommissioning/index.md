@@ -17,7 +17,7 @@ Endpoints can remain reachable if they use static IP addresses or receive an
 address from an external DHCP server. Complete any required network changes or
 physical hardware removal before force-deleting the device records.
 
-After cleaning up, use [force-delete](#force-delete-after-decommissioning) to remove a decommissioned machine and its records from NICo.
+After cleaning up, use [force-delete](#force-delete-after-decommissioning) to remove a decommissioned device and its records from NICo.
 
 ## Choose a procedure
 
