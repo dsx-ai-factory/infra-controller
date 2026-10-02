@@ -7,12 +7,12 @@ This page covers the `[secrets]` section of the `nico-api` config, how to supply
 Vault/OpenBao Transit is the available server-side KMS backend. The Integrated
 backend loads KEK material into the NICo process from an environment variable,
 file, or inline value. [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253)
-tracks qualification of a production non-Vault replacement and explicitly
-includes a hardened Integrated deployment backed by a CSI secrets-store or
-External-Secrets mount as a possible interim, alongside managed KMS, HSM, and
-KMIP providers. Inline Integrated keys remain for development and test; a
-mounted-key deployment is production-supported only if #3253 selects and
-qualifies that custody, availability, rotation, and recovery model.
+tracks a scoped KMIP client as an additional configurable production provider;
+Vault/OpenBao Transit remains supported. A hardened Integrated deployment backed
+by a CSI secrets-store or External-Secrets mount remains a possible separately
+qualified option. Inline Integrated keys remain for development and test; a
+mounted-key deployment is production-supported only after its custody,
+availability, rotation, and recovery model is separately qualified.
 
 ## How It Works
 
