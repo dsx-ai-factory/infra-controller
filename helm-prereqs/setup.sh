@@ -2644,8 +2644,12 @@ fi
 # before the pod schedules. Certificate names come from the rendered chart so a
 # values file that renames them is followed. The namespace cannot move: setup.sh
 # and the NICo REST site-agent address flow.flow.svc.cluster.local directly.
+# The chart defaults createNamespace=false (helm --create-namespace owns the
+# Namespace), but this pre-apply needs the template to render it, so force the
+# flag on for the render only.
 _flow_render() {
-    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" --show-only "templates/$1"
+    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" \
+        --set createNamespace=true --show-only "templates/$1"
 }
 _flow_namespace_yaml="$(_flow_render namespace.yaml)"
 _flow_certificates_yaml="$(_flow_render certificate.yaml)"
