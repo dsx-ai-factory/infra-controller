@@ -543,6 +543,9 @@ platform_general_enabled = true
 # stream retries independently. Default: false.
 leak_sensors_enabled = false
 
+# Malformed values in enabled configuration sections fail startup; they do not
+# reset the section to defaults. `enabled = false` disables a section without
+# parsing its payload, including nested sections.
 # Additional subscriptions are optional and default to an empty list. Each
 # entry opens an independent gNMI STREAM RPC for every switch host eligible for
 # NVUE gNMI and can bundle multiple paths. A rejected path affects its bundled
