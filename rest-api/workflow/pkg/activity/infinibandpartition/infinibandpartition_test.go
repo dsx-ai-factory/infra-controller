@@ -455,6 +455,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 				if assert.Len(t, statusDetails, 1) {
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, Ready for use"), statusDetails[0].Message)
 				}
 			},
 		},
@@ -476,7 +477,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 								Name:                 softDeletedIbp.ID.String(),
 								TenantOrganizationId: tn.Org,
 							},
-							Metadata: &corev1.Metadata{Name: "restored-site-ibp"},
+							Metadata: &corev1.Metadata{Name: softDeletedIbp.ID.String()},
 							Status: &corev1.IBPartitionStatus{
 								State:       corev1.TenantState_READY,
 								Pkey:        cutil.GetPtr("0x333"),
@@ -498,7 +499,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 				}
 
 				assert.Nil(t, restored.Deleted)
-				assert.Equal(t, "restored-site-ibp", restored.Name)
+				assert.Equal(t, softDeletedIbp.Name, restored.Name)
 				assert.Nil(t, restored.Description)
 				assert.Nil(t, restored.Labels)
 				assert.Equal(t, restoredControllerID, *restored.ControllerIBPartitionID)
@@ -523,6 +524,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 				if assert.Len(t, statusDetails, 1) {
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, Ready for use"), statusDetails[0].Message)
 				}
 			},
 		},

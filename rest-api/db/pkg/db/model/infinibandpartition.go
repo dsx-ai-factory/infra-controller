@@ -55,6 +55,11 @@ const (
 
 	// InfiniBandPartitionOrderByDefault default field to be used for ordering when none specified
 	InfiniBandPartitionOrderByDefault = "created"
+
+	// InfiniBandPartitionNameMinLength is the minimum supported InfiniBand Partition name length.
+	InfiniBandPartitionNameMinLength = 2
+	// InfiniBandPartitionNameMaxLength is the maximum supported InfiniBand Partition name length.
+	InfiniBandPartitionNameMaxLength = 256
 )
 
 var (
@@ -155,7 +160,7 @@ func (ibp *InfiniBandPartition) Validate() error {
 	return validation.ValidateStruct(ibp,
 		validation.Field(&ibp.Name,
 			validation.Required.Error("InfiniBandPartition Name must be specified"),
-			validation.Length(2, 256).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(InfiniBandPartitionNameMinLength, InfiniBandPartitionNameMaxLength).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateInfiniBandPartitionNameWhitespace)),
 		validation.Field(&ibp.Status,
 			validation.Required.Error("InfiniBandPartition Status must be specified"),
@@ -564,7 +569,7 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Name != nil {
 		if err := validation.Validate(*input.Name,
 			validation.Required.Error("InfiniBandPartition Name must be specified"),
-			validation.Length(2, 256).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(InfiniBandPartitionNameMinLength, InfiniBandPartitionNameMaxLength).Error("InfiniBandPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateInfiniBandPartitionNameWhitespace)); err != nil {
 			return nil, err
 		}
