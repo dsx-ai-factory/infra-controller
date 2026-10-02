@@ -563,8 +563,18 @@ helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
 ```
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service, as
-described under [Deploying a 250-Rack Site](#deploying-a-250-rack-site). The
-shipped `[rack_profiles.NVL72]` profile covers these racks.
+described under [Deploying a 250-Rack Site](#deploying-a-250-rack-site).
+
+machine-a-tron declares each rack's expected rack group before it registers
+the rack, since nico-api accepts an expected rack only once a group declares
+it and derives the rack profile from that group. A `wiwynn_gb200_nvl72` rack
+gets the group `group-<rack id>` with topology `gb200_nvl72r1_c2g4` and one
+member per tray, switch, and power shelf, which nico-api resolves to the
+shipped `GB200_NVL72R1_C2G4_WIWYNN` profile; a `lenovo_gb300_nvl72` rack
+resolves to `GB300_NVL72R1_C2G4_LENOVO`. No `rack_profile_id` is configured.
+A group that already exists with a different topology or member list fails
+startup; remove it with `nico-admin-cli expected-rack-group delete` and the
+stale expected rack with `nico-admin-cli expected-rack delete`.
 
 ### Deploying a 250-Rack Site
 
@@ -597,7 +607,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids: [rack-001, rack-002, rack-003]  # 25 ids per pod
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
@@ -607,7 +616,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids: [rack-026, rack-027, rack-028]
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"

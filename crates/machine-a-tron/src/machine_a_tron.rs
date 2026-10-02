@@ -259,6 +259,16 @@ impl MachineATron {
         };
 
         if self.app_context.app_config.register_expected_machines {
+            // nico-api accepts an expected rack only once the group declaring
+            // it exists, and derives the rack's profile from that group, so
+            // the groups are registered as a pass of their own before racks.
+            let groups = resolved_configs
+                .racks
+                .iter()
+                .map(|rack| ExpectedRecord::RackGroup {
+                    group: rack.rack_group.clone(),
+                })
+                .collect();
             let racks = resolved_configs
                 .racks
                 .iter()
@@ -268,14 +278,16 @@ impl MachineATron {
                 })
                 .collect();
             let api_client = self.app_context.api_client();
-            let failed = register_all(racks, CONCURRENCY, |record| {
-                let api_client = api_client.clone();
-                async move { api_client.add_expected_record(record).await }
-            })
-            .await
-            .failed_identifiers;
-            if !failed.is_empty() {
-                eyre::bail!("failed to register expected {}", failed.join(", "));
+            for records in [groups, racks] {
+                let failed = register_all(records, CONCURRENCY, |record| {
+                    let api_client = api_client.clone();
+                    async move { api_client.add_expected_record(record).await }
+                })
+                .await
+                .failed_identifiers;
+                if !failed.is_empty() {
+                    eyre::bail!("failed to register expected {}", failed.join(", "));
+                }
             }
         }
 

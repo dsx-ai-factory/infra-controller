@@ -122,7 +122,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-001
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -132,7 +131,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-002
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -142,7 +140,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-003
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -152,7 +149,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-004
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -162,7 +158,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-005
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -172,7 +167,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-006
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -182,7 +176,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-007
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -192,7 +185,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-008
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -202,7 +194,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-009
         bmc_dhcp_relay_address: "10.200.0.1"
@@ -212,7 +203,6 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-010
         bmc_dhcp_relay_address: "10.200.0.1"

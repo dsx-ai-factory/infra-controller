@@ -649,7 +649,7 @@ mod tests {
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
     use crate::expected_inventory::ExpectedInventorySummary;
-    use crate::rack::{RackMemberRegistration, RackRegistration};
+    use crate::rack::{RackMemberRegistration, RackRegistration, expected_rack_group};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
     use crate::{DeviceHandle, discovery_info};
@@ -686,12 +686,9 @@ mod tests {
         tray_section: &str,
         switch_section: &str,
     ) -> RackRegistration {
-        RackRegistration {
-            rack_id: RackId::new(rack_id),
-            rack_profile_id: RackProfileId::new("test-profile"),
-            rack_type: RackType::WiwynnGb200Nvl72,
-            version: 1,
-            members: vec![
+        partial_rack_registration(
+            rack_id,
+            vec![
                 RackMemberRegistration {
                     placement: GB200_RACK.placement(11),
                     hardware_type: HardwareType::WiwynnGB200Nvl,
@@ -703,6 +700,24 @@ mod tests {
                     machine_config_section: switch_section.to_string(),
                 },
             ],
+        )
+    }
+
+    /// A GB200 rack registration holding only the listed members. Real racks
+    /// are complete, so the profile is fixed rather than derived.
+    fn partial_rack_registration(
+        rack_id: &str,
+        members: Vec<RackMemberRegistration>,
+    ) -> RackRegistration {
+        let rack_id = RackId::new(rack_id);
+        let rack_type = RackType::WiwynnGb200Nvl72;
+        RackRegistration {
+            rack_group: expected_rack_group(&rack_id, rack_type, &members).unwrap(),
+            rack_id,
+            rack_profile_id: RackProfileId::new("test-profile"),
+            rack_type,
+            version: 1,
+            members,
         }
     }
 
@@ -719,12 +734,9 @@ mod tests {
     }
 
     fn rack_registration(rack_id: &str, machine_config_section: &str) -> RackRegistration {
-        RackRegistration {
-            rack_id: RackId::new(rack_id),
-            rack_profile_id: RackProfileId::new("test-profile"),
-            rack_type: RackType::WiwynnGb200Nvl72,
-            version: 1,
-            members: vec![RackMemberRegistration {
+        partial_rack_registration(
+            rack_id,
+            vec![RackMemberRegistration {
                 placement: RackInfo {
                     rack_type: RackType::WiwynnGb200Nvl72,
                 }
@@ -732,7 +744,7 @@ mod tests {
                 hardware_type: HardwareType::WiwynnGB200Nvl,
                 machine_config_section: machine_config_section.to_string(),
             }],
-        }
+        )
     }
 
     fn rack_control_state_for(

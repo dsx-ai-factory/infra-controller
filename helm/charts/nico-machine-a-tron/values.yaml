@@ -329,7 +329,6 @@ pods:
     # racks:
     #   gb200:
     #     type: wiwynn_gb200_nvl72
-    #     rack_profile_id: NVL72
     #     ids:
     #       - rack-001
     #     dpu_reboot_delay: 20

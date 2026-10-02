@@ -71,13 +71,15 @@ enable_ipmi_simulation = false
 # host_bmc_password = "vault-password"
 # dpu_bmc_password = "vault-password"
 
-# A rack type creates all of its devices automatically:
+# A rack type creates all of its devices automatically and declares the
+# rack's expected rack group in nico-api, which derives the rack profile:
 # - wiwynn_gb200_nvl72: 18 compute trays, 9 ND5200 switches, 8 power shelves
+#   (profile GB200_NVL72R1_C2G4_WIWYNN)
 # - lenovo_gb300_nvl72: 18 compute trays, 9 N5700 switches, 6 power shelves
+#   (profile GB300_NVL72R1_C2G4_LENOVO)
 #
 # [racks.default]
 # type = "lenovo_gb300_nvl72"
-# rack_profile_id = "NVL72_GB300"
 # ids = ["rack-001", "rack-002"]
 # dpu_reboot_delay = 20
 # host_reboot_delay = 10
