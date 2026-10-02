@@ -91,7 +91,7 @@ vary:
   imagePullSecrets: []
   resources: {}                # CPU/memory limits & requests
   podSecurityContext: {}
-  securityContext: {}
+  containerSecurityContext: {}  # rendered after the always-applied allowPrivilegeEscalation: false baseline
   nodeSelector: {}
   tolerations: []
   affinity: {}

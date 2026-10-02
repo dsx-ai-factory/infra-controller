@@ -185,3 +185,10 @@ extraEnv:
 imagePullSecret:
   create: true
   dockerconfigjson: "eyJhdXRocyI6e319"
+
+## Extra container security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). Empty by default; no
+## override is needed on OpenShift restricted Security Context Constraints
+## (SCC). Null drops all overrides; the hardcoded baseline survives.
+containerSecurityContext: {}
