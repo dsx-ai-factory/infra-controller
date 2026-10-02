@@ -219,9 +219,12 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         request
             .extensions_mut()
             .insert(carbide_api_core::AuthContext {
-                principals: vec![Principal::SpiffeServiceIdentifier(
-                    "elektra-site-agent".to_string(),
-                )],
+                // Real mTLS authentication records both the identity minted
+                // from the SPIFFE URI and the trusted-certificate marker.
+                principals: vec![
+                    Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                    Principal::TrustedCertificate,
+                ],
                 authorization: None,
             });
         request
@@ -253,6 +256,39 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         .expect_err("direct caller without SiteAgent identity cannot reserve an ID");
     assert_eq!(unauthorized.code(), tonic::Code::PermissionDenied);
 
+    let mut mixed_identity_request = site_request(payload());
+    mixed_identity_request
+        .extensions_mut()
+        .get_mut::<carbide_api_core::AuthContext>()
+        .unwrap()
+        .principals
+        .push(Principal::SpiffeServiceIdentifier("nico-dns".to_string()));
+    let mixed_identity = api
+        .create_domain(mixed_identity_request)
+        .await
+        .expect_err("an additional service identity must not inherit SiteAgent authority");
+    assert_eq!(mixed_identity.code(), tonic::Code::PermissionDenied);
+
+    let mut reserved_operator_request = Request::new(payload());
+    reserved_operator_request
+        .extensions_mut()
+        .insert(carbide_api_core::AuthContext {
+            principals: vec![
+                Principal::ExternalUser(carbide_authn::middleware::ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                )),
+                Principal::TrustedCertificate,
+            ],
+            authorization: None,
+        });
+    let reserved_operator = api
+        .create_domain(reserved_operator_request)
+        .await
+        .expect_err("an operator must not claim a reserved SiteAgent domain ID");
+    assert_eq!(reserved_operator.code(), tonic::Code::PermissionDenied);
+
     let mut operator_request = Request::new(CreateDomainRequest {
         name: "operator-owned.example".into(),
         default_ttl: None,
@@ -261,13 +297,14 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
     operator_request
         .extensions_mut()
         .insert(carbide_api_core::AuthContext {
-            principals: vec![Principal::ExternalUser(
-                carbide_authn::middleware::ExternalUserInfo::new(
+            principals: vec![
+                Principal::ExternalUser(carbide_authn::middleware::ExternalUserInfo::new(
                     None,
                     "nico-cli-client".into(),
                     None,
-                ),
-            )],
+                )),
+                Principal::TrustedCertificate,
+            ],
             authorization: None,
         });
     let operator_zone = api

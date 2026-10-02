@@ -2457,6 +2457,44 @@ async fn attach_to_different_vpc_requires_force(
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn attach_rejects_site_agent_with_an_additional_identity(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    for (name, additional_identity) in [
+        (
+            "service",
+            Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+        ),
+        (
+            "machine",
+            Principal::SpiffeMachineIdentifier("machine-1".to_string()),
+        ),
+    ] {
+        let mut request = authenticated_attach_request(
+            NetworkSegmentId::new(),
+            VpcId::new(),
+            true,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            None,
+            Some("not-read-before-authorization".to_string()),
+        );
+        request
+            .extensions_mut()
+            .get_mut::<AuthContext>()
+            .unwrap()
+            .principals
+            .push(additional_identity);
+
+        let error = env
+            .api
+            .attach_network_segment_to_vpc(request)
+            .await
+            .expect_err("an additional identity must not inherit SiteAgent attach authority");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied, "{name}");
+    }
+}
+
 /// An A -> B -> A move must invalidate a timed-out A -> B request,
 /// even though its source VPC ID becomes the same again.
 #[crate::sqlx_test]
@@ -3012,7 +3050,8 @@ fn authenticated_attach_request(
         expected_segment_version,
     });
     request.extensions_mut().insert(AuthContext {
-        principals: vec![principal],
+        // Real mTLS authentication records the identity plus this marker.
+        principals: vec![principal, Principal::TrustedCertificate],
         authorization: None,
     });
     request
