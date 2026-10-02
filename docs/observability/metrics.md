@@ -376,9 +376,12 @@ for identifying individual stuck objects.
 | `carbide_machine_dpu_info` | gauge | Host-to-DPU associations (one series per DPU). |
 | `carbide_machine_instance_info` | gauge | Machine-to-instance and tenant associations. |
 
-All metrics use labels `object_type` and `object_id`. State metrics add `state` and
-`substate` labels. These series exist only while true: transitions replace entries,
-deletions clear them immediately.
+The state metrics and `carbide_object_info` use labels `object_type` and `object_id`.
+State metrics add `state` and `substate` labels. The association metrics use their own
+labels instead: `carbide_machine_dpu_info` has `machine_id` and `dpu_id`, and
+`carbide_machine_instance_info` has `machine_id`, `instance_id`, and `tenant_org`.
+These series exist only while true: transitions replace entries, deletions clear them
+immediately.
 
 ### Configuration
 
