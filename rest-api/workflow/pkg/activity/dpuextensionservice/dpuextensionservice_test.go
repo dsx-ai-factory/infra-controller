@@ -119,9 +119,11 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	st8 := util.TestBuildSite(t, dbSession, ip, "test-site-8", cdbm.SiteStatusRegistered, nil, user)
 	st9 := util.TestBuildSite(t, dbSession, ip, "test-site-9", cdbm.SiteStatusRegistered, nil, user)
 	st10 := util.TestBuildSite(t, dbSession, ip, "test-site-10", cdbm.SiteStatusRegistered, nil, user)
+	st11 := util.TestBuildSite(t, dbSession, ip, "test-site-11", cdbm.SiteStatusRegistered, nil, user)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st8.ID, user.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st9.ID, user.ID)
 	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st10.ID, user.ID)
+	util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, st11.ID, user.ID)
 
 	// Create DPU Extension Services with different statuses
 	version1 := fmt.Sprintf("V1-T%d", time.Now().Unix()*1000000)
@@ -180,6 +182,8 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 
 	recoveredServiceID := uuid.New()
 	recoveredDpfServiceID := uuid.New()
+	terminatingDpfServiceID := uuid.New()
+	terminatedDpfServiceID := uuid.New()
 	recoveredVersion := "V1-T1761856992377000"
 	recoveredDescription := "recovered from Site inventory"
 	staleDescription := "stale pre-deletion description"
@@ -644,6 +648,47 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 				assert.Equal(t, st10.ID, recovered.SiteID)
 				assert.Equal(t, tenant.ID, recovered.TenantID)
 				assert.Equal(t, recoveredVersion, *recovered.Version)
+			},
+		},
+		{
+			name: "test DPF Helm chart inventory skips terminal Site-only services",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st11.ID,
+				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+					DpuExtensionServices: []*corev1.DpuExtensionService{
+						{
+							ServiceId:            terminatingDpfServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+							ServiceName:          "terminating-site-only-dpf-service",
+							TenantOrganizationId: tenant.Org,
+							DpuTarget:            cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
+							LifecycleStatus:      &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+						},
+						{
+							ServiceId:            terminatedDpfServiceID.String(),
+							ServiceType:          corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+							ServiceName:          "terminated-site-only-dpf-service",
+							TenantOrganizationId: tenant.Org,
+							DpuTarget:            cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
+							LifecycleStatus:      &corev1.LifecycleStatus{State: `{"state":"deleted"}`},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				for _, serviceID := range []uuid.UUID{terminatingDpfServiceID, terminatedDpfServiceID} {
+					_, rerr := dpuExtensionServiceDAO.GetByID(ctx, nil, serviceID, nil)
+					assert.Equal(t, cdb.ErrDoesNotExist, rerr)
+				}
 			},
 		},
 		{
