@@ -1,4 +1,4 @@
-# Flow Operations
+# Flow Operations <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Flow orchestrates rack operations through tasks. Use these guides to choose the execution rule, automate dispatch, or manage a phased firmware rollout.
 

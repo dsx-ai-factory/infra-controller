@@ -1,4 +1,4 @@
-# Managed Host Stuck in UEFI Setup
+# Managed Host Stuck in UEFI Setup <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a managed host remains at
 `HostInitializing/UefiSetup/SetUefiPassword` and the controller reports a

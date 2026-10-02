@@ -1,4 +1,4 @@
-# Task Schedule Implementation
+# Task Schedule Implementation <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Operator guide: [Task Schedules](../../operations/flow/task-schedules.md).
 
