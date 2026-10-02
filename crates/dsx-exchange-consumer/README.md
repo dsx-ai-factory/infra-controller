@@ -62,8 +62,11 @@ Exposed on the configured metrics endpoint (default `:9009`):
 | `carbide_dsx_exchange_consumer_messages_dropped_total` | Counter | Number of messages dropped due to queue overflow |
 | `carbide_dsx_exchange_consumer_alerts_detected_total` | Counter | Number of leak alerts detected |
 | `carbide_dsx_exchange_consumer_dedup_skipped_total` | Counter | Number of messages skipped due to deduplication |
+| `carbide_dsx_exchange_consumer_health_report_persist_failures_total` | Counter | Number of rack health report persist failures against the Carbide API |
+| `carbide_dsx_exchange_consumer_message_age_seconds` | Histogram | Age of consumed BMS value messages at processing time (consumer lag), in seconds |
 | `carbide_dsx_exchange_consumer_metadata_cache_size` | Gauge | Number of entries in the metadata cache |
 | `carbide_dsx_exchange_consumer_value_state_cache_size` | Gauge | Number of entries in the value state cache |
+| `carbide_dsx_exchange_consumer_queue_pending_messages` | Gauge | Number of messages queued in the DSX exchange consumer's processing channel |
 
 ## Running
 
