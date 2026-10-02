@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -539,21 +540,44 @@ func TestWithTxResult_ReturnsZeroValueOnError(t *testing.T) {
 	assert.Equal(t, uuid.Nil, id)
 }
 
+// testTxFailReleaseHook cancels RELEASE SAVEPOINT statements while armed, so a
+// rollback to the savepoint can succeed and its release fail.
+type testTxFailReleaseHook struct {
+	armed bool
+}
+
+func (h *testTxFailReleaseHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.armed || !strings.HasPrefix(event.Query, "RELEASE SAVEPOINT") {
+		return ctx
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	return canceled
+}
+
+func (h *testTxFailReleaseHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 func TestTx_WithSavepoint(t *testing.T) {
 	dbSession := testTxGetTestSession(t)
 	defer dbSession.Close()
 	testTxSetupSchema(t, dbSession)
 	ctx := context.Background()
 	errRejected := errors.New("candidate rejected")
+	releaseHook := &testTxFailReleaseHook{}
+	dbSession.DB.AddQueryHook(releaseHook)
 
 	tests := []struct {
 		name string
+		// calls is how many times WithSavepoint runs in the same transaction, each fn taking the same write and lock
+		calls int
 		// endTx rolls back the outer transaction first, so the SAVEPOINT statement fails
 		endTx bool
 		// failStatement runs a failing statement in fn, which aborts the outer transaction unless it rolls back to the savepoint
 		failStatement bool
 		// cancelCtx cancels the context passed to WithSavepoint inside fn, so ROLLBACK TO SAVEPOINT fails
-		cancelCtx        bool
+		cancelCtx bool
+		// failRelease makes RELEASE SAVEPOINT fail after ROLLBACK TO SAVEPOINT succeeds
+		failRelease      bool
 		fnErr            error
 		wantFnCalled     bool
 		wantSavepointErr bool
@@ -561,7 +585,8 @@ func TestTx_WithSavepoint(t *testing.T) {
 		wantKept bool
 	}{
 		{
-			name:          "fn error rolls back its write and lock, transaction stays usable",
+			name:          "repeated fn errors roll back their writes and locks, leave no savepoint open",
+			calls:         3,
 			failStatement: true,
 			fnErr:         errRejected,
 			wantFnCalled:  true,
@@ -583,6 +608,13 @@ func TestTx_WithSavepoint(t *testing.T) {
 			wantFnCalled:     true,
 			wantSavepointErr: true,
 		},
+		{
+			name:             "release failure after rollback is tagged alongside fn error",
+			failRelease:      true,
+			fnErr:            errRejected,
+			wantFnCalled:     true,
+			wantSavepointErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -593,30 +625,34 @@ func TestTx_WithSavepoint(t *testing.T) {
 			if tc.endTx {
 				require.NoError(t, tx.Rollback())
 			}
+			releaseHook.armed = tc.failRelease
+			defer func() { releaseHook.armed = false }()
 
 			spCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			fnCalled := false
-			err = tx.WithSavepoint(spCtx, func(sp *Tx) error {
-				fnCalled = true
-				_, ierr := GetIDB(sp, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name}).Exec(ctx)
-				require.NoError(t, ierr)
-				require.NoError(t, sp.AcquireAdvisoryLock(ctx, lockID, false))
-				if tc.failStatement {
-					_, serr := GetIDB(sp, dbSession).ExecContext(ctx, "SELECT 1/0")
-					require.Error(t, serr)
-				}
-				if tc.cancelCtx {
-					cancel()
-				}
-				return tc.fnErr
-			})
+			for range max(tc.calls, 1) {
+				err = tx.WithSavepoint(spCtx, func(sp *Tx) error {
+					fnCalled = true
+					_, ierr := GetIDB(sp, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name}).Exec(ctx)
+					require.NoError(t, ierr)
+					require.NoError(t, sp.AcquireAdvisoryLock(ctx, lockID, false))
+					if tc.failStatement {
+						_, serr := GetIDB(sp, dbSession).ExecContext(ctx, "SELECT 1/0")
+						require.Error(t, serr)
+					}
+					if tc.cancelCtx {
+						cancel()
+					}
+					return tc.fnErr
+				})
 
-			assert.Equal(t, tc.wantFnCalled, fnCalled)
-			assert.Equal(t, tc.wantSavepointErr, errors.Is(err, ErrTransactionSavepoint))
-			if tc.fnErr != nil {
-				assert.ErrorIs(t, err, tc.fnErr)
+				assert.Equal(t, tc.wantSavepointErr, errors.Is(err, ErrTransactionSavepoint))
+				if tc.fnErr != nil {
+					assert.ErrorIs(t, err, tc.fnErr)
+				}
 			}
+			assert.Equal(t, tc.wantFnCalled, fnCalled)
 			if tc.wantSavepointErr {
 				return
 			}
@@ -637,6 +673,16 @@ func TestTx_WithSavepoint(t *testing.T) {
 				assert.ErrorIs(t, lerr, ErrXactAdvisoryLockFailed)
 			} else {
 				assert.NoError(t, lerr)
+			}
+
+			if tc.fnErr != nil {
+				// Each savepoint left open after its rollback gets its own transaction ID once tx writes.
+				_, ierr := GetIDB(tx, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name + "-outer"}).Exec(ctx)
+				require.NoError(t, ierr)
+				xids, xerr := GetIDB(tx, dbSession).NewSelect().TableExpr("pg_locks").
+					Where("locktype = 'transactionid'").Where("pid = pg_backend_pid()").Count(ctx)
+				require.NoError(t, xerr)
+				assert.Equal(t, 1, xids, "every rolled back savepoint must also be released")
 			}
 		})
 	}

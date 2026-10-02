@@ -133,10 +133,10 @@ func WithTxResultOpts[T any](ctx context.Context, dbSession *Session, opts *sql.
 }
 
 // WithSavepoint runs fn inside a savepoint of tx. If fn returns an error, tx
-// rolls back to the savepoint and returns that error. This also releases any
-// advisory lock fn acquired, and clears a failed statement that would otherwise
-// abort tx. If fn returns nil, the savepoint is released and its writes and
-// locks stay held until tx ends.
+// rolls back to the savepoint, releases it, and returns that error. This also
+// releases any advisory lock fn acquired, and clears a failed statement that
+// would otherwise abort tx. If fn returns nil, the savepoint is released and
+// its writes and locks stay held until tx ends.
 //
 // Use it to take a lock on a candidate that may be rejected, so the lock does
 // not outlive the rejection. Failures of the savepoint statements themselves
@@ -148,7 +148,12 @@ func (tx *Tx) WithSavepoint(ctx context.Context, fn func(sp *Tx) error) error {
 	}
 	err = fn(&Tx{tx: sp})
 	if err != nil {
+		// ROLLBACK TO SAVEPOINT leaves the savepoint open, so it is released too.
+		// Otherwise each rejected fn nests the next savepoint one level deeper until tx ends.
 		rerr := sp.Rollback()
+		if rerr == nil {
+			rerr = sp.Commit()
+		}
 		if rerr != nil {
 			return errors.Join(err, fmt.Errorf("%w: %w", ErrTransactionSavepoint, rerr))
 		}
