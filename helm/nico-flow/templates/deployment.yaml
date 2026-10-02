@@ -35,6 +35,14 @@ spec:
         - name: flow
           image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           args:
             - "--metrics-port={{ .Values.ports.metrics }}"
           env:
