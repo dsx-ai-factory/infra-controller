@@ -1,4 +1,4 @@
-# NICo Instrumentation <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# NICo Instrumentation <Badge intent="info">v2.1</Badge>
 
 How to instrument significant events with `carbide-instrument`: this framework provides a single declaration that
 produces a structured log line, a Prometheus metric, or both -- correlated, consistently
