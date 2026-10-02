@@ -42,6 +42,8 @@ use crate::{
 };
 
 #[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
 mod test_metadata;
 
 #[derive(Copy, Clone)]
@@ -311,7 +313,15 @@ where
 /// machine snapshot query materializes `bmc_info` (see
 /// `sql/machine_snapshots.sql.template`). Keeping the alias `switches` lets the
 /// generic `FilterableQueryBuilder` filters reference unqualified columns.
-const SWITCHES_WITH_BMC_INFO: &str = r#"SELECT * FROM (
+const SWITCHES_WITH_BMC_INFO: &str = r#"SELECT
+    id, config, status, deleted, bmc_mac_address, bmc_info,
+    bmc_credential_rotation_requested, decommission_requested,
+    controller_state, controller_state_version, controller_state_outcome,
+    switch_maintenance_requested, switch_reprovisioning_requested,
+    firmware_upgrade_status, nvos_update_status, fabric_manager_status,
+    nvlink_domain_uuid, name, description, labels, version, is_primary,
+    rack_id, slot_number, tray_index, health_reports
+FROM (
     SELECT s.*, bmc.json AS bmc_info
     FROM switches s
     LEFT JOIN LATERAL (
@@ -1732,7 +1742,7 @@ mod tests {
         );
 
         // The flag defaults false, set flips it, and clear resets it -- observed
-        // through the standard load path (`s.*` surfaces the column).
+        // through the standard load path.
         let is_requested = |switch: Option<Switch>| {
             switch
                 .expect("switch exists")
