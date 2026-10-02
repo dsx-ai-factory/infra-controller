@@ -83,6 +83,9 @@ envFrom:
     configMapName: vault-cluster-info
   databaseCredentials:
     secretName: nico-system.nico.nico-pg-cluster.credentials
+    ## Key in the Secret that holds the database user name. Defaults to
+    ## "username" (Zalando); set to "user" for Crunchy PGO.
+    usernameKey: username
   databaseConfig:
     configMapName: nico-system-nico-database-config
 
@@ -125,3 +128,8 @@ externalService:
   type: LoadBalancer
   externalTrafficPolicy: Local
   annotations: {}
+
+## Extra container security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. Empty by default; no override is
+## needed on OpenShift restricted Security Context Constraints (SCC).
+containerSecurityContext: {}
