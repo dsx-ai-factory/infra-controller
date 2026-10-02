@@ -26,7 +26,7 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::Api;
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, has_exclusive_identity};
 
 /// Validates a caller-supplied default TTL into the zone's range.
 fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, CarbideError> {
@@ -59,11 +59,12 @@ fn ensure_not_reverse_zone_name(proposed_name: &str) -> Result<(), CarbideError>
 /// retain ordinary create/delete but cannot claim another tenant's identity.
 fn require_site_agent<T>(request: &Request<T>) -> Result<(), Status> {
     let allowed = request.extensions().get::<AuthContext>().is_some_and(|auth| {
-        auth.principals.len() == 1
-            && matches!(
-                &auth.principals[0],
+        has_exclusive_identity(&auth.principals, |principal| {
+            matches!(
+                principal,
                 Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
             )
+        })
     });
     if !allowed {
         return Err(CarbideError::PermissionDeniedError(

@@ -31,7 +31,7 @@ use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, has_exclusive_identity};
 use crate::{CarbideError, CarbideResult};
 
 fn supports_tenant_segment_reassignment(
@@ -226,16 +226,15 @@ pub(crate) async fn attach_to_vpc(
             "network segment attachment requires an authenticated caller".to_string(),
         )
     })?;
-    let is_site_agent = auth_context.principals.iter().any(|principal| {
+    let is_site_agent = has_exclusive_identity(&auth_context.principals, |principal| {
         matches!(
             principal,
             Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
         )
     });
-    let is_admin = auth_context
-        .principals
-        .iter()
-        .any(|principal| matches!(principal, Principal::ExternalUser(_)));
+    let is_admin = has_exclusive_identity(&auth_context.principals, |principal| {
+        matches!(principal, Principal::ExternalUser(_))
+    });
     let site_agent_call = match (is_site_agent, is_admin) {
         (true, false) => true,
         (false, true) => false,

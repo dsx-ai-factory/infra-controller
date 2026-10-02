@@ -73,6 +73,31 @@ pub struct Authorization {
 
 impl carbide_authn::middleware::Authorization for Authorization {}
 
+/// Returns whether authentication resolved exactly one kind of caller identity.
+///
+/// A trusted client credential contributes [`Principal::TrustedCertificate`]
+/// in addition to the concrete identity derived from that credential. That
+/// marker is authentication evidence rather than a second caller for this
+/// check. Every other principal must match `expected`, so combining an allowed
+/// identity with a different service, machine, external user, or anonymous
+/// principal cannot inherit the allowed identity's handler-level authority.
+pub(crate) fn has_exclusive_identity(
+    principals: &[Principal],
+    expected: impl Fn(&Principal) -> bool,
+) -> bool {
+    let mut identity = None;
+    for principal in principals {
+        if matches!(principal, Principal::TrustedCertificate) {
+            continue;
+        }
+        if !expected(principal) || identity.is_some_and(|identity| identity != principal) {
+            return false;
+        }
+        identity = Some(principal);
+    }
+    identity.is_some()
+}
+
 #[derive(thiserror::Error, Debug, Clone)]
 enum AuthorizationError {
     #[error("unauthorized: CasbinEngine: all auth principals denied by enforcer")]
@@ -301,6 +326,100 @@ mod tests {
     use eyre::Context;
 
     use super::*;
+
+    #[test]
+    fn exclusive_identity_ignores_only_the_trusted_certificate_marker() {
+        let site_agent = || Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+        let other_service = || Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+        let external_user = || {
+            Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            ))
+        };
+        let is_site_agent = |principal: &Principal| {
+            matches!(
+                principal,
+                Principal::SpiffeServiceIdentifier(identifier)
+                    if identifier == "elektra-site-agent"
+            )
+        };
+
+        for (name, principals, expected) in [
+            ("site agent", vec![site_agent()], true),
+            (
+                "site agent mTLS",
+                vec![site_agent(), Principal::TrustedCertificate],
+                true,
+            ),
+            (
+                "same identity from bearer and mTLS",
+                vec![
+                    site_agent(),
+                    Principal::TrustedCertificate,
+                    site_agent(),
+                    Principal::TrustedCertificate,
+                ],
+                true,
+            ),
+            (
+                "trusted certificate only",
+                vec![Principal::TrustedCertificate],
+                false,
+            ),
+            (
+                "other service mTLS",
+                vec![other_service(), Principal::TrustedCertificate],
+                false,
+            ),
+            (
+                "external user mTLS",
+                vec![external_user(), Principal::TrustedCertificate],
+                false,
+            ),
+            (
+                "site agent plus external user",
+                vec![site_agent(), Principal::TrustedCertificate, external_user()],
+                false,
+            ),
+            (
+                "two different external users",
+                vec![
+                    external_user(),
+                    Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "other-client".to_string(),
+                        None,
+                    )),
+                    Principal::TrustedCertificate,
+                ],
+                false,
+            ),
+            (
+                "machine bearer plus site agent mTLS",
+                vec![
+                    Principal::SpiffeMachineIdentifier("machine-1".to_string()),
+                    Principal::TrustedCertificate,
+                    site_agent(),
+                    Principal::TrustedCertificate,
+                ],
+                false,
+            ),
+            (
+                "site agent plus anonymous",
+                vec![site_agent(), Principal::Anonymous],
+                false,
+            ),
+            ("no principal", Vec::new(), false),
+        ] {
+            assert_eq!(
+                has_exclusive_identity(&principals, is_site_agent),
+                expected,
+                "{name}"
+            );
+        }
+    }
 
     /// A rejecting policy lets the permissive wrapper exercise the exact
     /// branch that production uses after Casbin denies a request.
