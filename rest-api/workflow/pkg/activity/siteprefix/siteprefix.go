@@ -36,15 +36,16 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("starting activity")
 
-	err := validatePage(inventory)
-	if err != nil {
-		logger.Warn().Err(err).Msg("received invalid SitePrefix inventory")
-		return err
+	if inventory == nil {
+		return invalid("UpdateSitePrefixesInDB called with nil inventory")
 	}
 	if inventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Str("Status Message", inventory.StatusMsg).
 			Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
+	}
+	if inventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
+		return invalid("unsupported SitePrefix inventory status")
 	}
 	siteDAO := cdbm.NewSiteDAO(manager.dbSession)
 	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
@@ -57,10 +58,20 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		return err
 	}
 	page := inventory.InventoryPage
-	logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
-		page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
+	if page != nil {
+		logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
+			page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
+	}
 
 	for _, prefix := range inventory.SitePrefixes {
+		// Validate only the current prefix so a later invalid entry cannot prevent
+		// earlier valid entries from being reconciled. Page IDs do not imply absence.
+		err := validatePrefix(prefix)
+		if err != nil {
+			logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
+				Msg("received invalid SitePrefix")
+			return err
+		}
 		// Keep one prefix's REST identity, IPAM changes, and status detail atomic.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		deferred, err := cdb.WithTxResult(ctx, manager.dbSession, func(tx *cdb.Tx) (bool, error) {
