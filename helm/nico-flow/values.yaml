@@ -121,6 +121,9 @@ database:
   flow:
     name: flow
     credentialsSecret: flow.nico.nico-pg-cluster.credentials
+    ## Key in the Secret that holds the database user name. Defaults to
+    ## "username" (Zalando); set to "user" for Crunchy PGO.
+    usernameKey: username
 
 ## NICo Core API endpoint (gRPC) that flow calls.
 nicoCoreApi:
@@ -186,8 +189,12 @@ imagePullSecret:
   create: true
   dockerconfigjson: "eyJhdXRocyI6e319"
 
-## Container security context. allowPrivilegeEscalation: false is always set.
-## Override to add capabilities or null to drop all overrides.
-## On OpenShift restricted-v2 SCC, set to null; the hardcoded baseline survives.
-##   containerSecurityContext: null
+## Extra container security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. Empty by default; no override is
+## needed on OpenShift restricted Security Context Constraints (SCC).
 containerSecurityContext: {}
+
+## createNamespace controls whether nico-flow renders its own Namespace resource.
+## Defaults to false. Set to true only if the chart must create the namespace
+## itself; do not combine with `helm install --create-namespace`.
+createNamespace: false
