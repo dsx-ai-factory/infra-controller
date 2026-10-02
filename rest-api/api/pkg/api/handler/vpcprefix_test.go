@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,8 @@ import (
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1550,6 +1553,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 		expectUsageStatsNil             bool
 		verifyUsageAcquisitionFromIface bool
 		verifyChildSpanner              bool
+		expectNoErrorLog                bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -1592,12 +1596,13 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when specified vpcprefix doesnt exist",
-			reqOrgName:     tnOrg1,
-			user:           tnu,
-			id:             uuid.New().String(),
-			expectedErr:    true,
-			expectedStatus: http.StatusNotFound,
+			name:             "error when specified vpcprefix doesnt exist",
+			reqOrgName:       tnOrg1,
+			user:             tnu,
+			id:               uuid.New().String(),
+			expectedErr:      true,
+			expectedStatus:   http.StatusNotFound,
+			expectNoErrorLog: true,
 		},
 		{
 			name:           "success case",
@@ -1672,6 +1677,13 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
+			var logs bytes.Buffer
+			if tc.expectNoErrorLog {
+				previousLogger := log.Logger
+				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+				t.Cleanup(func() { log.Logger = previousLogger })
+			}
+
 			// Setup echo server/context
 			e := echo.New()
 
@@ -1712,6 +1724,10 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectNoErrorLog {
+				assert.Contains(t, logs.String(), "VPC prefix not found")
+				assert.NotContains(t, logs.String(), `"level":"error"`)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIVpcPrefix{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -1884,6 +1900,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		expectedStoredName string
 		expectedPrefix     string
 		verifyChildSpanner bool
+		expectNoErrorLog   bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -1946,12 +1963,13 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when specified vpcprefix doesnt exist",
-			reqOrgName:     tnOrg1,
-			user:           tnu,
-			id:             uuid.New().String(),
-			expectedErr:    true,
-			expectedStatus: http.StatusNotFound,
+			name:             "error when specified vpcprefix doesnt exist",
+			reqOrgName:       tnOrg1,
+			user:             tnu,
+			id:               uuid.New().String(),
+			expectedErr:      true,
+			expectedStatus:   http.StatusNotFound,
+			expectNoErrorLog: true,
 		},
 		{
 			name:           "error when name clashes",
@@ -1999,6 +2017,13 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
+			var logs bytes.Buffer
+			if tc.expectNoErrorLog {
+				previousLogger := log.Logger
+				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+				t.Cleanup(func() { log.Logger = previousLogger })
+			}
+
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
@@ -2026,6 +2051,10 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 			require.Equal(t, tc.expectedStatus, rec.Code, rec.Body.String())
+			if tc.expectNoErrorLog {
+				assert.Contains(t, logs.String(), "VPC prefix not found")
+				assert.NotContains(t, logs.String(), `"level":"error"`)
+			}
 
 			if tc.expectedErr {
 				if tc.expectedStoredName != "" {
@@ -2235,6 +2264,7 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 		verifyChildSpanner bool
 		tClient            *tmocks.Client
 		clientPool         *sc.ClientPool
+		expectNoErrorLog   bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -2269,12 +2299,13 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when specified vpcprefix doesnt exist",
-			reqOrgName:     tnOrg1,
-			user:           tnu,
-			id:             uuid.New().String(),
-			expectedErr:    true,
-			expectedStatus: http.StatusNotFound,
+			name:             "error when specified vpcprefix doesnt exist",
+			reqOrgName:       tnOrg1,
+			user:             tnu,
+			id:               uuid.New().String(),
+			expectedErr:      true,
+			expectedStatus:   http.StatusNotFound,
+			expectNoErrorLog: true,
 		},
 		{
 			name:           "error when vpcprefix tenant does not match org",
@@ -2345,6 +2376,13 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
+			var logs bytes.Buffer
+			if tc.expectNoErrorLog {
+				previousLogger := log.Logger
+				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+				t.Cleanup(func() { log.Logger = previousLogger })
+			}
+
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -2383,6 +2421,10 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectNoErrorLog {
+				assert.Contains(t, logs.String(), "VPC prefix not found")
+				assert.NotContains(t, logs.String(), `"level":"error"`)
+			}
 
 			if tc.expectedErr {
 				if tc.expectedErrorMsg != nil {
