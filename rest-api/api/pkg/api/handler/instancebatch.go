@@ -2143,27 +2143,41 @@ func allocateMachinesForBatch(
 			break
 		}
 
-		// Acquire an advisory lock on the MachineID
-		err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+		// Verify the Machine inside a savepoint, so a rejected Machine is unlocked right away
+		// instead of staying locked until the batch create transaction ends.
+		var umc *cdbm.Machine
+		err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+			// Acquire an advisory lock on the MachineID
+			lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+			if lerr != nil {
+				return lerr
+			}
+
+			// Re-obtain the Machine record to ensure it is still available
+			var gerr error
+			umc, gerr = mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+			if gerr != nil {
+				return gerr
+			}
+
+			if umc.Status != cdbm.MachineStatusReady {
+				return common.ErrMachineUnavailable
+			}
+
+			if umc.IsAssigned {
+				return common.ErrMachineUnavailable
+			}
+
+			if !umc.MatchesLabelSelector(machineLabelSelector) {
+				return common.ErrMachineUnavailable
+			}
+			return nil
+		})
+		if errors.Is(err, cdb.ErrTransactionSavepoint) {
+			logger.Error().Err(err).Str("machineID", mc.ID).Msg("failed to verify Machine for batch allocation, DB savepoint error")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify Machines for allocation, DB error", nil)
+		}
 		if err != nil {
-			continue
-		}
-
-		// Re-obtain the Machine record to ensure it is still available
-		umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-		if err != nil {
-			continue
-		}
-
-		if umc.Status != cdbm.MachineStatusReady {
-			continue
-		}
-
-		if umc.IsAssigned {
-			continue
-		}
-
-		if !umc.MatchesLabelSelector(machineLabelSelector) {
 			continue
 		}
 
