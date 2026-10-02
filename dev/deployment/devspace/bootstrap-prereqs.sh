@@ -754,6 +754,10 @@ EOF
 }
 
 print_summary() {
+  local profile="full"
+  if [[ "${INSTALL_REST_PREREQS}" == "0" ]]; then
+    profile="core-only"
+  fi
   cat <<EOF
 
 Bootstrap complete.
@@ -766,7 +770,7 @@ Cert issuer: ${CERT_ISSUER_KIND}/${CERT_ISSUER_NAME}
 REST prerequisites: ${INSTALL_REST_PREREQS}
 
 Next step:
-  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE}
+  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE} --profile ${profile}
 EOF
 }
 

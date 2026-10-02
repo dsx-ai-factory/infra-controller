@@ -64,7 +64,7 @@ main() {
   log "Installing clean local prerequisites"
   "${SCRIPT_DIR}/bootstrap-prereqs.sh"
 
-  log "Reset complete; deploy with devspace deploy --skip-build"
+  log "Reset complete; add --skip-build to the bootstrap deployment command to reuse cached images"
 }
 
 main "$@"

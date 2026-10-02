@@ -14,6 +14,20 @@ SCRIPT = Path(__file__).with_name("bootstrap-prereqs.sh")
 
 
 class BootstrapPrereqsTest(unittest.TestCase):
+    def test_next_step_profile(self):
+        source = SCRIPT.read_text()
+        summary = source[source.index("print_summary() {"):source.index("\nmain() {")]
+        for rest, profile in (("1", "full"), ("0", "core-only")):
+            with self.subTest(rest=rest):
+                result = subprocess.run(
+                    ["bash", "-c", summary + "\nprint_summary"],
+                    env={**os.environ, "INSTALL_REST_PREREQS": rest,
+                         "REPO_ROOT": "/repo", "NAMESPACE": "isolated"},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"devspace deploy -n isolated --profile {profile}", result.stdout)
+
     def test_ssh_host_key_bootstrap(self):
         for existing in ("0", "1"):
             with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:

@@ -37,3 +37,19 @@ for attempt in {1..3}; do
   if [[ "${attempt}" != 3 ]]; then sleep 10; fi
 done
 printf 'Core workloads Ready with stable restart counts\n'
+
+# MAT requests boot instructions over gRPC; it does not exercise PXE HTTP delivery.
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+artifact="scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml"
+pxe_port="$(kubectl -n "${namespace}" get service nico-pxe -o json |
+  jq -er '.spec.ports[] | select(.name == "http") | .port')"
+download="$(mktemp)"
+trap 'rm -f "${download}"' EXIT
+kubectl -n "${namespace}" exec deployment/nico-api -c nico-api -- \
+  curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+    "http://nico-pxe.${namespace}.svc.cluster.local.:${pxe_port}/public/${artifact}" >"${download}"
+if ! cmp -s "${script_dir}/../../../pxe/${artifact}" "${download}"; then
+  printf 'PXE HTTP response does not match the packaged firmware metadata\n' >&2
+  exit 1
+fi
+printf 'PXE HTTP delivery verified against packaged firmware metadata\n'

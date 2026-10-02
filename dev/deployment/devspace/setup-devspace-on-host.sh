@@ -20,6 +20,7 @@ REPO_DIR=""
 REPO_URL="https://github.com/NVIDIA/infra-controller.git"
 REPO_REF=""
 CLUSTER_NAME="nico-dev"
+DEVSPACE_PROFILE="full"
 DOCKER_ROOT="/dockerroot"
 SKIP_DEPLOY=0
 SCRIPT_START_SECONDS="${SECONDS}"
@@ -67,6 +68,8 @@ Options:
   --repo-url URL       Repository to clone if --repo-dir does not exist.
   --repo-ref REF       Branch, tag, or commit to check out after cloning.
   --cluster-name NAME  kind cluster name. Default: nico-dev.
+  --profile PROFILE    Single DevSpace profile to deploy. Default: full.
+                       Must exist in the checkout; no fallback if unavailable.
   --docker-root PATH   Existing Docker storage directory, or symlink to one.
                        Default: /dockerroot.
   --skip-deploy        Prepare the host and cluster but do not build/deploy.
@@ -111,6 +114,11 @@ while (($#)); do
       DOCKER_ROOT="$2"
       shift 2
       ;;
+    --profile)
+      [[ $# -ge 2 && -n "${2:-}" && "${2:-}" != -* ]] || die "--profile requires a value"
+      DEVSPACE_PROFILE="$2"
+      shift 2
+      ;;
     --skip-deploy)
       SKIP_DEPLOY=1
       shift
@@ -134,6 +142,7 @@ if [[ "${EUID}" -ne 0 ]]; then
     --user "${DEV_USER}" \
     --repo-url "${REPO_URL}" \
     --cluster-name "${CLUSTER_NAME}" \
+    --profile "${DEVSPACE_PROFILE}" \
     --docker-root "${DOCKER_ROOT}"
   )
   if [[ -n "${REPO_DIR}" ]]; then
@@ -556,10 +565,10 @@ deploy_stack() {
     _ "${REPO_DIR}"
   cache_postgres_wait_image
 
-  log "Building and deploying the complete stack"
-  # shellcheck disable=SC2016 # $1 is intentionally expanded by the child shell.
-  run_as_user bash -c 'cd "$1" && devspace deploy -n nico-system' \
-    _ "${REPO_DIR}"
+  log "Building and deploying the ${DEVSPACE_PROFILE} profile"
+  # shellcheck disable=SC2016 # Positional arguments are expanded by the child shell.
+  run_as_user bash -c 'cd "$1" && devspace deploy -n nico-system --profile "$2"' \
+    _ "${REPO_DIR}" "${DEVSPACE_PROFILE}"
 }
 
 temporal_namespace_is_healthy() {
