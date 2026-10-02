@@ -99,16 +99,17 @@ docker build -f docker/mlt_image.Dockerfile -t machine-lifecycle-test:local .
 docker run --rm machine-lifecycle-test:local uv run pytest tests/unit
 ```
 
-For a multi-architecture image, use BuildKit and publish to a registry your
-runner can access:
+For a multi-architecture image published to a registry your runner can
+access, use the repository's `make` target from the repository root. It builds
+each architecture and joins them into one manifest, the same way the other NICo
+images are built:
 
 ```shell
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -f docker/mlt_image.Dockerfile \
-  -t <registry>/machine-lifecycle-test:<tag> \
-  --push .
+make images-machine-lifecycle IMAGE_REGISTRY=<registry> IMAGE_TAG=<tag>
 ```
+
+Set `NICO_ARCHES=amd64` or `NICO_ARCHES=arm64` to build one architecture. The
+project's own CI publishes this image for each release under the same name.
 
 The image contains Python, `uv`, and `kubectl`. It deliberately
 does not contain `nico-admin-cli`; MLT executes the binary belonging to the

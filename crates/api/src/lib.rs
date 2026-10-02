@@ -38,7 +38,6 @@ mod postgres;
 mod readiness;
 mod resources;
 mod run;
-mod shutdown_handler;
 
 pub use carbide_api_core::AdminUiRoutesBuilder;
 pub use command_line::{Command, Options};

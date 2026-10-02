@@ -20,9 +20,134 @@ use std::collections::HashMap;
 use model::expected_switch::ExpectedSwitch;
 use model::metadata::Metadata;
 use model::rack::RackConfig;
+use sqlx::Connection;
 
 use super::*;
 use crate as db;
+
+#[crate::sqlx_test]
+async fn expected_switch_queries_survive_added_columns(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut api_connection = pool.acquire().await?;
+    exercise_expected_switch_queries(&mut api_connection).await?;
+    assert!(api_connection.cached_statements_size() > 0);
+
+    // Keep the API's prepared statements while another connection applies DDL.
+    let mut migration = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL lock_timeout = '5s';
+         ALTER TABLE expected_switches ADD COLUMN test_added_column text;",
+    )
+    .execute(&mut *migration)
+    .await?;
+    migration.commit().await?;
+
+    exercise_expected_switch_queries(&mut api_connection).await?;
+    Ok(())
+}
+
+async fn exercise_expected_switch_queries(
+    connection: &mut PgConnection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = connection.begin().await?;
+    let id = Uuid::new_v4();
+    let rack_id = RackId::new("projection-rack");
+    let nvos_mac = "02:00:00:00:02:02".parse()?;
+    let expected = ExpectedSwitch {
+        expected_switch_id: Some(id),
+        bmc_mac_address: "02:00:00:00:02:01".parse()?,
+        nvos_mac_addresses: vec![nvos_mac],
+        bmc_username: "test-user".to_string(),
+        bmc_password: "test-password".to_string(),
+        serial_number: "projection-switch".to_string(),
+        nvos_username: Some("nvos-user".to_string()),
+        nvos_password: Some("nvos-password".to_string()),
+        bmc_ip_address: Some("192.0.2.20".parse()?),
+        nvos_ip_address: Some("192.0.2.21".parse()?),
+        rack_id: Some(rack_id.clone()),
+        bmc_retain_credentials: Some(true),
+        metadata: Metadata {
+            name: "expected switch".to_string(),
+            description: "populated projection fixture".to_string(),
+            labels: HashMap::from([("location".to_string(), "rack-1".to_string())]),
+        },
+    };
+    assert_switch(&create(&mut txn, expected.clone()).await?, &expected);
+
+    for found in [
+        find_by_bmc_mac_address(&mut txn, expected.bmc_mac_address).await?,
+        find_by_nvos_mac_address(&mut txn, nvos_mac).await?,
+        find_by_serial_number(&mut txn, &expected.serial_number).await?,
+        find_by_id(&mut txn, id).await?,
+        find_by_rack_id(&mut txn, rack_id.to_string()).await?,
+        find_for_update(
+            &mut txn,
+            &ExpectedSwitchRequest {
+                expected_switch_id: Some(id),
+                bmc_mac_address: None,
+            },
+        )
+        .await?,
+        find_for_update(
+            &mut txn,
+            &ExpectedSwitchRequest {
+                expected_switch_id: None,
+                bmc_mac_address: Some(expected.bmc_mac_address),
+            },
+        )
+        .await?,
+    ] {
+        assert_switch(&found.expect("the expected switch exists"), &expected);
+    }
+    for found in [
+        find_all(&mut txn).await?,
+        find_all_by_rack_id(&mut txn, &rack_id).await?,
+    ] {
+        assert_eq!(found.len(), 1);
+        assert_switch(&found[0], &expected);
+    }
+    let found = find_many_by_bmc_mac_address(&mut txn, &[expected.bmc_mac_address]).await?;
+    assert_eq!(found.len(), 1);
+    assert_switch(&found[&expected.bmc_mac_address], &expected);
+
+    // Request a different MAC first so the fallback cannot hide a missing
+    // `nvos_mac_addresses` column in either selector.
+    let different_mac = "02:00:00:00:02:04".parse()?;
+    for expected_switch_id in [Some(Uuid::new_v4()), None] {
+        let other = ExpectedSwitch {
+            expected_switch_id,
+            bmc_mac_address: "02:00:00:00:02:03".parse()?,
+            ..expected.clone()
+        };
+        assert_eq!(
+            find_nvos_mac_claimed_elsewhere(&mut txn, &[different_mac, nvos_mac], &other).await?,
+            Some(nvos_mac)
+        );
+    }
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+fn assert_switch(actual: &ExpectedSwitch, expected: &ExpectedSwitch) {
+    assert_eq!(actual.expected_switch_id, expected.expected_switch_id);
+    assert_eq!(actual.bmc_mac_address, expected.bmc_mac_address);
+    assert_eq!(actual.nvos_mac_addresses, expected.nvos_mac_addresses);
+    assert_eq!(actual.bmc_username, expected.bmc_username);
+    assert_eq!(actual.bmc_password, expected.bmc_password);
+    assert_eq!(actual.serial_number, expected.serial_number);
+    assert_eq!(actual.nvos_username, expected.nvos_username);
+    assert_eq!(actual.nvos_password, expected.nvos_password);
+    assert_eq!(actual.bmc_ip_address, expected.bmc_ip_address);
+    assert_eq!(actual.nvos_ip_address, expected.nvos_ip_address);
+    assert_eq!(actual.rack_id, expected.rack_id);
+    assert_eq!(
+        actual.bmc_retain_credentials,
+        expected.bmc_retain_credentials
+    );
+    assert_eq!(actual.metadata, expected.metadata);
+}
 
 fn expected_switch_bmc_mac_address(index: u32) -> mac_address::MacAddress {
     mac_address::MacAddress::new([0x44, 0x44, 0x11, 0x11, 0x00, index as u8])

@@ -1525,14 +1525,27 @@ impl SseLogConfig {
     }
 }
 
+/// Periodic log collection settings.
+///
+/// Numeric entry IDs must increase between resets; existing entries must
+/// remain unchanged. Each poll validates the highest saved entry. A missing entry
+/// or changed mapped record triggers replay of retained history. Changes below an
+/// unchanged anchor are not detected.
+/// Nonnumeric entries are emitted when collecting or replaying retained history.
+/// Incremental scans and completed history-skipping baselines ignore them.
+///
+/// Paginated collections must report a stable `Members@odata.count` and return
+/// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
+/// progress; records accepted by a sink before a failure can replay on retry.
+/// An unpaginated collection may omit the count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeriodicLogConfig {
-    /// Interval between log collection.
+    /// Interval between log collection polls. Defaults to 5 minutes.
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service state refresh.
+    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
@@ -1547,11 +1560,11 @@ pub struct PeriodicLogConfig {
     #[serde(default = "default_excluded_log_services")]
     pub exclude_services: Vec<String>,
 
-    /// When true, on the first encounter of a LogService with no saved state,
-    /// anchor at the current highest entry ID without emitting existing entries.
-    /// Subsequent polls collect only new entries, matching SSE real-time
-    /// behaviour. Defaults to false (existing entries are collected on first
-    /// run). Also applies when auto-mode downgrades to periodic collection.
+    /// Skip retained history only on the first successful baseline without a checkpoint.
+    /// Failed baselines and saved numeric/SSE checkpoints replay retained records.
+    /// Defaults to false. Also applies after auto mode downgrades from SSE.
+    /// Old fingerprint checkpoints replay once. Numeric-only checkpoint readers
+    /// require this option disabled to replay history after rollback.
     #[serde(default)]
     pub skip_initial_history: bool,
 }
@@ -2693,7 +2706,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Load configuration from optional path
+    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
+    /// overrides, in that order, then validates the resulting configuration.
+    /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
 
@@ -2705,9 +2720,29 @@ impl Config {
             Env::prefixed("CARBIDE_HEALTH__").split("__"),
         ));
 
-        let config: Config = figment
-            .extract()
-            .map_err(|e| format!("Failed to load configuration: {}", e))?;
+        let config: Config = figment.extract().map_err(|error| {
+            let sources = match config_path {
+                Some(path) => format!(
+                    "{} and CARBIDE_HEALTH__ environment variables",
+                    path.display()
+                ),
+                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+            };
+
+            let location = if error.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", error.path.join("."))
+            };
+
+            // Buffered sections retain relative field paths in their error
+            // messages, but the enclosing tag does not identify the leaf's
+            // provider. Report the inputs without attributing a leaf origin.
+            format!(
+                "failed to load configuration from {sources}: {location}{}",
+                error.kind
+            )
+        })?;
 
         config.validate()?;
         Ok(config)
@@ -2890,6 +2925,11 @@ impl Config {
     }
 }
 
+/// A configuration table that is enabled unless `enabled = false` is specified.
+///
+/// Null disables the section. An empty enabled table uses `T::default()`;
+/// populated enabled tables follow `T`'s defaults and unknown-field policy.
+/// Disabled payloads are ignored, while malformed enabled payloads return errors.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Configurable<T> {
@@ -2918,32 +2958,44 @@ where
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper<T> {
-            #[serde(default = "default_true")]
-            enabled: bool,
-            #[serde(flatten)]
-            config: Option<T>,
-        }
+        // Buffer before decoding so `enabled = false` wins regardless of key
+        // order. A payload decoding error must not be interpreted as absence.
+        let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+            return Ok(Self::Disabled);
+        };
 
-        fn default_true() -> bool {
-            true
-        }
+        let Value::Dict(tag, mut fields) = value else {
+            return Err(serde::de::Error::custom("expected a configuration table"));
+        };
 
-        let helper_opt = Option::<Helper<T>>::deserialize(deserializer)?;
+        if let Some(enabled) = fields.remove("enabled") {
+            let enabled: bool = enabled
+                .deserialize()
+                .map_err(|error| serde::de::Error::custom(format!("enabled: {}", error.kind)))?;
 
-        match helper_opt {
-            None => Ok(Configurable::Disabled),
-            Some(helper) => {
-                if !helper.enabled {
-                    Ok(Configurable::Disabled)
-                } else if let Some(cfg) = helper.config {
-                    Ok(Configurable::Enabled(cfg))
-                } else {
-                    Ok(Configurable::Enabled(T::default()))
-                }
+            if !enabled {
+                return Ok(Self::Disabled);
             }
         }
+
+        if fields.is_empty() {
+            return Ok(Self::Enabled(T::default()));
+        }
+
+        // Generic Serde errors do not carry Figment's relative key/index path.
+        // Include it explicitly before crossing another Configurable wrapper.
+        Value::Dict(tag, fields)
+            .deserialize()
+            .map(Self::Enabled)
+            .map_err(|error| {
+                if error.path.is_empty() {
+                    return serde::de::Error::custom(error.kind);
+                }
+
+                let location = error.path.join(".");
+
+                serde::de::Error::custom(format!("{location}: {}", error.kind))
+            })
     }
 }
 
@@ -5078,12 +5130,182 @@ interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
     }
 
     #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn malformed_enabled_sections_fail_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+
+            let valid = r#"
+[collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "first"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "bytes"}}]
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "second"
+encoding = "json_ietf"
+mode = "sample"
+sample_interval = "10s"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "count"}}]
+"#;
+
+            // Only the second entry is malformed, so diagnostics must identify
+            // its index rather than blaming or discarding the valid first entry.
+            for (field, from, to, reason) in [
+                (
+                    "encoding",
+                    "encoding = \"json_ietf\"",
+                    "encoding = \"proto\"",
+                    "proto",
+                ),
+                ("mode", "mode = \"sample\"", "mode = \"sampl\"", "sampl"),
+                (
+                    "metrics.0.output",
+                    "kind = \"gauge\", unit = \"count\"",
+                    "kind = \"gaugeh\", unit = \"count\"",
+                    "gaugeh",
+                ),
+                (
+                    "sample_interval",
+                    "sample_interval = \"10s\"",
+                    "sample_interval = \"not-a-duration\"",
+                    "duration",
+                ),
+                (
+                    "unknown",
+                    "encoding = \"json_ietf\"",
+                    "encodign = \"json_ietf\"",
+                    "encodign",
+                ),
+            ] {
+                jail.create_file("health.toml", &valid.replace(from, to))?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled subscription must fail startup");
+
+                for expected in [
+                    "collectors.nvue",
+                    "gnmi",
+                    "additional_subscriptions.1",
+                    "health.toml",
+                    reason,
+                ] {
+                    assert!(
+                        error.contains(expected),
+                        "{field}: missing {expected}: {error}"
+                    );
+                }
+
+                if field != "unknown" {
+                    assert!(error.contains(field), "{field}: {error}");
+                }
+            }
+
+            for (contents, section, field) in [
+                (
+                    "[collectors.nmxt]\nscrape_interval = \"not-a-duration\"",
+                    "collectors.nmxt",
+                    "scrape_interval",
+                ),
+                (
+                    "[collectors.nvue.gnmi]\nenabled = \"sometimes\"",
+                    "collectors.nvue",
+                    "enabled",
+                ),
+            ] {
+                jail.create_file("health.toml", contents)?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled section must fail startup");
+
+                assert!(error.contains(section), "{error}");
+                assert!(error.contains(field), "{error}");
+            }
+
+            jail.create_file("health.toml", valid)?;
+            jail.set_env("CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__GNMI_PORT", "20339");
+
+            let config = Config::load(Some(Path::new("health.toml")))
+                .expect("valid environment override should preserve the configured payload");
+
+            let gnmi = config
+                .collectors
+                .nvue
+                .as_option()
+                .unwrap()
+                .gnmi
+                .as_option()
+                .unwrap();
+
+            assert_eq!(gnmi.gnmi_port, 20339);
+            assert!(!gnmi.system_events_enabled);
+            assert_eq!(gnmi.additional_subscriptions.len(), 2);
+
+            jail.set_env(
+                "CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__SAMPLE_INTERVAL",
+                "invalid",
+            );
+
+            let error = Config::load(Some(Path::new("health.toml")))
+                .expect_err("malformed environment override must fail loading");
+
+            for expected in [
+                "health.toml",
+                "CARBIDE_HEALTH__",
+                "sample_interval",
+                "duration",
+            ] {
+                assert!(error.contains(expected), "missing {expected}: {error}");
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configurable_preserves_defaults_and_explicit_disabling() {
+        value_scenarios!(run = |input: serde_json::Value| {
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(input)
+                .expect("valid wrapper representation should parse")
+                .is_enabled()
+        };
+            "disabled representations" {
+                serde_json::Value::Null => false,
+                serde_json::json!({"enabled": false, "gnmi": {"sample_interval": "invalid"}}) => false,
+                serde_json::json!({"enabled": false, "rest": {"poll_interval": "invalid"}}) => false,
+            }
+
+            "empty enabled sections" {
+                serde_json::json!({}) => true,
+                serde_json::json!({"enabled": true}) => true,
+            }
+
+            "disabled child under enabled parent" {
+                serde_json::json!({"gnmi": {"enabled": false, "sample_interval": "invalid"}}) => true,
+            }
+        );
+
+        assert!(
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(serde_json::json!(false))
+                .is_err(),
+            "only null or a configuration table is supported"
+        );
+    }
+
+    #[test]
     fn nvue_gnmi_additional_subscription_parses_complete_contract() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::string(
                 r#"
 [collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
 
 [[collectors.nvue.gnmi.additional_subscriptions]]
 name = "external_metrics"
@@ -5126,6 +5348,8 @@ metrics = [
             .first()
             .expect("one additional subscription should be configured");
 
+        assert_eq!(gnmi.gnmi_port, 19339);
+        assert!(!gnmi.system_events_enabled);
         assert_eq!(subscription.name, "external_metrics");
         assert_eq!(subscription.target, "switch");
         assert_eq!(subscription.origin, "openconfig");

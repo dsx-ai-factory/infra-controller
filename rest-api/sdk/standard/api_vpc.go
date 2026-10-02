@@ -226,6 +226,8 @@ Delete a specific VPC by ID.
 
 Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
 
+First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
+
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().

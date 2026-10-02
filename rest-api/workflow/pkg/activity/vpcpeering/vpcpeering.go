@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -123,9 +124,11 @@ func (mvp ManageVpcPeering) UpdateVpcPeeringsInDB(
 		// This is redundant if paging is used, but isn't expensive.
 		reportedVpcPeeringIDMap[vpcPeering.ID] = true
 
-		// If VPC Peering is not in Deleting state, then update status to Ready
-		if vpcPeering.Status != cdbm.VpcPeeringStatusDeleting && vpcPeering.Status != cdbm.VpcPeeringStatusReady {
-			err = mvp.updateVpcPeeringStatusInDB(ctx, nil, vpcPeering.ID, cwutil.GetPtr(cdbm.VpcPeeringStatusReady), cwutil.GetPtr("VPC Peering has been re-detected on Site"))
+		// A locally requested deletion stays Deleting even if an older inventory
+		// still reports Ready. Core-initiated deletion uses the same REST state.
+		status, message := reportedPeeringStatus(controllerVpcPeering)
+		if vpcPeering.Status != cdbm.VpcPeeringStatusDeleting && vpcPeering.Status != status {
+			err = mvp.updateVpcPeeringStatusInDB(ctx, nil, vpcPeering.ID, &status, &message)
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to update VPC Peering status detail in DB")
 			}
@@ -134,7 +137,7 @@ func (mvp ManageVpcPeering) UpdateVpcPeeringsInDB(
 	}
 
 	// Delete VPC Peerings that are not in the inventory. If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPeeringInventory.InventoryPage == nil || vpcPeeringInventory.InventoryPage.TotalPages == 0 || (vpcPeeringInventory.InventoryPage.CurrentPage == vpcPeeringInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPeeringInventory.GetInventoryPage()) {
 		for _, vpcPeering := range existingVpcPeeringIDMap {
 			slogger := logger.With().Str("VPC Peering ID", vpcPeering.ID.String()).Logger()
 			slogger.Info().Msg("checking for deletion")
@@ -296,8 +299,7 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 				return nil, fmt.Errorf("unable to create VPC Peering found on Site: failed to clear soft-delete timestamp for VPC Peering, DB error: %w", clearErr)
 			}
 
-			status := cdbm.VpcPeeringStatusReady
-			statusMessage := "VPC Peering has been re-detected on Site"
+			status, statusMessage := reportedPeeringStatus(controllerVpcPeering)
 			statusErr := mvp.updateVpcPeeringStatusInDB(ctx, tx, restored.ID, &status, &statusMessage)
 			if statusErr != nil {
 				return nil, fmt.Errorf("unable to create VPC Peering found on Site: failed to update VPC Peering status after undelete, DB error: %w", statusErr)
@@ -310,7 +312,7 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 			return restored, nil
 		}
 
-		readyMessage := "VPC Peering was found on Site, Ready for use"
+		status, statusMessage := reportedPeeringStatus(controllerVpcPeering)
 		created, createErr := vpcPeeringDAO.Create(ctx, tx, cdbm.VpcPeeringCreateInput{
 			VpcPeeringID:             &controllerVpcPeeringID,
 			Vpc1ID:                   vpc1.ID,
@@ -319,7 +321,7 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 			IsMultiTenant:            isMultiTenant,
 			InfrastructureProviderID: infrastructureProviderID,
 			TenantID:                 tenantID,
-			Status:                   cdbm.VpcPeeringStatusReady,
+			Status:                   status,
 			CreatedByID:              site.CreatedBy,
 		})
 		if createErr != nil {
@@ -328,8 +330,8 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 
 		_, statusErr := statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
 			EntityID: created.ID.String(),
-			Status:   cdbm.VpcPeeringStatusReady,
-			Message:  &readyMessage,
+			Status:   status,
+			Message:  &statusMessage,
 		})
 		if statusErr != nil {
 			return nil, fmt.Errorf("unable to create VPC Peering found on Site: failed to create Status Detail, DB error: %w", statusErr)
@@ -341,6 +343,15 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 		return nil
 	}
 	return vpcPeering
+}
+
+// reportedPeeringStatus maps older servers' absent state to Ready and keeps
+// removal visible until the Site stops reporting the peering.
+func reportedPeeringStatus(peering *corev1.VpcPeering) (string, string) {
+	if peering.GetState() == corev1.VpcPeeringState_VPC_PEERING_STATE_DELETING {
+		return cdbm.VpcPeeringStatusDeleting, "VPC Peering is waiting for DPUs to apply permission removal"
+	}
+	return cdbm.VpcPeeringStatusReady, "VPC Peering was found on Site"
 }
 
 // updateVpcPeeringStatusInDB is helper function to write VpcPeering updates to DB

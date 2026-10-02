@@ -322,7 +322,34 @@ pub(crate) async fn delete(
 
     let mut txn = api.txn_begin().await?;
 
-    let _ = db::delete(&mut txn, id).await?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let peering = db::find_by_id_for_update(&mut txn, id)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "VpcPeering",
+            id: id.to_string(),
+        })?;
+    if peering.deletion_version.is_none() {
+        for host in db::find_receivers(&mut txn, &peering).await? {
+            if let ::db::ConditionalWrite::NotApplied(_) = ::db::machine::try_update_network_config(
+                &mut txn,
+                &host.host_snapshot.id,
+                host.host_snapshot.network_config.version,
+                &host.host_snapshot.network_config.value,
+            )
+            .await?
+            {
+                return Err(CarbideError::ConcurrentModificationError(
+                    "machine network configuration",
+                    host.host_snapshot.network_config.version.to_string(),
+                )
+                .into());
+            }
+        }
+        // Readers see permission removal and every new group version together.
+        // A repeated delete resumes the wait without resetting those versions.
+        db::mark_deleting(&mut txn, id).await?;
+    }
 
     txn.commit().await?;
 

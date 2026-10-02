@@ -49,6 +49,7 @@ use crate::machine_utils::{
     PxeBootTarget, PxeError, PxeResponse, forge_agent_control, get_validation_id,
     send_pxe_boot_request,
 };
+use crate::run_jitter::{first_run_offset, jitter_interval};
 use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine, scout_stream};
 
 type DpuDhcpRelayHandle = oneshot::Sender<()>;
@@ -146,6 +147,8 @@ pub(super) struct MachineStateMachine {
     /// `Timer::PowerOffGraceful`: a graceful shutdown completes when this passes.
     power_off_deadline: Option<Instant>,
     agent_polling_deadline: Option<(Instant, Timer)>,
+    /// Spreads a fleet that starts together over the idle interval.
+    first_run_delay: Option<Duration>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     machine_dhcp_info: Option<DhcpResponseInfo>,
     machine_interface_id: Option<MachineInterfaceId>,
@@ -407,6 +410,7 @@ impl MachineStateMachine {
             os_ready_deadline: None,
             power_off_deadline: None,
             agent_polling_deadline: None,
+            first_run_delay: Some(first_run_offset(config.run_interval_idle)),
             bmc_dhcp_info: None,
             machine_dhcp_info: None,
             machine_interface_id: None,
@@ -462,6 +466,7 @@ impl MachineStateMachine {
             os_ready_deadline: None,
             power_off_deadline: None,
             agent_polling_deadline: None,
+            first_run_delay: Some(first_run_offset(config.run_interval_idle)),
             power_cycle_deadline: None,
             installed_os,
             machine_info,
@@ -477,7 +482,10 @@ impl MachineStateMachine {
     }
 
     pub(super) async fn advance(&mut self) -> Duration {
-        if let Some(duration) = self.process_actions().await {
+        if let Some(delay) = self.first_run_delay.take() {
+            return delay;
+        }
+        let sleep_duration = if let Some(duration) = self.process_actions().await {
             duration
         } else {
             let now = Instant::now();
@@ -535,7 +543,8 @@ impl MachineStateMachine {
                 .map(|nearest| nearest.saturating_duration_since(now))
                 .unwrap_or(self.config.run_interval_idle)
             }
-        }
+        };
+        jitter_interval(sleep_duration)
     }
 
     async fn process_actions(&mut self) -> Option<Duration> {
@@ -599,14 +608,14 @@ impl MachineStateMachine {
                 }
                 FsmAction::SetTimer(Timer::ScoutAgentControlPoll) => {
                     self.agent_polling_deadline = Some((
-                        Instant::now() + self.config.scout_run_interval,
+                        Instant::now() + jitter_interval(self.config.scout_run_interval),
                         Timer::ScoutAgentControlPoll,
                     ));
                     self.actions.pop_front();
                 }
                 FsmAction::SetTimer(Timer::DpuAgentControlPoll) => {
                     self.agent_polling_deadline = Some((
-                        Instant::now() + self.config.network_status_run_interval,
+                        Instant::now() + jitter_interval(self.config.network_status_run_interval),
                         Timer::DpuAgentControlPoll,
                     ));
                     self.actions.pop_front();
@@ -1581,10 +1590,44 @@ pub(super) enum AddressConfigError {
 
 #[cfg(test)]
 mod tests {
+    use bmc_mock::HostMachineInfo;
+    use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values};
+    use mac_address::MacAddress;
 
     use super::*;
+
+    #[tokio::test]
+    async fn first_advance_returns_the_start_offset_without_running_actions() {
+        let app_context = MachineATronContext::for_test();
+        let config = app_context.app_config.machines["config"].clone();
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let mut mac_pool = MacAddressPool::new_pool(MacAddressPoolConfig::new(mac, 24).unwrap());
+        let host_info = HostMachineInfo::new(
+            config.hw_type,
+            Vec::new(),
+            &mut mac_pool,
+            MacAddressPoolConfig::new(mac, 24).unwrap(),
+        );
+        let (bmc_command_tx, _bmc_command_rx) = mpsc::unbounded_channel();
+        let mut state_machine = MachineStateMachine::new(
+            MachineInfo::Host(host_info),
+            config.clone(),
+            app_context,
+            bmc_command_tx,
+            None,
+            None,
+            Uuid::new_v4(),
+        );
+        let queued_actions = state_machine.actions.len();
+
+        let offset = state_machine.advance().await;
+
+        assert!(offset < config.run_interval_idle);
+        assert!(state_machine.first_run_delay.is_none());
+        assert_eq!(state_machine.actions.len(), queued_actions);
+    }
 
     #[test]
     fn resolves_pxe_boot_identity_requirements() {

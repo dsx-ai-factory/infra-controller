@@ -1,0 +1,37 @@
+suite: proxy redirect handling
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: follows only same-origin redirects by default
+    set:
+      global.image.repository: registry.example.com/nvmetal-carbide
+      global.image.tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__REDIRECTS__MODE
+            value: follow_same_origin
+
+  - it: can return redirects to the client experimentally
+    set:
+      global.image.repository: registry.example.com/nvmetal-carbide
+      global.image.tag: test
+      bmcProxy.redirectMode: return_to_client
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__REDIRECTS__MODE
+            value: return_to_client
+
+  - it: rejects an unsupported redirect mode
+    set:
+      global.image.repository: registry.example.com/nvmetal-carbide
+      global.image.tag: test
+      bmcProxy.redirectMode: follow_anywhere
+    asserts:
+      - failedTemplate:
+          errorMessage: 'bmcProxy.redirectMode must be one of follow_same_origin or return_to_client; got "follow_anywhere"'

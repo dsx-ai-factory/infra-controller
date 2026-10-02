@@ -3729,6 +3729,15 @@ async fn vpc_deletion_requires_explicit_inactive_vni_release(
     assert_eq!(released.released_inactive_vni, u32::try_from(inactive_vni)?);
 
     env.api
+        .delete_vpc_peering(tonic::Request::new(rpc::forge::VpcPeeringDeletionRequest {
+            id: peering.id,
+        }))
+        .await?;
+    super::vpc_peering::deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
+
+    env.api
         .delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())
         .await?;
     assert!(

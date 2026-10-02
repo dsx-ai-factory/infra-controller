@@ -258,7 +258,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 	dpuExtensionServicesToDelete := []*cdbm.DpuExtensionService{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if inventory.InventoryPage == nil || inventory.InventoryPage.TotalPages == 0 || (inventory.InventoryPage.CurrentPage == inventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(inventory.GetInventoryPage()) {
 		for _, dpuExtensionService := range existingDpuExtensionServiceIDMap {
 			if !reportedDpuExtensionServiceIDMap[dpuExtensionService.ID] {
 				dpuExtensionServicesToDelete = append(dpuExtensionServicesToDelete, dpuExtensionService)

@@ -3517,7 +3517,7 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Deletion was rejected because certain preconditions were not satisfied.
+          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
@@ -3526,6 +3526,8 @@ paths:
         Delete a specific VPC by ID.
 
         Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+
+        First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -4060,21 +4062,47 @@ paths:
         - VPC Peering
       operationId: delete-vpc-peering
       description: |-
-        Delete a VPC peering by ID.
+        Request deletion of a VPC peering by ID.
+
+        The peering remains visible with status `Deleting` while Core waits for affected DPUs to apply the removal of peering permissions. Poll this peering's GET endpoint until it returns `404` before deleting either VPC. REST removes the record after Site inventory confirms the peering is gone, so completion can take longer than the DPU update.
+
+        Repeating DELETE while the REST record still exists returns `202` if Core accepts the request or has already removed the peering. Once the REST record is gone, DELETE returns `404`.
+
+        A Site precondition failure returns `412` and leaves the peering's REST status unchanged. This can happen when a concurrent network update prevents deletion from being accepted. Retry the request; contact support if it continues to fail.
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted. The peering remains in Deleting until Site inventory confirms removal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                accepted:
+                  value:
+                    message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                precondition-failed:
+                  value:
+                    source: nico
+                    message: Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.
+                    data: null
   '/v2/org/{org}/nico/vpc-prefix':
     parameters:
       - schema:
@@ -5945,7 +5973,7 @@ paths:
         description: |-
           Expected Rack update request.
 
-          Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
+          Provide a non-null value for at least one of rackId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
         required: true
       responses:
         '200':
@@ -9297,6 +9325,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -9702,6 +9733,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -21594,7 +21628,7 @@ components:
         slaacEnabled:
           type: boolean
           readOnly: true
-          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -21852,7 +21886,7 @@ components:
         slaacEnabled:
           type: boolean
           default: false
-          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -22277,7 +22311,7 @@ components:
     VpcPeeringStatus:
       title: VpcPeeringStatus
       type: string
-      description: Status values for VPC peering objects
+      description: Status values for VPC peering objects. Deleting means removal is pending; wait until the peering's GET endpoint returns 404 before deleting either VPC.
       enum:
         - Pending
         - Configuring
@@ -25195,7 +25229,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. A nonempty list is validated against the individual Machine capabilities persisted by inventory reconciliation, not Instance Type capability summaries. The selected Machine must satisfy every attachment; Instance Type placement considers only compatible Machines. Invalid explicit-machine selectors return 400. If available Instance Type candidates are all incompatible, the 400 response identifies SpectrumX capabilities as the reason. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -25371,7 +25405,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its individual persisted capabilities, not Instance Type capability summaries. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. The response identifies SpectrumX when filtering reduces otherwise sufficient capacity below the requested count, and identifies both SpectrumX and topology constraints when filtering removes candidates and no single NVLink domain has enough compatible Machines. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -25570,9 +25604,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance''s SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -26036,11 +26072,12 @@ components:
           description: ID of the SpectrumX Partition the attachment should associate with
         device:
           type: string
-          description: 'SpectrumX device to attach over, matching the device description reported for the Machine''s SpectrumX interfaces'
+          description: 'Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.'
         deviceInstance:
           type: integer
           minimum: 0
-          description: 'Index of the device, used to identify which interface card to attach the Partition to'
+          maximum: 4294967295
+          description: 'Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.'
         attachmentType:
           type: string
           enum:
@@ -29918,7 +29955,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30089,7 +30126,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
           type:
             - string
@@ -30290,7 +30327,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30433,7 +30470,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -30650,7 +30687,7 @@ components:
       description: |-
         Request data to update an existing Expected Rack.
 
-        Provide a non-null value for at least one of `rackId`, `rackProfileId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
+        Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
 
         For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
@@ -31236,7 +31273,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -31405,7 +31442,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string

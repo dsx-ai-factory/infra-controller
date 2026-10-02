@@ -18,14 +18,15 @@
 //! Request classes: operator-defined groups of proxied BMC requests that
 //! share an upstream budget and a place in each BMC's admission queue.
 //!
-//! A class is a name, an ordered list of [`RequestPattern`]s, an upstream
-//! timeout, and its admission settings. The table classifies every proxied
-//! request by walking the classes in config order and taking the first whose
+//! A class is a name, the callers whose requests it takes, an ordered list of
+//! [`RequestPattern`]s, an upstream timeout, and its admission settings. The
+//! table classifies every proxied request by walking the classes in config
+//! order and taking the first that takes the caller's requests and whose
 //! patterns match; a request no class claims belongs to the implicit `default`
 //! class, which carries the proxy's historical upstream budget,
 //! [`DEFAULT_UPSTREAM_TIMEOUT`], and no `max_in_flight` of its own. Operators may declare
-//! `default` themselves to change those, but it takes no patterns: it exists
-//! to catch what nothing else matched.
+//! `default` themselves to change those, but it takes no patterns or
+//! principals: it exists to catch what nothing else matched.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -33,6 +34,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_authn::middleware::Principal;
 use carbide_instrument::LabelValue;
 use opentelemetry::StringValue;
 use serde::de::Error as SerdeError;
@@ -103,9 +105,15 @@ struct ClassDefinition {
     /// unique across the table.
     name: String,
     /// Patterns a request must match to belong to this class. Evaluated in
-    /// order across classes; the first class with a matching pattern wins.
+    /// order across classes; the first class that takes the caller's
+    /// requests and has a matching pattern wins.
     #[serde(rename = "match", default)]
     patterns: Vec<RequestPattern>,
+    /// Callers whose requests this class takes, by principal identifier as
+    /// in `allowed_principals`. Absent takes every caller's. Never
+    /// `anonymous`, which every caller holds.
+    #[serde(default)]
+    principals: Option<Vec<String>>,
     /// Total budget for one upstream exchange in this class.
     #[serde(with = "humantime_serde", default = "default_upstream_timeout")]
     upstream_timeout: Duration,
@@ -133,6 +141,9 @@ fn default_max_queued() -> NonZeroUsize {
 /// A validated request class.
 pub(crate) struct RequestClass {
     pub(crate) name: ClassName,
+    /// Callers whose requests the class takes, by principal identifier;
+    /// empty takes every caller's.
+    principals: Vec<String>,
     patterns: Vec<RequestPattern>,
     /// Total budget for one upstream exchange: looking up the BMC's
     /// credentials, waiting for a slot there, and from connecting to the BMC
@@ -155,12 +166,23 @@ impl RequestClass {
     fn default_class() -> Self {
         Self {
             name: ClassName(Arc::from(DEFAULT_CLASS_NAME)),
+            principals: Vec::new(),
             patterns: Vec::new(),
             upstream_timeout: DEFAULT_UPSTREAM_TIMEOUT,
             priority: 0,
             max_in_flight: None,
             max_queued: DEFAULT_MAX_QUEUED,
         }
+    }
+
+    /// Whether the class takes the requests of a caller holding
+    /// `principals`.
+    fn takes_from(&self, principals: &[String]) -> bool {
+        self.principals.is_empty()
+            || self
+                .principals
+                .iter()
+                .any(|principal| principals.contains(principal))
     }
 }
 
@@ -201,6 +223,16 @@ enum ClassTableError {
     NoPatterns(String),
     #[error("the default class takes no match patterns; it catches unmatched requests")]
     DefaultWithPatterns,
+    #[error("class {0:?} lists no principals; omit principals to take every caller's requests")]
+    NoPrincipals(String),
+    #[error("the default class takes no principals; it catches unmatched requests")]
+    DefaultWithPrincipals,
+    #[error(
+        "class {0:?} lists the anonymous principal, which every caller holds; omit principals to take every caller's requests"
+    )]
+    AnonymousPrincipal(String),
+    #[error("class {0:?} lists principal {1:?}, which is empty or padded with whitespace")]
+    MalformedPrincipal(String, String),
     #[error("class {0:?} upstream_timeout must be greater than zero")]
     ZeroTimeout(String),
     #[error("class {0:?} upstream_timeout exceeds the {MAX_UPSTREAM_TIMEOUT:?} maximum")]
@@ -238,8 +270,28 @@ impl ClassTable {
                 (false, true) => return Err(ClassTableError::NoPatterns(name)),
                 _ => {}
             }
+            let principals = match definition.principals {
+                Some(_) if is_default => return Err(ClassTableError::DefaultWithPrincipals),
+                Some(principals) if principals.is_empty() => {
+                    return Err(ClassTableError::NoPrincipals(name));
+                }
+                principals => principals.unwrap_or_default(),
+            };
+            if let Some(malformed) = principals
+                .iter()
+                .find(|principal| principal.is_empty() || principal.trim() != principal.as_str())
+            {
+                return Err(ClassTableError::MalformedPrincipal(name, malformed.clone()));
+            }
+            if principals
+                .iter()
+                .any(|principal| principal == &Principal::Anonymous.as_identifier())
+            {
+                return Err(ClassTableError::AnonymousPrincipal(name));
+            }
             let class = RequestClass {
                 name: ClassName(Arc::from(name)),
+                principals,
                 patterns: definition.patterns,
                 upstream_timeout: definition.upstream_timeout,
                 priority: definition.priority,
@@ -256,16 +308,23 @@ impl ClassTable {
         Ok(table)
     }
 
-    /// The class of a request for `method` on `path`: the first configured
-    /// class with a matching pattern, else the default class.
-    pub(crate) fn classify(&self, method: &http::Method, path: &str) -> &RequestClass {
+    /// The class of a request for `method` on `path` from a caller holding
+    /// `principals`: the first configured class that takes the caller's
+    /// requests and has a matching pattern, else the default class.
+    pub(crate) fn classify(
+        &self,
+        method: &http::Method,
+        path: &str,
+        principals: &[String],
+    ) -> &RequestClass {
         self.classes
             .iter()
             .find(|class| {
-                class
-                    .patterns
-                    .iter()
-                    .any(|pattern| pattern.matches(method, path))
+                class.takes_from(principals)
+                    && class
+                        .patterns
+                        .iter()
+                        .any(|pattern| pattern.matches(method, path))
             })
             .unwrap_or(&self.default)
     }
@@ -296,6 +355,12 @@ mod tests {
 
     const TABLE: &str = r#"
         [[class]]
+        name = "dps"
+        principals = ["spiffe-service-id/nv-dps-agent", "spiffe-service-id/nv-dps"]
+        match = ["/redfish/v1/**"]
+        upstream_timeout = "20s"
+
+        [[class]]
         name = "control"
         match = ["POST,PATCH,DELETE /redfish/v1/**"]
         upstream_timeout = "45s"
@@ -313,6 +378,11 @@ mod tests {
         name = "reads"
         match = ["GET /redfish/v1/**"]
         upstream_timeout = "30s"
+
+        [[class]]
+        name = "admins"
+        principals = ["external-role/admin"]
+        match = ["/redfish/v1/**"]
 
         [[class]]
         name = "default"
@@ -405,34 +475,77 @@ mod tests {
                 r#"[[class]]
                    name = "control"
                    match = ["BOGUS /redfish/v1/**"]"# => Fails,
+                r#"[[class]]
+                   name = "dps"
+                   principals = []
+                   match = ["/redfish/v1/**"]"# => Fails,
+                r#"[[class]]
+                   name = "default"
+                   principals = ["spiffe-service-id/nv-dps"]"# => Fails,
+                r#"[[class]]
+                   name = "dps"
+                   principals = ["spiffe-service-id/nv-dps", "anonymous"]
+                   match = ["/redfish/v1/**"]"# => Fails,
+                r#"[[class]]
+                   name = "dps"
+                   principals = [""]
+                   match = ["/redfish/v1/**"]"# => Fails,
+                r#"[[class]]
+                   name = "dps"
+                   principals = [" spiffe-service-id/nv-dps"]
+                   match = ["/redfish/v1/**"]"# => Fails,
             }
         );
     }
 
-    /// What a request for `method` on `path` is classified as: the class
-    /// name and its budget in seconds.
-    fn classified(method: http::Method, path: &'static str) -> (String, u64) {
+    /// A caller holding no principal of its own.
+    const ANYONE: &[&str] = &["anonymous"];
+    /// An admin, by its certificate's group.
+    const ADMIN: &[&str] = &["external-role/admin", "anonymous"];
+    /// DPS, among other principals.
+    const DPS: &[&str] = &[
+        "trusted-certificate",
+        "spiffe-service-id/nv-dps",
+        "anonymous",
+    ];
+
+    /// What a request for `method` on `path` from a caller holding
+    /// `principals` is classified as: the class name and its budget in
+    /// seconds.
+    fn classified(method: http::Method, path: &'static str, principals: &[&str]) -> (String, u64) {
         let table = parse_table(TABLE).expect("the test table parses");
-        let class = table.classify(&method, path);
+        let principals: Vec<String> = principals.iter().map(ToString::to_string).collect();
+        let class = table.classify(&method, path, &principals);
         (class.name.to_string(), class.upstream_timeout.as_secs())
     }
 
     #[test]
     fn classification_takes_the_first_matching_class() {
         value_scenarios!(
-            run = |(method, path)| classified(method, path);
+            run = |(method, path, principals)| classified(method, path, principals);
             "pattern order and verbs" {
-                (http::Method::PATCH, "/redfish/v1/Systems/System_0") => ("control".to_string(), 45),
+                // `dps` matches too, but takes only DPS's requests.
+                (http::Method::PATCH, "/redfish/v1/Systems/System_0", ANYONE) => ("control".to_string(), 45),
                 // `reads` matches too, but comes later.
-                (http::Method::GET, "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0") => ("inventory".to_string(), 300),
+                (http::Method::GET, "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0", ANYONE) => ("inventory".to_string(), 300),
             }
 
             "a class that sets no budget" {
-                (http::Method::GET, "/redfish/v1/EventService/Subscriptions") => ("events".to_string(), 60),
+                (http::Method::GET, "/redfish/v1/EventService/Subscriptions", ANYONE) => ("events".to_string(), 60),
+            }
+
+            "a class for some callers" {
+                // `control` matches too, but comes later; the caller holds
+                // the second of the class's principals.
+                (http::Method::PATCH, "/redfish/v1/Systems/System_0", DPS) => ("dps".to_string(), 20),
+                // `admins` takes the caller too, but comes later.
+                (http::Method::GET, "/redfish/v1/Systems/System_0", ADMIN) => ("reads".to_string(), 30),
+                // The caller is DPS, but no `dps` pattern matches.
+                (http::Method::PUT, "/other", DPS) => ("default".to_string(), 90),
             }
 
             "unmatched requests fall to the default class" {
-                (http::Method::PUT, "/redfish/v1/Systems/System_0") => ("default".to_string(), 90),
+                (http::Method::PUT, "/redfish/v1/Systems/System_0", ANYONE) => ("default".to_string(), 90),
             }
         );
     }

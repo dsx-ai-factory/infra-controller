@@ -48,6 +48,7 @@ carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-secrets = { path = "../secrets" }
 carbide-site-explorer = { path = "../site-explorer" }
 carbide-version = { path = "../version" }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 spancounter = { path = "../spancounter" }

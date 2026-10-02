@@ -12,6 +12,7 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
@@ -69,6 +70,10 @@ func testVpcPeeringSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkLogicalPartition)(nil))
+	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NetworkSecurityGroup)(nil))
+	require.NoError(t, err)
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Vpc)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.VpcPeering)(nil))
@@ -310,12 +315,14 @@ func TestManageVpcPeering_UpdateVpcPeeringsInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		readyVpcPeerings   []*cdbm.VpcPeering
-		deletedVpcPeerings []*cdbm.VpcPeering
-		wantErr            bool
+		name                string
+		fields              fields
+		args                args
+		prepare             func(*testing.T)
+		readyVpcPeerings    []*cdbm.VpcPeering
+		deletingVpcPeerings []*cdbm.VpcPeering
+		deletedVpcPeerings  []*cdbm.VpcPeering
+		wantErr             bool
 	}{
 		{
 			name: "test Vpc Peering inventory processing error, non-existent Site",
@@ -473,6 +480,42 @@ func TestManageVpcPeering_UpdateVpcPeeringsInDB(t *testing.T) {
 			},
 			readyVpcPeerings: []*cdbm.VpcPeering{{ID: recoveredVpcPeeringID}},
 		},
+		{
+			name:   "Core deletion moves a Ready VPC Peering to Deleting",
+			fields: fields{dbSession: dbSession},
+			prepare: func(t *testing.T) {
+				require.NoError(t, cdbm.NewVpcPeeringDAO(dbSession).UpdateStatusByID(ctx, nil, vp1.ID, cdbm.VpcPeeringStatusReady))
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: site.ID,
+				vpcPeeringInventory: &corev1.VPCPeeringInventory{
+					VpcPeerings: []*corev1.VpcPeering{{
+						Id:    &corev1.VpcPeeringId{Value: vp1.ID.String()},
+						State: corev1.VpcPeeringState_VPC_PEERING_STATE_DELETING,
+					}},
+				},
+			},
+			deletingVpcPeerings: []*cdbm.VpcPeering{vp1},
+		},
+		{
+			name:   "delayed Ready inventory does not cancel a local deletion",
+			fields: fields{dbSession: dbSession},
+			prepare: func(t *testing.T) {
+				require.NoError(t, cdbm.NewVpcPeeringDAO(dbSession).UpdateStatusByID(ctx, nil, vp1.ID, cdbm.VpcPeeringStatusDeleting))
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: site.ID,
+				vpcPeeringInventory: &corev1.VPCPeeringInventory{
+					VpcPeerings: []*corev1.VpcPeering{{
+						Id:    &corev1.VpcPeeringId{Value: vp1.ID.String()},
+						State: corev1.VpcPeeringState_VPC_PEERING_STATE_READY,
+					}},
+				},
+			},
+			deletingVpcPeerings: []*cdbm.VpcPeering{vp1},
+		},
 	}
 
 	for _, tt := range tests {
@@ -480,6 +523,9 @@ func TestManageVpcPeering_UpdateVpcPeeringsInDB(t *testing.T) {
 			mv := ManageVpcPeering{
 				dbSession:      tt.fields.dbSession,
 				siteClientPool: tt.fields.siteClientPool,
+			}
+			if tt.prepare != nil {
+				tt.prepare(t)
 			}
 
 			err := mv.UpdateVpcPeeringsInDB(tt.args.ctx, tt.args.siteID, tt.args.vpcPeeringInventory)
@@ -500,6 +546,12 @@ func TestManageVpcPeering_UpdateVpcPeeringsInDB(t *testing.T) {
 			for _, vp := range tt.deletedVpcPeerings {
 				_, err := vpcPeeringDAO.GetByID(ctx, nil, vp.ID, nil)
 				assert.Equal(t, cdb.ErrDoesNotExist, err, fmt.Sprintf("VPC Peering %s should have been deleted", vp.ID))
+			}
+			for _, vp := range tt.deletingVpcPeerings {
+				deleting, err := vpcPeeringDAO.GetByID(ctx, nil, vp.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.VpcPeeringStatusDeleting, deleting.Status)
+				assert.Nil(t, deleting.Deleted)
 			}
 		})
 	}
@@ -557,6 +609,9 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 		prepare           func(*testing.T, *fixture)
 		request           func(*fixture) *corev1.VpcPeering
 		expectedRecovered bool
+		reportedState     corev1.VpcPeeringState
+		expectedStatus    string
+		expectedMessage   string
 	}{
 		{
 			name: "skips VPC Peering with missing VPC",
@@ -571,9 +626,17 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 		{
 			name:              "creates VPC Peering from Site inventory",
 			expectedRecovered: true,
+			expectedStatus:    cdbm.VpcPeeringStatusReady,
+			expectedMessage:   "VPC Peering was found on Site",
 		},
 		{
-			name: "undeletes VPC Peering from Site inventory",
+			name:              "recovers a missing VPC Peering while Core is deleting it",
+			expectedRecovered: true,
+			reportedState:     corev1.VpcPeeringState_VPC_PEERING_STATE_DELETING,
+			expectedStatus:    cdbm.VpcPeeringStatusDeleting,
+		},
+		{
+			name: "undeletes VPC Peering with the Deleting status reported by Core",
 			prepare: func(t *testing.T, f *fixture) {
 				t.Helper()
 
@@ -595,6 +658,8 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 				cwu.TestInventoryAgeDeletedTimestamp(f.ctx, t, f.dbSession, (*cdbm.VpcPeering)(nil), f.vpcPeeringID)
 			},
 			expectedRecovered: true,
+			reportedState:     corev1.VpcPeeringState_VPC_PEERING_STATE_DELETING,
+			expectedStatus:    cdbm.VpcPeeringStatusDeleting,
 		},
 		{
 			// The delete is newer than the interval, so this inventory may predate it and
@@ -649,6 +714,7 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 			}
 
 			request := f.controllerVpcPeering
+			request.State = test.reportedState
 			if test.request != nil {
 				request = test.request(f)
 			}
@@ -668,9 +734,18 @@ func TestManageVpcPeering_CreateOrUpdateVpcPeeringFromSite(t *testing.T) {
 			assert.Nil(t, recovered.InfrastructureProviderID)
 			require.NotNil(t, recovered.TenantID)
 			assert.Equal(t, f.tenant.ID, *recovered.TenantID)
-			assert.Equal(t, cdbm.VpcPeeringStatusReady, recovered.Status)
+			assert.Equal(t, test.expectedStatus, recovered.Status)
 			assert.Equal(t, f.site.CreatedBy, recovered.CreatedBy)
 			assert.Nil(t, recovered.Deleted)
+			if test.expectedMessage != "" {
+				statusDetails, _, err := cdbm.NewStatusDetailDAO(f.dbSession).GetAll(f.ctx, nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}}, cdbp.PageInput{})
+				require.NoError(t, err)
+				require.Len(t, statusDetails, 1)
+				assert.Equal(t, test.expectedStatus, statusDetails[0].Status)
+				require.NotNil(t, statusDetails[0].Message)
+				assert.Equal(t, test.expectedMessage, *statusDetails[0].Message)
+			}
 		})
 	}
 }

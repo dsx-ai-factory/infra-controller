@@ -2302,6 +2302,8 @@ message VpcUpdateVirtualizationResult {
 }
 
 message VpcDeletionRequest {
+  // All VPC peerings must finish deleting before this request can succeed.
+  // Retained Ready or Deleting peerings return FAILED_PRECONDITION.
   common.VpcId id = 1;
 }
 
@@ -2428,10 +2430,22 @@ message VpcPrefixStateHistoriesRequest {
   repeated common.VpcPrefixId vpc_prefix_ids = 1;
 }
 
+// A peering remains discoverable until affected DPUs acknowledge its removal.
 message VpcPeering {
   common.VpcPeeringId id = 1;
   common.VpcId vpc_id = 2;
   common.VpcId peer_vpc_id = 3;
+  // Unspecified on older servers. New servers report Ready or Deleting.
+  VpcPeeringState state = 4;
+}
+
+enum VpcPeeringState {
+  VPC_PEERING_STATE_UNSPECIFIED = 0;
+  // The peering is active. Creation remains synchronous.
+  VPC_PEERING_STATE_READY = 1;
+  // Peer permissions are omitted from new DPU configurations. The peering
+  // remains reserved until every affected DPU acknowledges their removal.
+  VPC_PEERING_STATE_DELETING = 2;
 }
 
 message VpcPeeringIdList {
@@ -2461,9 +2475,13 @@ message VpcPeeringsByIdsRequest {
 }
 
 message VpcPeeringDeletionRequest {
+  // Repeated requests while Deleting succeed without requesting another update.
+  // A missing peering returns NOT_FOUND.
   common.VpcPeeringId id = 1;
 }
 
+// Deletion was requested, not necessarily completed. Poll FindVpcPeeringIds or
+// FindVpcPeeringsByIds for absence before deleting either VPC.
 message VpcPeeringDeletionResult {
 }
 

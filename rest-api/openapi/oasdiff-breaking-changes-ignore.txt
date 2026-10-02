@@ -320,3 +320,7 @@ GET /v2/org/{org}/nico/rack the `items/nvLinkDomainIds/items/` response's proper
 GET /v2/org/{org}/nico/rack/{id} the `nvLinkDomainIds/items/` response's property `format` changed from `uuid` to `none` for status `200`
 GET /v2/org/{org}/nico/tray the `items/nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
 GET /v2/org/{org}/nico/tray/{id} the `nvLinkDomainId` response's property `format` changed from `uuid` to `none` for status `200`
+
+# Peering deletion now waits for DPU acknowledgement and inventory removal.
+# Return 202 with MessageResponse, not 204; callers poll GET for completion.
+API DELETE /v2/org/{org}/nico/vpc-peering/{id} removed the success response with the status `204`

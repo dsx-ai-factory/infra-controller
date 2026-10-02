@@ -1109,6 +1109,34 @@ startup and writer checks, following the
 [peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
 and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115).
 
+### VPC Peering Deletion
+
+`DeleteVpcPeering` starts permission removal. `FindVpcPeeringsByIds` reports
+`VPC_PEERING_STATE_DELETING` until every affected DPU acknowledges the new
+managed-host network configuration. During that wait, FNN and ETV responses
+omit the peer's prefix permissions; FNN also omits its VNI import. Inventory and
+overlap admission still include the peering. Repeated deletion requests resume
+the same wait without requesting another network update.
+
+`DeleteVpc` returns `FailedPrecondition` while any peering remains, including a
+deleting peering. Delete the peerings and wait for them to disappear from
+inventory before deleting either VPC. The VPC retains its VNI allocation until
+VPC deletion succeeds. The explicit operator operation `ReleaseVpcInactiveVni`
+has its own verification and operational-hold requirements; peering deletion
+does not replace them.
+
+An unavailable DPU can keep a peering deleting indefinitely. The controller logs
+the host and expected network version and stores the wait reason in
+`vpc_peerings.controller_state_outcome`. Restore the DPU and let it acknowledge
+the configuration; ordinary deletion never treats a missing receipt as success.
+
+Stop and drain API processes that hard-delete peerings before starting this
+controller. Those binaries do not honor the deletion marker and cannot safely
+share peering mutations with the controller or serve as an application rollback.
+No intermediate release is required. The additive migration can run while the
+outgoing API is live, with the existing possibility of cached wildcard-query
+errors until that process exits.
+
 ### Stored Prefix Scope
 
 `network_vpc_prefixes.overlap_vpc_id` and `network_prefixes.overlap_vpc_id` are

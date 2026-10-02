@@ -29,11 +29,13 @@ Important configuration fields:
 - `auth.acls`: per-principal ACL rules for HTTP method and path authorization
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
 - `bmc_proxy`: optional upstream override for dev/test chaining
-- `class`: optional request classes that set how long the proxy waits on the
-  BMC, and how many of their requests it sends to a BMC at a time; see
-  [`class`](#class)
+- `class`: optional request classes, by method, path, and caller, that set
+  how long the proxy waits on the BMC, and how many of their requests it sends
+  to a BMC at a time; see [`class`](#class)
 - `admission`: optional limit on the requests the proxy sends to each BMC; see
   [`admission`](#admission)
+- `redirects.mode`: redirect policy, either `follow_same_origin` (default) or
+  `return_to_client`
 
 Example shape:
 
@@ -41,6 +43,9 @@ Example shape:
 listen = "[::]:1079"
 metrics_endpoint = "[::]:1080"
 allowed_principals = ["spiffe-service-id/dpf"]
+
+[redirects]
+mode = "follow_same_origin"
 
 [tls]
 identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -63,6 +68,37 @@ additional_issuer_cns = []
 [auth.acls]
 "spiffe-service-id/dpf" = ["/redfish/v1/**"]
 ```
+
+### `redirects.mode`
+
+`follow_same_origin` follows up to five redirects within the original scheme, host, and effective
+port. Redirects are returned instead when a `307` or `308` requires replaying a streamed request
+body, or when chaining produces a redirect to the BMC's direct HTTPS address on port 443.
+
+Automatically followed redirects do not re-run ACL authorization. Same-origin checks protect
+credential scope; they do not establish that the redirected path is allowed for the principal.
+
+For safe redirects returned to the client, the proxy removes the scheme and authority from
+`Location`, preserving the path, query, and fragment. The client must send the same `Forwarded`
+target on its follow-up request.
+
+The proxy does not follow any other origin because the BMC credential includes the Redfish
+`X-Auth-Token` header, which Reqwest does not strip automatically on a cross-origin redirect. Such
+a redirect returns `502` without exposing its `Location`.
+
+This is a deliberate security change from the earlier unrestricted five-hop policy: a
+cross-origin redirect is rejected instead of being followed.
+
+`return_to_client` disables automatic following and returns safe redirects using the same rewrite
+so the caller can make a separately authorized request. This mode is experimental.
+
+Both modes reject non-HTTP(S), malformed, ambiguous, credential-bearing, and other cross-origin
+redirect targets. On a non-redirect response such as a Redfish session creation `201`, the proxy
+rewrites a safe same-BMC `Location` and omits an unsafe one without changing the response status.
+
+`NICO_BMC_PROXY__REDIRECTS__MODE` overrides the TOML value because environment providers are merged
+after the configuration file. The Helm chart always sets that variable from
+`bmcProxy.redirectMode`.
 
 ### `auth.acls`
 
@@ -147,6 +183,15 @@ upstream_timeout = "90s"
   entry without a leading `!`: optional comma-separated methods (`GET`,
   `HEAD`, `POST`, `PUT`, `PATCH`, or `DELETE`, in any case), then a path in
   the syntax above. Required for every class but `default`.
+- `principals`: an array of the callers whose requests the class takes, each
+  a principal identifier as in `allowed_principals` and `auth.acls`, such as
+  `spiffe-service-id/nv-dps`. A request belongs to the class only when its
+  caller holds one of them and the request matches a pattern;
+  `trusted-certificate` takes every caller that presented a trusted
+  certificate. A class never lets a caller in: only requests the ACL allows
+  are classified. Optional; a class without it takes every caller's requests.
+  It may not be empty, list `anonymous`, which every caller holds, or list an
+  empty or whitespace-padded identifier, and `default` may not set it.
 - `upstream_timeout`: how long one exchange with the BMC may take, as a
   duration string such as `"500ms"`, `"45s"`, or `"5m"`, above zero and at
   most 30 minutes. A class that omits it gets 60 seconds, not the `default`
@@ -158,7 +203,7 @@ upstream_timeout = "90s"
   to one BMC at a time, at least 1. Optional; unlimited by default.
 - `max_queued`: how many of the class's requests may wait for one BMC at a
   time, from 1 to 128; a request that stops waiting gives up its place, and
-  one more than this is refused with `503` at once. Requests arriving
+  one more than this is refused with `429` at once. Requests arriving
   together on their way to free slots do not count. Optional, 16 by default.
   Each BMC in use costs the proxy memory in proportion to the `max_queued` of
   every class that takes slots.
@@ -168,36 +213,42 @@ for a slot at the BMC (see [`admission`](#admission)), then runs from
 connecting to the BMC until the proxy has read the last byte of the BMC's
 response body, redirects the proxy follows included. Most
 bodies are passed on to the caller as they are read, so a slow caller spends
-the budget too. When the budget runs out before the BMC answers, the caller
-gets `502`; when it runs out while the body is being passed on, the body is
-cut off. A request the proxy replays with fresh credentials gets a budget of
-its own, which covers looking up the fresh credentials. A streamed upload (a
-body over 8 MiB that declares its length) looks up credentials and waits for
-a slot within its class's budget, then gets a budget of its own for the
+the budget too. When the budget runs out while the proxy looks up credentials
+or waits for the BMC to answer, the caller gets `502`; while the request waits
+for a slot, `429`; while the body is being passed on, the body is cut off. A
+request the proxy replays with fresh credentials gets a budget of its own,
+which covers looking up the fresh credentials. A streamed upload (a body over
+8 MiB that declares its length) looks up credentials and waits for a slot
+within its class's budget, then gets a budget of its own for the
 transfer, scaled from its declared size: 60 seconds plus the transfer at
 10 kB/s, at most four hours.
 
-A request belongs to the first class, in file order, with a matching pattern.
-A request no class matches belongs to `default`, whose budget is 60 seconds;
-declare `default`, without `match`, only to change that or its admission
-settings. A budget longer than
-the caller's own deadline does not help that caller. A `[[class]]` table that
-breaks these rules, or has a key not listed here, stops the proxy from
+A request belongs to the first class, in file order, that takes its caller's
+requests and has a matching pattern. A request no class takes belongs to
+`default`, whose budget is 60 seconds; declare `default`, without `match` or
+`principals`, only to change that or its admission settings. A budget longer
+than the caller's own deadline does not help that caller. A `[[class]]` table
+that breaks these rules, or has a key not listed here, stops the proxy from
 starting.
 
 ### `admission`
 
 The proxy can limit how many requests it sends to each BMC at a time, and
-choose which waiting request goes next:
+choose which waiting request goes next. Here, DPS's waiting requests go ahead
+of other callers', but take at most two of a BMC's four slots, so DPS cannot
+shut the others out; other callers send at most two metrics reads to a BMC at
+a time:
 
 ```toml
 [admission]
 max_in_flight_per_bmc = 4
 
 [[class]]
-name = "power"
-match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
+name = "dps"
+principals = ["spiffe-service-id/nv-dps"]
+match = ["/redfish/v1/**"]
 priority = 1
+max_in_flight = 2
 
 [[class]]
 name = "metrics"
@@ -236,10 +287,12 @@ starts sending the upload.
 
 Waiting spends the request's budget, and a request that waited has only the
 rest of it for its first exchange with the BMC; a streamed upload keeps its
-own. The proxy refuses a request with `503` and a plain-text body giving the
-reason when its class's queue at the BMC is full of requests still waiting,
-when no slot frees within its budget, when the proxy already tracks 100,000
-BMCs, or when the proxy is shutting down. It counts refusals in
+own. The proxy refuses a request with a plain-text body giving the reason:
+with `429 Too Many Requests` when its class's queue at the BMC is full of
+requests still waiting, or when no slot frees within its budget, and with
+`503 Service Unavailable` when the proxy already tracks 100,000 BMCs, or when
+it is shutting down. A refused request never reached the BMC, so even a write
+can be sent again; the refusal carries no `Retry-After`. It counts refusals in
 `carbide_bmc_proxy_admission_refused_total`, by `class` and `reason`
 (`queue_full`, `timeout`, `too_many_bmcs`, or `shutting_down`), and records
 the waits of requests that got a slot in

@@ -389,6 +389,8 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: NICo mTLS and Authorization
+              path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev
               path: development/issuer_ca_recreate.md
             - page: Visual Studio Code Remote Development
