@@ -34,7 +34,10 @@ pub async fn find_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE bmc_mac_address=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -46,7 +49,10 @@ pub async fn find_by_id(
     txn: &mut PgConnection,
     id: Uuid,
 ) -> Result<Option<ExpectedPowerShelf>, DatabaseError> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE expected_power_shelf_id=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE expected_power_shelf_id=$1";
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -59,7 +65,10 @@ pub async fn find_by_id_for_update(
     txn: &mut PgConnection,
     expected_power_shelf_id: Uuid,
 ) -> DatabaseResult<Option<ExpectedPowerShelf>> {
-    let query = "SELECT * FROM expected_power_shelves WHERE expected_power_shelf_id=$1 FOR UPDATE";
+    let query = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE expected_power_shelf_id=$1 FOR UPDATE";
     sqlx::query_as(query)
         .bind(expected_power_shelf_id)
         .fetch_optional(txn)
@@ -71,7 +80,10 @@ pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE bmc_mac_address=ANY($1)";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedPowerShelf> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -99,7 +111,10 @@ pub async fn find_many_by_bmc_mac_address(
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -111,7 +126,10 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE rack_id=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -155,7 +173,10 @@ pub async fn create(
     let query = "INSERT INTO expected_power_shelves
             (expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password, serial_number, bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id, bmc_retain_credentials)
             VALUES
-            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7, $8, $9::jsonb, $10, $11) RETURNING *";
+            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7, $8, $9::jsonb, $10, $11)
+            RETURNING expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+                serial_number, bmc_ip_address, metadata_name, metadata_description,
+                metadata_labels, rack_id, bmc_retain_credentials";
 
     sqlx::query_as(query)
         .bind(id)

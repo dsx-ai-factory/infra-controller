@@ -26,7 +26,10 @@ pub async fn find_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> Result<Option<ExpectedRack>, DatabaseError> {
-    let sql = "SELECT * FROM expected_racks WHERE rack_id=$1";
+    let sql =
+        "SELECT rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels,
+        rack_group_id
+        FROM expected_racks WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_optional(txn)
@@ -36,7 +39,10 @@ pub async fn find_by_rack_id(
 
 /// find_all returns all expected racks.
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRack>> {
-    let sql = "SELECT * FROM expected_racks";
+    let sql =
+        "SELECT rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels,
+        rack_group_id
+        FROM expected_racks";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -48,7 +54,9 @@ pub async fn create(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResu
     let query = "INSERT INTO expected_racks
              (rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels, rack_group_id)
              VALUES
-             ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::jsonb, $6::varchar) RETURNING *";
+             ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::jsonb, $6::varchar)
+             RETURNING rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels,
+                 rack_group_id";
 
     sqlx::query_as(query)
         .bind(&rack.rack_id)
