@@ -352,6 +352,10 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		lifecycleStatus, lifecycleErr := cdbm.DpuExtensionServiceStatusFromLifecycleStatus(controllerDpuExtensionService.LifecycleStatus)
 		if lifecycleErr == nil {
 			status = lifecycleStatus
+			if status == cdbm.DpuExtensionServiceStatusDeleting {
+				logger.Info().Msg("skipping create or undelete of DPU Extension Service from Site inventory: Site reports a terminal lifecycle state")
+				return nil
+			}
 			statusMessage = fmt.Sprintf("Core reports DPU Extension Service in %s status", lifecycleStatus)
 		}
 	default:
@@ -430,10 +434,10 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 
 		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
 		// the same fallback name.
-		lockErr := transaction.AcquireAdvisoryLock(
+		lockErr := transaction.TryAcquireAdvisoryLock(
 			ctx,
 			cdb.GetAdvisoryLockIDFromString("dpu-extension-service-recovery-"+tenant.ID.String()),
-			true,
+			nil,
 		)
 		if lockErr != nil {
 			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to acquire Tenant recovery lock, DB error: %w", lockErr)
