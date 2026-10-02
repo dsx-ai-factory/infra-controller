@@ -314,6 +314,10 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	alc1 := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, ist1.ID, cdbm.AllocationConstraintTypeReserved, 15, ipu)
 	assert.NotNil(t, alc1)
 
+	// Instance Type without a matching Allocation Constraint for tenant entitlement testing.
+	istWithoutAllocation := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-without-allocation", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istWithoutAllocation)
+
 	// Use dedicated allocation inventory for VPC-selection coverage so the
 	// request cannot consume capacity needed by unrelated table cases.
 	istVpcSelection := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-vpc-selection", st1, cdbm.InstanceStatusReady)
@@ -961,6 +965,31 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 				respMsg:  fmt.Sprintf("VPC Prefix: %s specified in request does not belong to Site", vpcPrefixSite2.ID.String()),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test batch instance create API endpoint rejects Instance Type without an Allocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:     "test-no-instance-type-allocation",
+					Count:          2,
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: istWithoutAllocation.ID.String(),
+					VpcID:          vpc1.ID.String(),
+					Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+					IpxeScript:     cutil.GetPtr("test script"),
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "No Allocations for specified Instance Type were found for current Tenant",
 			},
 			wantErr: false,
 		},
