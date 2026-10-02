@@ -243,13 +243,39 @@ type childWorkflowEntry struct {
 	componentType devicetypes.ComponentType
 }
 
+const componentActionBatchingChangeID = "component-action-max-parallel"
+
+// componentActionBatchingEnabled preserves replay determinism for workflows
+// whose histories predate component action batching.
+func componentActionBatchingEnabled(ctx workflow.Context) bool {
+	version := workflow.GetVersion(
+		ctx,
+		componentActionBatchingChangeID,
+		workflow.DefaultVersion,
+		workflow.Version(1),
+	)
+	return version != workflow.DefaultVersion
+}
+
+// versionedMaxParallel applies the configured limit to new executions while
+// existing histories retain the previous unlimited dispatch.
+func versionedMaxParallel(ctx workflow.Context, configured int) int {
+	if !componentActionBatchingEnabled(ctx) {
+		return 0
+	}
+	return configured
+}
+
 // childWorkflowExecutionTimeout returns a child workflow execution timeout that
-// accommodates the full retry budget for activities, the pre/post operation
-// durations, and a fixed scheduling buffer.
+// accommodates the full retry budget for every main-operation batch, the
+// pre/post operation durations, and a fixed scheduling buffer.
 //
-// The child workflow runs: pre-ops → main-op (with retries) → post-ops
-// sequentially, so the budget must cover all three phases.
-func childWorkflowExecutionTimeout(step operationrules.SequenceStep) time.Duration {
+// The child workflow runs: pre-ops → main-op batches (with retries) →
+// post-ops sequentially, so the budget must cover all three phases.
+func childWorkflowExecutionTimeout(
+	step operationrules.SequenceStep,
+	componentCount int,
+) time.Duration {
 	base := step.Timeout
 	if base == 0 {
 		base = 30 * time.Minute
@@ -269,15 +295,22 @@ func childWorkflowExecutionTimeout(step operationrules.SequenceStep) time.Durati
 	// Main operation: each attempt may take up to base, plus back-off between attempts.
 	mainBudget := base*time.Duration(maxAttempts) +
 		maxBackoff*time.Duration(maxAttempts-1)
+	mainBudget *= time.Duration(actionBatchCount(
+		step.MainOperation, step.MaxParallel, componentCount,
+	))
 
 	// Pre/post operation budgets: sum the declared timeouts of each action.
 	// Actions without a timeout are assumed to be quick (covered by the buffer).
 	var actionBudget time.Duration
 	for _, a := range step.PreOperation {
-		actionBudget += a.Timeout
+		actionBudget += a.Timeout * time.Duration(actionBatchCount(
+			a, step.MaxParallel, componentCount,
+		))
 	}
 	for _, a := range step.PostOperation {
-		actionBudget += a.Timeout
+		actionBudget += a.Timeout * time.Duration(actionBatchCount(
+			a, step.MaxParallel, componentCount,
+		))
 	}
 
 	return mainBudget + actionBudget + 2*time.Minute
@@ -292,6 +325,8 @@ func executeGenericStageParallel(
 	typeToTargets map[devicetypes.ComponentType]common.Target,
 	activityInfo any,
 ) error {
+	batchingEnabled := componentActionBatchingEnabled(ctx)
+
 	// Launch a child workflow for each component type that has targets.
 	// Pair each future with its component type so error attribution is always
 	// correct even when some steps are skipped (skipped steps shrink the
@@ -299,6 +334,10 @@ func executeGenericStageParallel(
 	futures := make([]childWorkflowEntry, 0, len(steps))
 
 	for _, step := range steps {
+		maxParallel := 0
+		if batchingEnabled {
+			maxParallel = step.MaxParallel
+		}
 		target, exists := typeToTargets[step.ComponentType]
 		if !exists || len(target.ComponentIDs) == 0 {
 			log.Info().
@@ -313,19 +352,23 @@ func executeGenericStageParallel(
 			Int("max_parallel", step.MaxParallel).
 			Msg("Starting component step as child workflow")
 
+		childStep := step
+		childStep.MaxParallel = maxParallel
 		childOptions := workflow.ChildWorkflowOptions{
 			WorkflowID: fmt.Sprintf("component-step-%s-%s",
 				workflow.GetInfo(ctx).WorkflowExecution.ID,
 				devicetypes.ComponentTypeToString(step.ComponentType)),
 			// Give the child workflow enough time to run all retry attempts.
-			WorkflowExecutionTimeout: childWorkflowExecutionTimeout(step),
+			WorkflowExecutionTimeout: childWorkflowExecutionTimeout(
+				childStep, len(target.ComponentIDs),
+			),
 		}
 		childCtx := workflow.WithChildOptions(ctx, childOptions)
 
 		future := workflow.ExecuteChildWorkflow(
 			childCtx,
 			nameGenericComponentStepWorkflow,
-			step,
+			childStep,
 			target,
 			activityInfo,
 			typeToTargets,

@@ -30,7 +30,7 @@ A rule contains **steps**. Each step targets one component type and belongs to
 a numbered **stage**. Execution proceeds stage by stage in ascending order.
 Within a stage, all steps run in parallel.
 
-```
+```text
 Stage 1: [powershelf step]
 Stage 2: [nvswitch step]
 Stage 3: [compute step]        ← stages are sequential
@@ -67,7 +67,7 @@ batch file.
 
 | Field     | Type     | Required | Description                        |
 |-----------|----------|----------|------------------------------------|
-| `version` | string   | no       | Schema version. Defaults to `"v1"` |
+| `version` | string   | no       | Schema version. Defaults to `"v1"`; unsupported versions are rejected |
 | `steps`   | array    | yes      | One or more step definitions       |
 
 ### Step fields
@@ -76,12 +76,26 @@ batch file.
 |-----------------|----------|----------|-------------|
 | `component_type`| string   | yes      | Component this step targets: `"compute"`, `"nvswitch"`, `"powershelf"` |
 | `stage`         | integer  | yes      | Execution order. Steps with the same stage run in parallel. Must be ≥ 1 |
-| `max_parallel`  | integer  | yes      | Max concurrent components. `0` = unlimited, `1` = sequential |
-| `timeout`       | duration | no       | Timeout for the entire child workflow (pre + main + post). E.g. `"10m"` |
-| `retry`         | object   | no       | Retry policy for the child workflow |
+| `max_parallel`  | integer  | yes      | Maximum targets per component activity dispatch. `0` = unlimited, `1` = one target per dispatch |
+| `timeout`       | duration | no       | Default activity start-to-close timeout for the step. E.g. `"10m"` |
+| `retry`         | object   | no       | Default activity retry policy for the step |
 | `pre_operation` | array    | no       | Actions to run before `main_operation` |
 | `main_operation`| object   | yes      | The primary action |
 | `post_operation`| array    | no       | Actions to run after `main_operation` |
+
+### Component batching
+
+`max_parallel` limits each component-scoped activity dispatch in the step's
+pre-, main-, and post-operations. Batches run sequentially, and a failed batch
+stops the remaining batches for that action. For targets `[compute-a,
+compute-b]`, `max_parallel: 1` dispatches `[compute-a]` and then `[compute-b]`;
+`max_parallel: 2` dispatches both targets together. A value of `0` dispatches
+the complete target once.
+
+`VerifyReachability` remains one logical action, but its nested
+`GetPowerStatus` activities use the step's limit. Step-wide coordination such
+as `Sleep` and group-wide validation such as `VerifyFirmwareConsistency`
+execute once with their complete context.
 
 ### Retry policy fields
 
@@ -715,7 +729,7 @@ a rule is applied to a task.
 Before any workflow starts, the task manager resolves the applicable rule for
 the operation and rack using this priority order:
 
-```
+```text
 1. Rack-specific association  (rack_rule_associations table for this rack)
 2. Global default rule        (is_default = true for this operation)
 3. Hardcoded fallback         (built into the binary)
@@ -729,7 +743,7 @@ parent workflow. The workflow never queries the database.
 `PowerControl` (or `FirmwareControl`) is the parent Temporal workflow. It does
 pure orchestration:
 
-```
+```text
 for each stage in ascending stage number:
     executeGenericStageParallel(stage.steps)   ← waits before advancing
 ```
@@ -737,8 +751,8 @@ for each stage in ascending stage number:
 If any stage fails, the workflow stops and the task is marked failed. Stages do
 not roll back.
 
-The parent workflow has no retry policy of its own (`MaxAttempts = 1`). Retries
-are configured at the child workflow (step) level.
+The parent workflow has no retry policy of its own (`MaxAttempts = 1`). The
+step's retry policy configures its Temporal activities.
 
 The parent workflow's execution timeout is auto-calculated from the sum of each
 stage's maximum step timeout, plus a 10 % overhead buffer. You do not set it
@@ -750,7 +764,7 @@ Within a stage, each step spawns one `GenericComponentStepWorkflow` child
 workflow. All child workflows in the stage are launched simultaneously and the
 parent waits for all of them to finish before advancing.
 
-```
+```text
 Stage N:
   ┌─────────────────────────┐  ┌─────────────────────────┐
   │ child: powershelf step  │  │ child: nvswitch step   │  ← in parallel
@@ -760,15 +774,16 @@ Stage N:
 
 Steps whose component type is not present in the rack are silently skipped.
 
-The child workflow's `WorkflowExecutionTimeout` is set to the step's `timeout`
-field (defaulting to 30 minutes if unset). This timeout covers the entire
-pre + main + post sequence.
+Flow derives the child workflow's `WorkflowExecutionTimeout` from the step
+configuration. The budget accounts for sequential main-operation batches and
+their retries, declared pre- and post-operation timeouts, and scheduling
+overhead.
 
 ### 4. Child workflow — action sequence
 
 `GenericComponentStepWorkflow` runs the three action phases in order:
 
-```
+```text
 pre_operation actions  (sequential)
        ↓
 main_operation action
@@ -776,9 +791,9 @@ main_operation action
 post_operation actions (sequential)
 ```
 
-The step's `retry` policy applies to the **entire child workflow**. If any
-action fails and retries are exhausted, the child workflow fails, which fails
-the stage, which fails the parent workflow.
+The step's `retry` policy applies to its activities, not to the entire child
+workflow. If an action fails after its activity retries are exhausted, the
+child workflow fails, which fails the stage and parent workflow.
 
 Activity options (timeout, retry) for individual Temporal activities are derived
 from the step configuration via `buildActivityOptions`. If the step has no
@@ -812,7 +827,7 @@ polling loops — not as single activities. Each iteration calls
 `poll_interval` before trying again. The loop exits when the condition is
 satisfied or `timeout` is exceeded.
 
-```
+```text
 loop:
     call GetPowerStatus activity
     if condition met → return success
@@ -837,7 +852,7 @@ targets regardless of the step's own component type.
 
 ### Execution flow diagram
 
-```
+```text
 gRPC request
     │
     ▼
