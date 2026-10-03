@@ -68,7 +68,7 @@ The templates in `deploy/files/` are mounted into services and must be filled wi
 
 Rendering the complete root also requires standalone `kustomize` and `ksops` on `PATH`, with credentials to decrypt the SOPS-encrypted `deploy/nico-base/ssh-console-rs/secrets/ssh_host_key.enc.yaml`. That file must contain the `ssh-host-key` Secret with `ssh_host_ed25519_key` and `ssh_host_ed25519_key_pub` keys. Supply `deploy/nico-unbound-base/local.conf.d/patchme.conf` with the base Unbound forwarders; the base generator reads it before the root replaces `forwarders.conf` with `deploy/files/unbound/forwarders.conf`.
 
-After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
+Before deploying, supply the [PXE external inputs](#nico-pxe) in the deployment namespace (`nico-system` for the top-level `deploy/` overlay). After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
 
 ```bash
 kustomize build deploy --enable-alpha-plugins --enable-exec | kubectl apply -f -
@@ -330,19 +330,28 @@ Path: `deploy/nico-base/pxe/`
   - `ServiceAccount/nico-pxe`
   - `Role/RoleBinding nico-pxe` (CertificateRequests for cert‑manager)
 
-The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io`, reads Rocket/pxe config from `/tmp/nico`, and reloads when the `nico-pxe-config` ConfigMap changes.
+The pod mounts SPIFFE material at `/var/run/secrets/spiffe.io` and reads its runtime configuration from environment variables.
 
 **External inputs you must provide**
 
 - A published PXE image (override `yourdockerregistry.com/path/to/nico-core:latest`).
-- ConfigMap(s) with `Rocket.toml` / templates at `/tmp/nico` plus any env ConfigMap (`nico-pxe-env-config`) your boot flow requires.
+- Optional `nico-pxe-env-config` supplies environment settings. The `full`
+  DevSpace profile packages PXE request templates in its image.
+- The base keeps a legacy `config` volume for the optional `nico-pxe-config`
+  ConfigMap at `/tmp/nico`. The current PXE binary does not read it, so the
+  pod starts without it and the base does not generate it.
 - A cert‑manager `ClusterIssuer` for the SPIFFE certificate.
 
 **Quick start**
 
 1. Build/publish the PXE image and patch the Deployment to use it.
-2. Create the config/env ConfigMaps referenced above.
-3. Deploy PXE:
+2. If needed, create the optional env ConfigMap in the **same namespace** as
+   the Deployment (for this standalone command, `<NICO_NAMESPACE>`) before
+   applying it. Do not commit site credentials to this repo.
+3. If a downstream JSON6902 overlay already adds a `config` volume to
+   `nico-pxe`, remove that addition or replace the base `config` volume instead.
+   Duplicate volume names are invalid.
+4. Deploy PXE:
 
    ```bash
    kubectl apply -k deploy/nico-base/pxe -n <NICO_NAMESPACE>
@@ -467,7 +476,7 @@ Reusable Kustomize components that add registry credentials, boot artifact sidec
 
 Path: `deploy/components/`
 
-- Component `boot-artifacts-containers` – JSON6902 patch that adds an EmptyDir volume plus sidecar containers to `nico-pxe` and `nico-api` Deployments. The sidecars copy `x86_64`, `aarch64`, `apt`, `firmware`, and machine-validation artifacts into `/nico-boot-artifacts/blobs/internal`, including a legacy x86_64 image for backward compatibility.
+- Component `boot-artifacts-containers` – JSON6902 patch that adds an EmptyDir volume plus sidecar containers to `nico-pxe` and `nico-api` Deployments. The sidecars copy `x86_64`, `aarch64`, `apt`, and machine-validation artifacts into `/forge-boot-artifacts/blobs/internal`, including a legacy x86_64 image for backward compatibility.
 - Component `dhcp6` – adds the separate `nico-dhcp6` Deployment and its data, metrics, and external Services. It is disabled by default. Add `components/dhcp6` to the top-level `deploy/kustomization.yaml` only after preparing the inputs and network described in [Deploy DHCPv6](../docs/provisioning/dhcpv6-deployment.md#kustomize).
 - Component `imagepullsecret` – JSON6902 patch that injects an `imagepullsecret` reference into all Deployments, Jobs, and StatefulSets.
 

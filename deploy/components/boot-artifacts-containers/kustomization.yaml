@@ -18,6 +18,12 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
 patches:
+  - path: patch-api-boot-artifacts-volume.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: nico-api
   - path: patch-boot-artifacts.yaml
     target:
       group: apps

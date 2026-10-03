@@ -1,0 +1,81 @@
+suite: PXE image selection
+templates:
+  - charts/nico-pxe/templates/deployment.yaml
+release:
+  name: test-nico
+  namespace: nico-system
+tests:
+  - it: uses the shared Core image and pull policy by default
+    set:
+      global.image.repository: registry.example.com/nico
+      global.image.tag: shared
+      global.image.pullPolicy: Always
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/nico:shared
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 10001
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 10001
+
+  - it: uses a complete component image override
+    set:
+      global.image.repository: registry.example.com/nico
+      global.image.tag: shared
+      global.image.pullPolicy: Always
+      nico-pxe.image.repository: localhost:5000/nico-pxe
+      nico-pxe.image.tag: dev
+      nico-pxe.image.pullPolicy: Never
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: localhost:5000/nico-pxe:dev
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Never
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 10001
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 10001
+
+  - it: uses the global pull policy when the component policy is unset
+    set:
+      global.image.repository: registry.example.com/nico
+      global.image.tag: shared
+      global.image.pullPolicy: Always
+      nico-pxe.image.repository: localhost:5000/nico-pxe
+      nico-pxe.image.tag: dev
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: defaults an overridden component tag to latest
+    set:
+      global.image.repository: registry.example.com/nico
+      global.image.tag: shared
+      nico-pxe.image.repository: localhost:5000/nico-pxe
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: localhost:5000/nico-pxe:latest
