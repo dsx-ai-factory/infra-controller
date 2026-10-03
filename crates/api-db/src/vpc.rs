@@ -29,6 +29,9 @@ use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segm
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Clone, Copy)]
 pub struct VniColumn;
 impl ColumnInfo<'_> for crate::vpc::VniColumn {
@@ -72,7 +75,11 @@ pub async fn persist(
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
                 slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *";
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     sqlx::query_as(query)
         .bind(value.id)
         .bind(&value.metadata.name)
@@ -194,7 +201,14 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM vpcs").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted
+         FROM vpcs",
+    )
+    .filter(&filter);
 
     query.push(" AND deleted IS NULL");
     if matches!(row_lock, VpcRowLock::Mutation) {
@@ -225,7 +239,11 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Vpc>>(
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
-    let query = "SELECT * from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
+    let query = "SELECT id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted
+        from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
 
     sqlx::query_as(query)
         .bind(vni)
@@ -240,7 +258,10 @@ pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseR
     let query = "UPDATE vpcs
             SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     sqlx::query_as(query)
         .bind(vni)
         .bind(value.id)
@@ -266,7 +287,10 @@ pub async fn change_routing_profile(
             status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
             version = $3, updated = NOW()
         WHERE id = $4 AND version = $5 AND deleted IS NULL
-        RETURNING *";
+        RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     let result = sqlx::query_as(query)
         .bind(&value.routing_profile_type)
         .bind(vni)
@@ -297,7 +321,11 @@ pub async fn find_by_segment(
     segment_id: NetworkSegmentId,
 ) -> Result<Option<Vpc>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
-        "SELECT v.* from vpcs v INNER JOIN network_segments s ON v.id = s.vpc_id",
+        "SELECT v.id, v.version, v.organization_id, v.network_security_group_id,
+                v.network_virtualization_type, v.routing_profile_type, v.routing_profile_overrides,
+                v.power_resource_group, v.slaac_enabled, v.vni, v.status, v.name, v.description,
+                v.labels, v.created, v.updated, v.deleted
+         from vpcs v INNER JOIN network_segments s ON v.id = s.vpc_id",
     )
     .filter_relation(
         &ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
@@ -367,8 +395,11 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let query =
-        "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL RETURNING *";
+    let query = "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
+        RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     match sqlx::query_as(query).bind(id).fetch_one(txn).await {
         Ok(vpc) => Ok(Some(vpc)),
         Err(sqlx::Error::RowNotFound) => Ok(None),
@@ -406,7 +437,10 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     let (update_power_resource_group, power_resource_group) =
         match value.power_resource_group.as_ref() {
             Some(PowerResourceGroupUpdate::Set(resource_group)) => {
@@ -457,7 +491,10 @@ pub async fn update_virtualization(
     let query = "UPDATE vpcs
             SET version=$1, network_virtualization_type=$2, updated=NOW()
             WHERE id=$3 AND version=$4 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
 
     let current_version = match value.if_version_match {
         Some(version) => version,
