@@ -4,6 +4,7 @@
 package vpc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -20,6 +21,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -916,6 +919,33 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 
 	vpcDAO := cdbm.NewVpcDAO(dbSession)
 	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
+
+	if !t.Run("skips Core admin VPC without warning", func(t *testing.T) {
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		adminVpcID := uuid.New()
+		adminInventory := &corev1.VPCInventory{
+			Vpcs: []*corev1.Vpc{{
+				Id:       &corev1.VpcId{Value: adminVpcID.String()},
+				Config:   &corev1.VpcConfig{TenantOrganizationId: systemTenantOrganizationID},
+				Metadata: &corev1.Metadata{Name: "admin"},
+			}},
+		}
+
+		_, err := manager.UpdateVpcsInDB(ctx, site.ID, adminInventory)
+		require.NoError(t, err)
+		assert.NotContains(t, logOutput.String(), "unable to create VPC found on Site")
+
+		_, err = vpcDAO.GetByID(ctx, nil, adminVpcID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	}) {
+		t.FailNow()
+	}
 
 	if !t.Run("auto creates VPC from inventory", func(t *testing.T) {
 		_, err := manager.UpdateVpcsInDB(ctx, site.ID, inventory)
