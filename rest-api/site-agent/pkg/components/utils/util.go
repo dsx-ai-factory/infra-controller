@@ -4,7 +4,6 @@
 package utils
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -29,6 +28,9 @@ const (
 	LivenessStatus = "/healthz"
 	// ReadinessStatus path is readyz
 	ReadinessStatus = "/readyz"
+	// DefaultStatusPort is the port the Site Agent serves its status page and probes on
+	// when ESA_PORT is unset.
+	DefaultStatusPort = "8080"
 	// ParamName in URI
 	ParamName = "name"
 )
@@ -114,22 +116,13 @@ func ConvertTimestampToVersion(ts *timestamppb.Timestamp) (uint64, error) {
 	return uint64(stdTime.UnixMicro()), nil
 }
 
-// GetSAStatus - Get Status from elektra agent
-func GetSAStatus(path string) {
-	addr := os.Getenv("ESA_PORT")
-	resp, err := http.Get("http://localhost:" + addr + path)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
+// StatusPort returns the port the Site Agent serves its status page and probes on.
+func StatusPort() string {
+	port := os.Getenv("ESA_PORT")
+	if port == "" {
+		return DefaultStatusPort
 	}
-	defer resp.Body.Close()
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		fmt.Println(scanner.Text())
-	}
-	if err = scanner.Err(); err != nil {
-		fmt.Println(err.Error())
-	}
+	return port
 }
 
 func UpdateState(Elektra *elektratypes.Elektra) {

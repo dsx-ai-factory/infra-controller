@@ -9,6 +9,8 @@ release:
   namespace: nico-rest
 tests:
   - it: probes the ports the Site Agent listens on
+    # Each port differs from its default and from envConfig, so the asserts only pass
+    # when the chart takes the ports from service.
     set:
       service:
         port: 9080
@@ -26,14 +28,44 @@ tests:
           path: data.METRICS_PORT
           value: "9112"
       - template: statefulset.yaml
-        equal:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet
-          value:
-            path: /healthz
-            port: 9080
+        contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            containerPort: 9080
+            name: http
       - template: statefulset.yaml
         equal:
-          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          path: spec.template.spec.containers[0].livenessProbe
           value:
-            path: /readyz
-            port: 9080
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+      - template: statefulset.yaml
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe
+          value:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+
+  - it: applies per-Site probe overrides
+    set:
+      livenessProbe:
+        enabled: false
+      readinessProbe:
+        failureThreshold: 6
+    asserts:
+      - template: statefulset.yaml
+        notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+      - template: statefulset.yaml
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe
+          value:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6

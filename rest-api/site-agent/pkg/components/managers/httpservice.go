@@ -6,7 +6,6 @@ package managers
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/rs/zerolog/log"
 
@@ -41,7 +40,7 @@ func newStatusServeMux() *http.ServeMux {
 
 // StartHTTPServer - start a web server on the specified port.
 func StartHTTPServer() {
-	port := ":" + os.Getenv("ESA_PORT")
+	port := ":" + computils.StatusPort()
 	mux := newStatusServeMux()
 	go func() {
 		err := http.ListenAndServe(port, mux)

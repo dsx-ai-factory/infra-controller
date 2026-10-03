@@ -37,6 +37,13 @@ type fakeCoreGrpc struct {
 
 func (f fakeCoreGrpc) CheckConnection(ctx context.Context) { f.check(ctx) }
 
+type fakeBootstrap struct {
+	managerapi.BootstrapInterface
+	registrationErr error
+}
+
+func (f fakeBootstrap) CheckRegistration() error { return f.registrationErr }
+
 // newHealthTestManager points ManagerAccess at fresh Site Agent data for one test.
 func newHealthTestManager(t *testing.T, api *managerapi.ManagerAPI) *elektratypes.Elektra {
 	t.Helper()
@@ -89,22 +96,32 @@ func TestCheckHealth(t *testing.T) {
 
 func TestHandleLivenessRequest(t *testing.T) {
 	tests := []struct {
-		name     string
-		err      error
-		wantCode int
-		wantBody string
+		name            string
+		registrationErr error
+		workerErr       error
+		wantCode        int
+		wantBody        string
 	}{
 		{name: "worker running", wantCode: http.StatusOK, wantBody: "ok\n"},
 		{
-			name:     "worker stopped",
-			err:      errors.New("task queue name cannot start with reserved prefix /_sys/"),
-			wantCode: http.StatusServiceUnavailable,
-			wantBody: "Temporal worker is not running: task queue name cannot start with reserved prefix /_sys/\n",
+			name:            "Site re-paired",
+			registrationErr: errors.New("site-registration holds Site ID 5b0e7c1a, not d2f4b0c6"),
+			wantCode:        http.StatusServiceUnavailable,
+			wantBody:        "Site was re-paired: site-registration holds Site ID 5b0e7c1a, not d2f4b0c6\n",
+		},
+		{
+			name:      "worker stopped",
+			workerErr: errors.New("task queue name cannot start with reserved prefix /_sys/"),
+			wantCode:  http.StatusServiceUnavailable,
+			wantBody:  "Temporal worker is not running: task queue name cannot start with reserved prefix /_sys/\n",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			newHealthTestManager(t, &managerapi.ManagerAPI{Orchestrator: fakeOrchestrator{livenessErr: tt.err}})
+			newHealthTestManager(t, &managerapi.ManagerAPI{
+				Bootstrap:    fakeBootstrap{registrationErr: tt.registrationErr},
+				Orchestrator: fakeOrchestrator{livenessErr: tt.workerErr},
+			})
 			response := httptest.NewRecorder()
 			handleLivenessRequest(response, httptest.NewRequest(http.MethodGet, computils.LivenessStatus, nil))
 			assert.Equal(t, tt.wantCode, response.Code)

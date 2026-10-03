@@ -62,16 +62,18 @@ spec:
               readOnly: true
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.readinessProbe }}
+          {{- if .enabled }}
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: {{ .Values.service.port }}
-            periodSeconds: 10
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          {{- if .enabled }}
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.service.port }}
-            periodSeconds: 10
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
       volumes:
         - name: site-registration
           secret:

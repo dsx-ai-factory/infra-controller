@@ -12,6 +12,7 @@ type BootstrapInterface interface {
 	Init()
 	Start()
 	DownloadAndStoreCreds(otpOverride []byte) error
+	CheckRegistration() error
 	GetState() []string
 
 	BootstrapExpansion

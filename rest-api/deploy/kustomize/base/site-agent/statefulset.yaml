@@ -68,7 +68,7 @@ spec:
             httpGet:
               path: /healthz
               port: http
-            periodSeconds: 10
+            periodSeconds: 30
       volumes:
         - name: site-registration
           secret:

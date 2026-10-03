@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 )
 
@@ -46,9 +48,15 @@ func checkHealth() {
 	computils.UpdateState(ManagerAccess.Data.EB)
 }
 
-// handleLivenessRequest fails once the Temporal worker is gone for good, so
-// Kubernetes restarts the Site Agent.
+// handleLivenessRequest fails once only a restart brings the Site Agent back: its Site was
+// re-paired, or its Temporal worker is gone for good. Kubernetes then restarts it, whether
+// or not the Site Agent is Ready.
 func handleLivenessRequest(w http.ResponseWriter, r *http.Request) {
+	if err := ManagerAccess.API.Bootstrap.CheckRegistration(); err != nil {
+		log.Warn().Err(err).Msg("Managers: Site was re-paired, failing the liveness check")
+		http.Error(w, "Site was re-paired: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	err := ManagerAccess.API.Orchestrator.CheckLiveness()
 	if err != nil {
 		http.Error(w, "Temporal worker is not running: "+err.Error(), http.StatusServiceUnavailable)
