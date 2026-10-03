@@ -15,10 +15,8 @@ import (
 func TestNewStatusServeMux(t *testing.T) {
 	statusPaths := []string{
 		computils.SiteStatus,
-		computils.VPCStatus,
-		computils.SubnetStatus,
-		computils.InstanceStatus,
-		computils.MachineStatus,
+		computils.LivenessStatus,
+		computils.ReadinessStatus,
 	}
 	mux := newStatusServeMux()
 	for _, path := range statusPaths {
@@ -49,10 +47,6 @@ func TestNewMetricsServeMux(t *testing.T) {
 
 	excludedPaths := []string{
 		computils.SiteStatus,
-		computils.VPCStatus,
-		computils.SubnetStatus,
-		computils.InstanceStatus,
-		computils.MachineStatus,
 		"/unknown",
 	}
 	for _, path := range excludedPaths {

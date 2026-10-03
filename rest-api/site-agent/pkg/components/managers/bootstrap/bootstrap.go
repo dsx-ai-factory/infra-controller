@@ -95,6 +95,7 @@ func newBootstrapConfig(dir string) error {
 	if bCfg.CACert == "" || bCfg.CredsURL == "" || bCfg.OTP == "" || bCfg.UUID == "" {
 		return ErrInvalidBootstrapSecret
 	}
+	ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Load(bCfg.UUID, bCfg.OTP)
 	// The OTP is named to report that it was read, with no value of any kind. It
 	// is a live credential from the moment the secret is read until the handshake
 	// consumes it, and every Site Agent start reaches this point whether or not a
@@ -252,6 +253,23 @@ func (bs *BoostrapAPI) Start() {
 	// DownloadAndStoreCreds logs its own failures, and the Site Agent keeps its existing certificates.
 	_ = bs.DownloadAndStoreCreds(nil)
 	go bs.watchBootstrapFile()
+}
+
+// CheckRegistration returns an error once site-registration holds a Site ID or OTP the
+// Site Agent did not apply, as after a re-pair. The Site Agent reads that Secret only at
+// startup, so it needs a restart to use the new registration. A file it cannot read back
+// is not treated as a re-pair.
+func (bs *BoostrapAPI) CheckRegistration() error {
+	dir := ManagerAccess.Conf.EB.BootstrapSecret
+	siteID, err := os.ReadFile(dir + bootstraptypes.TagUUID)
+	if err != nil {
+		return nil
+	}
+	otp, err := os.ReadFile(dir + bootstraptypes.TagOTP)
+	if err != nil {
+		return nil
+	}
+	return ManagerAccess.Data.EB.Managers.Bootstrap.Registration.Check(string(siteID), string(otp))
 }
 
 // GetState - handle http request

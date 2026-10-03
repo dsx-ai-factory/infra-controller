@@ -694,6 +694,8 @@ The site agent bootstrap flow is:
 3. The received certs are written back into the `temporal-client-site-agent-certs` secret.
 4. The agent then connects to Temporal using those certs and starts polling its site-specific namespace and queue.
 
+The StatefulSet probes the agent on port `8080`. The agent checks Temporal and Core gRPC every `30s`, and `/readyz` reports the latest result. So it succeeds only while its Temporal worker runs and both are reachable. The same results back the `nico_rest_site_agent_temporal_connection_status`, `nico_rest_site_agent_carbide_health_status`, and `nico_rest_site_agent_health_status` metrics. `/healthz` fails once the agent has no Temporal worker, because its last connection attempt failed or the Temporal SDK stopped the worker. It also fails once `site-registration` holds a `site-uuid` or `otp` the agent did not apply itself, as after a re-pair, because the agent reads that secret only at startup. Either way Kubernetes restarts the agent, whether or not it is Ready. Until a site is configured below, the agent is not Ready and restarts after each failed connection attempt.
+
 ### Manifests
 
 | File | Contents |
@@ -763,8 +765,10 @@ kubectl patch configmap nico-rest-site-agent-config -n nico-rest --type='json' -
   {\"op\": \"replace\", \"path\": \"/data/TEMPORAL_SUBSCRIBE_QUEUE\", \"value\": \"site\"}
 ]"
 
-kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
+kubectl delete pod -l app=nico-rest-site-agent -n nico-rest
 ```
+
+Deleting the pod applies the new configuration right away. A `kubectl rollout restart` would not, because a StatefulSet only replaces a pod that is Ready.
 
 ### Apply
 
