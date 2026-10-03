@@ -38,6 +38,7 @@ use ipnetwork::Ipv6Network;
 use lru::LruCache;
 use rpc::forge::{AddressFamily, DhcpDiscovery, MessageKind};
 use tokio::sync::Mutex;
+use tonic::transport::Uri;
 
 use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
@@ -468,6 +469,14 @@ fn ensure_server_identifier(message: &Message, config: &Config) -> Result<(), Dh
     Ok(())
 }
 
+fn boot_url_has_ipv6_host(boot_url: &Uri) -> bool {
+    boot_url
+        .host()
+        .and_then(|host| host.strip_prefix('['))
+        .and_then(|host| host.strip_suffix(']'))
+        .is_some_and(|host| host.parse::<Ipv6Addr>().is_ok())
+}
+
 /// Encode a mode-backed address or options response.
 fn encode_mode_reply(
     request: &DecodedPacketV6,
@@ -489,10 +498,8 @@ fn encode_mode_reply(
     };
     if let Some(booturl) = booturl
         && !booturl.is_empty()
-        && matches!(
-            request.message.opts().get(OptionCode::ORO),
-            Some(DhcpOption::ORO(requested)) if requested.opts.contains(&OptionCode::OptBootfileUrl)
-        )
+        && let Some(DhcpOption::ORO(requested)) = request.message.opts().get(OptionCode::ORO)
+        && requested.opts.contains(&OptionCode::OptBootfileUrl)
     {
         reply
             .opts_mut()
@@ -500,6 +507,38 @@ fn encode_mode_reply(
                 OptionCode::OptBootfileUrl,
                 booturl.as_bytes().to_vec(),
             )));
+
+        // EDK2 rejects HTTP offers without an IPv6 literal or DNS before
+        // trying a firmware-configured URI. Leave those offers unmarked.
+        if requested.opts.contains(&OptionCode::VendorClass)
+            && let Ok(boot_uri) = booturl.parse::<Uri>()
+            && matches!(boot_uri.scheme_str(), Some("http" | "https"))
+            && (!config.dhcp_config.carbide_nameservers_v6.is_empty()
+                || boot_url_has_ipv6_host(&boot_uri))
+            && let Some(vendors) = request.message.opts().get_all(OptionCode::VendorClass)
+            && let Some(vendor) = vendors.iter().find_map(|option| match option {
+                DhcpOption::VendorClass(vendor)
+                    if vendor.data.iter().any(|class| {
+                        class == b"HTTPClient" || class.starts_with(b"HTTPClient:")
+                    }) =>
+                {
+                    Some(vendor)
+                }
+                _ => None,
+            })
+        {
+            // UEFI clients need this marker to recognize an HTTP boot offer.
+            // Use the raw option: dhcproto 0.15 miscalculates the typed VendorClass length.
+            let mut data = vendor.num.to_be_bytes().to_vec();
+            data.extend_from_slice(&10u16.to_be_bytes());
+            data.extend_from_slice(b"HTTPClient");
+            reply
+                .opts_mut()
+                .insert(DhcpOption::Unknown(UnknownOption::new(
+                    OptionCode::VendorClass,
+                    data,
+                )));
+        }
     }
 
     match outcome {
