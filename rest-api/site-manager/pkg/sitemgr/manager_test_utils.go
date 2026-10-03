@@ -8,11 +8,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -36,12 +39,13 @@ type Suite struct {
 	sync.Mutex
 	l net.Listener
 	//srv      *http.Server
-	srv      *httptest.Server
-	forceErr bool
-	tc       *http.Client
-	MgrURL   string
-	cancel   context.CancelFunc
-	UUID1OTP string
+	srv           *httptest.Server
+	forceErr      bool
+	tc            *http.Client
+	MgrURL        string
+	cancel        context.CancelFunc
+	UUID1OTP      string
+	certClientDir string
 }
 
 var (
@@ -133,13 +137,20 @@ func (s *Suite) setup() error {
 	rtr := mux.NewRouter()
 	rtr.HandleFunc("/v1/pki/ca/pem", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(testCACert))
+		_, err := w.Write([]byte(testCACert))
+		if err != nil {
+			return
+		}
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}
 	})
 
-	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, _ *http.Request) {
+	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-site-manager-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		resp := &certs.CertificateResponse{
 			Key:         testKey,
 			Certificate: testCert,
@@ -149,7 +160,10 @@ func (s *Suite) setup() error {
 			panic(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(c)
+		_, err = w.Write(c)
+		if err != nil {
+			return
+		}
 		if s.forceErr {
 			http.Error(w, "forced error", http.StatusInternalServerError)
 		}
@@ -170,6 +184,7 @@ func (s *Suite) setup() error {
 
 // Teardown closes the connection
 func (s *Suite) Teardown() {
+	os.RemoveAll(s.certClientDir)
 	s.srv.Close()
 	s.cancel()
 }
@@ -272,12 +287,28 @@ func TestManagerCreateSite() (*Suite, error) {
 		return ts, err
 	}
 
+	ts.certClientDir, err = os.MkdirTemp("", "site-manager-cert-client-")
+	if err != nil {
+		return ts, err
+	}
+	caPath := filepath.Join(ts.certClientDir, "ca.crt")
+	err = os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.srv.Certificate().Raw}), 0600)
+	if err != nil {
+		return ts, err
+	}
+	tokenPath := filepath.Join(ts.certClientDir, "token")
+	err = os.WriteFile(tokenPath, []byte("test-site-manager-token"), 0600)
+	if err != nil {
+		return ts, err
+	}
 	fcrd := fakecrdclient.NewSimpleClientset()
 	o := Options{
-		credsMgrURL: fmt.Sprintf("https://%s", ts.l.Addr().String()),
-		ingressHost: "test-host",
-		listenPort:  "0",
-		namespace:   "csm",
+		credsMgrCAFile:    caPath,
+		credsMgrTokenFile: tokenPath,
+		credsMgrURL:       fmt.Sprintf("https://%s", ts.l.Addr().String()),
+		ingressHost:       "test-host",
+		listenPort:        "0",
+		namespace:         "csm",
 	}
 
 	ctx := core.NewDefaultContext(context.Background())
@@ -488,7 +519,10 @@ func (s *Suite) TestManagerSiteTest() error {
 		return fmt.Errorf("!SiteAwaitHandshake %+v", sgr.BootstrapState)
 	}
 
-	ts.getSiteCreds(Testuuid1, sgr.OTP)
+	_, err = ts.getSiteCreds(Testuuid1, sgr.OTP)
+	if err != nil {
+		return err
+	}
 	testCase("Roll a non-existent site")
 	r, err = tc.Post(testURL+"/v1/site/roll/"+testuuid2, "", nil)
 	if err != nil {
