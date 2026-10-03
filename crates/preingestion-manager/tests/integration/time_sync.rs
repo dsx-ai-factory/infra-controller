@@ -24,10 +24,75 @@ use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
 use libredfish::SystemPowerControl;
+use model::DpuModel;
 use model::site_explorer::{PreingestionState, TimeSyncResetPhase};
 use rpc::forge::DhcpDiscovery;
 
 use crate::common;
+
+async fn prepare_time_sync_endpoint(
+    env: &TestHarness,
+    pool: &PgPool,
+    relay_address: IpAddr,
+    mac_address: &str,
+    is_dpu: bool,
+) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder(mac_address, relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "6.00.30.00", "1.13.2", false)
+        .await?;
+    if is_dpu {
+        sqlx::query(
+            "UPDATE explored_endpoints SET exploration_report = \
+             jsonb_set( \
+                 jsonb_set( \
+                     jsonb_set(exploration_report, '{Systems,0,Id}', to_jsonb('Bluefield'::text)), \
+                     '{Chassis,0,Id}', to_jsonb('Card1'::text)), \
+                 '{Chassis,0,Model}', to_jsonb('NVIDIA BlueField 3 DPU'::text)) \
+             WHERE address = $1",
+        )
+        .bind(ip_addr)
+        .execute(&mut *txn)
+        .await?;
+    }
+    db::explored_endpoints::set_preingestion_set_ntp_servers(ip_addr, None, 0, &mut txn).await?;
+
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert_eq!(
+        endpoint.report.identify_dpu(),
+        is_dpu.then_some(DpuModel::BlueField3)
+    );
+    txn.commit().await?;
+
+    Ok(ip_addr)
+}
+
+async fn preingestion_state(
+    pool: &PgPool,
+    ip_addr: IpAddr,
+) -> Result<PreingestionState, Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist")
+        .preingestion_state;
+    txn.commit().await?;
+    Ok(state)
+}
 
 /// Test that when BMC time is in sync, preingestion proceeds normally with firmware checks
 #[sqlx_test]
@@ -401,6 +466,184 @@ async fn test_preingestion_time_sync_reset_flow(
         endpoint.preingestion_state
     );
     txn.commit().await?;
+
+    Ok(())
+}
+
+/// A BlueField-3 reports stable StandbyOffline as Paused after powering off.
+/// The no-NTP recovery waits for the BMC reset, powers the DPU back on, and
+/// completes the time-sync recovery.
+#[sqlx_test]
+async fn test_preingestion_time_sync_reset_accepts_paused_power_state_for_dpu(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let mut config = default_config::get();
+    config.ntp_servers.clear();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_bmc_time_offset_seconds(600);
+    redfish_sim.set_paused_when_off(true);
+    redfish_sim.set_bmc_reset_unavailable_polls(1);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers,
+    );
+
+    let dpu_ip = prepare_time_sync_endpoint(
+        &env,
+        &pool,
+        underlay_segment.relay_address,
+        "b8:3f:d2:90:97:a6",
+        true,
+    )
+    .await?;
+    let timepoint = redfish_sim.timepoint();
+
+    // Empty NTP configuration runs initial checks and starts the reset fallback.
+    mgr.run_single_iteration().await?;
+    let state = preingestion_state(&pool, dpu_ip).await?;
+    assert!(matches!(
+        state,
+        PreingestionState::TimeSyncReset {
+            phase: TimeSyncResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+
+    // The BMC is not reachable for one task poll after reset; don't power on yet.
+    mgr.run_single_iteration().await?;
+    let state = preingestion_state(&pool, dpu_ip).await?;
+    assert!(matches!(
+        state,
+        PreingestionState::TimeSyncReset {
+            phase: TimeSyncResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    let actions = redfish_sim
+        .actions_since(&timepoint)
+        .for_host(&dpu_ip.to_string());
+    assert!(
+        !actions
+            .iter()
+            .any(|action| *action == RedfishSimAction::Power(SystemPowerControl::On)),
+        "host must not power on while the BMC reset is still in progress"
+    );
+
+    // Once the reset task query succeeds, power the DPU on and advance the phase.
+    mgr.run_single_iteration().await?;
+    let state = preingestion_state(&pool, dpu_ip).await?;
+    assert!(matches!(
+        state,
+        PreingestionState::TimeSyncReset {
+            phase: TimeSyncResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+    let actions = redfish_sim
+        .actions_since(&timepoint)
+        .for_host(&dpu_ip.to_string());
+    let power_off = actions
+        .iter()
+        .position(|action| *action == RedfishSimAction::Power(SystemPowerControl::ForceOff))
+        .expect("DPU should be powered off");
+    let bmc_reset = actions
+        .iter()
+        .position(|action| *action == RedfishSimAction::BmcReset(None))
+        .expect("BMC should be reset");
+    let power_on = actions
+        .iter()
+        .position(|action| *action == RedfishSimAction::Power(SystemPowerControl::On))
+        .expect("DPU should be powered on after the BMC reset is ready");
+    assert!(power_off < bmc_reset && bmc_reset < power_on);
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(dpu_ip, &mut txn).await?;
+    txn.commit().await?;
+
+    // Model the reset correcting the clock before the final convergence check.
+    redfish_sim.set_bmc_time_offset_seconds(0);
+    mgr.run_single_iteration().await?;
+    assert_eq!(
+        preingestion_state(&pool, dpu_ip).await?,
+        PreingestionState::Complete
+    );
+
+    Ok(())
+}
+
+/// A non-DPU BMC reporting Paused is not assumed to be powered off.
+#[sqlx_test]
+async fn test_preingestion_time_sync_reset_rejects_paused_power_state_for_non_dpu(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let mut config = default_config::get();
+    config.ntp_servers.clear();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_bmc_time_offset_seconds(600);
+    redfish_sim.set_paused_when_off(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers,
+    );
+    let non_dpu_ip = prepare_time_sync_endpoint(
+        &env,
+        &pool,
+        underlay_segment.relay_address,
+        "b8:3f:d2:90:97:a7",
+        false,
+    )
+    .await?;
+
+    let timepoint = redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+
+    assert!(matches!(
+        preingestion_state(&pool, non_dpu_ip).await?,
+        PreingestionState::SetNtpServers {
+            set_at: None,
+            attempts: 0
+        }
+    ));
+    let actions = redfish_sim
+        .actions_since(&timepoint)
+        .for_host(&non_dpu_ip.to_string());
+    assert!(
+        actions
+            .iter()
+            .any(|action| *action == RedfishSimAction::Power(SystemPowerControl::ForceOff)),
+        "recovery should request power-off before checking the resulting state"
+    );
+    assert!(
+        actions.iter().all(|action| !matches!(
+            action,
+            RedfishSimAction::BmcReset(_) | RedfishSimAction::Power(SystemPowerControl::On)
+        )),
+        "a non-DPU reporting Paused must not be reset or powered on"
+    );
 
     Ok(())
 }
