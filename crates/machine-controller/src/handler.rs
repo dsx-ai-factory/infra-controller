@@ -1810,9 +1810,9 @@ impl MachineStateHandler {
                                 .await
                             }
                             CreateBossVolumeState::LockHost => {
-                                if matches!(
-                                    cleanup_context,
-                                    CleanupContext::Deprovision | CleanupContext::Reset
+                                if should_reenable_boss_lockdown(
+                                    *cleanup_context,
+                                    mh_snapshot.host_snapshot.host_profile.disable_lockdown,
                                 ) {
                                     redfish_client
                                         .set_idrac_lockdown(EnabledDisabled::Enabled)
@@ -12757,6 +12757,13 @@ fn get_next_state_boss_job_failure(
     Ok((next_state, expected_power_state))
 }
 
+fn should_reenable_boss_lockdown(cleanup_context: CleanupContext, disable_lockdown: bool) -> bool {
+    matches!(
+        cleanup_context,
+        CleanupContext::Deprovision | CleanupContext::Reset
+    ) && !disable_lockdown
+}
+
 fn handle_boss_controller_job_error(
     boss_controller_id: String,
     iterations: u32,
@@ -15459,6 +15466,37 @@ mod tests {
         let result =
             handle_no_dpu_error(Err(RedfishError::Lockdown), 0, "set_boot_order_dpu_first");
         assert!(matches!(result, Err(RedfishError::Lockdown)));
+    }
+
+    #[test]
+    fn boss_deprovision_lockdown_honors_disable_lockdown_policy() {
+        check_values(
+            [
+                Check {
+                    scenario: "deprovision relocks hosts by default",
+                    input: (CleanupContext::Deprovision, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "deprovision leaves opted-out hosts unlocked",
+                    input: (CleanupContext::Deprovision, true),
+                    expect: false,
+                },
+                Check {
+                    scenario: "reset relocks hosts by default",
+                    input: (CleanupContext::Reset, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "reset leaves opted-out hosts unlocked",
+                    input: (CleanupContext::Reset, true),
+                    expect: false,
+                },
+            ],
+            |(cleanup_context, disable_lockdown)| {
+                should_reenable_boss_lockdown(cleanup_context, disable_lockdown)
+            },
+        );
     }
 
     #[test]
