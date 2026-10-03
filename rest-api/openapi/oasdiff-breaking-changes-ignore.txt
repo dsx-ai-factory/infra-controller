@@ -324,3 +324,9 @@ GET /v2/org/{org}/nico/tray/{id} the `nvLinkDomainId` response's property `forma
 # Peering deletion now waits for DPU acknowledgement and inventory removal.
 # Return 202 with MessageResponse, not 204; callers poll GET for completion.
 API DELETE /v2/org/{org}/nico/vpc-peering/{id} removed the success response with the status `204`
+
+# Expected rack group declarations need their protocol to derive the correct rack profile.
+# New declarations must provide it; legacy stored declarations remain readable with null.
+API POST /v2/org/{org}/nico/expected-rack-group added the new required request property `protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`

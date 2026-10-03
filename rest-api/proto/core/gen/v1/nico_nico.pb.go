@@ -17700,7 +17700,9 @@ type ExpectedRackGroup struct {
 	Metadata *Metadata `protobuf:"bytes,4,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// Ordered racks and their devices. Rack IDs and device identities are unique across the group.
 	// May be empty; updates replace the complete list.
-	Racks         []*ExpectedRackGroupRack `protobuf:"bytes,6,rep,name=racks,proto3" json:"racks,omitempty"`
+	Racks []*ExpectedRackGroupRack `protobuf:"bytes,6,rep,name=racks,proto3" json:"racks,omitempty"`
+	// Required external rack-management protocol identifier.
+	Protocol      string `protobuf:"bytes,7,opt,name=protocol,proto3" json:"protocol,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -17761,6 +17763,13 @@ func (x *ExpectedRackGroup) GetRacks() []*ExpectedRackGroupRack {
 		return x.Racks
 	}
 	return nil
+}
+
+func (x *ExpectedRackGroup) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
 }
 
 type ExpectedRackGroupRack struct {
@@ -71830,12 +71839,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13_expected_switch_idB\x1c\n" +
 	"\x1a_explored_endpoint_addressB\n" +
 	"\n" +
-	"\b_rack_id\"\xff\x01\n" +
+	"\b_rack_id\"\x9b\x02\n" +
 	"\x11ExpectedRackGroup\x12<\n" +
 	"\rrack_group_id\x18\x01 \x01(\v2\x13.common.RackGroupIdH\x00R\vrackGroupId\x88\x01\x01\x12\x1a\n" +
 	"\btopology\x18\x02 \x01(\tR\btopology\x12+\n" +
 	"\bmetadata\x18\x04 \x01(\v2\x0f.forge.MetadataR\bmetadata\x122\n" +
-	"\x05racks\x18\x06 \x03(\v2\x1c.forge.ExpectedRackGroupRackR\x05racksB\x10\n" +
+	"\x05racks\x18\x06 \x03(\v2\x1c.forge.ExpectedRackGroupRackR\x05racks\x12\x1a\n" +
+	"\bprotocol\x18\a \x01(\tR\bprotocolB\x10\n" +
 	"\x0e_rack_group_idJ\x04\b\x03\x10\x04J\x04\b\x05\x10\x06R\brack_idsR\amembers\"\x8b\x01\n" +
 	"\x15ExpectedRackGroupRack\x12,\n" +
 	"\arack_id\x18\x01 \x01(\v2\x0e.common.RackIdH\x00R\x06rackId\x88\x01\x01\x128\n" +

@@ -5735,6 +5735,7 @@ paths:
                   siteId: f97df110-f4de-492e-8849-4a6af68026b0
                   rackGroupId: nvl5-gp1-jhb01
                   topology: gb200_nvl72r1_c2g4
+                  protocol: NVLINK_V6
                   racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
                   name: NVL rack group 1
                   description: Production NVL rack group in row A
@@ -5868,6 +5869,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp1-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
                       name: NVL rack group 1
                       description: Production NVL rack group in row A
@@ -5880,6 +5882,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp2-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
                       name: NVL rack group 2
                       description: Production NVL rack group in row A
@@ -30160,7 +30163,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. For protocol NVLINK_V6, a topology beginning with `gb` followed by digits and `_` is normalized to the `vr_` topology family for profile derivation, and Core records a warning. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -30330,6 +30333,7 @@ components:
           rackGroupId: nvl5-gp1-jhb01
           siteId: f97df110-f4de-492e-8849-4a6af68026b0
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30373,6 +30377,11 @@ components:
         topology:
           type: string
           description: External group-level NVLink topology identifier.
+        protocol:
+          type:
+            - string
+            - 'null'
+          description: Rack fabric protocol. Null only for declarations created before protocol became required.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -30412,6 +30421,7 @@ components:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           rackGroupId: nvl5-gp1-jhb01
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30445,6 +30455,11 @@ components:
           minLength: 1
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30475,6 +30490,7 @@ components:
         - siteId
         - rackGroupId
         - topology
+        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -30486,6 +30502,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp1-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
               name: NVL rack group 1
               description: Production NVL rack group in row A
@@ -30498,6 +30515,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp2-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
               name: NVL rack group 2
               description: Production NVL rack group in row A
@@ -30532,6 +30550,7 @@ components:
           properties:
             rackGroupId: {type: 'null'}
             topology: {type: 'null'}
+            protocol: {type: 'null'}
             racks: {type: 'null'}
             name: {type: 'null'}
             description: {type: 'null'}
@@ -30543,7 +30562,7 @@ components:
 
         For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 
-        Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
+        Provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all seven fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
 
         The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.
 
@@ -30552,6 +30571,7 @@ components:
         - `location.region`, `location.datacenter`, `location.room`, `location.position`
       examples:
         - topology: gb300_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
           name: NVL rack group 1 (updated)
           description: Production NVL rack group in row A, expanded membership
@@ -30584,6 +30604,13 @@ components:
           minLength: 1
           maxLength: 128
           description: Optional replacement topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30611,7 +30638,7 @@ components:
           propertyNames:
             pattern: '^[\x00-\x7F]+$'
           description: |-
-            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false

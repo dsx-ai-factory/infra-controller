@@ -134,6 +134,9 @@ async fn run_machine_a_tron_racks_test(
             &ExpectedRackGroup {
                 rack_group_id: RackGroupId::new(format!("group-{rack_id}")),
                 topology: RackGroupTopology::new(topology),
+                protocol: Some(model::expected_rack_group::RackGroupProtocol::new(
+                    "NVLINK_V5",
+                )),
                 racks: vec![ExpectedRackGroupRack {
                     rack_id: rack_id.clone(),
                     members,

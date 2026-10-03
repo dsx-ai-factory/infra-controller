@@ -12,7 +12,7 @@ nico-admin-cli-expected-rack-group-add - Add an expected rack group
 nico-admin-cli expected-rack-group add [--rack]
 [--meta-name] [--meta-description] [--label]
 [--extended] [--sort-by] [-h|--help]
-<RACK_GROUP_ID> <TOPOLOGY>
+<RACK_GROUP_ID> <PROTOCOL> <TOPOLOGY>
 ```
 
 ## DESCRIPTION
@@ -56,9 +56,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -68,6 +68,10 @@ Print help (see a summary with -h)
 
 Externally assigned group ID; UUID syntax is not required
 
+`<PROTOCOL>`
+
+External rack-management protocol identifier
+
 `<TOPOLOGY>`
 
 External topology identifier
@@ -75,8 +79,8 @@ External topology identifier
 ## Examples
 
 ```sh
-nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 gb200_nvl72r1_c2g4
-nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
+nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 NVLINK_V6 gb200_nvl72r1_c2g4
+nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 NVLINK_V6 gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
 ```
 
 ---
