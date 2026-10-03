@@ -77,10 +77,12 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			}
 			previousAccess := ManagerAccess
 			previousGauge := CertExpirationMetric
+			previousTimestampGauge := CertExpirationTimestampSecondsMetric
 			previousRegisterer := prometheus.DefaultRegisterer
 			t.Cleanup(func() {
 				ManagerAccess = previousAccess
 				CertExpirationMetric = previousGauge
+				CertExpirationTimestampSecondsMetric = previousTimestampGauge
 				prometheus.DefaultRegisterer = previousRegisterer
 			})
 
@@ -98,15 +100,18 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			data := &elektratypes.Elektra{Log: zerolog.Nop(), Managers: managertypes.NewManagerType()}
 			managerConf := &managerapi.ManagerConf{EB: conf}
 			NewWorkflowManager(data, nil, managerConf).Init()
-			gauge := CertExpirationMetric
-			gaugeValue := func() float64 {
+			// The legacy and unit-suffixed gauges must always report the same value.
+			gauges := []prometheus.Gauge{CertExpirationMetric, CertExpirationTimestampSecondsMetric}
+			assertExpiration := func(want float64) {
 				t.Helper()
-				metric := &dto.Metric{}
-				writeErr := gauge.Write(metric)
-				require.NoError(t, writeErr)
-				return metric.GetGauge().GetValue()
+				for _, gauge := range gauges {
+					metric := &dto.Metric{}
+					writeErr := gauge.Write(metric)
+					require.NoError(t, writeErr)
+					assert.Equal(t, want, metric.GetGauge().GetValue())
+				}
 			}
-			require.Zero(t, gaugeValue())
+			assertExpiration(0)
 			if tt.nilGauge {
 				CertExpirationMetric = nil
 			}
@@ -142,43 +147,60 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			loadErr := workflowOrchestrator()
 			if tt.invalidKey {
 				require.ErrorContains(t, loadErr, "PEM data in key input")
-				assert.Zero(t, gaugeValue())
+				assertExpiration(0)
 				return
 			}
 			var pathErr *os.PathError
 			require.ErrorAs(t, loadErr, &pathErr)
 			assert.Equal(t, filepath.Join(conf.Temporal.TemporalCertPath, "ca", "ca.crt"), pathErr.Path)
 			if tt.nilGauge {
-				assert.Zero(t, gaugeValue())
+				assertExpiration(0)
 				return
 			}
-			assert.Equal(t, float64(expiration.Unix()), gaugeValue())
+			assertExpiration(float64(expiration.Unix()))
 			metrics, gatherErr := registry.Gather()
 			require.NoError(t, gatherErr)
-			require.Len(t, metrics, 4)
-			var expirationMetric *dto.MetricFamily
-			for _, metric := range metrics {
-				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration" {
-					expirationMetric = metric
-					break
-				}
+			require.Len(t, metrics, 5)
+			exposed := []struct {
+				name string
+				help string
+			}{
+				{
+					name: "nico_rest_site_agent_temporal_cert_expiration",
+					help: "The expiration date of the Temporal certificate",
+				},
+				{
+					name: "nico_rest_site_agent_temporal_cert_expiration_timestamp_seconds",
+					help: "Unix timestamp in seconds when the Temporal client certificate expires",
+				},
 			}
-			require.NotNil(t, expirationMetric)
-			require.Len(t, expirationMetric.GetMetric(), 1)
-			assert.Equal(t, float64(expiration.Unix()), expirationMetric.GetMetric()[0].GetGauge().GetValue())
+			for _, want := range exposed {
+				var expirationMetric *dto.MetricFamily
+				for _, metric := range metrics {
+					if metric.GetName() == want.name {
+						expirationMetric = metric
+						break
+					}
+				}
+				require.NotNil(t, expirationMetric, want.name)
+				assert.Equal(t, dto.MetricType_GAUGE, expirationMetric.GetType())
+				assert.Equal(t, want.help, expirationMetric.GetHelp())
+				require.Len(t, expirationMetric.GetMetric(), 1)
+				assert.Equal(t, float64(expiration.Unix()), expirationMetric.GetMetric()[0].GetGauge().GetValue())
+			}
 			if tt.failedReload {
 				err = os.WriteFile(conf.Temporal.GetTemporalClientKeyFullPath(), []byte("invalid PEM"), 0600)
 				require.NoError(t, err)
 				loadErr = workflowOrchestrator()
 				require.ErrorContains(t, loadErr, "PEM data in key input")
-				assert.Equal(t, float64(expiration.Unix()), gaugeValue())
+				assertExpiration(float64(expiration.Unix()))
 			}
 			if tt.reload {
 				newExpiration := expiration.Add(24 * time.Hour)
 				writeCertificate(newExpiration)
 				loadErr = workflowOrchestrator()
 				require.ErrorAs(t, loadErr, &pathErr)
-				assert.Equal(t, float64(newExpiration.Unix()), gaugeValue())
+				assertExpiration(float64(newExpiration.Unix()))
 			}
 		})
 	}

@@ -16,7 +16,13 @@ import (
 // CertExpirationMetric is a prometheus metric for Site Agent Temporal
 // certificate expiration. Registered in Init rather than here, because the
 // namespace comes from config that is not loaded yet at package init.
+// Its unitless name is retained for existing consumers; the same value is also
+// exported by CertExpirationTimestampSecondsMetric.
 var CertExpirationMetric prometheus.Gauge
+
+// CertExpirationTimestampSecondsMetric exports the Temporal certificate
+// expiration as a Unix timestamp in seconds, named with its unit.
+var CertExpirationTimestampSecondsMetric prometheus.Gauge
 
 const (
 	// MetricTemporalConnAttempted - Metric Temporal Conn Attempted
@@ -35,6 +41,11 @@ func (wflow *API) Init() {
 		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 		Name:      "temporal_cert_expiration",
 		Help:      "The expiration date of the Temporal certificate",
+	})
+	CertExpirationTimestampSecondsMetric = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+		Name:      "temporal_cert_expiration_timestamp_seconds",
+		Help:      "Unix timestamp in seconds when the Temporal client certificate expires",
 	})
 
 	prometheus.MustRegister(
