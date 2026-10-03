@@ -282,4 +282,39 @@ impl DeviceHandle {
             machine_config_section,
         ))
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+    ) -> Self {
+        Self::machine(MachineHandle::for_control_test_host(
+            host_info,
+            Vec::new(),
+            machine_config_section,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_control_test_switch(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        Self::switch(SwitchHandle::for_control_test(
+            host_info,
+            machine_config_section,
+            nvos_ip,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.set_control_test_nvos_ip(ip),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test NVOS addresses are only set on switches")
+            }
+        }
+    }
 }

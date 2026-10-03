@@ -130,6 +130,11 @@ nodes or pods must otherwise reach. On Kind the first two default to
 [Requirements](../../../helm/charts/nico-machine-a-tron/README.md#requirements)
 for the full contract.
 
+The DPU OOB / switch NVOS underlay (`192.168.128.0/18`) has the same
+constraint: the controller publishes each simulated NVLink switch's NVOS lease
+as the externalIP of a `mat-nvos-*` Service, through which NICo reaches
+machine-a-tron's hosted NMX-C mock on port 9370.
+
 ## Image builds
 
 Core uses the existing Dockerfiles under

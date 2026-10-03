@@ -122,98 +122,88 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-001
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-1:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-002
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-2:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-003
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-3:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-004
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-4:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-005
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-5:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-006
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-6:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-007
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-7:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-008
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-8:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-009
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-9:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
         ids:
           - rack-010
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"

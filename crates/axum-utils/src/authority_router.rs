@@ -45,13 +45,26 @@ struct AuthorityRouter {
     routers: Arc<RwLock<HashMap<String, Router>>>,
 }
 
-async fn process(State(state): State<AuthorityRouter>, request: Request<Body>) -> Response {
-    let forwarded_host = forwarded_host(&request);
-    let host = request
+/// The authority a client addressed this request to, in the same precedence
+/// [`authority_router`] uses: the `host` parameter of `Forwarded`, the `Host`
+/// header, then the URI authority (where HTTP/2 carries `:authority`).
+pub fn request_authority<B>(request: &Request<B>) -> Option<String> {
+    forwarded_host(request)
+        .or_else(|| host_header(request))
+        .or_else(|| request.uri().authority().map(|v| v.as_str().to_owned()))
+}
+
+fn host_header<B>(request: &Request<B>) -> Option<String> {
+    request
         .headers()
         .get(HOST)
         .and_then(|v| v.to_str().ok())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+}
+
+async fn process(State(state): State<AuthorityRouter>, request: Request<Body>) -> Response {
+    let forwarded_host = forwarded_host(&request);
+    let host = host_header(&request);
     let authority = request.uri().authority().map(|v| v.as_str().to_owned());
     let router = find_router(
         &state.routers,

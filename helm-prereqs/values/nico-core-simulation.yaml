@@ -15,6 +15,8 @@
 ##     [networks.simulated-underlay]: the DHCP relay targets of the
 ##     machine-a-tron values files in this directory.
 ##   - [pools.lo-ip] and [pools.fnn-asn] sized for 4,500 hosts x 2 DPUs.
+##   - [nvlink_config] pointed at the NMX-C mock machine-a-tron hosts, verified
+##     against the mat-mock.nvidia.com SAN on the machine-a-tron certificates.
 ##   - [dpf] enabled and nico-api.dpf.rbacCreate: true for the DPF simulator
 ##     (dev/k8s/dpf-sim-controller), which replaces the DPF operator here.
 ##   - datacenter_asn declared in the root table, where nico-api reads it.
@@ -275,10 +277,13 @@ nico-api:
       # predicts DPU OOB interfaces on an underlay-typed segment and rejects
       # DHCP relayed onto any other type, while host admin links stay on the
       # admin segment above.
+      # Outside every default ServiceCIDR (kubeadm 10.96.0.0/12, kind
+      # 10.96.0.0/16, K3s 10.43.0.0/16): switch NVOS leases from this network
+      # are published as Service externalIPs for the NMX-C mock.
       [networks.simulated-underlay]
       type = "underlay"
-      prefix = "10.104.0.0/18"
-      gateway = "10.104.0.1"
+      prefix = "10.201.0.0/18"
+      gateway = "10.201.0.1"
       mtu = 9000
       reserve_first = 1
 
@@ -295,6 +300,23 @@ nico-api:
       # [ib_fabrics.default]
       # endpoints = ["https://10.180.126.181:443"]  # EXAMPLE - replace with your UFM endpoint
       # pkeys = [{ start = "9000", end = "11000" }] # EXAMPLE - replace with your site PKey range
+
+      # -----------------------------------------------------------------------
+      # NVLink (NMX-C mock hosted by machine-a-tron)
+      # -----------------------------------------------------------------------
+      # In controller mode NICo reaches each simulated rack's NMX-C mock at a
+      # switch NVOS address (a mat-nvos-* Service externalIP in the
+      # simulated-underlay network). The mock is served with machine-a-tron's
+      # own certificate, which carries mat-mock.nvidia.com as an extra SAN
+      # (nico-machine-a-tron certificate.extraDnsNames) and is issued by the
+      # same CA as nico-roots, so one authority verifies every rack and no
+      # client certificate is needed. Racks are reconciled once their switches
+      # report CONTROL_PLANE_STATE_CONFIGURED through the RMS mock.
+      [nvlink_config]
+      enabled = true
+      allow_insecure = false
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
 
       # -----------------------------------------------------------------------
       # Firmware management

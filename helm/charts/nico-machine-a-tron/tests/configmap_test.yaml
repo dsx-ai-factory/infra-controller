@@ -87,7 +87,6 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
-              rack_profile_id: NVL72
               ids:
                 - rack-001
               dpu_reboot_delay: 20
@@ -99,9 +98,9 @@ tests:
       - matchRegex:
           path: data["mat.toml"]
           pattern: '\[racks\.gb200\]'
-      - matchRegex:
+      - notMatchRegex:
           path: data["mat.toml"]
-          pattern: 'rack_profile_id = "NVL72"'
+          pattern: 'rack_profile_id'
       - matchRegex:
           path: data["mat.toml"]
           pattern: 'acceleration_factor = 0\.03'
@@ -121,7 +120,6 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
-              rack_profile_id: NVL72
               ids:
                 - rack-002
               bmc_dhcp_relay_address: 10.96.64.1
@@ -153,7 +151,6 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
-              rack_profile_id: NVL72
               ids:
                 - rack-001
               dpu_reboot_delay: 20
@@ -219,14 +216,14 @@ tests:
               hostCount: 2
               dpuPerHostCount: 2
               bmcDhcpRelayAddress: "10.96.64.1"
-              underlayDhcpRelayAddress: "10.104.0.1"
+              underlayDhcpRelayAddress: "10.201.0.1"
     asserts:
       - matchRegex:
           path: data["mat.toml"]
           pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
       - matchRegex:
           path: data["mat.toml"]
-          pattern: 'underlay_dhcp_relay_address = "10.104.0.1"'
+          pattern: 'underlay_dhcp_relay_address = "10.201.0.1"'
       - notMatchRegex:
           path: data["mat.toml"]
           pattern: '(oob|admin)_dhcp_relay_address'
@@ -240,11 +237,11 @@ tests:
               hostCount: 2
               dpuPerHostCount: 2
               oobDhcpRelayAddress: "10.96.64.1"
-              adminDhcpRelayAddress: "10.104.0.1"
+              adminDhcpRelayAddress: "10.201.0.1"
     asserts:
       - matchRegex:
           path: data["mat.toml"]
           pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
       - matchRegex:
           path: data["mat.toml"]
-          pattern: 'underlay_dhcp_relay_address = "10.104.0.1"'
+          pattern: 'underlay_dhcp_relay_address = "10.201.0.1"'

@@ -17,7 +17,9 @@
 
 use bmc_mock::infiniband::Guid;
 use bmc_mock::mac_address_pool::MacAddressPool;
-use bmc_mock::{DpuMachineInfo, HardwareType, HostMachineInfo, MachineInfo};
+use bmc_mock::{
+    DpuMachineInfo, HardwareType, HostMachineInfo, MachineInfo, RackPlacement, TrayPlacement,
+};
 use carbide_utils::arch::CpuArchitecture;
 use mac_address::MacAddress;
 use rpc::machine_discovery::{
@@ -353,7 +355,7 @@ fn wiwynn_gb200(host: &HostMachineInfo) -> DiscoveryInfo {
             product_name: "GB200 NVL".into(),
             sys_vendor: "NVIDIA".into(),
         }),
-        gpus: gb200_gpus(),
+        gpus: gb200_gpus(host),
         memory_device_groups: memory_device_groups(2, 491520, "LPDDR5"),
         #[allow(deprecated)]
         memory_devices: vec![],
@@ -413,38 +415,7 @@ fn lenovo_gb300(host: &HostMachineInfo) -> DiscoveryInfo {
             product_name: "HG635N_V2".into(),
             sys_vendor: "Lenovo".into(),
         }),
-        gpus: (0..4)
-            .map(|index| Gpu {
-                name: "NVIDIA GB300".into(),
-                serial: [
-                    "165300000001",
-                    "165300000001",
-                    "165300000002",
-                    "165300000002",
-                ][index]
-                    .into(),
-                driver_version: "580.126.16".into(),
-                vbios_version: "97.10.4A.00.1A".into(),
-                inforom_version: "G548.0301.00.03".into(),
-                total_memory: "284208 MiB".into(),
-                frequency: "2070 MHz".into(),
-                pci_bus_id: [
-                    "00000008:06:00.0",
-                    "00000009:06:00.0",
-                    "00000018:06:00.0",
-                    "00000019:06:00.0",
-                ][index]
-                    .into(),
-                platform_info: Some(GpuPlatformInfo {
-                    chassis_serial: host.serial.clone(),
-                    slot_number: 4,
-                    tray_index: 3,
-                    host_id: 1,
-                    module_id: [2, 1, 4, 3][index],
-                    fabric_guid: format!("0xfeeeeeeeeeeeee{index:02x}"),
-                }),
-            })
-            .collect(),
+        gpus: gb300_gpus(host),
         memory_device_groups: memory_device_groups(2, 491520, "LPDDR5"),
         #[allow(deprecated)]
         memory_devices: vec![],
@@ -708,7 +679,55 @@ fn nvme_pci_path(index: usize) -> String {
     )
 }
 
-fn gb200_gpus() -> Vec<Gpu> {
+/// The NVLink GPUs `for_machine` reports for `host`; empty for hosts without
+/// them. The hosted NMX-C mock builds its view of a rack from this, so the
+/// GPU identities it serves are the ones discovery reports.
+pub(crate) fn nvlink_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
+    match host.hw_type {
+        HardwareType::WiwynnGB200Nvl => gb200_gpus(host),
+        HardwareType::LenovoGB300Nvl => gb300_gpus(host),
+        _ => Vec::new(),
+    }
+}
+
+/// Where a GPU's tray sits, as NMX-C would report it: the chassis slot and
+/// compute-tray index from the rack elevation, or `fallback` for a host that
+/// is not part of a rack.
+fn gpu_platform_info(
+    host: &HostMachineInfo,
+    module_id: u32,
+    fallback: (u32, u32),
+) -> GpuPlatformInfo {
+    let (slot_number, tray_index) = match host.rack_placement.and_then(RackPlacement::tray) {
+        Some(TrayPlacement::Compute {
+            tray_index,
+            chassis_physical_slot_number,
+        }) => (chassis_physical_slot_number, u32::from(tray_index)),
+        _ => fallback,
+    };
+    GpuPlatformInfo {
+        chassis_serial: host.serial.clone(),
+        slot_number,
+        tray_index,
+        host_id: 1,
+        module_id,
+        fabric_guid: nvlink_fabric_guid(host, module_id),
+    }
+}
+
+/// The fabric GUID of the GPU in NVLink module `module_id` of `host`.
+///
+/// NICo joins NMX-C partition membership to machines by this value, so it
+/// has to be unique across the fleet and stable across restarts. The BMC MAC
+/// is both: MAC pools are already required not to overlap between
+/// machine-a-tron deployments whose inventories are aggregated.
+fn nvlink_fabric_guid(host: &HostMachineInfo, module_id: u32) -> String {
+    let mac = host.bmc_mac_address.bytes();
+    let mac = u64::from_be_bytes([0, 0, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+    format!("{:#018x}", (mac << 8) | u64::from(module_id))
+}
+
+fn gb200_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
     (0..2)
         .flat_map(|board| {
             (0..2).map(move |gpu| Gpu {
@@ -724,15 +743,40 @@ fn gb200_gpus() -> Vec<Gpu> {
                     ["00000018:01:00.0", "00000019:01:00.0"],
                 ][board][gpu]
                     .into(),
-                platform_info: Some(GpuPlatformInfo {
-                    chassis_serial: format!("182100000000{board}{gpu}"),
-                    slot_number: 24,
-                    tray_index: 14,
-                    host_id: 1,
-                    module_id: [[2, 1], [4, 3]][board][gpu],
-                    fabric_guid: format!("0xfeeeeeeeeeeeee{gpu:02x}"),
-                }),
+                platform_info: Some(gpu_platform_info(
+                    host,
+                    [[2, 1], [4, 3]][board][gpu],
+                    (24, 14),
+                )),
             })
+        })
+        .collect()
+}
+
+fn gb300_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
+    (0..4)
+        .map(|index| Gpu {
+            name: "NVIDIA GB300".into(),
+            serial: [
+                "165300000001",
+                "165300000001",
+                "165300000002",
+                "165300000002",
+            ][index]
+                .into(),
+            driver_version: "580.126.16".into(),
+            vbios_version: "97.10.4A.00.1A".into(),
+            inforom_version: "G548.0301.00.03".into(),
+            total_memory: "284208 MiB".into(),
+            frequency: "2070 MHz".into(),
+            pci_bus_id: [
+                "00000008:06:00.0",
+                "00000009:06:00.0",
+                "00000018:06:00.0",
+                "00000019:06:00.0",
+            ][index]
+                .into(),
+            platform_info: Some(gpu_platform_info(host, [2, 1, 4, 3][index], (4, 3))),
         })
         .collect()
 }
@@ -885,7 +929,7 @@ mod tests {
     use std::collections::HashSet;
 
     use bmc_mock::mac_address_pool::{Config, MacAddressPool, PoolConfig};
-    use bmc_mock::{DpuMachineInfo, DpuSettings};
+    use bmc_mock::{DpuMachineInfo, DpuSettings, RackInfo, RackType};
 
     use super::*;
 
@@ -1002,6 +1046,75 @@ mod tests {
             }]
         );
         assert!(discovery.tpm_description.is_some());
+    }
+
+    /// NICo joins NMX-C partitions to machines by fabric GUID, so two trays
+    /// must never report the same one, and a tray's placement must be the
+    /// one its rack elevation gives it.
+    #[test]
+    fn nvlink_gpus_are_unique_per_host_and_placed_by_the_rack() {
+        let mut first = match host_for_platform(HardwareType::WiwynnGB200Nvl) {
+            MachineInfo::Host(host) => host,
+            MachineInfo::Dpu(_) => unreachable!("GB200 must be a host"),
+        };
+        let mut second = first.clone();
+        second.bmc_mac_address = MacAddress::new([2, 0, 0, 0, 0, 0x42]);
+        second.rack_placement = Some(
+            RackInfo {
+                rack_type: RackType::WiwynnGb200Nvl72,
+            }
+            .placement(12),
+        );
+
+        let platform = |host: &HostMachineInfo| -> Vec<GpuPlatformInfo> {
+            nvlink_gpus(host)
+                .into_iter()
+                .map(|gpu| gpu.platform_info.expect("GPU platform info"))
+                .collect()
+        };
+        let first_gpus = platform(&first);
+        let second_gpus = platform(&second);
+
+        assert_eq!(first_gpus.len(), 4);
+        assert!(
+            first_gpus
+                .iter()
+                .chain(&second_gpus)
+                .map(|gpu| gpu.fabric_guid.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+                == 8,
+            "fabric GUIDs are unique across hosts and modules"
+        );
+        assert!(
+            first_gpus
+                .iter()
+                .all(|gpu| gpu.fabric_guid.starts_with("0x") && gpu.fabric_guid.len() == 18)
+        );
+        assert_eq!(
+            second_gpus[0].fabric_guid,
+            format!("0x{:016x}", (0x0200_0000_0042_u64 << 8) | 2),
+            "the GUID is the BMC MAC followed by the module id"
+        );
+        assert!(
+            first_gpus
+                .iter()
+                .all(|gpu| gpu.chassis_serial == first.serial)
+        );
+
+        assert_eq!(
+            (first_gpus[0].slot_number, first_gpus[0].tray_index),
+            (24, 14),
+            "a host outside a rack keeps the platform fallback"
+        );
+        assert_eq!(
+            (second_gpus[0].slot_number, second_gpus[0].tray_index),
+            (11, 1),
+            "a rack member is placed by its elevation"
+        );
+
+        first.hw_type = HardwareType::NvidiaDgxH100;
+        assert!(nvlink_gpus(&first).is_empty());
     }
 
     #[test]

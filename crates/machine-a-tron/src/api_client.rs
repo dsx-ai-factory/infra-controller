@@ -25,10 +25,12 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
+use model::expected_rack_group::ExpectedRackGroup;
 use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
-    ExpectedRackRequest, ExpectedSwitch, MachinesByIdsRequest, SetDynamicConfigRequest,
+    ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch, MachinesByIdsRequest,
+    SetDynamicConfigRequest,
 };
 use rpc::protos::forge_api_client::ForgeApiClient;
 
@@ -70,6 +72,8 @@ impl From<ForgeApiClient> for ApiClient {
 /// One expected inventory record that machine-a-tron registers at startup.
 #[derive(Clone, Debug)]
 pub(crate) enum ExpectedRecord {
+    /// The group nico-api requires before it accepts the rack it declares.
+    RackGroup { group: ExpectedRackGroup },
     Rack {
         rack_id: RackId,
         rack_profile_id: RackProfileId,
@@ -99,6 +103,7 @@ impl ExpectedRecord {
     /// Human-readable identity used in logs and the registration summary.
     pub(crate) fn identifier(&self) -> String {
         let (kind, serial, bmc_mac_address) = match self {
+            Self::RackGroup { group } => return format!("rack group {}", group.rack_group_id),
             Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
             Self::Machine {
                 chassis_serial_number,
@@ -421,6 +426,7 @@ impl ApiClient {
     /// Registers one expected inventory record of any supported kind.
     pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
         match record {
+            ExpectedRecord::RackGroup { group } => self.ensure_expected_rack_group(group).await,
             ExpectedRecord::Rack {
                 rack_id,
                 rack_profile_id,
@@ -558,6 +564,50 @@ impl ApiClient {
             })
             .await
             .map_err(ClientApiError::InvocationError)
+    }
+
+    /// Registers the expected rack group that declares one simulated rack.
+    /// A group the API already holds is accepted when it declares the same
+    /// topology and racks, since nico-api derived the rack's profile from
+    /// those; any other difference is a configuration error, as it is for a
+    /// rack that already exists with another profile.
+    pub(crate) async fn ensure_expected_rack_group(
+        &self,
+        group: ExpectedRackGroup,
+    ) -> ClientApiResult<()> {
+        let rack_group_id = group.rack_group_id.clone();
+        match self
+            .0
+            .add_expected_rack_group(rpc::forge::ExpectedRackGroup::from(group.clone()))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                let existing = self
+                    .0
+                    .get_expected_rack_group(ExpectedRackGroupRequest {
+                        rack_group_id: rack_group_id.to_string(),
+                    })
+                    .await
+                    .map_err(ClientApiError::InvocationError)?;
+                let existing = ExpectedRackGroup::try_from(existing).map_err(|error| {
+                    ClientApiError::ConfigError(format!(
+                        "Expected rack group {rack_group_id} already exists but cannot be read back: {error}"
+                    ))
+                })?;
+                if existing.topology == group.topology && existing.racks == group.racks {
+                    Ok(())
+                } else {
+                    Err(ClientApiError::ConfigError(format!(
+                        "Expected rack group {rack_group_id} already exists with topology {} and {} rack(s) that differ from the simulated {} rack; delete it with `nico-admin-cli expected-rack-group delete`",
+                        existing.topology,
+                        existing.racks.len(),
+                        group.topology
+                    )))
+                }
+            }
+            Err(status) => Err(ClientApiError::InvocationError(status)),
+        }
     }
 
     pub async fn ensure_expected_rack(

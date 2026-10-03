@@ -15,48 +15,30 @@
 # limitations under the License.
 #
 [package]
-name = "libnmxc"
-version = "0.1.0"
+name = "carbide-nmxc-mock"
+version = "0.0.1"
 edition.workspace = true
-exclude = ["/tests"]
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
 [lib]
-name = "libnmxc"
-path = "src/lib.rs"
-
-[features]
-# Also generate the tonic server for `NMX_Controller`, for mocks that serve it.
-server = []
+name = "nmxc_mock"
 
 [dependencies]
-async-trait = { workspace = true }
-trace-propagation = { path = "../trace-propagation" }
-http = { workspace = true }
-tokio = { workspace = true, features = [
-  "fs",
-  "net",
-  "time",
-  "rt-multi-thread",
-] }
-tonic = { workspace = true }
-prost = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-tracing = { workspace = true }
+axum = { workspace = true }
+carbide-axum-utils = { path = "../axum-utils" }
+libnmxc = { path = "../libnmxc", features = ["server"] }
+serde = { features = ["derive"], workspace = true }
 thiserror = { workspace = true }
-tonic-prost.workspace = true
+tonic = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
+axum = { features = ["http2"], workspace = true }
 carbide-test-support = { path = "../test-support" }
-clap = { workspace = true, features = ["derive"] }
-tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio = { features = ["full"], workspace = true }
 
-[build-dependencies]
-tonic-prost-build = { workspace = true }
-
-[lints.clippy]
-undocumented_unsafe_blocks = "deny"
+[lints]
+workspace = true
