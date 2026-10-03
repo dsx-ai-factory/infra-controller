@@ -1,0 +1,127 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: Ansible Collection CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+    paths:
+      - '.github/workflows/ansible-ci.yml'
+      - '.github/workflows/ansible-publish.yml'
+      - 'Makefile'
+      - 'rest-api/openapi/spec.yaml'
+      - 'tools/generate/**'
+      - 'ansible/**'
+      - '!ansible/plugins/modules/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') && format('ansible-pr-{0}', github.ref_name) || format('ansible-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') }}
+
+jobs:
+  ansible-generate-check:
+    name: Generate and validate Ansible collection
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml ansible-core pytest
+
+      - name: Lint workflow files
+        run: |
+          ACTIONLINT_VERSION=1.7.12
+          curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash" \
+            | bash -s -- "${ACTIONLINT_VERSION}" /usr/local/bin
+          actionlint .github/workflows/ansible-ci.yml .github/workflows/ansible-publish.yml
+
+      - name: Generate Ansible collection modules and docs
+        run: |
+          python3 tools/generate/generate.py \
+            --backend ansible \
+            --spec rest-api/openapi/spec.yaml \
+            --output ansible/plugins/modules \
+            --docs-output /tmp/ansible-docs
+
+      - name: Verify generator metadata is in sync
+        run: |
+          python3 tools/generate/generate.py \
+            --backend ansible \
+            --spec rest-api/openapi/spec.yaml \
+            --output /tmp/drift-check-modules \
+            --root .
+          git diff --exit-code -- ansible/meta/runtime.yml \
+            || { echo "ERROR: ansible/meta/runtime.yml is out of sync. Run 'make ansible' to regenerate."; exit 1; }
+
+      - name: Verify scaffold files are unmodified
+        run: git diff --exit-code -- ansible/galaxy.yml ansible/plugins/module_utils/ ansible/tests/
+
+      - name: Run unit tests
+        run: python3 -m pytest ansible/tests/unit/ -v
+
+      - name: Validate collection builds
+        working-directory: ansible
+        run: ansible-galaxy collection build --output-path /tmp/ansible-build
+
+      - name: Run ansible-test sanity
+        run: |
+          # ansible-test requires the collection to be under the canonical namespace path.
+          mkdir -p /tmp/test_collections/ansible_collections/nvidia/infra_controller
+          cp -r ansible/. /tmp/test_collections/ansible_collections/nvidia/infra_controller/
+          cd /tmp/test_collections/ansible_collections/nvidia/infra_controller
+          ansible-test sanity --test validate-modules --python default --local
+
+      - name: Validate action_groups in runtime.yml
+        run: |
+          MODULES=$(ls ansible/plugins/modules/*.py 2>/dev/null | xargs -n1 basename | sed 's/\.py$//' | sort)
+          ACTION_GROUP_MODULES=$(python3 -c "
+          import yaml
+          with open('ansible/meta/runtime.yml') as f:
+              d = yaml.safe_load(f)
+          print('\n'.join(sorted(d.get('action_groups', {}).get('all', []))))
+          ")
+          MISSING=$(comm -23 <(echo "$MODULES") <(echo "$ACTION_GROUP_MODULES"))
+          EXTRA=$(comm -13 <(echo "$MODULES") <(echo "$ACTION_GROUP_MODULES"))
+          if [ -n "$MISSING" ]; then
+            echo "Modules missing from action_groups: $MISSING"
+            exit 1
+          fi
+          if [ -n "$EXTRA" ]; then
+            echo "action_groups contains entries not matching any module: $EXTRA"
+            exit 1
+          fi
+          echo "action_groups are in sync with generated modules."
+
+      - name: Report module and doc count
+        run: |
+          COUNT=$(ls ansible/plugins/modules/*.py 2>/dev/null | wc -l)
+          DOCS=$(ls /tmp/ansible-docs/*.md 2>/dev/null | wc -l)
+          echo "Generated $COUNT module files, $DOCS doc pages" | tee -a "$GITHUB_STEP_SUMMARY"
