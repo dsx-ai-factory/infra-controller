@@ -74,11 +74,11 @@ and handles sensitive credentials and tenant state.
   workflows. Versioned routes require Bearer JWT processing through configured
   JWKS issuers or Keycloak. REST workflows use Temporal and site-agent/Core gRPC
   proxying to reach site-local Core services.
-- **Managed-host and DPU agents**: Scout runs for limited lifecycle phases on hosts for inventory,
-  cleanup, validation, and health checks. The DPU agent runs persistently on the
-  BlueField DPU, polls Core for desired state, configures HBN/network isolation,
-  manages local DHCP and metadata service behavior, and applies updates or
-  hotfixes.
+- **Managed-host and DPU agents**: Scout runs for limited lifecycle phases on
+  hosts for inventory, cleanup, validation, and health checks. The DPU agent runs
+  persistently on the BlueField DPU, polls Core for desired state, configures
+  HBN/network isolation, manages local DHCP and metadata service behavior, and
+  applies updates or hotfixes.
 - **PXE, cloud-init, DHCP, DNS, and metadata services**: PXE serves boot scripts,
   cloud-init data, static boot artifacts, Scout firmware scripts, and bootstrap
   CA material. DPU-side DHCP handles host DHCP locally. FMDS-style metadata
@@ -241,6 +241,12 @@ and support scripts.
   development defaults are not production hardening guidance.
 
 ## Supported Versions and Security Updates
+
+The [NICo release notes](https://docs.nvidia.com/infra-controller/documentation/release-notes)
+are the canonical source for release status. Releases labeled **current** or
+**maintenance** receive security updates. Releases labeled **EOL** no longer
+receive updates. See [SUPPORT.md](SUPPORT.md) for the support lifecycle and
+upgrade guidance.
 
 The software is provided "as is" without warranties of any kind. Features,
 APIs, and configurations may change in future releases. Security fixes should
