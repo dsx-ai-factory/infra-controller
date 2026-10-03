@@ -20,95 +20,106 @@ import (
 
 func TestExpectedSwitch_FromProto(t *testing.T) {
 	id := uuid.New()
-	rackID := "rack-1"
-	name := "sw-1"
-	manufacturer := "ACME"
-	model := "SW1"
-	description := "primary"
-	var slot, trayIdx, host int32 = 1, 2, 3
-
-	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
-		es := &ExpectedSwitch{ID: id, BmcMacAddress: "aa:bb"}
-		es.FromProto(nil)
-
-		assert.Equal(t, id, es.ID)
-		assert.Equal(t, "aa:bb", es.BmcMacAddress)
-	})
-
-	t.Run("invalid id leaves es.ID unchanged", func(t *testing.T) {
-		es := &ExpectedSwitch{ID: id}
-		es.FromProto(&corev1.ExpectedSwitch{
-			ExpectedSwitchId: &corev1.UUID{Value: "not-a-uuid"},
-			BmcMacAddress:    "aa:bb",
-		})
-
-		assert.Equal(t, id, es.ID)
-		assert.Equal(t, "aa:bb", es.BmcMacAddress)
-	})
-
-	t.Run("populates all proto fields", func(t *testing.T) {
-		es := &ExpectedSwitch{}
-		es.FromProto(&corev1.ExpectedSwitch{
-			ExpectedSwitchId:   &corev1.UUID{Value: id.String()},
-			BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
-			SwitchSerialNumber: "SSN-1",
-			BmcIpAddress:       "10.0.0.1",
-			NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
-			RackId:             &corev1.RackId{Id: rackID},
-			Name:               &name,
-			Manufacturer:       &manufacturer,
-			Model:              &model,
-			Description:        &description,
-			SlotId:             &slot,
-			TrayIdx:            &trayIdx,
-			HostId:             &host,
-			Metadata: &corev1.Metadata{
-				Labels: []*corev1.Label{
-					{Key: "env", Value: cutil.GetPtr("prod")},
+	incomingID := uuid.New()
+	siteID := uuid.New()
+	stored := ExpectedSwitch{
+		ID:                 id,
+		SiteID:             siteID,
+		BmcMacAddress:      "aa:bb",
+		SwitchSerialNumber: "old-serial",
+		BmcIpAddress:       cutil.GetPtr("10.0.0.2"),
+		RackID:             cutil.GetPtr("old-rack"),
+		Name:               cutil.GetPtr("old-name"),
+		Description:        cutil.GetPtr("old-description"),
+		Manufacturer:       cutil.GetPtr("old-manufacturer"),
+		Model:              cutil.GetPtr("old-model"),
+		SlotID:             cutil.GetPtr(int32(9)),
+		TrayIdx:            cutil.GetPtr(int32(9)),
+		HostID:             cutil.GetPtr(int32(9)),
+		Labels:             Labels{"old": "value"},
+		NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:00"},
+	}
+	tests := []struct {
+		name  string
+		proto *corev1.ExpectedSwitch
+		want  ExpectedSwitch
+	}{
+		{
+			name: "nil proto leaves receiver unchanged",
+			want: stored,
+		},
+		{
+			name: "reads metadata names and preserves raw labels",
+			proto: &corev1.ExpectedSwitch{
+				ExpectedSwitchId:   &corev1.UUID{Value: incomingID.String()},
+				BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
+				SwitchSerialNumber: "serial-1",
+				BmcIpAddress:       "10.0.0.1",
+				RackId:             &corev1.RackId{Id: "rack-1"},
+				NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+				Name:               cutil.GetPtr("obsolete-name"),
+				Description:        cutil.GetPtr("obsolete-description"),
+				Manufacturer:       cutil.GetPtr("ACME"),
+				Model:              cutil.GetPtr("M1"),
+				SlotId:             cutil.GetPtr(int32(4)),
+				TrayIdx:            cutil.GetPtr(int32(5)),
+				HostId:             cutil.GetPtr(int32(6)),
+				Metadata: &corev1.Metadata{
+					Name:        "component-1",
+					Description: "primary",
+					Labels: []*corev1.Label{
+						{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+						{Key: "model", Value: cutil.GetPtr("model-1")},
+						{Key: "slot_id", Value: cutil.GetPtr("1")},
+						{Key: "tray_idx", Value: cutil.GetPtr("2")},
+						{Key: "host_id", Value: cutil.GetPtr("3")},
+						{Key: "env", Value: cutil.GetPtr("prod")},
+					},
 				},
 			},
+			want: ExpectedSwitch{
+				ID:                 incomingID,
+				SiteID:             siteID,
+				BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
+				SwitchSerialNumber: "serial-1",
+				BmcIpAddress:       cutil.GetPtr("10.0.0.1"),
+				RackID:             cutil.GetPtr("rack-1"),
+				Name:               cutil.GetPtr("component-1"),
+				Description:        cutil.GetPtr("primary"),
+				Manufacturer:       cutil.GetPtr("ACME"),
+				Model:              cutil.GetPtr("M1"),
+				SlotID:             cutil.GetPtr(int32(4)),
+				TrayIdx:            cutil.GetPtr(int32(5)),
+				HostID:             cutil.GetPtr(int32(6)),
+				Labels:             Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
+				NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			},
+		},
+		{
+			name: "invalid ID preserves identity and absent fields reset the receiver",
+			proto: &corev1.ExpectedSwitch{
+				ExpectedSwitchId: &corev1.UUID{Value: "not-a-uuid"},
+				BmcMacAddress:    "aa:bb",
+			},
+			want: ExpectedSwitch{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb"},
+		},
+		{
+			name: "empty metadata does not read obsolete names",
+			proto: &corev1.ExpectedSwitch{
+				Name:        cutil.GetPtr("obsolete-name"),
+				Description: cutil.GetPtr("obsolete-description"),
+				Metadata:    &corev1.Metadata{},
+			},
+			want: ExpectedSwitch{ID: id, SiteID: siteID},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stored
+			got.FromProto(tc.proto)
+			assert.Equal(t, tc.want, got)
 		})
-
-		assert.Equal(t, id, es.ID)
-		assert.Equal(t, "aa:bb:cc:dd:ee:ff", es.BmcMacAddress)
-		assert.Equal(t, "SSN-1", es.SwitchSerialNumber)
-		if assert.NotNil(t, es.BmcIpAddress) {
-			assert.Equal(t, "10.0.0.1", *es.BmcIpAddress)
-		}
-		assert.Equal(t, []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, es.NvosMacAddresses)
-		if assert.NotNil(t, es.RackID) {
-			assert.Equal(t, rackID, *es.RackID)
-		}
-		assert.Equal(t, &name, es.Name)
-		assert.Equal(t, &manufacturer, es.Manufacturer)
-		assert.Equal(t, &model, es.Model)
-		assert.Equal(t, &description, es.Description)
-		assert.Equal(t, &slot, es.SlotID)
-		assert.Equal(t, &trayIdx, es.TrayIdx)
-		assert.Equal(t, &host, es.HostID)
-		assert.Equal(t, Labels{"env": "prod"}, es.Labels)
-	})
-
-	t.Run("empty BmcIpAddress yields nil pointer", func(t *testing.T) {
-		es := &ExpectedSwitch{BmcIpAddress: cutil.GetPtr("stale")}
-		es.FromProto(&corev1.ExpectedSwitch{
-			ExpectedSwitchId: &corev1.UUID{Value: id.String()},
-			BmcIpAddress:     "",
-		})
-
-		assert.Nil(t, es.BmcIpAddress)
-	})
-
-	t.Run("nil RackId clears es.RackID", func(t *testing.T) {
-		stale := "stale-rack"
-		es := &ExpectedSwitch{RackID: &stale}
-		es.FromProto(&corev1.ExpectedSwitch{
-			ExpectedSwitchId: &corev1.UUID{Value: id.String()},
-			BmcMacAddress:    "aa:bb",
-		})
-
-		assert.Nil(t, es.RackID)
-	})
+	}
 }
 
 func TestExpectedSwitch_ToProto(t *testing.T) {
