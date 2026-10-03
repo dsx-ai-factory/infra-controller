@@ -26,9 +26,10 @@ use config_version::ConfigVersion;
 use db::{self};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
+use model::firmware::FirmwareComponentType;
 use model::machine::{
-    CleanupContext, DpuInitState, HostReprovisionState, MachineState, ManagedHostState,
-    ReadyBootConfigState, SetBootOrderInfo, SetBootOrderState,
+    CleanupContext, DpuInitState, HostReprovisionState, InstanceState, MachineState,
+    ManagedHostState, ReadyBootConfigState, SetBootOrderInfo, SetBootOrderState,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::test_support::ManagedHostConfig;
@@ -389,26 +390,37 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
-    move_machine_to_needed_state(
-        host_id.into(),
-        &ManagedHostState::HostReprovision {
-            reprovision_state: HostReprovisionState::WaitingForManualUpgrade {
-                manual_upgrade_started: Utc::now(),
-            },
-            retry_count: 0,
+    for reprovision_state in [
+        HostReprovisionState::WaitingForManualUpgrade {
+            manual_upgrade_started: Utc::now(),
         },
-        &env.pool,
-    )
-    .await;
+        HostReprovisionState::NewFirmwareReportedWait {
+            final_version: "28.47.2682".to_string(),
+            firmware_type: FirmwareComponentType::Cx7,
+            firmware_number: None,
+            previous_reset_time: Some(Utc::now().timestamp()),
+            reset_retry_count: 0,
+        },
+    ] {
+        let state = ManagedHostState::HostReprovision {
+            reprovision_state,
+            retry_count: 0,
+        };
+        move_machine_to_needed_state(host_id.into(), &state, &env.pool).await;
 
-    let instructions = get_pxe_instructions(
-        &env,
-        host_interface_id,
-        rpc::forge::MachineArchitecture::X86,
-        None,
-    )
-    .await;
-    assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+        let instructions = get_pxe_instructions(
+            &env,
+            host_interface_id,
+            rpc::forge::MachineArchitecture::X86,
+            None,
+        )
+        .await;
+        assert!(
+            instructions.pxe_script.contains("x86_64/scout.efi"),
+            "a host in {state:?} must boot Scout: {}",
+            instructions.pxe_script
+        );
+    }
 
     move_machine_to_needed_state(
         host_id.into(),
@@ -448,6 +460,42 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
         .single_interface_network_config(segment_id)
         .build()
         .await;
+
+    move_machine_to_needed_state(
+        mh.host().id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::HostReprovision {
+                reprovision_state: HostReprovisionState::NewFirmwareReportedWait {
+                    final_version: "28.47.2682".to_string(),
+                    firmware_type: FirmwareComponentType::Cx7,
+                    firmware_number: None,
+                    previous_reset_time: Some(Utc::now().timestamp()),
+                    reset_retry_count: 0,
+                },
+            },
+        },
+        &env.pool,
+    )
+    .await;
+
+    let instructions = host_interface
+        .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
+        .await;
+    assert!(
+        instructions.pxe_script.contains("x86_64/scout.efi"),
+        "an assigned host waiting for firmware must boot Scout: {}",
+        instructions.pxe_script
+    );
+
+    // Booting Scout must preserve the pending one-time tenant provisioning script.
+    move_machine_to_needed_state(
+        mh.host().id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+        &env.pool,
+    )
+    .await;
 
     let instructions = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)

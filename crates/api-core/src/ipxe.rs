@@ -660,7 +660,9 @@ exit ||
                 _ => error_instructions(machine_id, target.interface_id, machine.current_state()),
             },
             ManagedHostState::HostReprovision {
-                reprovision_state: HostReprovisionState::WaitingForManualUpgrade { .. },
+                reprovision_state:
+                    HostReprovisionState::WaitingForManualUpgrade { .. }
+                    | HostReprovisionState::NewFirmwareReportedWait { .. },
                 ..
             } => PxeInstructions::get_pxe_instruction_for_arch(
                 target.arch,
