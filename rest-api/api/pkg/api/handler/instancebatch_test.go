@@ -6,10 +6,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -29,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -61,12 +64,61 @@ func testBatchBuildMachineWithNVLinkDomain(t *testing.T, dbSession *cdb.Session,
 	return mc
 }
 
+// testBatchAssignOnLockHook marks the first candidate Machine assigned from another connection right after
+// the batch locks it, so the locked re-read rejects that Machine. bun can't remove a hook, so it fires once.
+type testBatchAssignOnLockHook struct {
+	once      sync.Once
+	dbSession *cdb.Session
+	// lockQueries maps each candidate's pg_try_advisory_xact_lock call to its Machine ID
+	lockQueries map[string]string
+	assigned    string
+	err         error
+}
+
+func (h *testBatchAssignOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testBatchAssignOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Err != nil {
+		return
+	}
+	for lockQuery, machineID := range h.lockQueries {
+		if !strings.Contains(event.Query, lockQuery) {
+			continue
+		}
+		h.once.Do(func() {
+			h.assigned = machineID
+			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+				MachineID:  machineID,
+				IsAssigned: cutil.GetPtr(true),
+			})
+		})
+		return
+	}
+}
+
 func TestAllocateMachinesForBatch(t *testing.T) {
 	dbSession := testBatchInstanceInitDB(t)
 	defer dbSession.Close()
 	common.TestSetupSchema(t, dbSession)
 
 	ctx := context.Background()
+
+	// machineLockedElsewhere reports whether another transaction is holding the Machine's advisory lock
+	machineLockedElsewhere := func(t *testing.T, machineID string) bool {
+		t.Helper()
+		other, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback() }()
+		lockErr := other.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			return true
+		}
+		require.NoError(t, lockErr)
+		return false
+	}
+
 	providerOrg := "test-label-filter-provider"
 	providerUser := testInstanceBuildUser(t, dbSession, "test-label-filter-user", providerOrg, []string{authz.ProviderAdminRole})
 	provider := testInstanceSiteBuildInfrastructureProvider(t, dbSession, "test-label-filter-provider", providerOrg, providerUser)
@@ -184,6 +236,30 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("unlocks a Machine rejected after its lock, keeps the verified Machine locked", func(t *testing.T) {
+		lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type", site, cdbm.InstanceStatusReady)
+		hook := &testBatchAssignOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}}
+		for range 2 {
+			machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
+			testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
+			hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
+		}
+		dbSession.DB.AddQueryHook(hook)
+
+		tx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
+
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
+		require.Nil(t, apiErr)
+		require.NoError(t, hook.err)
+		require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
+		require.Len(t, machines, 1)
+		assert.NotEqual(t, hook.assigned, machines[0].ID)
+		assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
+		assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
+	})
 }
 
 func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
