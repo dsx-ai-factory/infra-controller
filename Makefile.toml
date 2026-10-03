@@ -413,7 +413,7 @@ workspace = false
 script = '''
 #!/usr/bin/env bash
 
-docker build ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
+docker build --load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
 '''
 
 [tasks.build-x86-build-container]
@@ -430,6 +430,7 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--load",
   "--build-arg",
   "KEA_VERSION=${KEA_VERSION}",
   "-t",
