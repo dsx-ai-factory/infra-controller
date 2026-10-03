@@ -5,11 +5,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,29 @@ import (
 	"github.com/stretchr/testify/require"
 	cli "github.com/urfave/cli/v2"
 )
+
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	run()
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	return string(output)
+}
 
 func TestToKebab(t *testing.T) {
 	tests := []struct {
@@ -1497,6 +1522,175 @@ func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
 	assert.JSONEq(t, `[]`, string(output))
+}
+
+func TestNewApp_VpcPeeringListOutputAndRelationRequests(t *testing.T) {
+	var requests []url.Values
+	const response = `[
+		{
+			"id": "peering-id",
+			"vpc1Id": "vpc1-id",
+			"vpc1": {"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2": {"name": "Storage VPC"}
+		}
+	]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests = append(requests, request.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(response))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	tests := []struct {
+		name            string
+		flags           []string
+		wantRelations   []string
+		wantTableOutput bool
+		wantFormat      string
+	}{
+		{
+			name:            "defaults to table and requests both VPC relations",
+			wantRelations:   []string{"Vpc1", "Vpc2"},
+			wantTableOutput: true,
+		},
+		{
+			name:       "JSON remains available without relation expansion",
+			flags:      []string{"--output", "json"},
+			wantFormat: "json",
+		},
+		{
+			name:       "YAML remains available without relation expansion",
+			flags:      []string{"--output", "yaml"},
+			wantFormat: "yaml",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-peering", "list",
+			}
+			args = append(args, test.flags...)
+			before := len(requests)
+			var runErr error
+			output := captureStdout(t, func() {
+				runErr = app.Run(args)
+			})
+			require.NoError(t, runErr)
+			require.Len(t, requests, before+1)
+			assert.Equal(t, test.wantRelations, requests[before]["includeRelation"])
+			if test.wantTableOutput {
+				for _, want := range []string{"ID", "VPC1 Name", "VPC1 ID", "VPC2 Name", "VPC2 ID", "peering-id", "Application VPC", "Storage VPC"} {
+					assert.Contains(t, output, want)
+				}
+			}
+			switch test.wantFormat {
+			case "json":
+				assert.JSONEq(t, response, output)
+			case "yaml":
+				assert.Contains(t, output, "id: peering-id")
+				assert.Contains(t, output, "name: Application VPC")
+				assert.Contains(t, output, "name: Storage VPC")
+			}
+		})
+	}
+}
+
+func TestAddDefaultTableRelations(t *testing.T) {
+	tests := []struct {
+		name        string
+		operationID string
+		queryParams url.Values
+		want        []string
+	}{
+		{
+			name:        "adds mapped relations without duplicates",
+			operationID: vpcPeeringListOperationID,
+			queryParams: url.Values{"includeRelation": {"Site", "Vpc1"}},
+			want:        []string{"Site", "Vpc1", "Vpc2"},
+		},
+		{
+			name:        "leaves operations without relation defaults unchanged",
+			operationID: "get-all-site",
+			queryParams: url.Values{"includeRelation": {"Tenant"}},
+			want:        []string{"Tenant"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			addDefaultTableRelations(test.queryParams, test.operationID)
+			assert.Equal(t, test.want, test.queryParams["includeRelation"])
+		})
+	}
+}
+
+func TestNewApp_VpcPeeringListAllKeepsRelationsAcrossPages(t *testing.T) {
+	requests := make([]url.Values, 0, 2)
+	firstPage := make([]map[string]interface{}, 100)
+	for i := range firstPage {
+		firstPage[i] = map[string]interface{}{
+			"id":     fmt.Sprintf("peering-%d", i),
+			"vpc1Id": "vpc1-id",
+			"vpc1":   map[string]string{"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2":   map[string]string{"name": "Storage VPC"},
+		}
+	}
+	secondPage := []map[string]interface{}{
+		{
+			"id":     "last-peering",
+			"vpc1Id": "vpc1-id",
+			"vpc1":   map[string]string{"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2":   map[string]string{"name": "Storage VPC"},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query()
+		requests = append(requests, query)
+		items := firstPage
+		if query.Get("pageNumber") == "2" {
+			items = secondPage
+		}
+		body, err := json.Marshal(items)
+		require.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_, err = w.Write(body)
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	runErr := app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"vpc-peering", "list",
+		"--all",
+		"--include-relation", "Site",
+	})
+	require.NoError(t, runErr)
+	require.Len(t, requests, 2)
+
+	for index, query := range requests {
+		assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+		assert.Equal(t, "100", query.Get("pageSize"))
+		assert.Equal(t, []string{"Site", "Vpc1", "Vpc2"}, query["includeRelation"])
+	}
 }
 
 func TestNewApp_MachineValidationCommandSurface(t *testing.T) {

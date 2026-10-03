@@ -120,6 +120,14 @@ func (c *Client) rewriteAPIName(path string) string {
 
 // Do executes an HTTP request against the API.
 func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
+	queryValues := make(url.Values, len(queryParams))
+	for key, value := range queryParams {
+		queryValues.Set(key, value)
+	}
+	return c.doWithQueryValues(method, pathTemplate, pathParams, queryValues, body)
+}
+
+func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
 	doClient := c
 	respBody, respHeader, err := doClient.do(method, pathTemplate, pathParams, queryParams, body)
 	streamErr, isHTTP2StreamError := errors.AsType[http2StreamError](err)
@@ -216,7 +224,7 @@ func canReplayAfterAuthRefresh(method string) bool {
 	}
 }
 
-func (c *Client) do(method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
+func (c *Client) do(method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
 	path := pathTemplate
 	path = strings.ReplaceAll(path, "{org}", url.PathEscape(c.Org))
 	for k, v := range pathParams {
@@ -226,11 +234,7 @@ func (c *Client) do(method, pathTemplate string, pathParams, queryParams map[str
 	path = c.rewriteAPIName(path)
 	reqURL := c.BaseURL + path
 	if len(queryParams) > 0 {
-		q := url.Values{}
-		for k, v := range queryParams {
-			q.Set(k, v)
-		}
-		reqURL += "?" + q.Encode()
+		reqURL += "?" + queryParams.Encode()
 	}
 
 	var bodyReader io.Reader

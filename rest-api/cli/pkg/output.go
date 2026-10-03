@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -18,6 +19,31 @@ import (
 // flag accepts. Kept as a slice (not a map) so error messages can render the
 // list deterministically.
 var allowedOutputFormats = []string{"json", "yaml", "table"}
+
+const vpcPeeringListOperationID = "get-all-vpc-peering"
+
+type tableColumn struct {
+	header string
+	path   string
+	nested bool
+}
+
+var tableColumnsByOperation = map[string][]tableColumn{
+	vpcPeeringListOperationID: {
+		{header: "ID", path: "id"},
+		{header: "VPC1 Name", path: "vpc1.name", nested: true},
+		{header: "VPC1 ID", path: "vpc1Id"},
+		{header: "VPC2 Name", path: "vpc2.name", nested: true},
+		{header: "VPC2 ID", path: "vpc2Id"},
+	},
+}
+
+func defaultOutputFormat(operationID string) string {
+	if operationID == vpcPeeringListOperationID {
+		return "table"
+	}
+	return "json"
+}
 
 // ValidateOutputFormat returns an error if format is outside the allowed set.
 // The empty string is treated as valid so the StringFlag default ("json") and
@@ -68,6 +94,15 @@ func FormatOutput(data []byte, format string) error {
 	}
 }
 
+func formatOutputWithOperation(data []byte, format, operationID string) error {
+	if format == "table" {
+		if columns, ok := tableColumnsByOperation[operationID]; ok {
+			return formatTableWithColumns(data, columns)
+		}
+	}
+	return FormatOutput(data, format)
+}
+
 func formatJSON(data []byte) error {
 	var v interface{}
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -91,6 +126,10 @@ func formatYAML(data []byte) error {
 var tableFields = []string{"id", "name", "status", "created", "updated"}
 
 func formatTable(data []byte) error {
+	return formatTableWithColumns(data, nil)
+}
+
+func formatTableWithColumns(data []byte, customColumns []tableColumn) error {
 	var raw interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		_, err = os.Stdout.Write(data)
@@ -116,34 +155,61 @@ func formatTable(data []byte) error {
 		return nil
 	}
 
-	var cols []string
-	for _, f := range tableFields {
-		if _, ok := items[0][f]; ok {
-			cols = append(cols, f)
+	columns := customColumns
+	if len(columns) == 0 {
+		for _, field := range tableFields {
+			if _, ok := items[0][field]; ok {
+				columns = append(columns, tableColumn{header: field, path: field})
+			}
 		}
-	}
-	if len(cols) == 0 {
-		return formatJSON(data)
+		if len(columns) == 0 {
+			return formatJSON(data)
+		}
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	for i, c := range cols {
+	for i, column := range columns {
 		if i > 0 {
 			fmt.Fprint(w, "\t")
 		}
-		fmt.Fprint(w, c)
+		fmt.Fprint(w, column.header)
 	}
 	fmt.Fprintln(w)
 
 	for _, item := range items {
-		for i, c := range cols {
+		for i, column := range columns {
 			if i > 0 {
 				fmt.Fprint(w, "\t")
 			}
-			fmt.Fprintf(w, "%v", item[c])
+			value := fmt.Sprint(item[column.path])
+			if column.nested {
+				value = nestedString(item, column.path)
+			}
+			fmt.Fprint(w, escapeTableCell(value))
 		}
 		fmt.Fprintln(w)
 	}
 
 	return w.Flush()
+}
+
+func escapeTableCell(value string) string {
+	quoted := strconv.Quote(value)
+	return quoted[1 : len(quoted)-1]
+}
+
+func nestedString(item map[string]interface{}, path string) string {
+	var value interface{} = item
+	for _, field := range strings.Split(path, ".") {
+		fields, ok := value.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		value, ok = fields[field]
+		if !ok {
+			return ""
+		}
+	}
+	result, _ := value.(string)
+	return result
 }

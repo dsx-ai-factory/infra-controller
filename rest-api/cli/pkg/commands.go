@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -68,6 +69,10 @@ func (operation resolvedOp) resourceIDParameter() (string, error) {
 
 func (operation resolvedOp) execute(client *Client, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
 	return client.Do(operation.method, operation.path, pathParams, queryParams, body)
+}
+
+func (operation resolvedOp) executeWithQueryValues(client *Client, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
+	return client.doWithQueryValues(operation.method, operation.path, pathParams, queryParams, body)
 }
 
 // bodyField tracks a request body property for type-aware flag reading.
@@ -598,6 +603,18 @@ func isListAction(action string) bool {
 	return action == "list" || strings.HasPrefix(action, "list-")
 }
 
+var defaultTableRelationsByOperation = map[string][]string{
+	vpcPeeringListOperationID: {"Vpc1", "Vpc2"},
+}
+
+func addDefaultTableRelations(queryParams url.Values, operationID string) {
+	for _, relation := range defaultTableRelationsByOperation[operationID] {
+		if !slices.Contains(queryParams["includeRelation"], relation) {
+			queryParams.Add("includeRelation", relation)
+		}
+	}
+}
+
 func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Command {
 	return buildActionCommandWithOptions(spec, ro, subResource, commandBuildOptions{})
 }
@@ -607,7 +624,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 		&cli.StringFlag{
 			Name:   "output",
 			Usage:  "Output format: json, yaml, table",
-			Value:  "json",
+			Value:  defaultOutputFormat(ro.op.OperationID),
 			Action: validateOutputFlag,
 		},
 	}
@@ -779,14 +796,18 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				pathParams[ap] = c.Args().Get(i)
 			}
 
-			queryParams := make(map[string]string)
+			queryParams := make(url.Values)
 			for _, p := range allParams {
 				if p.In != "query" {
 					continue
 				}
 				if v := readFlagValue(c, p); v != "" {
-					queryParams[p.Name] = v
+					queryParams.Set(p.Name, v)
 				}
+			}
+
+			if c.String("output") == "table" {
+				addDefaultTableRelations(queryParams, ro.op.OperationID)
 			}
 
 			var body []byte
@@ -802,10 +823,10 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			}
 
 			if isList && c.Bool("all") {
-				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"))
+				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"), ro.op.OperationID)
 			}
 
-			respBody, respHeaders, err := ro.execute(client, pathParams, queryParams, body)
+			respBody, respHeaders, err := ro.executeWithQueryValues(client, pathParams, queryParams, body)
 			if err != nil {
 				return err
 			}
@@ -816,7 +837,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				return nil
 			}
 
-			return FormatOutput(respBody, c.String("output"))
+			return formatOutputWithOperation(respBody, c.String("output"), ro.op.OperationID)
 		},
 	}
 
@@ -1188,23 +1209,23 @@ func printPaginationSummary(headers http.Header) {
 	}
 }
 
-func fetchAllPages(client *Client, method, path string, pathParams, queryParams map[string]string, outputFormat string) error {
+func fetchAllPages(client *Client, method, path string, pathParams map[string]string, queryParams url.Values, outputFormat, operationID string) error {
 	const maxPageSize = 100
 	const maxPages = 1000
 	pageNumber := 1
 
 	if queryParams == nil {
-		queryParams = make(map[string]string)
+		queryParams = make(url.Values)
 	}
-	queryParams["pageSize"] = strconv.Itoa(maxPageSize)
+	queryParams.Set("pageSize", strconv.Itoa(maxPageSize))
 
 	allItems := make([]json.RawMessage, 0)
 	totalFromHeader := 0
 
 	for {
-		queryParams["pageNumber"] = strconv.Itoa(pageNumber)
+		queryParams.Set("pageNumber", strconv.Itoa(pageNumber))
 
-		respBody, respHeaders, err := client.Do(method, path, pathParams, queryParams, nil)
+		respBody, respHeaders, err := client.doWithQueryValues(method, path, pathParams, queryParams, nil)
 		if err != nil {
 			return err
 		}
@@ -1212,7 +1233,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 		var pageItems []json.RawMessage
 		if len(respBody) > 0 {
 			if err := json.Unmarshal(respBody, &pageItems); err != nil {
-				return FormatOutput(respBody, outputFormat)
+				return formatOutputWithOperation(respBody, outputFormat, operationID)
 			}
 		}
 		allItems = append(allItems, pageItems...)
@@ -1246,7 +1267,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	if err != nil {
 		return err
 	}
-	return FormatOutput(merged, outputFormat)
+	return formatOutputWithOperation(merged, outputFormat, operationID)
 }
 
 func coerceValue(v string, schemaType SchemaType) (interface{}, error) {
