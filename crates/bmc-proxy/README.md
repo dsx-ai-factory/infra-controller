@@ -314,7 +314,28 @@ curl --http2 \
   https://bmc-proxy.example/redfish/v1/Systems/Bluefield
 ```
 
-The client chooses the BMC by IP. The proxy performs authentication, credential lookup, and backend authentication.
+Supply one BMC target in `Forwarded`: `host=<ip>`, `mac=<mac>`, or
+`serial=<serial>`. MAC/serial resolve through nico-api; names are case-insensitive.
+The first recognized target in header order is used; later targets are ignored,
+with no fallback after errors.
+
+Values may be unquoted or double-quoted (e.g. `serial="FOO,BAR-123"`).
+Outer whitespace is ignored; quoted contents, including whitespace, commas and
+semicolons, are preserved. Backslashes inside quotes escape the next character.
+Unquoted commas/semicolons separate elements/parameters
+([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239.html#section-4)); quoted values follow
+[HTTP quoted-string syntax](https://www.rfc-editor.org/rfc/rfc7230.html#section-3.2.6).
+
+MACs accept 12 hex digits or six byte pairs separated by colons or hyphens
+(mixed separators and either case allowed); dotted notation is unsupported.
+Serials pass unchanged after quote decoding and match discovered product,
+board or chassis serials exactly.
+
+Missing, malformed or unmatched targets return `400`; nico-api lookup failures
+return `502`. Malformed quoting reports `malformed quoted value in forwarded header`.
+Non-text header values are skipped.
+
+The proxy performs authentication, credential lookup, and backend authentication.
 
 ## Why?
 
