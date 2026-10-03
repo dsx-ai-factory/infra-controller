@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use bmc_mock::HostMachineInfo;
 use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
-use futures::future::try_join_all;
+use futures::future::join_all;
 use model::expected_machine::HostDpuPolicy;
 use rpc::forge::{ExpectedInterface, NetworkSegmentType};
 use tokio::sync::mpsc;
@@ -373,6 +373,51 @@ impl MachineATron {
         Ok((simulators, summary))
     }
 
+    /// `shutdown_devices` snapshots every device, optionally deletes its API records,
+    /// and stops its actors. Cleanup runs while DPU actors can acknowledge Admin
+    /// networking. Every device is stopped before returning an error; a device's
+    /// cleanup error takes precedence over its shutdown error, which is also logged.
+    /// On success, returns the snapshots in registry order without persisting them.
+    pub async fn shutdown_devices(
+        &self,
+        simulators: &SimulatorRegistry,
+        cleanup: bool,
+    ) -> eyre::Result<Vec<PersistedDevice>> {
+        join_all(simulators.devices().iter().map(|simulator| {
+            let api_client = self.app_context.api_client();
+            let persisted = simulator.persisted();
+            async move {
+                let cleanup_result = if cleanup {
+                    simulator
+                        .delete_from_api(api_client)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::warn!(
+                                mat_id = %persisted.mat_id,
+                                error = %error,
+                                "Failed to delete simulator API records",
+                            );
+                        })
+                } else {
+                    Ok(())
+                };
+                let shutdown_result = simulator.shutdown().await.inspect_err(|error| {
+                    tracing::warn!(
+                        mat_id = %persisted.mat_id,
+                        error = %error,
+                        "Failed to shut down simulator",
+                    );
+                });
+                cleanup_result?;
+                shutdown_result?;
+                Ok(persisted)
+            }
+        }))
+        .await
+        .into_iter()
+        .collect()
+    }
+
     pub async fn run(
         &mut self,
         simulators: SimulatorRegistry,
@@ -401,19 +446,8 @@ impl MachineATron {
 
         let _ = stop_rx.recv().await;
         tracing::info!("quit");
-        let cleanup_on_quit = self.app_context.app_config.cleanup_on_quit;
-        let persisted_devices =
-            try_join_all(simulators.devices().iter().cloned().map(|simulator| {
-                let api_client = self.app_context.api_client();
-                let persisted = simulator.persisted();
-                async move {
-                    simulator.shutdown().await?;
-                    if cleanup_on_quit {
-                        simulator.delete_from_api(api_client).await?;
-                    }
-                    Ok::<PersistedDevice, eyre::Report>(persisted)
-                }
-            }))
+        let persisted_devices = self
+            .shutdown_devices(&simulators, self.app_context.app_config.cleanup_on_quit)
             .await?;
 
         // Persist the current state of the machines before quitting
@@ -446,12 +480,122 @@ impl MachineATron {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::time::Duration;
 
+    use bmc_mock::mac_address_pool::{Config as MacAddressConfig, MacAddressPool, RangesConfig};
     use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType};
     use carbide_test_support::{Check, check_values};
     use mac_address::MacAddress;
+    use rpc::forge_tls_client::{ApiConfig, RetryConfig};
+    use rpc::protos::forge_api_client::ForgeApiClient;
 
     use super::*;
+    use crate::api_client::ClientApiError;
+
+    #[tokio::test]
+    async fn run_stops_all_actors_even_when_cleanup_fails() {
+        struct Case {
+            scenario: &'static str,
+            cleanup_on_quit: bool,
+            check: fn(eyre::Result<()>),
+        }
+
+        for case in [
+            Case {
+                scenario: "cleanup failure is returned after stopping every actor",
+                cleanup_on_quit: true,
+                check: |result| {
+                    let error = result.expect_err("the API is unavailable");
+                    assert!(
+                        matches!(
+                            error.downcast_ref::<ClientApiError>(),
+                            Some(ClientApiError::InvocationError(status))
+                                if status.code() == tonic::Code::Unavailable
+                        ),
+                        "unexpected cleanup error: {error:?}",
+                    );
+                },
+            },
+            Case {
+                scenario: "cleanup disabled stops every actor without calling the API",
+                cleanup_on_quit: false,
+                check: |result| result.expect("shutdown without cleanup succeeds"),
+            },
+        ] {
+            let mut app_context = MachineATronContext::for_test();
+            let context = Arc::get_mut(&mut app_context).expect("test owns the context");
+            context.app_config.cleanup_on_quit = case.cleanup_on_quit;
+            context.app_config.register_expected_machines = false;
+            // Use plaintext so a missing test CA cannot mask the connection failure.
+            context.app_config.carbide_api_url = "http://127.0.0.1:1".to_string();
+            let machine_config = Arc::make_mut(
+                context
+                    .app_config
+                    .machines
+                    .get_mut("config")
+                    .expect("test machine config"),
+            );
+            machine_config.host_count = 2;
+            machine_config.dpu_per_host_count = 1;
+            *context.mac_address_pool.lock().expect("test MAC pool lock") =
+                MacAddressPool::new(MacAddressConfig {
+                    pool: Some(
+                        MacAddressPoolConfig::new(mac("02:00:00:00:00:00"), 24)
+                            .expect("test MAC pool"),
+                    ),
+                    ranges: Some(
+                        RangesConfig::new(mac("06:00:00:00:00:00"), 32, 8)
+                            .expect("test hardware MAC ranges"),
+                    ),
+                });
+            context.forge_client_config.connect_retries_max = Some(0);
+            context.forge_client_config.connect_retries_interval = Some(Duration::from_millis(1));
+            context.forge_client_config.request_timeout = Some(Duration::from_secs(1));
+            context.forge_api_client = ForgeApiClient::new(
+                &ApiConfig::new(
+                    &context.app_config.carbide_api_url,
+                    &context.forge_client_config,
+                )
+                .with_retry_config(RetryConfig {
+                    retries: 0,
+                    interval: Duration::from_millis(1),
+                }),
+            );
+
+            let mut mat = MachineATron::new(app_context);
+            let (simulators, _) = mat.make_devices(true).await.expect("create real actors");
+            let handles = simulators.provisionable_handles();
+            assert_eq!(handles.len(), 2, "{}", case.scenario);
+            for handle in &handles {
+                handle.pause().expect("host actor is alive before shutdown");
+                assert_eq!(handle.dpus().len(), 1, "{}", case.scenario);
+                handle.dpus()[0]
+                    .pause()
+                    .expect("DPU actor is alive before shutdown");
+            }
+
+            let (stop_tx, stop_rx) = mpsc::channel(1);
+            stop_tx.send(()).await.expect("queue stop before running");
+            let result =
+                tokio::time::timeout(Duration::from_secs(30), mat.run(simulators, stop_rx))
+                    .await
+                    .expect("shutdown must finish within 30 seconds");
+
+            for handle in &handles {
+                assert!(
+                    handle.pause().is_err(),
+                    "{}: host actor still running",
+                    case.scenario,
+                );
+                assert!(
+                    handle.dpus()[0].pause().is_err(),
+                    "{}: DPU actor still running",
+                    case.scenario,
+                );
+            }
+            (case.check)(result);
+        }
+    }
 
     fn mac(value: &str) -> MacAddress {
         MacAddress::from_str(value).unwrap()

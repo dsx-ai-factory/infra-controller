@@ -849,9 +849,13 @@ type ForgeClient interface {
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// Before deleting a tenant's Instance or its Machines, request Admin networking
+	// and wait for every attached DPU to acknowledge it. While waiting, return
+	// all_done=false and retain the records and network resources. Poll with the
+	// same request to finish deletion; an unreachable DPU can block it indefinitely.
+	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Returning to Admin stops tenant networking through the DPUs, but does not shut
+	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those
@@ -7106,9 +7110,13 @@ type ForgeServer interface {
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// Before deleting a tenant's Instance or its Machines, request Admin networking
+	// and wait for every attached DPU to acknowledge it. While waiting, return
+	// all_done=false and retain the records and network resources. Poll with the
+	// same request to finish deletion; an unreachable DPU can block it indefinitely.
+	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Returning to Admin stops tenant networking through the DPUs, but does not shut
+	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those

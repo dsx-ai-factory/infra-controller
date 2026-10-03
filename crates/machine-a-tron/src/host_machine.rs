@@ -804,6 +804,10 @@ impl MachineHandle {
     }
 
     pub(super) async fn delete_from_api(self, api_client: ApiClient) -> eyre::Result<()> {
+        // Match the admin CLI's polling interval and overall wait limit.
+        const RETRY_TIME: Duration = Duration::from_secs(5);
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(60 * 20);
+
         let delete_by = match self
             .0
             .live_state
@@ -839,8 +843,27 @@ impl MachineHandle {
             }
         };
 
-        api_client.force_delete_machine(delete_by).await?;
-        Ok(())
+        tokio::time::timeout(MAX_WAIT_TIME, async {
+            loop {
+                let response = api_client.force_delete_machine(delete_by.clone()).await?;
+                if response.all_done {
+                    return Ok(());
+                }
+                tracing::info!(
+                    host_query = %delete_by,
+                    retry_delay_seconds = RETRY_TIME.as_secs(),
+                    "Machine has not been fully deleted; waiting for DPU acknowledgement",
+                );
+                tokio::time::sleep(RETRY_TIME).await;
+            }
+        })
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "timed out force deleting machine {delete_by} after {}s",
+                MAX_WAIT_TIME.as_secs(),
+            )
+        })?
     }
 
     pub(super) fn abort(&self) {

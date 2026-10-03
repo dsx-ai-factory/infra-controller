@@ -823,10 +823,13 @@ impl MachineStateHandler {
 
         // Don't update failed state failure cause everytime. Record first failure cause only,
         // otherwise first failure cause will be overwritten.
-        // A reset is a deliberate teardown, so a failure record must not park it.
+        // Reset and force deletion already own teardown. Preserve their state
+        // and failure evidence instead of parking them in Failed.
         if !matches!(
             mh_state,
-            ManagedHostState::Failed { .. } | ManagedHostState::Reset { .. }
+            ManagedHostState::Failed { .. }
+                | ManagedHostState::Reset { .. }
+                | ManagedHostState::ForceDeletion
         ) && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
         {
             let already_relocking_machine_failure = matches!(
@@ -9769,17 +9772,15 @@ impl StateHandler for InstanceStateHandler {
     }
 }
 
-// Process the host's use_admin_network flag change and selectively flag
-// DPUs that undergo an actual network mode change with the
-// use_admin_network_changed flag if restart_ovs_on_use_admin_network_change
-// is true.
-// Not every DPU participates in tenant networking — only those with instance
-// interface configs assigned to them. DPUs without tenant interfaces remain on
-// the admin network regardless of the host-level toggle.
-async fn process_dpu_use_admin_network_state_change(
+/// Requests an OVS restart for DPUs with tenant interfaces when the host changes
+/// between Admin and tenant networking. The caller checks
+/// `restart_ovs_on_use_admin_network_change` and commits these flags in the same
+/// transaction as the network configuration change. DPUs without tenant
+/// interfaces remain on Admin and do not need a restart.
+pub async fn process_dpu_use_admin_network_state_change(
     txn: &mut PgConnection,
     mh_snapshot: &ManagedHostStateSnapshot,
-) -> Result<(), StateHandlerError> {
+) -> Result<(), DatabaseError> {
     tracing::info!(
         machine_id = %mh_snapshot.host_snapshot.id,
         "Request an OVS restart for DPUs switching between Admin and tenant networking"

@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use bmc_mock::mac_address_pool::MacAddressPool;
 use forge_tls::client_config::get_root_ca_path;
-use futures::future::try_join_all;
 use machine_a_tron::{
     BmcMockRegistry, DeviceHandle, DhcpClient, MachineATron, MachineATronConfig,
     MachineATronContext, UdpDhcpService, api_throttler,
@@ -95,27 +94,15 @@ pub async fn run_local(
         mac_address_pool,
     });
 
-    let mat = MachineATron::new(app_context.clone());
+    let mat = MachineATron::new(app_context);
     let (simulators, _) = mat.make_devices(false).await?;
     let provisionable_handles = simulators.provisionable_handles();
 
     let (stop_tx, stop_rx) = oneshot::channel();
-    let device_simulators = simulators.devices().to_vec();
     let join_handle = tokio::spawn(async move {
         stop_rx.await.ok(); // this finishes when stop_tx is dropped
 
-        try_join_all(
-            device_simulators
-                .iter()
-                .map(|simulator| simulator.shutdown()),
-        )
-        .await?;
-
-        try_join_all(device_simulators.into_iter().map(|simulator| {
-            let api_client = app_context.api_client();
-            async move { simulator.delete_from_api(api_client).await }
-        }))
-        .await?;
+        mat.shutdown_devices(&simulators, true).await?;
 
         Ok(())
     });

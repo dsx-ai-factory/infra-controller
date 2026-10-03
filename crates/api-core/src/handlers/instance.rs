@@ -2264,9 +2264,8 @@ pub(super) async fn force_delete_instance(
     response: &mut AdminForceDeleteMachineResponse,
 ) -> CarbideResult<()> {
     // The caller has already committed the Machine ForceDeletion state. Lock
-    // and reread the Instance in a separate transaction so this path never
-    // holds Machine and Instance locks together; IB updates lock the Instance
-    // before the Machine. Once the deletion marker commits, the captured
+    // and reread the Instance in a separate transaction; IB updates lock the
+    // Instance before the Machine. Once the deletion marker commits, the captured
     // snapshot is the last configuration a tenant update can commit before
     // external cleanup.
     let mut txn = api.txn_begin().await?;
@@ -2289,11 +2288,51 @@ pub(super) async fn force_delete_instance(
 
     response.ufm_unregistrations += unbind_all_instance_ib_ports(api, &instance).await?;
 
-    // Delete the instance and allocated address
-    // TODO: This might need some changes with the new state machine
+    // Keep the Instance visible until every topology DPU has acknowledged Admin.
+    // Serialize removal with routing-policy writers and recheck after external
+    // cleanup. The Machine row lock below keeps the checked network configuration
+    // stable through commit.
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    if db::instance::find_by_id(&mut txn, instance_id)
+        .await?
+        .is_none()
+    {
+        txn.commit().await?;
+        return Ok(());
+    }
+    // Preserve the cleanup order: addresses, Instance, then Machine. None of
+    // these deletions is visible unless the Admin acknowledgement check passes
+    // and this transaction commits.
     db::instance::delete(instance_id, &mut txn).await?;
-
+    db::machine::find_one(
+        &mut txn,
+        &instance.machine_id,
+        MachineSearchConfig {
+            for_update: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await?
+    .ok_or(CarbideError::NotFoundError {
+        kind: "machine",
+        id: instance.machine_id.to_string(),
+    })?;
+    let snapshot = db::managed_host::load_snapshot(
+        &mut txn,
+        &instance.machine_id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .ok_or(CarbideError::NotFoundError {
+        kind: "machine",
+        id: instance.machine_id.to_string(),
+    })?;
+    if !snapshot.use_admin_network() || !snapshot.managed_host_network_config_version_synced() {
+        txn.rollback().await?;
+        response.all_done = false;
+        return Ok(());
+    }
     let mut network_segment_ids_with_vpc = vec![];
     if let Some(update_network_req) = &instance.update_network_config_request {
         network_segment_ids_with_vpc = update_network_req
@@ -2329,17 +2368,6 @@ pub(super) async fn force_delete_instance(
         db::network_segment::mark_as_deleted_no_validation(&mut txn, &network_segment_ids_with_vpc)
             .await?;
     }
-
-    let snapshot = db::managed_host::load_snapshot(
-        &mut txn,
-        &instance.machine_id,
-        LoadSnapshotOptions::default(),
-    )
-    .await?
-    .ok_or(CarbideError::NotFoundError {
-        kind: "machine",
-        id: instance.machine_id.to_string(),
-    })?;
 
     carbide_machine_controller::handler::release_vpc_dpu_loopback(
         &snapshot,

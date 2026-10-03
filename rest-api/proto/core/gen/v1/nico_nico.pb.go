@@ -30817,10 +30817,12 @@ func (*DecommissionManagedHostResponse) Descriptor() ([]byte, []int) {
 // Response to AdminForceDeleteMachine call
 // Describes which resources have been released
 type AdminForceDeleteMachineResponse struct {
-	state                         protoimpl.MessageState `protogen:"open.v1"`
-	AllDone                       bool                   `protobuf:"varint,1,opt,name=all_done,json=allDone,proto3" json:"all_done,omitempty"`
-	ManagedHostMachineId          string                 `protobuf:"bytes,11,opt,name=managed_host_machine_id,json=managedHostMachineId,proto3" json:"managed_host_machine_id,omitempty"`
-	ManagedHostMachineInterfaceId string                 `protobuf:"bytes,12,opt,name=managed_host_machine_interface_id,json=managedHostMachineInterfaceId,proto3" json:"managed_host_machine_interface_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// True when deletion has completed. False while waiting for DPU Admin-network
+	// acknowledgement; poll AdminForceDeleteMachine with the same request to resume.
+	AllDone                       bool   `protobuf:"varint,1,opt,name=all_done,json=allDone,proto3" json:"all_done,omitempty"`
+	ManagedHostMachineId          string `protobuf:"bytes,11,opt,name=managed_host_machine_id,json=managedHostMachineId,proto3" json:"managed_host_machine_id,omitempty"`
+	ManagedHostMachineInterfaceId string `protobuf:"bytes,12,opt,name=managed_host_machine_interface_id,json=managedHostMachineInterfaceId,proto3" json:"managed_host_machine_interface_id,omitempty"`
 	// Deprecated: Use dpu_machine_ids
 	DpuMachineId string `protobuf:"bytes,13,opt,name=dpu_machine_id,json=dpuMachineId,proto3" json:"dpu_machine_id,omitempty"`
 	// Deprecated: Use dpu_machine_interface_ids

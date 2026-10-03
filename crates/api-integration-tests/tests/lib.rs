@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{self, Duration};
 
 use ::carbide_utils::HostPortPair;
@@ -211,6 +211,12 @@ async fn test_integration() -> eyre::Result<()> {
 
     // Run several tests in parallel.
     let all_tests = join_all([
+        test_machine_a_tron_teardown_deletes_assigned_instance(
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+        )
+        .boxed(),
         test_machine_a_tron_multidpu(
             HardwareType::DellPowerEdgeR750,
             &test_env,
@@ -702,6 +708,78 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     cancel_token.cancel();
     server_handle.wait().await?;
     db_pool.close().await;
+    Ok(())
+}
+
+async fn test_machine_a_tron_teardown_deletes_assigned_instance(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+) -> eyre::Result<()> {
+    let cleanup_ids = Mutex::new(None);
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| {
+            let cleanup_ids = &cleanup_ids;
+            async move {
+                machine_handle
+                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                    .await?;
+                let machine_ids = [
+                    machine_handle
+                        .observed_machine_id()
+                        .context("ready host has no observed machine ID")?,
+                    machine_handle.dpus()[0]
+                        .observed_machine_id()
+                        .context("ready DPU has no observed machine ID")?,
+                ];
+                let host_id: StableHostMachineId = machine_ids[0].try_into()?;
+                let instance_id = instance::create(
+                    &test_env.carbide_api_addrs,
+                    &host_id,
+                    segment_id,
+                    None,
+                    false,
+                    true,
+                    &[],
+                )
+                .await?;
+                let network_config =
+                    db::machine::get_network_config(&test_env.db_pool, &machine_ids[0]).await?;
+                assert_eq!(network_config.value.use_admin_network, Some(false));
+
+                // Leave tenant intent in place so teardown must request Admin and poll.
+                *cleanup_ids.lock().unwrap() = Some((machine_ids, instance_id));
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await?;
+
+    let (machine_ids, instance_id) = cleanup_ids
+        .into_inner()
+        .unwrap()
+        .context("assigned-host teardown fixture did not record its IDs")?;
+    assert!(
+        db::instance::find_by_id(&test_env.db_pool, instance_id.parse()?)
+            .await?
+            .is_none(),
+        "simulator teardown must remove the assigned Instance",
+    );
+    for machine_id in machine_ids {
+        assert!(
+            db::machine::find_one(&test_env.db_pool, &machine_id, Default::default())
+                .await?
+                .is_none(),
+            "simulator teardown must remove machine {machine_id}",
+        );
+    }
     Ok(())
 }
 

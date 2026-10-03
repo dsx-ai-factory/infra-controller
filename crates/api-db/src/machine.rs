@@ -3629,6 +3629,37 @@ pub async fn find_machine_ids_by_sku_ids(
         .collect())
 }
 
+/// Records whether force deletion needs an Admin acknowledgement. A retained
+/// requirement cannot be cleared, and current tenant use overrides an earlier
+/// false value. The caller must hold the host row lock and commit this together
+/// with `ForceDeletion` and any Admin request.
+pub async fn record_force_delete_admin_ack_requirement(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    requires_admin_ack: bool,
+) -> DatabaseResult<bool> {
+    let query = "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1";
+    let recorded: Option<bool> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if let Some(recorded) = recorded
+        && (recorded || !requires_admin_ack)
+    {
+        return Ok(recorded);
+    }
+
+    let query = "UPDATE machines SET force_delete_requires_admin_ack = $2 WHERE id = $1
+                 RETURNING force_delete_requires_admin_ack";
+    sqlx::query_scalar(query)
+        .bind(machine_id)
+        .bind(requires_admin_ack)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub async fn get_network_config(
     txn: impl DbReader<'_>,
     machine_id: &MachineId,
@@ -3871,6 +3902,59 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    /// A later tenant assignment must override an earlier offline-cleanup
+    /// decision, and subsequent Admin intent must not erase the resulting wait.
+    #[crate::sqlx_test]
+    async fn force_delete_ack_requirement_only_becomes_stricter(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::ForceDeletion,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        for (observed, expected) in [(false, false), (true, true), (false, true)] {
+            let mut txn = pool.begin().await?;
+            super::find_one(
+                txn.as_mut(),
+                &machine_id,
+                MachineSearchConfig {
+                    for_update: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .expect("fixture host must remain available");
+            assert_eq!(
+                super::record_force_delete_admin_ack_requirement(
+                    txn.as_mut(),
+                    &machine_id,
+                    observed,
+                )
+                .await?,
+                expected,
+            );
+            txn.commit().await?;
+            let stored: Option<bool> = sqlx::query_scalar(
+                "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1",
+            )
+            .bind(machine_id)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(stored, Some(expected));
+        }
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn machine_observations_compare_timestamps_chronologically(

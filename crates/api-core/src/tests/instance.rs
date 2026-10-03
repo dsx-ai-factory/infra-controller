@@ -4296,20 +4296,31 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
         .network_segment_id
         .unwrap();
 
+    let request = AdminForceDeleteMachineRequest {
+        host_query: managed_host.id.to_string(),
+        delete_interfaces: false,
+        delete_bmc_interfaces: false,
+        delete_bmc_credentials: false,
+        allow_delete_with_orphaned_dpf_crds: false,
+        delete_bmc_suppressions: false,
+        delete_retained_boot_interfaces: false,
+        release_preserved_addresses: false,
+    };
+    let waiting = fixture
+        .env
+        .api
+        .admin_force_delete_machine(Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!waiting.all_done);
+    managed_host.network_configured(&fixture.env).await;
+
     // Force delete must route automatic intent through generated-resource cleanup.
     let response = fixture
         .env
         .api
-        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
-            host_query: managed_host.id.to_string(),
-            delete_interfaces: false,
-            delete_bmc_interfaces: false,
-            delete_bmc_credentials: false,
-            allow_delete_with_orphaned_dpf_crds: false,
-            delete_bmc_suppressions: false,
-            delete_retained_boot_interfaces: false,
-            release_preserved_addresses: false,
-        }))
+        .admin_force_delete_machine(Request::new(request))
         .await
         .unwrap()
         .into_inner();
