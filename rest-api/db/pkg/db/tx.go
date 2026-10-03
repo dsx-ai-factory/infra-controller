@@ -141,6 +141,10 @@ func WithTxResultOpts[T any](ctx context.Context, dbSession *Session, opts *sql.
 // Use it to take a lock on a candidate that may be rejected, so the lock does
 // not outlive the rejection. Failures of the savepoint statements themselves
 // are tagged with ErrTransactionSavepoint.
+//
+// A successful fn that writes or locks rows keeps a subtransaction ID until tx
+// ends. Postgres caches only 64 per backend before snapshots on every
+// connection slow down, so keep such calls in one tx below that.
 func (tx *Tx) WithSavepoint(ctx context.Context, fn func(sp *Tx) error) error {
 	sp, err := tx.tx.BeginTx(ctx, nil)
 	if err != nil {
