@@ -22,6 +22,7 @@
 //! `carbide-dhcpv6` decoder therefore uses a deliberately small raw-TLV parser,
 //! while this server uses dhcproto's typed API for response options.
 
+use std::borrow::Cow;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
@@ -30,8 +31,8 @@ use carbide_dhcpv6::{
     RelayEnvelope, decode as decode_wire_packet, extract_mac_from_duid, extract_mac_from_option79,
 };
 use dhcproto::v6::{
-    DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption, OptionCode, Status,
-    StatusCode, UnknownOption,
+    Architecture, DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption,
+    OptionCode, Status, StatusCode, UnknownOption, VendorClass,
 };
 use dhcproto::{Encodable, Encoder};
 use ipnetwork::Ipv6Network;
@@ -72,6 +73,49 @@ impl PacketV6 {
 }
 
 impl DecodedPacketV6 {
+    fn http_vendor_class(&self) -> Option<&VendorClass> {
+        self.message
+            .opts()
+            .get_all(OptionCode::VendorClass)?
+            .iter()
+            .find_map(|option| match option {
+                DhcpOption::VendorClass(vendor)
+                    if vendor.data.iter().any(|class| {
+                        class == b"HTTPClient" || class.starts_with(b"HTTPClient:")
+                    }) =>
+                {
+                    Some(vendor)
+                }
+                _ => None,
+            })
+    }
+
+    /// Select the first supported HTTP boot architecture in the client's preference order.
+    fn default_http_boot_url(
+        &self,
+        provisioning_address: Ipv6Addr,
+    ) -> Option<(String, Architecture)> {
+        self.http_vendor_class()?;
+        let DhcpOption::ClientArchType(architectures) =
+            self.message.opts().get(OptionCode::ClientArchType)?
+        else {
+            return None;
+        };
+        architectures.iter().copied().find_map(|architecture| {
+            let directory = match architecture {
+                Architecture::X64_Http => "x86_64",
+                Architecture::Arm64_Http => "aarch64",
+                _ => return None,
+            };
+            Some((
+                format!(
+                    "http://[{provisioning_address}]:8080/public/blobs/internal/{directory}/ipxe.efi"
+                ),
+                architecture,
+            ))
+        })
+    }
+
     /// Decode a direct client message or one supported Relay-Forward envelope.
     fn decode(packet: &[u8]) -> Result<Self, DhcpError> {
         let WirePacket { message, relay } = decode_wire_packet(packet).map_err(map_wire_error)?;
@@ -493,10 +537,18 @@ fn encode_mode_reply(
     };
 
     let booturl = match &outcome {
-        V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record.booturl.as_ref(),
+        V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record
+            .booturl
+            .as_deref()
+            .map(|url| (Cow::Borrowed(url), None))
+            .or_else(|| {
+                request
+                    .default_http_boot_url(config.dhcp_config.carbide_provisioning_server_ipv6?)
+                    .map(|(url, architecture)| (Cow::Owned(url), Some(architecture)))
+            }),
         V6Outcome::NoAddress => None,
     };
-    if let Some(booturl) = booturl
+    if let Some((booturl, architecture)) = booturl
         && !booturl.is_empty()
         && let Some(DhcpOption::ORO(requested)) = request.message.opts().get(OptionCode::ORO)
         && requested.opts.contains(&OptionCode::OptBootfileUrl)
@@ -507,6 +559,12 @@ fn encode_mode_reply(
                 OptionCode::OptBootfileUrl,
                 booturl.as_bytes().to_vec(),
             )));
+        if let Some(architecture) = architecture {
+            // RFC 5970 returns the architecture of the selected boot image.
+            reply
+                .opts_mut()
+                .insert(DhcpOption::ClientArchType(vec![architecture]));
+        }
 
         // EDK2 rejects HTTP offers without an IPv6 literal or DNS before
         // trying a firmware-configured URI. Leave those offers unmarked.
@@ -515,17 +573,7 @@ fn encode_mode_reply(
             && matches!(boot_uri.scheme_str(), Some("http" | "https"))
             && (!config.dhcp_config.carbide_nameservers_v6.is_empty()
                 || boot_url_has_ipv6_host(&boot_uri))
-            && let Some(vendors) = request.message.opts().get_all(OptionCode::VendorClass)
-            && let Some(vendor) = vendors.iter().find_map(|option| match option {
-                DhcpOption::VendorClass(vendor)
-                    if vendor.data.iter().any(|class| {
-                        class == b"HTTPClient" || class.starts_with(b"HTTPClient:")
-                    }) =>
-                {
-                    Some(vendor)
-                }
-                _ => None,
-            })
+            && let Some(vendor) = request.http_vendor_class()
         {
             // UEFI clients need this marker to recognize an HTTP boot offer.
             // Use the raw option: dhcproto 0.15 miscalculates the typed VendorClass length.
