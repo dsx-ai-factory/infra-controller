@@ -259,15 +259,25 @@ impl MachineATron {
         };
 
         if self.app_context.app_config.register_expected_machines {
+            let api_client = self.app_context.api_client();
+            // A group that already declares a rack is used as is.
+            let grouped_rack_ids = api_client.grouped_rack_ids().await?;
             let racks = resolved_configs
                 .racks
                 .iter()
-                .map(|rack| ExpectedRecord::Rack {
-                    rack_id: rack.rack_id.clone(),
-                    rack_profile_id: rack.rack_profile_id.clone(),
+                .map(|rack| {
+                    let group = if grouped_rack_ids.contains(&rack.rack_id) {
+                        None
+                    } else {
+                        Some(rack.expected_rack_group()?)
+                    };
+                    Ok(ExpectedRecord::Rack {
+                        rack_id: rack.rack_id.clone(),
+                        rack_profile_id: rack.rack_profile_id.clone(),
+                        group,
+                    })
                 })
-                .collect();
-            let api_client = self.app_context.api_client();
+                .collect::<eyre::Result<Vec<_>>>()?;
             let failed = register_all(racks, CONCURRENCY, |record| {
                 let api_client = api_client.clone();
                 async move { api_client.add_expected_record(record).await }
