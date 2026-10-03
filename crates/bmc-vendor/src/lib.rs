@@ -41,6 +41,7 @@ pub enum BMCVendor {
     Nvidia, // DPU, Viking, Oberon
     Liteon,
     Delta,
+    Sushy,
     #[serde(other)]
     #[default]
     Unknown,
@@ -64,6 +65,7 @@ impl From<&str> for BMCVendor {
             "nvidia" => BMCVendor::Nvidia,
             "liteon" => BMCVendor::Liteon,
             "delta" => BMCVendor::Delta,
+            "sushy" => BMCVendor::Sushy,
             _ => BMCVendor::Unknown,
         }
     }
@@ -180,6 +182,7 @@ impl BMCVendor {
             BMCVendor::Nvidia => "Nvidia",
             BMCVendor::Liteon => "Liteon",
             BMCVendor::Delta => "Delta",
+            BMCVendor::Sushy => "Sushy",
             BMCVendor::Unknown => "Unknown",
         }
         .to_string()
@@ -200,6 +203,10 @@ impl BMCVendor {
         *self == Self::Dell
     }
 
+    pub fn is_sushy(&self) -> bool {
+        *self == Self::Sushy
+    }
+
     pub fn is_unknown(&self) -> bool {
         *self == Self::Unknown
     }
@@ -217,6 +224,7 @@ mod tests {
         is_supermicro: bool,
         is_nvidia: bool,
         is_dell: bool,
+        is_sushy: bool,
         is_unknown: bool,
     }
 
@@ -234,6 +242,7 @@ mod tests {
                         is_supermicro: vendor.is_supermicro(),
                         is_nvidia: vendor.is_nvidia(),
                         is_dell: vendor.is_dell(),
+                        is_sushy: vendor.is_sushy(),
                         is_unknown: vendor.is_unknown(),
                     },
                 )
@@ -299,6 +308,15 @@ mod tests {
                     "delta".to_string(),
                     "Delta".to_string(),
                     VendorPredicates::default(),
+                ),
+                "SuShY" => (
+                    BMCVendor::Sushy,
+                    "sushy".to_string(),
+                    "Sushy".to_string(),
+                    VendorPredicates {
+                        is_sushy: true,
+                        ..Default::default()
+                    },
                 ),
                 "unknown" => (
                     BMCVendor::Unknown,
