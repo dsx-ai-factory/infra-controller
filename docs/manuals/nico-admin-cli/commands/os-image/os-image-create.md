@@ -81,15 +81,13 @@ uuid of the root filesystem of the OS image.
 
 Label of the root filesystem of the OS image.
 
-`-b, --boot-disk <BOOT_DISK>`
-
+**-b**, **--boot-disk** *\<BOOT_DISK\>*  
 Whole-disk target that the image overwrites. Accepts smallest,
-/dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`,
-/dev/vd`<letters>`, or /dev/disk/by-id/`<identifier>`. If omitted or
-empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1
-or /dev/sda.
-
-`--bootfs-id <BOOTFS_ID>`
+/dev/nvme\<controller\>n\<namespace\>, /dev/sd\<letters\>,
+/dev/vd\<letters\>, or /dev/disk/by-id/\<identifier\>. If omitted or
+empty, selection prefers a disk with an EFI partition, then the first
+deterministically ordered whole disk. If the device scan reports no
+whole disk, selection fails with Boot drive not detected or specified.
 
 UUID of the image boot filesystem (/boot)
 

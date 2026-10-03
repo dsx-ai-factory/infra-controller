@@ -96,11 +96,7 @@ function find_bootdisk() {
 	else
 		image_disk=$(find_efi_disk $disk_names)
 		if [ -z "$image_disk" ]; then
-			if [ -b /dev/nvme0n1 ]; then
-				image_disk="/dev/nvme0n1"
-			elif [ -b /dev/sda ]; then
-				image_disk="/dev/sda"
-			fi
+			image_disk=$(echo "$disk_names" | head -n 1)
 		fi
 	fi
 
