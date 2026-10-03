@@ -53,6 +53,7 @@ type ExpectedRackGroup struct {
 	Site        *Site                   `bun:"rel:belongs-to,join:site_id=id"`
 	RackGroupID string                  `bun:"rack_group_id,notnull"`
 	Topology    string                  `bun:"topology,notnull"`
+	Protocol    *string                 `bun:"protocol"`
 	Racks       []ExpectedRackGroupRack `bun:"racks,type:jsonb,notnull"`
 	Name        string                  `bun:"name,notnull,default:''"`
 	Description string                  `bun:"description,notnull,default:''"`
@@ -204,6 +205,7 @@ type ExpectedRackGroupCreateInput struct {
 	SiteID              uuid.UUID
 	RackGroupID         string
 	Topology            string
+	Protocol            *string
 	Racks               []ExpectedRackGroupRack
 	Name                string
 	Description         string
@@ -216,6 +218,8 @@ type ExpectedRackGroupUpdateInput struct {
 	ExpectedRackGroupID uuid.UUID
 	RackGroupID         *string
 	Topology            *string
+	ProtocolSet         bool
+	Protocol            *string
 	Racks               []ExpectedRackGroupRack
 	Name                *string
 	Description         *string
@@ -243,6 +247,9 @@ func (er *ExpectedRackGroup) ToProto() *corev1.ExpectedRackGroup {
 			Name:        er.Name,
 			Description: er.Description,
 		},
+	}
+	if er.Protocol != nil {
+		proto.Protocol = *er.Protocol
 	}
 
 	for _, rack := range er.Racks {
@@ -283,6 +290,11 @@ func (er *ExpectedRackGroup) FromProto(proto *corev1.ExpectedRackGroup) error {
 		er.RackGroupID = proto.RackGroupId.Id
 	}
 	er.Topology = proto.GetTopology()
+	if proto.GetProtocol() == "" {
+		er.Protocol = nil
+	} else {
+		er.Protocol = cutil.GetPtr(proto.GetProtocol())
+	}
 	er.Racks = converted.Racks
 	if proto.Metadata != nil {
 		er.Name = proto.Metadata.Name
@@ -392,6 +404,7 @@ func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx
 			SiteID:      input.SiteID,
 			RackGroupID: input.RackGroupID,
 			Topology:    input.Topology,
+			Protocol:    input.Protocol,
 			Racks:       input.Racks,
 			Name:        input.Name,
 			Description: input.Description,
@@ -590,6 +603,10 @@ func (erd ExpectedRackGroupSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx
 		if input.Topology != nil {
 			row.Topology = *input.Topology
 			columns = append(columns, "topology")
+		}
+		if input.ProtocolSet {
+			row.Protocol = input.Protocol
+			columns = append(columns, "protocol")
 		}
 		if input.Racks != nil {
 			row.Racks = input.Racks

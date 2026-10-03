@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
@@ -74,11 +75,44 @@ pub fn derive_rack_profile_id(
             })
         })
         .unwrap_or("NVIDIA");
+    let topology = profile_topology(group, rack_id);
     Ok(RackProfileId::new(format!(
         "{}_{}{power_suffix}",
-        group.topology.as_str().to_uppercase(),
+        topology.to_uppercase(),
         vendor
     )))
+}
+
+fn profile_topology<'a>(group: &'a ExpectedRackGroup, rack_id: &RackId) -> Cow<'a, str> {
+    let topology = group.topology.as_str();
+    let Some(protocol) = group.protocol.as_ref() else {
+        return Cow::Borrowed(topology);
+    };
+    if protocol.as_str() != "NVLINK_V6" {
+        return Cow::Borrowed(topology);
+    }
+    let Some((platform, suffix)) = topology.split_once('_') else {
+        return Cow::Borrowed(topology);
+    };
+    let Some(generation) = platform
+        .strip_prefix("gb")
+        .or_else(|| platform.strip_prefix("GB"))
+    else {
+        return Cow::Borrowed(topology);
+    };
+    if generation.is_empty() || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Cow::Borrowed(topology);
+    }
+    let normalized = format!("vr_{suffix}");
+    tracing::warn!(
+        rack_group_id = %group.rack_group_id,
+        %rack_id,
+        protocol = %protocol,
+        supplied_topology = topology,
+        normalized_topology = normalized,
+        "normalizing NVLINK_V6 rack profile topology"
+    );
+    Cow::Owned(normalized)
 }
 
 /// ExpectedRack represents a rack that has been declared and is expected to
@@ -126,7 +160,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedRack {
 mod tests {
     use super::*;
     use crate::expected_rack_group::{
-        ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+        ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupProtocol, RackGroupTopology,
     };
 
     #[test]
@@ -220,5 +254,31 @@ mod tests {
                 "{name}: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn nvlink_v6_uses_vr_profile_topology() {
+        let rack_id = RackId::new("rack-01");
+        let group = ExpectedRackGroup {
+            rack_group_id: RackGroupId::new("group-01"),
+            topology: RackGroupTopology::new("gb300_nvl72r1_c2g4"),
+            protocol: Some(RackGroupProtocol::new("NVLINK_V6")),
+            racks: vec![ExpectedRackGroupRack {
+                rack_id: rack_id.clone(),
+                members: [RackCapabilityType::Compute, RackCapabilityType::Switch]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, device_type)| ExpectedRackGroupMember {
+                        device_type,
+                        manufacturer: "NVIDIA".into(),
+                        id: index.to_string(),
+                    })
+                    .collect(),
+            }],
+            metadata: Default::default(),
+        };
+
+        let profile = derive_rack_profile_id(&group, &rack_id).unwrap();
+        assert_eq!(profile.as_str(), "VR_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF");
     }
 }
