@@ -735,7 +735,15 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Org does not have tenant", nil)
 	}
 
-	if ta.TenantID == nil || *ta.TenantID != tn.ID {
+	// A nil TenantID is not a mismatch. The Tenant entity did not exist when the
+	// Provider created the invitation, and only Tenant creation back-fills it, so say
+	// which call is missing instead of reporting a conflict between two Tenants.
+	if ta.TenantID == nil {
+		logger.Warn().Msg("tenant account is not linked to a tenant yet")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest,
+			"TenantAccount is not linked to a Tenant yet, retrieve the current Tenant for this org first", nil)
+	}
+	if *ta.TenantID != tn.ID {
 		logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest,
 			"Tenant in org does not match tenant in TenantAccount", nil)
@@ -761,7 +769,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 	// Values needed after the transaction closure
 	var uta *cdbm.TenantAccount
 	var ssds []cdbm.StatusDetail
-	// Handle database updates -- both tenant account and status detail
+	// Handle database updates for both tenant account and status detail
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-invite-%s", taID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -775,7 +783,12 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
 		}
-		if lockedTA.TenantID == nil || *lockedTA.TenantID != tn.ID {
+		if lockedTA.TenantID == nil {
+			logger.Warn().Msg("tenant account is not linked to a tenant yet")
+			return cutil.NewAPIError(http.StatusBadRequest,
+				"TenantAccount is not linked to a Tenant yet, retrieve the current Tenant for this org first", nil)
+		}
+		if *lockedTA.TenantID != tn.ID {
 			logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 			return cutil.NewAPIError(http.StatusBadRequest,
 				"Tenant in org does not match tenant in TenantAccount", nil)
