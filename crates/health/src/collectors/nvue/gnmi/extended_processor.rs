@@ -110,9 +110,7 @@ impl ExtendedGnmiProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let emitted = self.process_notification(notification);

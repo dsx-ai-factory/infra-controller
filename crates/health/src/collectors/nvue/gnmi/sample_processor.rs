@@ -62,9 +62,7 @@ impl GnmiSampleProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let entity_count = self.process_notification(notification);
@@ -2082,8 +2080,12 @@ mod tests {
             reconnections_total: Counter::new("test_reconn", "test").unwrap(),
             server_initiated_closures_total: Counter::new("test_closures", "test").unwrap(),
             connection_established_timestamp: Gauge::new("test_conn_ts", "test").unwrap(),
+            connection_established_timestamp_seconds: Gauge::new("test_conn_ts_seconds", "test")
+                .unwrap(),
             notifications_received_total: Counter::new("test_notif_total", "test").unwrap(),
             last_notification_timestamp: Gauge::new("test_last_notif_ts", "test").unwrap(),
+            last_notification_timestamp_seconds: Gauge::new("test_last_notif_ts_seconds", "test")
+                .unwrap(),
             notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
                 "test_proc_secs",
                 "test",
@@ -2943,6 +2945,10 @@ mod tests {
         assert_eq!(metrics.notifications_received_total.get(), 1.0);
         assert_eq!(metrics.monitored_entities.get(), 1.0);
         assert_eq!(metrics.stream_errors_total.get(), 0.0);
+        assert_eq!(
+            metrics.last_notification_timestamp.get(),
+            metrics.last_notification_timestamp_seconds.get()
+        );
     }
 
     // ---- /platform-general switch-level singleton coverage -----------------

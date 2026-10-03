@@ -72,14 +72,26 @@ pub(crate) struct GnmiStreamMetrics {
     pub(crate) reconnections_total: Counter,
     pub(crate) server_initiated_closures_total: Counter,
     pub(crate) connection_established_timestamp: Gauge,
+    pub(crate) connection_established_timestamp_seconds: Gauge,
     pub(crate) notifications_received_total: Counter,
     pub(crate) last_notification_timestamp: Gauge,
+    pub(crate) last_notification_timestamp_seconds: Gauge,
     pub(crate) notification_processing_seconds: Histogram,
     pub(crate) stream_errors_total: Counter,
     pub(crate) monitored_entities: Gauge,
 }
 
 impl GnmiStreamMetrics {
+    fn set_connection_established_timestamp(&self, timestamp: f64) {
+        self.connection_established_timestamp.set(timestamp);
+        self.connection_established_timestamp_seconds.set(timestamp);
+    }
+
+    pub(crate) fn set_last_notification_timestamp(&self, timestamp: f64) {
+        self.last_notification_timestamp.set(timestamp);
+        self.last_notification_timestamp_seconds.set(timestamp);
+    }
+
     fn new(
         registry: &prometheus::Registry,
         prefix: &str,
@@ -141,6 +153,17 @@ impl GnmiStreamMetrics {
         )?;
         registry.register(Box::new(connection_established_timestamp.clone()))?;
 
+        let connection_established_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!(
+                    "{prefix}_nvue_gnmi{stream_name}_connection_established_timestamp_seconds"
+                ),
+                "Unix timestamp in seconds when current connection was established. Compute uptime via time() - this_metric.",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(connection_established_timestamp_seconds.clone()))?;
+
         let notifications_received_total = Counter::with_opts(
             Opts::new(
                 format!("{prefix}_nvue_gnmi{stream_name}_notifications_received_total"),
@@ -158,6 +181,15 @@ impl GnmiStreamMetrics {
             .const_labels(const_labels.clone()),
         )?;
         registry.register(Box::new(last_notification_timestamp.clone()))?;
+
+        let last_notification_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!("{prefix}_nvue_gnmi{stream_name}_last_notification_timestamp_seconds"),
+                "Unix timestamp in seconds of most recent notification",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(last_notification_timestamp_seconds.clone()))?;
 
         let notification_processing_seconds = Histogram::with_opts(
             HistogramOpts::new(
@@ -194,8 +226,10 @@ impl GnmiStreamMetrics {
             reconnections_total,
             server_initiated_closures_total,
             connection_established_timestamp,
+            connection_established_timestamp_seconds,
             notifications_received_total,
             last_notification_timestamp,
+            last_notification_timestamp_seconds,
             notification_processing_seconds,
             stream_errors_total,
             monitored_entities,
@@ -1031,8 +1065,7 @@ async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: Extended
                 state.stream_metrics.connection_state.set(READY);
                 state
                     .stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
+                    .set_connection_established_timestamp(now_unix_secs());
 
                 let _connection_guard =
                     StreamingConnectionGuard::inc(state.stream_metrics.connected.clone());
@@ -1248,9 +1281,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
             }
             Ok((mut stream, credential_generation)) => 'connected: {
                 stream_metrics.connection_state.set(READY);
-                stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
+                stream_metrics.set_connection_established_timestamp(now_unix_secs());
 
                 let _connection_guard =
                     StreamingConnectionGuard::inc(stream_metrics.connected.clone());
@@ -1419,9 +1450,7 @@ async fn gnmi_on_change_task(
             }
             Ok((mut stream, credential_generation)) => 'connected: {
                 stream_metrics.connection_state.set(READY);
-                stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
+                stream_metrics.set_connection_established_timestamp(now_unix_secs());
 
                 let _connection_guard =
                     StreamingConnectionGuard::inc(stream_metrics.connected.clone());
@@ -1628,6 +1657,34 @@ mod tests {
             .expect("extended connection metric should be registered");
 
         assert_eq!(connection.get_metric().len(), 2);
+    }
+
+    #[test]
+    fn timestamp_gauges_expose_seconds_names_with_legacy_values() {
+        let registry = prometheus::Registry::new();
+        let metrics = GnmiStreamMetrics::new(&registry, "test", "", test_labels()).unwrap();
+
+        metrics.set_connection_established_timestamp(123.0);
+        metrics.set_last_notification_timestamp(456.0);
+
+        let families = registry.gather();
+        let exposed = |name: &str| {
+            families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap_or_else(|| panic!("{name} should be registered"))
+                .get_metric()[0]
+                .get_gauge()
+                .value()
+        };
+
+        for (legacy, expected) in [
+            ("test_nvue_gnmi_connection_established_timestamp", 123.0),
+            ("test_nvue_gnmi_last_notification_timestamp", 456.0),
+        ] {
+            assert_eq!(exposed(legacy), expected);
+            assert_eq!(exposed(&format!("{legacy}_seconds")), expected);
+        }
     }
 
     #[tokio::test]

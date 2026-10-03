@@ -46,6 +46,7 @@ pub(crate) const ON_CHANGE_STREAM_ID_SYSTEM_EVENTS: &str = "nvue_gnmi_events";
 pub(crate) struct OnChangeStreamMetrics {
     pub(crate) rows_total: CounterVec,
     pub(crate) last_row_timestamp: Gauge,
+    pub(crate) last_row_timestamp_seconds: Gauge,
 }
 
 impl OnChangeStreamMetrics {
@@ -70,13 +71,23 @@ impl OnChangeStreamMetrics {
                 format!("{prefix}_{stream_id}_last_timestamp"),
                 "Unix timestamp of most recent ON_CHANGE row",
             )
-            .const_labels(const_labels),
+            .const_labels(const_labels.clone()),
         )?;
         registry.register(Box::new(last_row_timestamp.clone()))?;
+
+        let last_row_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!("{prefix}_{stream_id}_last_timestamp_seconds"),
+                "Unix timestamp in seconds of most recent ON_CHANGE row",
+            )
+            .const_labels(const_labels),
+        )?;
+        registry.register(Box::new(last_row_timestamp_seconds.clone()))?;
 
         Ok(Self {
             rows_total,
             last_row_timestamp,
+            last_row_timestamp_seconds,
         })
     }
 }
@@ -132,9 +143,7 @@ impl GnmiOnChangeProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let entity_count = self.process_notification(notification);
@@ -274,7 +283,11 @@ impl GnmiOnChangeProcessor {
         let severity = row.get("severity").map(String::as_str).unwrap_or("unknown");
         let text = row.get("text").map(String::as_str).unwrap_or("");
 
-        self.stream_metrics.last_row_timestamp.set(now_unix_secs());
+        let timestamp = now_unix_secs();
+        self.stream_metrics.last_row_timestamp.set(timestamp);
+        self.stream_metrics
+            .last_row_timestamp_seconds
+            .set(timestamp);
         self.stream_metrics
             .rows_total
             .with_label_values(&[severity])
@@ -544,6 +557,19 @@ mod tests {
     }
 
     #[test]
+    fn on_change_timestamp_seconds_alias_is_registered() {
+        let registry = prometheus::Registry::new();
+        OnChangeStreamMetrics::new(&registry, "test", "stream_a", test_labels()).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "test_stream_a_last_timestamp_seconds")
+        );
+    }
+
+    #[test]
     fn test_process_notification_severity_and_text() {
         let processor = test_processor(None);
         let notification = proto::Notification {
@@ -591,6 +617,10 @@ mod tests {
             1.0
         );
         assert!(processor.stream_metrics.last_row_timestamp.get() > 0.0);
+        assert_eq!(
+            processor.stream_metrics.last_row_timestamp.get(),
+            processor.stream_metrics.last_row_timestamp_seconds.get()
+        );
     }
 
     #[test]
