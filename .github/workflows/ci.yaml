@@ -1536,6 +1536,11 @@ jobs:
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
       load: true
       scan: true
+      # Bundled into both machine_validation carriers, which serve every image
+      # named in crates/machine-validation/images/list.json. The ref is the one
+      # scout's import reports (crates/machine-validation/src/lib.rs).
+      export_image_archive: crates/machine-validation/images/machine-validation-runner.tar
+      export_image_archive_ref: nvcr.io/nvidian/nvforge/machine-validation-runner:latest
     secrets: inherit
 
   build-release-machine-validation-basic-plugin-x86:
@@ -1635,6 +1640,8 @@ jobs:
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.major_minor_version }}-latest
       build_args: '{"CI_COMMIT_SHORT_SHA":"${{ needs.prepare.outputs.short_sha }}","CONTAINER_RUNTIME_X86_64":"${{ needs.prepare.outputs.runtime_container_x86_64_ref }}"}'
+      download_artifacts: true
+      artifact_pattern: machine-validation-runner-${{ github.run_id }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
@@ -1645,14 +1652,17 @@ jobs:
   # arm64 container build of the machine-validation config carrier, so it can run
   # as an init container on arm64 control-plane nodes. FROM the aarch64 runtime
   # base; pushed as machine_validation-aarch64 and merged into the bare
-  # machine_validation tag below. (The bundled validation runner payload staying
+  # machine_validation tag below. It bundles the same amd64 runner archive as the
+  # amd64 carrier, so the served payload does not depend on the control-plane
+  # node's architecture. (The bundled validation runner payload staying
   # arm64-capable is tracked separately — this only makes the carrier runnable on
   # arm64 nodes.)
   build-release-machine-validation-artifacts-arm-host:
     needs:
       - prepare
       - build-runtime-container-aarch64
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
+      - build-release-machine-validation-runner
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-aarch64.result) && needs.build-release-machine-validation-runner.result == 'success' }}
     uses: ./.github/workflows/docker-build.yml
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
@@ -1662,6 +1672,8 @@ jobs:
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
       build_args: '{"CI_COMMIT_SHORT_SHA":"${{ needs.prepare.outputs.short_sha }}","CONTAINER_RUNTIME_AARCH64":"${{ needs.prepare.outputs.runtime_container_aarch64_ref }}"}'
+      download_artifacts: true
+      artifact_pattern: machine-validation-runner-${{ github.run_id }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
