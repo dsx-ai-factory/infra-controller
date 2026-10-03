@@ -32,6 +32,16 @@ macro_rules! r {
     };
 }
 
+// Add a row directly from a value (not a field within a struct)
+macro_rules! rstr {
+    ($table: ident, $value:ident) => {
+        $table.add_row(Row::new(vec![
+            Cell::new(stringify!($value)),
+            Cell::new(&$value),
+        ]));
+    };
+}
+
 macro_rules! rv {
     ($table: ident, $value:ident, $field_name:ident) => {
         $table.add_row(Row::new(vec![
@@ -86,11 +96,26 @@ pub(super) async fn handle_show_version(
 
         let mut table = Table::new();
 
+        let describe_duration_ms = |ms| match ms {
+            0 => "<unknown>".to_string(),
+            // this is probably always going to be configured in seconds, but just in case...
+            ms if ms % 1000 != 0 => format!("{}ms", ms),
+            _ => format!("{}s", ms / 1000),
+        };
+
+        let database_pool_acquire_timeout =
+            describe_duration_ms(config.database_pool_acquire_timeout_ms);
+        let database_pool_idle_timeout = describe_duration_ms(config.database_pool_idle_timeout_ms);
+        let database_pool_max_lifetime = describe_duration_ms(config.database_pool_max_lifetime_ms);
+
         table.set_titles(row!["Property", "Value"]);
         r!(table, config, listen);
         r!(table, config, metrics_endpoint);
         r!(table, config, database_url);
         r!(table, config, max_database_connections);
+        rstr!(table, database_pool_acquire_timeout);
+        rstr!(table, database_pool_idle_timeout);
+        rstr!(table, database_pool_max_lifetime);
         r!(table, config, enable_route_servers);
         r!(table, config, asn);
         rv!(table, config, dhcp_servers);
