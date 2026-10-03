@@ -116,50 +116,141 @@ func labelsAsMap(protoLabels []*corev1.Label) Labels {
 	return l
 }
 
-func TestExpectedComponentLabelsInput_ToProto(t *testing.T) {
-	t.Run("merges user labels with the flat device fields", func(t *testing.T) {
-		got := labelsAsMap(expectedComponentLabelsInput{
-			Manufacturer: cutil.GetPtr("NVIDIA"),
-			Model:        cutil.GetPtr("MGX"),
-			SlotID:       cutil.GetPtr(int32(3)),
-			TrayIdx:      cutil.GetPtr(int32(0)), // zero is a valid position
-			HostID:       cutil.GetPtr(int32(1)),
-			Labels:       Labels{"environment": "prod", "team": "infra"},
-		}.ToProto())
-		assert.Equal(t, Labels{
-			"environment":  "prod",
-			"team":         "infra",
-			"manufacturer": "NVIDIA",
-			"model":        "MGX",
-			"slot_id":      "3",
-			"tray_idx":     "0",
-			"host_id":      "1",
-		}, got)
-	})
+func TestExpectedComponentMetadata_ToProto(t *testing.T) {
+	tests := []struct {
+		name  string
+		input expectedComponentMetadata
+		want  *corev1.Metadata
+	}{
+		{
+			name: "merges inventory fields with user labels",
+			input: expectedComponentMetadata{
+				Name:         cutil.GetPtr("machine-1"),
+				Description:  cutil.GetPtr("primary"),
+				Manufacturer: cutil.GetPtr("NVIDIA"),
+				Model:        cutil.GetPtr("MGX"),
+				SlotID:       cutil.GetPtr(int32(3)),
+				TrayIdx:      cutil.GetPtr(int32(0)),
+				HostID:       cutil.GetPtr(int32(1)),
+				Labels:       Labels{"environment": "prod", "manufacturer": "user-supplied"},
+			},
+			want: &corev1.Metadata{
+				Name:        "machine-1",
+				Description: "primary",
+				Labels: []*corev1.Label{
+					{Key: "environment", Value: cutil.GetPtr("prod")},
+					{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+					{Key: "model", Value: cutil.GetPtr("MGX")},
+					{Key: "slot_id", Value: cutil.GetPtr("3")},
+					{Key: "tray_idx", Value: cutil.GetPtr("0")},
+					{Key: "host_id", Value: cutil.GetPtr("1")},
+				},
+			},
+		},
+		{
+			name: "no inventory fields or labels",
+			want: &corev1.Metadata{},
+		},
+		{
+			name: "inventory fields without user labels",
+			input: expectedComponentMetadata{
+				Manufacturer: cutil.GetPtr("NVIDIA"),
+				SlotID:       cutil.GetPtr(int32(0)),
+			},
+			want: &corev1.Metadata{
+				Labels: []*corev1.Label{
+					{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+					{Key: "slot_id", Value: cutil.GetPtr("0")},
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.input.ToProto()
+			assert.Equal(t, tc.want.Name, got.Name)
+			assert.Equal(t, tc.want.Description, got.Description)
+			assert.Equal(t, labelsAsMap(tc.want.Labels), labelsAsMap(got.Labels))
+		})
+	}
+}
 
-	t.Run("returns nil when there are no labels", func(t *testing.T) {
-		assert.Nil(t, expectedComponentLabelsInput{}.ToProto())
-	})
-
-	t.Run("device fields only, no user labels", func(t *testing.T) {
-		got := labelsAsMap(expectedComponentLabelsInput{
-			Manufacturer: cutil.GetPtr("NVIDIA"),
-			SlotID:       cutil.GetPtr(int32(0)),
-		}.ToProto())
-		assert.Equal(t, Labels{
-			"manufacturer": "NVIDIA",
-			"slot_id":      "0",
-		}, got)
-	})
-
-	t.Run("system field wins over a conflicting user label", func(t *testing.T) {
-		got := labelsAsMap(expectedComponentLabelsInput{
-			Manufacturer: cutil.GetPtr("NVIDIA"),
-			Labels:       Labels{"manufacturer": "user-supplied", "extra": "kept"},
-		}.ToProto())
-		assert.Equal(t, Labels{
-			"manufacturer": "NVIDIA", // system value wins
-			"extra":        "kept",   // non-conflicting user label preserved
-		}, got)
-	})
+func TestExpectedComponentMetadata_FromProto(t *testing.T) {
+	tests := []struct {
+		name  string
+		proto *corev1.Metadata
+		want  expectedComponentMetadata
+	}{
+		{
+			name: "missing metadata clears fields",
+		},
+		{
+			name:  "empty metadata preserves an explicit empty label collection",
+			proto: &corev1.Metadata{Labels: []*corev1.Label{}},
+			want:  expectedComponentMetadata{Labels: Labels{}},
+		},
+		{
+			name: "extracts reserved labels and preserves signed int32 boundaries",
+			proto: &corev1.Metadata{
+				Name:        "machine-1",
+				Description: "primary",
+				Labels: []*corev1.Label{
+					{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+					{Key: "model", Value: cutil.GetPtr("MGX")},
+					{Key: "slot_id", Value: cutil.GetPtr("2147483647")},
+					{Key: "tray_idx", Value: cutil.GetPtr("0")},
+					{Key: "host_id", Value: cutil.GetPtr("-2147483648")},
+					{Key: "environment", Value: cutil.GetPtr("prod")},
+				},
+			},
+			want: expectedComponentMetadata{
+				Name:         cutil.GetPtr("machine-1"),
+				Description:  cutil.GetPtr("primary"),
+				Manufacturer: cutil.GetPtr("NVIDIA"),
+				Model:        cutil.GetPtr("MGX"),
+				SlotID:       cutil.GetPtr(int32(2147483647)),
+				TrayIdx:      cutil.GetPtr(int32(0)),
+				HostID:       cutil.GetPtr(int32(-2147483648)),
+				Labels:       Labels{"environment": "prod"},
+			},
+		},
+		{
+			name: "invalid and empty values clear fields but preserve labels",
+			proto: &corev1.Metadata{
+				Labels: []*corev1.Label{
+					{Key: "manufacturer", Value: cutil.GetPtr("")},
+					{Key: "model"},
+					{Key: "slot_id", Value: cutil.GetPtr("not-a-number")},
+					{Key: "tray_idx", Value: cutil.GetPtr("2147483648")},
+					{Key: "host_id", Value: cutil.GetPtr("-2147483649")},
+				},
+			},
+			want: expectedComponentMetadata{Labels: Labels{
+				"manufacturer": "",
+				"model":        "",
+				"slot_id":      "not-a-number",
+				"tray_idx":     "2147483648",
+				"host_id":      "-2147483649",
+			}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expectedComponentMetadata{
+				Name:         cutil.GetPtr("stale"),
+				Description:  cutil.GetPtr("stale"),
+				Manufacturer: cutil.GetPtr("stale"),
+				Model:        cutil.GetPtr("stale"),
+				SlotID:       cutil.GetPtr(int32(9)),
+				TrayIdx:      cutil.GetPtr(int32(9)),
+				HostID:       cutil.GetPtr(int32(9)),
+				Labels:       Labels{"stale": "value"},
+			}
+			got.FromProto(tc.proto)
+			assert.Equal(t, tc.want, got)
+			if len(tc.proto.GetLabels()) > 0 {
+				assert.Equal(t, labelsAsMap(tc.proto.Labels), labelsAsMap(got.ToProto().Labels))
+			}
+		})
+	}
 }

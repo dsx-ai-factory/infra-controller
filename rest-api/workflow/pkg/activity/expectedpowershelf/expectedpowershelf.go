@@ -6,7 +6,7 @@ package expectedpowershelf
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -133,6 +133,14 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 				BmcMacAddress:        reported.BmcMacAddress,
 				ShelfSerialNumber:    reported.ShelfSerialNumber,
 				BmcIpAddress:         reported.BmcIpAddress,
+				RackID:               reported.RackID,
+				Name:                 reported.Name,
+				Manufacturer:         reported.Manufacturer,
+				Model:                reported.Model,
+				Description:          reported.Description,
+				SlotID:               reported.SlotID,
+				TrayIdx:              reported.TrayIdx,
+				HostID:               reported.HostID,
 				Labels:               reported.Labels,
 				CreatedBy:            siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -155,23 +163,64 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ShelfSerialNumber != reported.ShelfSerialNumber ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			_, uerr := epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
-				ExpectedPowerShelfID: cur.ID,
-				BmcMacAddress:        &reported.BmcMacAddress,
-				ShelfSerialNumber:    &reported.ShelfSerialNumber,
-				BmcIpAddress:         reported.BmcIpAddress,
-				Labels:               labels,
+			!util.PtrsEqual(cur.RackID, reported.RackID) ||
+			!util.PtrsEqual(cur.Name, reported.Name) ||
+			!util.PtrsEqual(cur.Manufacturer, reported.Manufacturer) ||
+			!util.PtrsEqual(cur.Model, reported.Model) ||
+			!util.PtrsEqual(cur.Description, reported.Description) ||
+			!util.PtrsEqual(cur.SlotID, reported.SlotID) ||
+			!util.PtrsEqual(cur.TrayIdx, reported.TrayIdx) ||
+			!util.PtrsEqual(cur.HostID, reported.HostID) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := epsDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				// `Update` preserves nil fields, so clear values Core no longer
+				// reports in the same transaction as the replacement values.
+				_, cerr := epsDAO.Clear(ctx, tx, cdbm.ExpectedPowerShelfClearInput{
+					ExpectedPowerShelfID: cur.ID,
+					BmcIpAddress:         cur.BmcIpAddress != nil && reported.BmcIpAddress == nil,
+					RackID:               cur.RackID != nil && reported.RackID == nil,
+					Name:                 cur.Name != nil && reported.Name == nil,
+					Manufacturer:         cur.Manufacturer != nil && reported.Manufacturer == nil,
+					Model:                cur.Model != nil && reported.Model == nil,
+					Description:          cur.Description != nil && reported.Description == nil,
+					SlotID:               cur.SlotID != nil && reported.SlotID == nil,
+					TrayIdx:              cur.TrayIdx != nil && reported.TrayIdx == nil,
+					HostID:               cur.HostID != nil && reported.HostID == nil,
+					Labels:               len(cur.Labels) > 0 && len(reported.Labels) == 0,
+				})
+				if cerr != nil {
+					return cerr
+				}
+
+				_, uerr := epsDAO.Update(ctx, tx, cdbm.ExpectedPowerShelfUpdateInput{
+					ExpectedPowerShelfID: cur.ID,
+					BmcMacAddress:        &reported.BmcMacAddress,
+					ShelfSerialNumber:    &reported.ShelfSerialNumber,
+					BmcIpAddress:         reported.BmcIpAddress,
+					RackID:               reported.RackID,
+					Name:                 reported.Name,
+					Manufacturer:         reported.Manufacturer,
+					Model:                reported.Model,
+					Description:          reported.Description,
+					SlotID:               reported.SlotID,
+					TrayIdx:              reported.TrayIdx,
+					HostID:               reported.HostID,
+					Labels:               reported.Labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
-				logger.Error().Err(uerr).Str("ExpectedPowerShelfID", cur.ID.String()).Msg("failed to update ExpectedPowerShelf in DB")
+				logger.Error().Err(uerr).Str("ExpectedPowerShelfID", cur.ID.String()).Msg("failed to reconcile ExpectedPowerShelf in DB")
 			}
 		}
 	}

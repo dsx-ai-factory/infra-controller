@@ -7,15 +7,20 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"go.temporal.io/sdk/testsuite"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -73,6 +78,34 @@ func testExpectedMachineSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	assert.Nil(t, err)
+}
+
+type testExpectedMachineReconcileContextKey struct{}
+
+type testExpectedMachineAfterReadHook struct {
+	afterRead    func()
+	beforeCommit func()
+	rowID        uuid.UUID
+}
+
+func (h *testExpectedMachineAfterReadHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if ctx.Value(testExpectedMachineReconcileContextKey{}) == h && event.Operation() == "COMMIT" && h.beforeCommit != nil {
+		h.beforeCommit()
+	}
+	return ctx
+}
+
+func (h *testExpectedMachineAfterReadHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if h.rowID != uuid.Nil && (ctx.Value(testExpectedMachineReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String())) {
+		return
+	}
+	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
+		strings.HasPrefix(event.Query, "SELECT count(") || !strings.Contains(event.Query, `FROM "expected_machine"`) {
+		return
+	}
+	afterRead := h.afterRead
+	h.afterRead = nil
+	afterRead()
 }
 
 func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
@@ -508,6 +541,358 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
 		require.NoError(t, err)
 		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
+
+		inventory.LinkedMachines[0].MachineId.Id = predictedMachineID
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+		beforeMissingTarget, err := emDAO.Get(ctx, nil, emID, nil, false)
+		require.NoError(t, err)
+		err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+		require.NoError(t, err)
+		reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
+		assert.Equal(t, beforeMissingTarget.Updated, reconciled.Updated)
+	})
+
+	t.Run("API write after inventory read survives reconciliation", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID:   uuid.New(),
+			SiteID:              site.ID,
+			BmcMacAddress:       "00:11:22:33:99:01",
+			ChassisSerialNumber: "SN-CONCURRENT",
+			Name:                cutil.GetPtr("original-name"),
+			Description:         cutil.GetPtr("original-description"),
+			CreatedBy:           ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+
+		// Commit the API edit after the inventory read has cached the old row.
+		var newer *cdbm.ExpectedMachine
+		var writeErr error
+		fired := false
+		hook := &testExpectedMachineAfterReadHook{afterRead: func() {
+			fired = true
+			newer, writeErr = emDAO.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+				ExpectedMachineID: row.ID,
+				Name:              cutil.GetPtr("API-name"),
+				Description:       cutil.GetPtr("API-description"),
+			})
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.afterRead = nil }()
+		inventory := &corev1.ExpectedMachineInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedMachines: []*corev1.ExpectedMachine{{
+				Id:                  &corev1.UUID{Value: row.ID.String()},
+				BmcMacAddress:       row.BmcMacAddress,
+				ChassisSerialNumber: row.ChassisSerialNumber,
+				Metadata:            &corev1.Metadata{Name: "inventory-name"},
+			}},
+		}
+		mei := ManageExpectedMachine{dbSession: dbSession}
+		err = mei.UpdateExpectedMachinesInDB(ctx, site.ID, inventory)
+		require.True(t, fired)
+		require.NoError(t, writeErr)
+		require.NoError(t, err)
+		stored, err := emDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, newer, stored, "both API values and Updated must survive")
+
+		// A later inventory can still replace the name and clear the description.
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+		err = mei.UpdateExpectedMachinesInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		stored, err = emDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("inventory-name"), stored.Name)
+		assert.Nil(t, stored.Description)
+	})
+
+	t.Run("row lock protects reconciliation through commit", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		site := cwu.TestBuildSite(t, dbSession, ip, "locked-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID:   uuid.New(),
+			SiteID:              site.ID,
+			BmcMacAddress:       "00:11:22:33:99:02",
+			ChassisSerialNumber: "SN-LOCKED",
+			Name:                cutil.GetPtr("original-name"),
+			Description:         cutil.GetPtr("original-description"),
+			CreatedBy:           ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+
+		readReached, commitReached := make(chan struct{}), make(chan struct{})
+		continueRead, continueCommit := make(chan struct{}), make(chan struct{})
+		releaseRead := sync.OnceFunc(func() { close(continueRead) })
+		releaseCommit := sync.OnceFunc(func() { close(continueCommit) })
+		var workers sync.WaitGroup
+		defer func() {
+			releaseRead()
+			releaseCommit()
+			cancel()
+			workers.Wait()
+		}()
+		hook := &testExpectedMachineAfterReadHook{
+			rowID: row.ID,
+			afterRead: func() {
+				close(readReached)
+				select {
+				case <-continueRead:
+				case <-ctx.Done():
+				}
+			},
+			beforeCommit: func() {
+				close(commitReached)
+				select {
+				case <-continueCommit:
+				case <-ctx.Done():
+				}
+			},
+		}
+		dbSession.DB.AddQueryHook(hook)
+		inventory := &corev1.ExpectedMachineInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedMachines: []*corev1.ExpectedMachine{{
+				Id:                  &corev1.UUID{Value: row.ID.String()},
+				BmcMacAddress:       row.BmcMacAddress,
+				ChassisSerialNumber: row.ChassisSerialNumber,
+				Metadata:            &corev1.Metadata{Name: "inventory-name"},
+			}},
+		}
+		mei := ManageExpectedMachine{dbSession: dbSession}
+		var activityErr, writerErr error
+		workers.Go(func() {
+			activityErr = mei.UpdateExpectedMachinesInDB(context.WithValue(ctx, testExpectedMachineReconcileContextKey{}, hook), site.ID, inventory)
+		})
+		select {
+		case <-readReached:
+		case <-ctx.Done():
+			t.Fatal("activity did not reach its row reload: ", ctx.Err())
+		}
+
+		writerReady := make(chan int, 1)
+		workers.Go(func() {
+			writerErr = cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
+				var pid int
+				err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+				if err != nil {
+					return err
+				}
+				writerReady <- pid
+				_, err = emDAO.Update(ctx, tx, cdbm.ExpectedMachineUpdateInput{
+					ExpectedMachineID: row.ID,
+					Name:              cutil.GetPtr("API-name"),
+				})
+				return err
+			})
+		})
+		var writerPID int
+		select {
+		case writerPID = <-writerReady:
+		case <-ctx.Done():
+			t.Fatal("API writer did not start: ", ctx.Err())
+		}
+		assertWriterBlocked := func() {
+			t.Helper()
+			require.Eventually(t, func() bool {
+				var blockers int
+				err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", writerPID).Scan(ctx, &blockers)
+				return err == nil && blockers > 0
+			}, 5*time.Second, 10*time.Millisecond, "API write did not wait for reconciliation")
+		}
+		assertWriterBlocked()
+		releaseRead()
+		select {
+		case <-commitReached:
+		case <-ctx.Done():
+			t.Fatal("activity did not reach commit: ", ctx.Err())
+		}
+		// The writer must still wait after both the clear and replacement write.
+		assertWriterBlocked()
+		releaseCommit()
+		workers.Wait()
+		require.NoError(t, activityErr)
+		require.NoError(t, writerErr)
+		stored, err := emDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("API-name"), stored.Name)
+		assert.Nil(t, stored.Description)
+	})
+
+	t.Run("complete Core snapshots", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "snapshot-site", cdbm.SiteStatusRegistered, nil, ipu)
+		id := uuid.New()
+		sku := cwu.TestBuildSku(t, dbSession, "snapshot-sku", site)
+		machine := cwu.TestBuildMachine(t, dbSession, ip.ID, site.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
+		mei := ManageExpectedMachine{dbSession: dbSession}
+		cases := []struct {
+			name            string
+			reported        *corev1.ExpectedMachine
+			want            cdbm.ExpectedMachine
+			linkedMachineID *string
+		}{
+			{
+				name:            "create all Core fields",
+				linkedMachineID: &machine.ID,
+				reported: &corev1.ExpectedMachine{
+					BmcIpAddress: cutil.GetPtr("192.0.2.10"),
+					RackId:       &corev1.RackId{Id: "initial-rack"},
+					Metadata: &corev1.Metadata{
+						Name:        "initial-name",
+						Description: "initial-description",
+						Labels: []*corev1.Label{
+							{Key: "manufacturer", Value: cutil.GetPtr("initial-manufacturer")},
+							{Key: "model", Value: cutil.GetPtr("initial-model")},
+							{Key: "slot_id", Value: cutil.GetPtr("0")},
+							{Key: "tray_idx", Value: cutil.GetPtr("1")},
+							{Key: "host_id", Value: cutil.GetPtr("2")},
+							{Key: "environment", Value: cutil.GetPtr("prod")},
+						},
+					},
+					SkuId:                    &sku.ID,
+					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
+					IsDpfEnabled:             cutil.GetPtr(true),
+					HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+				},
+				want: cdbm.ExpectedMachine{
+					BmcIpAddress:             cutil.GetPtr("192.0.2.10"),
+					RackID:                   cutil.GetPtr("initial-rack"),
+					Name:                     cutil.GetPtr("initial-name"),
+					Description:              cutil.GetPtr("initial-description"),
+					Manufacturer:             cutil.GetPtr("initial-manufacturer"),
+					Model:                    cutil.GetPtr("initial-model"),
+					SlotID:                   cutil.GetPtr(int32(0)),
+					TrayIdx:                  cutil.GetPtr(int32(1)),
+					HostID:                   cutil.GetPtr(int32(2)),
+					Labels:                   cdbm.Labels{"environment": "prod"},
+					SkuID:                    &sku.ID,
+					MachineID:                &machine.ID,
+					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
+					IsDpfEnabled:             cutil.GetPtr(true),
+					HostLifecycleProfile:     cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+				},
+			},
+			{
+				name:     "clear omitted optional fields",
+				reported: &corev1.ExpectedMachine{},
+				want:     cdbm.ExpectedMachine{MachineID: &machine.ID},
+			},
+		}
+		for _, field := range []struct {
+			name  string
+			apply func(*corev1.ExpectedMachine, *cdbm.ExpectedMachine)
+		}{
+			{"rack", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.RackId.Id = "updated-rack"
+				want.RackID = cutil.GetPtr("updated-rack")
+			}},
+			{"name", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Name = "updated-name"
+				want.Name = cutil.GetPtr("updated-name")
+			}},
+			{"description", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Description = "updated-description"
+				want.Description = cutil.GetPtr("updated-description")
+			}},
+			{"manufacturer", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Labels[0].Value = cutil.GetPtr("updated-manufacturer")
+				want.Manufacturer = cutil.GetPtr("updated-manufacturer")
+			}},
+			{"model", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Labels[1].Value = cutil.GetPtr("updated-model")
+				want.Model = cutil.GetPtr("updated-model")
+			}},
+			{"slot", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Labels[2].Value = cutil.GetPtr("2")
+				want.SlotID = cutil.GetPtr(int32(2))
+			}},
+			{"tray", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Labels[3].Value = cutil.GetPtr("3")
+				want.TrayIdx = cutil.GetPtr(int32(3))
+			}},
+			{"host", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.Metadata.Labels[4].Value = cutil.GetPtr("4")
+				want.HostID = cutil.GetPtr(int32(4))
+			}},
+		} {
+			next := cases[len(cases)-2]
+			next.name = "replace only " + field.name
+			next.reported = proto.Clone(next.reported).(*corev1.ExpectedMachine)
+			field.apply(next.reported, &next.want)
+			cases = slices.Insert(cases, len(cases)-1, next)
+		}
+
+		lifecycleUpdate := cases[len(cases)-2]
+		lifecycleUpdate.name = "replace only the lifecycle profile"
+		lifecycleUpdate.reported = proto.Clone(cases[len(cases)-2].reported).(*corev1.ExpectedMachine)
+		lifecycleUpdate.reported.HostLifecycleProfile.DisableLockdown = cutil.GetPtr(false)
+		lifecycleUpdate.want.HostLifecycleProfile.DisableLockdown = cutil.GetPtr(false)
+		cases = slices.Insert(cases, len(cases)-1, lifecycleUpdate)
+
+		var created time.Time
+		createdBy := site.ID
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.reported.Id = &corev1.UUID{Value: id.String()}
+				tc.reported.BmcMacAddress = "00:11:22:33:88:01"
+				tc.reported.ChassisSerialNumber = "SN-SNAPSHOT"
+				inventory := &corev1.ExpectedMachineInventory{
+					ExpectedMachines: []*corev1.ExpectedMachine{tc.reported},
+					InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				if tc.linkedMachineID != nil {
+					inventory.LinkedMachines = []*corev1.LinkedExpectedMachine{{
+						BmcMacAddress: tc.reported.BmcMacAddress,
+						MachineId:     &corev1.MachineId{Id: *tc.linkedMachineID},
+					}}
+				}
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+				err := mei.UpdateExpectedMachinesInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				stored, err := emDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				if created.IsZero() {
+					created = stored.Created
+				}
+				tc.want.ID = id
+				tc.want.SiteID = site.ID
+				tc.want.BmcMacAddress = tc.reported.BmcMacAddress
+				tc.want.ChassisSerialNumber = tc.reported.ChassisSerialNumber
+				tc.want.Created = created
+				tc.want.CreatedBy = createdBy
+				tc.want.Updated = stored.Updated
+				assert.Equal(t, tc.want, *stored)
+
+				// A DB round trip may preserve empty collections where Core omits
+				// them. Repeating that snapshot must not refresh `Updated`.
+				if len(tc.want.Labels) == 0 {
+					_, err = emDAO.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+						ExpectedMachineID:        id,
+						Labels:                   map[string]string{},
+						FallbackDpuSerialNumbers: []string{},
+					})
+					require.NoError(t, err)
+				}
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+				beforeRepeat, err := emDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				err = mei.UpdateExpectedMachinesInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				afterRepeat, err := emDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, beforeRepeat.Updated, afterRepeat.Updated)
+
+				// Subsequent snapshots must preserve the Cloud creator.
+				createdBy = ipu.ID
+				_, err = dbSession.DB.Exec("UPDATE expected_machine SET created_by = ? WHERE id = ?", createdBy, id)
+				require.NoError(t, err)
+			})
+		}
 	})
 }
 
@@ -651,6 +1036,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB_BmcIpAddress(t *testin
 			BmcMacAddress:       bmcMAC,
 			ChassisSerialNumber: chassisSerialNumber,
 			BmcIpAddress:        tt.reportedBmcIP,
+			Metadata:            &corev1.Metadata{Name: preservedName},
 		})
 	}
 

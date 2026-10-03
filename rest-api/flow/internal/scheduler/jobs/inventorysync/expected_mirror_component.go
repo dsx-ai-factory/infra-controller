@@ -95,7 +95,7 @@ type fieldChange struct {
 // component spec. ChassisSerialNumber is the natural identity field; the
 // label-carried Manufacturer / Model / FirmwareVersion / SlotID / TrayIdx /
 // HostID are the per-row metadata cloud REST writes via
-// expectedComponentLabelsInput.ToProto().
+// expectedComponentMetadata.ToProto().
 func machineDetailToSpec(d nicoapi.ExpectedMachineDetail) expectedComponentSpec {
 	s := expectedComponentSpec{
 		Type:           devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),

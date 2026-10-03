@@ -138,23 +138,16 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 		proto.NvosPassword = creds.NvosPassword
 	}
 
-	metadata := &corev1.Metadata{
-		Labels: expectedComponentLabelsInput{
-			Manufacturer: es.Manufacturer,
-			Model:        es.Model,
-			SlotID:       es.SlotID,
-			TrayIdx:      es.TrayIdx,
-			HostID:       es.HostID,
-			Labels:       es.Labels,
-		}.ToProto(),
-	}
-	if es.Name != nil {
-		metadata.Name = *es.Name
-	}
-	if es.Description != nil {
-		metadata.Description = *es.Description
-	}
-	proto.Metadata = metadata
+	proto.Metadata = expectedComponentMetadata{
+		Name:         es.Name,
+		Description:  es.Description,
+		Manufacturer: es.Manufacturer,
+		Model:        es.Model,
+		SlotID:       es.SlotID,
+		TrayIdx:      es.TrayIdx,
+		HostID:       es.HostID,
+		Labels:       es.Labels,
+	}.ToProto()
 
 	return proto
 }
@@ -163,6 +156,8 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 // by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedSwitchId leaves es.ID unchanged so the caller can validate
 // the proto's UUID before calling.
+// Descriptive and position fields come from Metadata; absent optional fields
+// clear their stored values.
 func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	if proto == nil {
 		return
@@ -187,14 +182,16 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	} else {
 		es.RackID = nil
 	}
-	es.Name = proto.Name
-	es.Manufacturer = proto.Manufacturer
-	es.Model = proto.Model
-	es.Description = proto.Description
-	es.SlotID = proto.SlotId
-	es.TrayIdx = proto.TrayIdx
-	es.HostID = proto.HostId
-	es.Labels.FromProto(proto.Metadata.GetLabels())
+	var metadata expectedComponentMetadata
+	metadata.FromProto(proto.Metadata)
+	es.Name = metadata.Name
+	es.Manufacturer = metadata.Manufacturer
+	es.Model = metadata.Model
+	es.Description = metadata.Description
+	es.SlotID = metadata.SlotID
+	es.TrayIdx = metadata.TrayIdx
+	es.HostID = metadata.HostID
+	es.Labels = metadata.Labels
 }
 
 // ExpectedSwitchCreateInput input parameters for Create method

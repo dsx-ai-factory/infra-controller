@@ -6,7 +6,7 @@ package expectedswitch
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 	"slices"
 
 	"github.com/google/uuid"
@@ -133,6 +133,15 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				SiteID:             siteID,
 				BmcMacAddress:      reported.BmcMacAddress,
 				SwitchSerialNumber: reported.SwitchSerialNumber,
+				BmcIpAddress:       reported.BmcIpAddress,
+				RackID:             reported.RackID,
+				Name:               reported.Name,
+				Manufacturer:       reported.Manufacturer,
+				Model:              reported.Model,
+				Description:        reported.Description,
+				SlotID:             reported.SlotID,
+				TrayIdx:            reported.TrayIdx,
+				HostID:             reported.HostID,
 				NvosMacAddresses:   reported.NvosMacAddresses,
 				Labels:             reported.Labels,
 				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
@@ -155,30 +164,68 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		// update if any field differs
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.SwitchSerialNumber != reported.SwitchSerialNumber ||
+			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
+			!util.PtrsEqual(cur.RackID, reported.RackID) ||
+			!util.PtrsEqual(cur.Name, reported.Name) ||
+			!util.PtrsEqual(cur.Manufacturer, reported.Manufacturer) ||
+			!util.PtrsEqual(cur.Model, reported.Model) ||
+			!util.PtrsEqual(cur.Description, reported.Description) ||
+			!util.PtrsEqual(cur.SlotID, reported.SlotID) ||
+			!util.PtrsEqual(cur.TrayIdx, reported.TrayIdx) ||
+			!util.PtrsEqual(cur.HostID, reported.HostID) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			// nil NVOS MACs from nico follow the same rule as labels: swap in an
-			// empty slice so the DAO clears a previously-set list.
-			nvosMacAddresses := reported.NvosMacAddresses
-			if cur.NvosMacAddresses != nil && nvosMacAddresses == nil {
-				nvosMacAddresses = []string{}
-			}
-			_, uerr := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
-				ExpectedSwitchID:   cur.ID,
-				BmcMacAddress:      &reported.BmcMacAddress,
-				SwitchSerialNumber: &reported.SwitchSerialNumber,
-				NvosMacAddresses:   nvosMacAddresses,
-				Labels:             labels,
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := esDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				// `Update` preserves nil fields, so clear values Core no longer
+				// reports in the same transaction as the replacement values.
+				_, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+					ExpectedSwitchID: cur.ID,
+					BmcIpAddress:     cur.BmcIpAddress != nil && reported.BmcIpAddress == nil,
+					RackID:           cur.RackID != nil && reported.RackID == nil,
+					Name:             cur.Name != nil && reported.Name == nil,
+					Manufacturer:     cur.Manufacturer != nil && reported.Manufacturer == nil,
+					Model:            cur.Model != nil && reported.Model == nil,
+					Description:      cur.Description != nil && reported.Description == nil,
+					SlotID:           cur.SlotID != nil && reported.SlotID == nil,
+					TrayIdx:          cur.TrayIdx != nil && reported.TrayIdx == nil,
+					HostID:           cur.HostID != nil && reported.HostID == nil,
+					NvosMacAddresses: len(cur.NvosMacAddresses) > 0 && len(reported.NvosMacAddresses) == 0,
+					Labels:           len(cur.Labels) > 0 && len(reported.Labels) == 0,
+				})
+				if cerr != nil {
+					return cerr
+				}
+
+				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID:   cur.ID,
+					BmcMacAddress:      &reported.BmcMacAddress,
+					SwitchSerialNumber: &reported.SwitchSerialNumber,
+					BmcIpAddress:       reported.BmcIpAddress,
+					RackID:             reported.RackID,
+					Name:               reported.Name,
+					Manufacturer:       reported.Manufacturer,
+					Model:              reported.Model,
+					Description:        reported.Description,
+					SlotID:             reported.SlotID,
+					TrayIdx:            reported.TrayIdx,
+					HostID:             reported.HostID,
+					NvosMacAddresses:   reported.NvosMacAddresses,
+					Labels:             reported.Labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
-				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to update ExpectedSwitch in DB")
+				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to reconcile ExpectedSwitch in DB")
 			}
 		}
 	}

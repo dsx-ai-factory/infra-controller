@@ -121,23 +121,16 @@ func (eps *ExpectedPowerShelf) ToProto(creds ExpectedPowerShelfCredentials) *cor
 		proto.BmcPassword = *creds.Password
 	}
 
-	metadata := &corev1.Metadata{
-		Labels: expectedComponentLabelsInput{
-			Manufacturer: eps.Manufacturer,
-			Model:        eps.Model,
-			SlotID:       eps.SlotID,
-			TrayIdx:      eps.TrayIdx,
-			HostID:       eps.HostID,
-			Labels:       eps.Labels,
-		}.ToProto(),
-	}
-	if eps.Name != nil {
-		metadata.Name = *eps.Name
-	}
-	if eps.Description != nil {
-		metadata.Description = *eps.Description
-	}
-	proto.Metadata = metadata
+	proto.Metadata = expectedComponentMetadata{
+		Name:         eps.Name,
+		Description:  eps.Description,
+		Manufacturer: eps.Manufacturer,
+		Model:        eps.Model,
+		SlotID:       eps.SlotID,
+		TrayIdx:      eps.TrayIdx,
+		HostID:       eps.HostID,
+		Labels:       eps.Labels,
+	}.ToProto()
 
 	return proto
 }
@@ -146,6 +139,8 @@ func (eps *ExpectedPowerShelf) ToProto(creds ExpectedPowerShelfCredentials) *cor
 // reported by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedPowerShelfId leaves eps.ID unchanged so the caller can
 // validate the proto's UUID before calling.
+// Descriptive and position fields come from Metadata; absent optional fields
+// clear their stored values.
 func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	if proto == nil {
 		return
@@ -169,14 +164,16 @@ func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	} else {
 		eps.RackID = nil
 	}
-	eps.Name = proto.Name
-	eps.Manufacturer = proto.Manufacturer
-	eps.Model = proto.Model
-	eps.Description = proto.Description
-	eps.SlotID = proto.SlotId
-	eps.TrayIdx = proto.TrayIdx
-	eps.HostID = proto.HostId
-	eps.Labels.FromProto(proto.Metadata.GetLabels())
+	var metadata expectedComponentMetadata
+	metadata.FromProto(proto.Metadata)
+	eps.Name = metadata.Name
+	eps.Manufacturer = metadata.Manufacturer
+	eps.Model = metadata.Model
+	eps.Description = metadata.Description
+	eps.SlotID = metadata.SlotID
+	eps.TrayIdx = metadata.TrayIdx
+	eps.HostID = metadata.HostID
+	eps.Labels = metadata.Labels
 }
 
 // ExpectedPowerShelfCreateInput input parameters for Create method

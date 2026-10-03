@@ -6,6 +6,7 @@ package model
 import (
 	"strconv"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -96,11 +97,11 @@ const (
 	ExpectedComponentLabelHostID       = "host_id"
 )
 
-// expectedComponentLabelsInput carries the flat device/rack columns that its
-// ToProto method maps into an expected component's Metadata labels. Grouping
-// them into a struct keeps the call sites self-documenting and avoids a long,
-// transposition-prone arg list.
-type expectedComponentLabelsInput struct {
+// expectedComponentMetadata maps the shared inventory columns to Core Metadata.
+// Reserved labels with valid values become dedicated inventory columns.
+type expectedComponentMetadata struct {
+	Name         *string
+	Description  *string
 	Manufacturer *string
 	Model        *string
 	SlotID       *int32
@@ -109,15 +110,10 @@ type expectedComponentLabelsInput struct {
 	Labels       Labels
 }
 
-// ToProto merges the input's labels with the flat device/rack columns, each
-// emitted as a label keyed by its source field name (see the
-// ExpectedComponentLabel* constants). A system field takes precedence over a
-// colliding user label, since the field value is the authoritative inventory
-// data. Returns nil when there are no labels at all. Name and description are
-// not labels -- callers set those on Metadata directly.
-func (in expectedComponentLabelsInput) ToProto() []*corev1.Label {
-	// Merge through a map so a system field overrides a colliding user label.
-	merged := make(map[string]string, len(in.Labels)+5)
+// ToProto merges user labels with the device and rack fields. Dedicated fields
+// take precedence over colliding user labels.
+func (in expectedComponentMetadata) ToProto() *corev1.Metadata {
+	merged := make(Labels, len(in.Labels)+5)
 	for k, v := range in.Labels {
 		merged[k] = v
 	}
@@ -137,7 +133,41 @@ func (in expectedComponentLabelsInput) ToProto() []*corev1.Label {
 		merged[ExpectedComponentLabelHostID] = strconv.FormatInt(int64(*in.HostID), 10)
 	}
 	if len(merged) == 0 {
-		return nil
+		merged = nil
 	}
-	return Labels(merged).ToProto()
+	return &corev1.Metadata{
+		Name:        cutil.GetValueOrZero(in.Name),
+		Description: cutil.GetValueOrZero(in.Description),
+		Labels:      merged.ToProto(),
+	}
+}
+
+// FromProto replaces the inventory fields with Core's Metadata. Missing or empty
+// strings and missing or invalid int32 labels clear their optional fields.
+// Preserve labels we can't represent so later writes don't drop their values.
+// Remaining labels follow Labels.FromProto's nil and empty collection behavior.
+func (in *expectedComponentMetadata) FromProto(metadata *corev1.Metadata) {
+	in.Name = cutil.GetPtrIfNotZero(metadata.GetName())
+	in.Description = cutil.GetPtrIfNotZero(metadata.GetDescription())
+	in.Labels.FromProto(metadata.GetLabels())
+	in.Manufacturer = cutil.GetPtrIfNotZero(in.Labels[ExpectedComponentLabelManufacturer])
+	in.Model = cutil.GetPtrIfNotZero(in.Labels[ExpectedComponentLabelModel])
+	if in.Manufacturer != nil {
+		delete(in.Labels, ExpectedComponentLabelManufacturer)
+	}
+	if in.Model != nil {
+		delete(in.Labels, ExpectedComponentLabelModel)
+	}
+
+	position := func(key string) *int32 {
+		value, err := strconv.ParseInt(in.Labels[key], 10, 32)
+		if err != nil {
+			return nil
+		}
+		delete(in.Labels, key)
+		return cutil.GetPtr(int32(value))
+	}
+	in.SlotID = position(ExpectedComponentLabelSlotID)
+	in.TrayIdx = position(ExpectedComponentLabelTrayIdx)
+	in.HostID = position(ExpectedComponentLabelHostID)
 }

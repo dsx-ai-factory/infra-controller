@@ -22,138 +22,103 @@ import (
 
 func TestExpectedMachine_FromProto(t *testing.T) {
 	id := uuid.New()
+	incomingID := uuid.New()
 	siteID := uuid.New()
-	linkedMachineID := uuid.New().String()
-	skuID := "sku-1"
-	rackID := "rack-1"
-	name := "machine-1"
-	manufacturer := "ACME"
-	model := "M1"
-	description := "primary"
-	bmcIP := "10.0.0.1"
-	var slot, trayIdx, host int32 = 1, 2, 3
-
-	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
-		em := &ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb"}
-		em.FromProto(nil, nil)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, siteID, em.SiteID)
-		assert.Equal(t, "aa:bb", em.BmcMacAddress)
-	})
-
-	t.Run("invalid id leaves em.ID unchanged", func(t *testing.T) {
-		em := &ExpectedMachine{ID: id}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: "not-a-uuid"},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, "aa:bb", em.BmcMacAddress)
-	})
-
-	t.Run("populates all proto fields", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:                       &corev1.UUID{Value: id.String()},
-			BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber:      "CSN-1",
-			SkuId:                    &skuID,
-			FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
-			BmcIpAddress:             &bmcIP,
-			RackId:                   &corev1.RackId{Id: rackID},
-			Name:                     &name,
-			Manufacturer:             &manufacturer,
-			Model:                    &model,
-			Description:              &description,
-			SlotId:                   &slot,
-			TrayIdx:                  &trayIdx,
-			HostId:                   &host,
-			Metadata: &corev1.Metadata{
-				Labels: []*corev1.Label{
-					{Key: "env", Value: cutil.GetPtr("prod")},
+	stored := ExpectedMachine{
+		ID:                       id,
+		SiteID:                   siteID,
+		BmcMacAddress:            "aa:bb",
+		ChassisSerialNumber:      "old-serial",
+		BmcIpAddress:             cutil.GetPtr("10.0.0.2"),
+		RackID:                   cutil.GetPtr("old-rack"),
+		Name:                     cutil.GetPtr("old-name"),
+		Description:              cutil.GetPtr("old-description"),
+		Manufacturer:             cutil.GetPtr("old-manufacturer"),
+		Model:                    cutil.GetPtr("old-model"),
+		SlotID:                   cutil.GetPtr(int32(9)),
+		TrayIdx:                  cutil.GetPtr(int32(9)),
+		HostID:                   cutil.GetPtr(int32(9)),
+		Labels:                   Labels{"old": "value"},
+		SkuID:                    cutil.GetPtr("old-sku"),
+		MachineID:                cutil.GetPtr("old-machine"),
+		FallbackDpuSerialNumbers: []string{"old-dpu"},
+		IsDpfEnabled:             cutil.GetPtr(true),
+		HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+	}
+	tests := []struct {
+		name            string
+		proto           *corev1.ExpectedMachine
+		linkedMachineID *string
+		want            ExpectedMachine
+	}{
+		{
+			name: "nil proto leaves receiver unchanged",
+			want: stored,
+		},
+		{
+			name:            "replaces fields from Core metadata",
+			linkedMachineID: cutil.GetPtr("machine-1"),
+			proto: &corev1.ExpectedMachine{
+				Id:                       &corev1.UUID{Value: incomingID.String()},
+				BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
+				ChassisSerialNumber:      "serial-1",
+				BmcIpAddress:             cutil.GetPtr("10.0.0.1"),
+				RackId:                   &corev1.RackId{Id: "rack-1"},
+				SkuId:                    cutil.GetPtr("sku-1"),
+				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
+				IsDpfEnabled:             cutil.GetPtr(false),
+				HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+				Metadata: &corev1.Metadata{
+					Name:        "component-1",
+					Description: "primary",
+					Labels: []*corev1.Label{
+						{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+						{Key: "model", Value: cutil.GetPtr("model-1")},
+						{Key: "slot_id", Value: cutil.GetPtr("1")},
+						{Key: "tray_idx", Value: cutil.GetPtr("2")},
+						{Key: "host_id", Value: cutil.GetPtr("3")},
+						{Key: "env", Value: cutil.GetPtr("prod")},
+					},
 				},
 			},
-		}, &linkedMachineID)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, "aa:bb:cc:dd:ee:ff", em.BmcMacAddress)
-		assert.Equal(t, "CSN-1", em.ChassisSerialNumber)
-		assert.Equal(t, &skuID, em.SkuID)
-		assert.Equal(t, &linkedMachineID, em.MachineID)
-		assert.Equal(t, []string{"dpu-1", "dpu-2"}, em.FallbackDpuSerialNumbers)
-		assert.Equal(t, &bmcIP, em.BmcIpAddress)
-		if assert.NotNil(t, em.RackID) {
-			assert.Equal(t, rackID, *em.RackID)
-		}
-		assert.Equal(t, &name, em.Name)
-		assert.Equal(t, &manufacturer, em.Manufacturer)
-		assert.Equal(t, &model, em.Model)
-		assert.Equal(t, &description, em.Description)
-		assert.Equal(t, &slot, em.SlotID)
-		assert.Equal(t, &trayIdx, em.TrayIdx)
-		assert.Equal(t, &host, em.HostID)
-		assert.Equal(t, Labels{"env": "prod"}, em.Labels)
-	})
-
-	t.Run("populates dpfEnabled from is_dpf_enabled", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		enabled := false
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-			IsDpfEnabled:  &enabled,
-		}, nil)
-
-		if assert.NotNil(t, em.IsDpfEnabled) {
-			assert.False(t, *em.IsDpfEnabled)
-		}
-	})
-
-	t.Run("nil linkedMachineID leaves MachineID nil", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.MachineID)
-	})
-
-	t.Run("nil RackId clears em.RackID", func(t *testing.T) {
-		stale := "stale-rack"
-		em := &ExpectedMachine{RackID: &stale}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.RackID)
-	})
-
-	t.Run("populates host_lifecycle_profile", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:                   &corev1.UUID{Value: id.String()},
-			BmcMacAddress:        "aa:bb",
-			HostLifecycleProfile: &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
-		}, nil)
-
-		if assert.NotNil(t, em.HostLifecycleProfile.DisableLockdown) {
-			assert.Equal(t, true, *em.HostLifecycleProfile.DisableLockdown)
-		}
-	})
-
-	t.Run("missing host_lifecycle_profile clears the field", func(t *testing.T) {
-		em := &ExpectedMachine{HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.HostLifecycleProfile.DisableLockdown)
-	})
+			want: ExpectedMachine{
+				ID:                       incomingID,
+				SiteID:                   siteID,
+				BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
+				ChassisSerialNumber:      "serial-1",
+				BmcIpAddress:             cutil.GetPtr("10.0.0.1"),
+				RackID:                   cutil.GetPtr("rack-1"),
+				Name:                     cutil.GetPtr("component-1"),
+				Description:              cutil.GetPtr("primary"),
+				Manufacturer:             cutil.GetPtr("NVIDIA"),
+				Model:                    cutil.GetPtr("model-1"),
+				SlotID:                   cutil.GetPtr(int32(1)),
+				TrayIdx:                  cutil.GetPtr(int32(2)),
+				HostID:                   cutil.GetPtr(int32(3)),
+				Labels:                   Labels{"env": "prod"},
+				SkuID:                    cutil.GetPtr("sku-1"),
+				MachineID:                cutil.GetPtr("machine-1"),
+				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
+				IsDpfEnabled:             cutil.GetPtr(false),
+				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+			},
+		},
+		{
+			name: "invalid ID preserves identity and absent fields clear stored values",
+			proto: &corev1.ExpectedMachine{
+				Id:            &corev1.UUID{Value: "not-a-uuid"},
+				BmcMacAddress: "aa:bb",
+			},
+			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stored
+			got.FromProto(tc.proto, tc.linkedMachineID)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestHostLifecycleProfile_ToProto(t *testing.T) {
@@ -193,71 +158,39 @@ func TestHostLifecycleProfile_FromProto(t *testing.T) {
 	})
 }
 
-func TestExpectedMachine_ToProto_HostLifecycleProfile(t *testing.T) {
-	t.Run("sets host_lifecycle_profile when disableLockdown present", func(t *testing.T) {
-		em := &ExpectedMachine{
-			ID:                   uuid.New(),
-			BmcMacAddress:        "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber:  "CSN-1",
-			HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
-		}
-		proto := em.ToProto(ExpectedMachineCredentials{})
-		if assert.NotNil(t, proto.GetHostLifecycleProfile()) {
-			assert.Equal(t, true, proto.GetHostLifecycleProfile().GetDisableLockdown())
-		}
-	})
-
-	t.Run("leaves host_lifecycle_profile unset when no setting present", func(t *testing.T) {
-		em := &ExpectedMachine{
-			ID:                  uuid.New(),
-			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber: "CSN-1",
-		}
-		proto := em.ToProto(ExpectedMachineCredentials{})
-		assert.Nil(t, proto.GetHostLifecycleProfile())
-	})
-}
-
 func TestExpectedMachine_ToProto(t *testing.T) {
-	id := uuid.New()
-	enabled := true
-	disabled := false
-
-	t.Run("sets is_dpf_enabled when stored", func(t *testing.T) {
-		em := &ExpectedMachine{
-			ID:                  id,
-			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber: "CSN-1",
-			IsDpfEnabled:        &enabled,
-		}
-		proto := em.ToProto(ExpectedMachineCredentials{})
-		assert.True(t, *proto.IsDpfEnabled)
-	})
-
-	t.Run("omits is_dpf_enabled when unset", func(t *testing.T) {
-		em := &ExpectedMachine{
-			ID:                  id,
-			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber: "CSN-1",
-		}
-		proto := em.ToProto(ExpectedMachineCredentials{})
-		assert.Nil(t, proto.IsDpfEnabled)
-		assert.False(t, proto.DpfEnabled)
-	})
-
-	t.Run("forwards false value", func(t *testing.T) {
-		em := &ExpectedMachine{
-			ID:                  id,
-			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber: "CSN-1",
-			IsDpfEnabled:        &disabled,
-		}
-		proto := em.ToProto(ExpectedMachineCredentials{})
-		if assert.NotNil(t, proto.IsDpfEnabled) {
-			assert.False(t, *proto.IsDpfEnabled)
-		}
-		assert.False(t, proto.DpfEnabled)
-	})
+	tests := []struct {
+		name        string
+		machine     ExpectedMachine
+		wantDPF     *bool
+		wantProfile *corev1.HostLifecycleProfile
+	}{
+		{
+			name: "forwards configured DPF and lifecycle settings",
+			machine: ExpectedMachine{
+				IsDpfEnabled:         cutil.GetPtr(true),
+				HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+			},
+			wantDPF:     cutil.GetPtr(true),
+			wantProfile: &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		},
+		{
+			name: "omits unset settings",
+		},
+		{
+			name:    "preserves explicit false DPF setting",
+			machine: ExpectedMachine{IsDpfEnabled: cutil.GetPtr(false)},
+			wantDPF: cutil.GetPtr(false),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			proto := tc.machine.ToProto(ExpectedMachineCredentials{})
+			assert.Equal(t, tc.wantDPF, proto.IsDpfEnabled)
+			assert.Equal(t, tc.wantProfile, proto.HostLifecycleProfile)
+			assert.False(t, proto.DpfEnabled)
+		})
+	}
 }
 
 // reset the tables needed for ExpectedMachine tests

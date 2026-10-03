@@ -172,23 +172,16 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 		proto.BmcPassword = *creds.Password
 	}
 
-	metadata := &corev1.Metadata{
-		Labels: expectedComponentLabelsInput{
-			Manufacturer: em.Manufacturer,
-			Model:        em.Model,
-			SlotID:       em.SlotID,
-			TrayIdx:      em.TrayIdx,
-			HostID:       em.HostID,
-			Labels:       em.Labels,
-		}.ToProto(),
-	}
-	if em.Name != nil {
-		metadata.Name = *em.Name
-	}
-	if em.Description != nil {
-		metadata.Description = *em.Description
-	}
-	proto.Metadata = metadata
+	proto.Metadata = expectedComponentMetadata{
+		Name:         em.Name,
+		Description:  em.Description,
+		Manufacturer: em.Manufacturer,
+		Model:        em.Model,
+		SlotID:       em.SlotID,
+		TrayIdx:      em.TrayIdx,
+		HostID:       em.HostID,
+		Labels:       em.Labels,
+	}.ToProto()
 
 	return proto
 }
@@ -199,6 +192,8 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 // table). A nil proto is a no-op. An invalid or missing proto.Id leaves
 // em.ID unchanged so the caller can validate the proto's UUID before
 // calling.
+// Descriptive and position fields come from Metadata; absent optional fields
+// clear their stored values.
 func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachineID *string) {
 	if proto == nil {
 		return
@@ -220,14 +215,16 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	} else {
 		em.RackID = nil
 	}
-	em.Name = proto.Name
-	em.Manufacturer = proto.Manufacturer
-	em.Model = proto.Model
-	em.Description = proto.Description
-	em.SlotID = proto.SlotId
-	em.TrayIdx = proto.TrayIdx
-	em.HostID = proto.HostId
-	em.Labels.FromProto(proto.Metadata.GetLabels())
+	var metadata expectedComponentMetadata
+	metadata.FromProto(proto.Metadata)
+	em.Name = metadata.Name
+	em.Manufacturer = metadata.Manufacturer
+	em.Model = metadata.Model
+	em.Description = metadata.Description
+	em.SlotID = metadata.SlotID
+	em.TrayIdx = metadata.TrayIdx
+	em.HostID = metadata.HostID
+	em.Labels = metadata.Labels
 	em.IsDpfEnabled = proto.IsDpfEnabled
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
@@ -294,6 +291,8 @@ type ExpectedMachineClearInput struct {
 	TrayIdx                  bool
 	HostID                   bool
 	Labels                   bool
+	IsDpfEnabled             bool
+	HostLifecycleProfile     bool
 }
 
 // ExpectedMachineFilterInput filtering options for GetAll method
@@ -1001,6 +1000,15 @@ func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Ex
 	if input.Labels {
 		em.Labels = nil
 		updatedFields = append(updatedFields, "labels")
+	}
+
+	if input.IsDpfEnabled {
+		em.IsDpfEnabled = nil
+		updatedFields = append(updatedFields, "is_dpf_enabled")
+	}
+	if input.HostLifecycleProfile {
+		em.HostLifecycleProfile = HostLifecycleProfile{}
+		updatedFields = append(updatedFields, "host_lifecycle_profile")
 	}
 
 	if len(updatedFields) > 0 {

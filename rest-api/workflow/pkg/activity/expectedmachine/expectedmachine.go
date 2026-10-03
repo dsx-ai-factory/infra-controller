@@ -6,7 +6,8 @@ package expectedmachine
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -180,18 +181,33 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				SiteID:                   siteID,
 				BmcMacAddress:            reported.BmcMacAddress,
 				ChassisSerialNumber:      reported.ChassisSerialNumber,
-				SkuID:                    reported.SkuID,
-				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 				BmcIpAddress:             reported.BmcIpAddress,
-				Labels:                   reported.Labels,
+				RackID:                   reported.RackID,
+				Name:                     reported.Name,
+				Manufacturer:             reported.Manufacturer,
+				Model:                    reported.Model,
+				Description:              reported.Description,
+				SlotID:                   reported.SlotID,
+				TrayIdx:                  reported.TrayIdx,
+				HostID:                   reported.HostID,
+				SkuID:                    reported.SkuID,
 				MachineID:                reported.MachineID,
+				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 				IsDpfEnabled:             reported.IsDpfEnabled,
+				HostLifecycleProfile:     reported.HostLifecycleProfile,
+				Labels:                   reported.Labels,
 				CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", emID.String()).Msg("failed to create ExpectedMachine in DB")
 			}
 			continue
+		}
+
+		// Missing discovery links don't establish that an existing association
+		// should be removed. Preserve it until a new target resolves in Cloud.
+		if linkedMachineID == nil {
+			reported.MachineID = cur.MachineID
 		}
 
 		// A row written since the Site collected this inventory holds changes the snapshot
@@ -206,49 +222,79 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		// update if any field differs
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
+			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
+			!util.PtrsEqual(cur.RackID, reported.RackID) ||
+			!util.PtrsEqual(cur.Name, reported.Name) ||
+			!util.PtrsEqual(cur.Manufacturer, reported.Manufacturer) ||
+			!util.PtrsEqual(cur.Model, reported.Model) ||
+			!util.PtrsEqual(cur.Description, reported.Description) ||
+			!util.PtrsEqual(cur.SlotID, reported.SlotID) ||
+			!util.PtrsEqual(cur.TrayIdx, reported.TrayIdx) ||
+			!util.PtrsEqual(cur.HostID, reported.HostID) ||
 			!util.PtrsEqual(cur.SkuID, reported.SkuID) ||
 			!util.PtrsEqual(cur.MachineID, reported.MachineID) ||
-			!reflect.DeepEqual(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers) ||
-			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) ||
-			!util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-
+			!slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers) ||
+			!util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled) ||
+			!util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
-				// Passing nil to Update leaves the existing value unchanged, so explicitly clear a
-				// BMC IP address that NICo no longer reports.
-				if cur.BmcIpAddress != nil && reported.BmcIpAddress == nil {
-					_, cerr := emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
-						ExpectedMachineID: cur.ID,
-						BmcIpAddress:      true,
-					})
-					if cerr != nil {
-						return cerr
-					}
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := emDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				// `Update` preserves nil fields, so clear values Core no longer
+				// reports in the same transaction as the replacement values.
+				_, cerr := emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
+					ExpectedMachineID:        cur.ID,
+					BmcIpAddress:             cur.BmcIpAddress != nil && reported.BmcIpAddress == nil,
+					RackID:                   cur.RackID != nil && reported.RackID == nil,
+					Name:                     cur.Name != nil && reported.Name == nil,
+					Manufacturer:             cur.Manufacturer != nil && reported.Manufacturer == nil,
+					Model:                    cur.Model != nil && reported.Model == nil,
+					Description:              cur.Description != nil && reported.Description == nil,
+					SlotID:                   cur.SlotID != nil && reported.SlotID == nil,
+					TrayIdx:                  cur.TrayIdx != nil && reported.TrayIdx == nil,
+					HostID:                   cur.HostID != nil && reported.HostID == nil,
+					SkuID:                    cur.SkuID != nil && reported.SkuID == nil,
+					IsDpfEnabled:             cur.IsDpfEnabled != nil && reported.IsDpfEnabled == nil,
+					FallbackDpuSerialNumbers: len(cur.FallbackDpuSerialNumbers) > 0 && len(reported.FallbackDpuSerialNumbers) == 0,
+					HostLifecycleProfile:     cur.HostLifecycleProfile.HasSetFields() && !reported.HostLifecycleProfile.HasSetFields(),
+					Labels:                   len(cur.Labels) > 0 && len(reported.Labels) == 0,
+				})
+				if cerr != nil {
+					return cerr
 				}
 
 				_, uerr := emDAO.Update(ctx, tx, cdbm.ExpectedMachineUpdateInput{
 					ExpectedMachineID:        cur.ID,
 					BmcMacAddress:            &reported.BmcMacAddress,
 					ChassisSerialNumber:      &reported.ChassisSerialNumber,
+					BmcIpAddress:             reported.BmcIpAddress,
+					RackID:                   reported.RackID,
+					Name:                     reported.Name,
+					Manufacturer:             reported.Manufacturer,
+					Model:                    reported.Model,
+					Description:              reported.Description,
+					SlotID:                   reported.SlotID,
+					TrayIdx:                  reported.TrayIdx,
+					HostID:                   reported.HostID,
 					SkuID:                    reported.SkuID,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
-					BmcIpAddress:             reported.BmcIpAddress,
-					Labels:                   labels,
 					IsDpfEnabled:             reported.IsDpfEnabled,
+					HostLifecycleProfile:     &reported.HostLifecycleProfile,
+					Labels:                   reported.Labels,
 				})
 				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedMachineID", cur.ID.String()).Msg("failed to reconcile ExpectedMachine in DB")
-				continue
 			}
 		}
 	}
