@@ -34,6 +34,11 @@ spec:
         - name: flow
           image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             ## flow's GetDeploymentEnv (carbide-rest/flow/internal/service/config.go)
             ## requires FLOW_ENV ∈ {development, staging, production}; empty/unset
@@ -47,7 +52,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.flow.credentialsSecret }}
-                  key: username
+                  key: {{ .Values.database.flow.usernameKey | default "username" }}
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

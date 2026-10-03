@@ -11,6 +11,21 @@ podAnnotations: {}
 image:
   name: nico-rest-api
 
+## Pod-level security context. 1000 is the `nvs` user the image declares; the
+## image names it rather than giving a UID, which the kubelet cannot verify, so
+## runAsNonRoot needs the number spelled out here. Override for OpenShift, where
+## the restricted SCC assigns UIDs from the namespace range and rejects fixed
+## numeric UIDs. Keep runAsNonRoot: true and null only the fixed UID/GID so the
+## SCC assigns them from the range while the non-root assertion is preserved:
+##   podSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     fsGroup: null
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
 service:
   type: ClusterIP
   port: 8388
@@ -187,3 +202,13 @@ config:
 
 # -- Extra container environment, name->value. Mainly for OTEL_* variables.
 extraEnv: {}
+
+## caBundle is a PEM-encoded CA certificate (or concatenated bundle) that the API
+## should add to its trusted CA store via SSL_CERT_FILE. Set this when the API
+## needs to verify TLS connections to services whose certificates are signed by a
+## private CA (e.g. an internal PKI or a cluster CA).
+##
+## Provide the full PEM content, or a concatenation of multiple PEM certificates.
+## When set, a ConfigMap is created and mounted at /etc/ssl/certs/ca-bundle.crt;
+## SSL_CERT_FILE is set to that path so Go's TLS stack picks it up automatically.
+caBundle: ""

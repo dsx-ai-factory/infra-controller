@@ -125,3 +125,9 @@ externalService:
   type: LoadBalancer
   externalTrafficPolicy: Local
   annotations: {}
+
+## Container security context. allowPrivilegeEscalation: false is always set.
+## Override to add capabilities or null to drop all overrides.
+## On OpenShift restricted-v2 SCC, set to null; the hardcoded baseline survives.
+##   containerSecurityContext: null
+containerSecurityContext: {}
