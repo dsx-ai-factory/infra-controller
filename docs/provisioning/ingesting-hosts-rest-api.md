@@ -239,6 +239,10 @@ For more DPU-specific troubleshooting (Secure Boot configuration, BMC password r
 
 ## Managing the Expected Machines Table
 
+The operations below make incremental changes. See
+[Expected Inventory](expected-inventory.md) for the complete resource model,
+site-wide replacement, and removal and recovery workflows.
+
 ### Listing and Filtering
 
 ```bash
@@ -276,3 +280,5 @@ nicocli expected-machine list --all --output json
 ```
 
 Suitable for backup or import-into-another-site workflows.
+Exports omit credentials; retain them separately when preparing a
+[recovery payload](expected-inventory.md#removal-and-recovery).
