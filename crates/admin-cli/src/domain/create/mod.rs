@@ -15,14 +15,17 @@
  * limitations under the License.
  */
 
-/// DNS database helpers for tests in downstream crates.
-pub mod dns;
-#[cfg(test)]
-pub(crate) mod expected_host;
-#[cfg(test)]
-pub(crate) mod network_segment;
-pub mod postgres;
-pub mod power_shelf;
-pub mod switch;
-#[cfg(test)]
-pub(crate) mod vpc;
+mod args;
+mod cmd;
+
+pub(super) use args::Args;
+
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
+
+impl Run for Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::create(self, ctx.config.format, &ctx.api_client).await
+    }
+}
