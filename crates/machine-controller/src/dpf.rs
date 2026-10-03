@@ -517,12 +517,14 @@ impl BmcPasswordProvider for CarbideBmcPasswordProvider {
 pub struct DpfSdkOps {
     sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
     _watcher: DpuWatcher,
+    astra_route_prefix_lengths: (u8, u8),
 }
 
 impl DpfSdkOps {
     /// Create a new DpfSdkOps using the DPF SDK and sets up watcher callbacks to trigger carbide state handling.
     pub fn new(
         sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
+        astra_route_prefix_lengths: (u8, u8),
         db_pool: PgPool,
         join_set: &mut JoinSet<()>,
     ) -> std::io::Result<Self> {
@@ -609,6 +611,7 @@ impl DpfSdkOps {
         Ok(Self {
             sdk,
             _watcher: watcher,
+            astra_route_prefix_lengths,
         })
     }
 }
@@ -728,7 +731,15 @@ impl DpfOperations for DpfSdkOps {
         info: DpuDeviceInfo,
         astra_nics: Option<Vec<&'a DpaInterface>>,
     ) -> Result<(), DpfError> {
-        self.sdk.register_dpu_device(info, astra_nics).await
+        let (rail_route_prefix_len, software_plane_route_prefix_len) =
+            self.astra_route_prefix_lengths;
+        self.sdk
+            .register_dpu_device(
+                info,
+                astra_nics
+                    .map(|nics| (nics, rail_route_prefix_len, software_plane_route_prefix_len)),
+            )
+            .await
     }
 
     async fn register_dpu_node(&self, info: DpuNodeInfo) -> Result<(), DpfError> {

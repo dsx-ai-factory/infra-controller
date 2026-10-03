@@ -4571,7 +4571,9 @@ fn default_mqtt_broker_port() -> u16 {
     1884
 }
 
-pub use carbide_dpa_manager::config::{EwEthersConfig, MqttAuthConfig, MqttAuthMode, SvpcConfig};
+pub use carbide_dpa_manager::config::{
+    AstraConfig, EwEthersConfig, MqttAuthConfig, MqttAuthMode, SvpcConfig,
+};
 use model::vpc::VpcDefinition;
 
 /// DSX Exchange Event Bus configuration for publishing state change events via MQTT 3.1.1.
@@ -7210,7 +7212,8 @@ mqtt_endpoint = "mqtt.forge"
                 astra_enabled: false,
                 monitor_run_interval: std::time::Duration::from_secs(60),
                 subnet_ip: Ipv4Addr::UNSPECIFIED,
-                subnet_mask: 0_i32,
+                subnet_mask: EwEthersConfig::default_subnet_mask(),
+                astra: Default::default(),
                 svpc: SvpcConfig {
                     mqtt_endpoint: "mqtt.forge".to_string(),
                     mqtt_broker_port: 1884,
@@ -7219,6 +7222,41 @@ mqtt_endpoint = "mqtt.forge"
                 },
             }
         );
+        assert_eq!(
+            (
+                dpa_config.astra.underlay_rail_route_prefix_len,
+                dpa_config.astra.underlay_software_plane_route_prefix_len,
+                dpa_config.astra.underlay_ip_rail_id_bit_len,
+                dpa_config.astra.underlay_ip_software_plane_id_bit_len,
+            ),
+            (16, 13, 4, 8)
+        );
+    }
+
+    #[test]
+    fn deserialize_ewethers_route_parameters() {
+        let config: EwEthersConfig = Figment::new()
+            .merge(Toml::string(
+                r#"
+subnet_ip = "10.0.0.0"
+subnet_mask = 24
+
+[astra]
+underlay_rail_route_prefix_len = 19
+underlay_software_plane_route_prefix_len = 12
+underlay_ip_rail_id_bit_len = 5
+underlay_ip_software_plane_id_bit_len = 7
+"#,
+            ))
+            .extract()
+            .unwrap();
+
+        assert_eq!(config.subnet_ip, Ipv4Addr::new(10, 0, 0, 0));
+        assert_eq!(config.subnet_mask, 24);
+        assert_eq!(config.astra.underlay_rail_route_prefix_len, 19);
+        assert_eq!(config.astra.underlay_software_plane_route_prefix_len, 12);
+        assert_eq!(config.astra.underlay_ip_rail_id_bit_len, 5);
+        assert_eq!(config.astra.underlay_ip_software_plane_id_bit_len, 7);
     }
 
     #[test]
