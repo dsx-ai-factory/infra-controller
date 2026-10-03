@@ -13,6 +13,20 @@ No Job required — avoids network dependency for apk.
 {{- end -}}
 
 {{/*
+Whether to provision a component's database on nico-pg-cluster: true unless its
+useHaPostgres value is false. `auto` provisions it too, because setup.sh only
+decides at install time which database the workload uses. An existing Site that
+stays on the standalone StatefulSet gets an empty database it can migrate into.
+*/}}
+{{- define "prereqs.provisionHaPostgres" -}}
+{{- $value := toString .value -}}
+{{- if not (has $value (list "true" "false" "auto")) -}}
+{{- fail (printf "%s.useHaPostgres must be true, false, or auto (got %s)" .component $value) -}}
+{{- end -}}
+{{- if ne $value "false" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
 Render siteCredentials as nico-api's credential file (JSON, which the file
 reader accepts). A password left empty keeps the value of the same entry in the
 existing Secret, or is generated when that entry is absent. Usernames may be
