@@ -1,4 +1,6 @@
 nico-api:
+  # Single-node development cannot reserve CPU for several draining rollouts.
+  terminationGracePeriodSeconds: 30
   # Disable legacy forge-system namespace alias for local dev
   legacyAlias:
     enabled: false
@@ -82,6 +84,8 @@ nico-api:
 
       [auth]
       permissive_mode = true
+      # Isolated simulator deployment: MAT may claim any Scout machine ID.
+      allow_machineatron_scout_stream = true
 
       [auth.trust]
       spiffe_trust_domain = "nico.local"
