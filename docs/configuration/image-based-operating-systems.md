@@ -20,7 +20,7 @@ calls it `imageDisk`. Set the value according to the following table:
 | `/dev/sd<letters>` | Selects a SCSI-style whole disk, for example `/dev/sda` or `/dev/sdaa`. |
 | `/dev/vd<letters>` | Selects a virtio whole disk, for example `/dev/vda` or `/dev/vdaa`. |
 | `/dev/disk/by-id/<identifier>` | Resolves a stable Linux disk identifier to its backing device. The identifier cannot contain a slash or whitespace. |
-| Omitted or empty on creation | Prefers the first deterministically ordered disk containing an EFI System Partition, then `/dev/nvme0n1`, then `/dev/sda`. |
+| Omitted or empty on creation | Prefers the first deterministically ordered disk containing an EFI System Partition, then the first deterministically ordered whole disk reported by the installer's device scan. |
 
 An explicit device path is resolved before use. It must exist, be a block
 device, and resolve to an `lsblk` type of `disk`; partitions and other block

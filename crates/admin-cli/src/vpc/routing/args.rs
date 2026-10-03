@@ -23,8 +23,8 @@ use config_version::ConfigVersion;
 #[derive(Parser, Debug)]
 #[command(
     long_about = "\
-Inspect the VPC's persisted routing profile, observed version, active VNI, and \
-retained allocation. Each RPC attempt uses the client request timeout (300 \
+Inspect the persisted routing profile, observed version, active VNI, and retained \
+allocation for a VPC. Each RPC attempt uses the client request timeout (300 \
 seconds by default, configurable with FORGE_CLIENT_REQUEST_TIMEOUT_SECS), \
 including connection setup and response reads. This is not the effective routing profile or evidence of \
 DPU/fabric convergence; site-global VNI overrides are not reflected here.
@@ -52,7 +52,7 @@ pub(crate) struct Show {
 #[command(
     long_about = "\
 Change a supported FNN VPC between configured profiles with opposite internal \
-settings. Core validates the destination against the tenant's access tier and \
+settings. Core validates the destination against the access tier of the tenant and \
 retains the previous VNI until an explicit release. A Core commit does not prove \
 DPU/fabric convergence or guarantee that a later change back will be accepted.
 
@@ -109,7 +109,7 @@ pub(crate) struct ChangeProfile {
 
     #[clap(
         value_parser = NonEmptyStringValueParser::new(),
-        help = "Nonempty destination profile name from the site's Core configuration"
+        help = "Nonempty destination profile name from the Core configuration of the site"
     )]
     pub(super) routing_profile_type: String,
 
