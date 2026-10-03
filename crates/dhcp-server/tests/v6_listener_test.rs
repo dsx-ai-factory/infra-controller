@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,11 +23,11 @@ use std::time::Duration;
 use carbide_dhcp_server::modes::dpu::Dpu;
 use carbide_dhcp_server::packet_handler_v6::process_packet;
 use carbide_dhcp_server::util::get_socket_v6;
-use carbide_rpc_utils::dhcp::InterfaceInfoV6;
+use carbide_rpc_utils::dhcp::{InterfaceInfo, InterfaceInfoV6};
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use dhcproto::v6::{
-    DhcpOption, IANA, MessageType, NtpSuboption, OptionCode, Status, UnknownOption,
+    DhcpOption, IANA, MessageType, NtpSuboption, ORO, OptionCode, Status, UnknownOption,
 };
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -35,10 +36,134 @@ mod common;
 
 use common::{
     DUID_LL, IAID, SERVER_IDENTIFIER, assert_ia_na_failure, client_message, decode_message,
-    decode_response, dpu_config, encode, machine_cache, response_ia_na, response_status,
+    decode_response, dpu_config, dpu_config_with_bindings, encode, machine_cache, response_ia_na,
+    response_status,
 };
 
 const INTERFACE: &str = "eth0";
+
+#[tokio::test]
+async fn boot_url_is_returned_only_when_configured_and_requested() {
+    const BOOT_URL: &str = "http://[2001:db8::10]/bootx64.efi";
+
+    struct Input {
+        message_type: MessageType,
+        boot_url: Option<&'static str>,
+        requested_options: Option<Vec<OptionCode>>,
+    }
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "stateful advertise includes configured URL",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                },
+                expect: Yields(Some(BOOT_URL.as_bytes().to_vec())),
+            },
+            Case {
+                scenario: "stateful reply includes configured URL",
+                input: Input {
+                    message_type: MessageType::Request,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                },
+                expect: Yields(Some(BOOT_URL.as_bytes().to_vec())),
+            },
+            Case {
+                scenario: "stateless reply includes configured URL",
+                input: Input {
+                    message_type: MessageType::InformationRequest,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                },
+                expect: Yields(Some(BOOT_URL.as_bytes().to_vec())),
+            },
+            Case {
+                scenario: "no configured URL",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: None,
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                },
+                expect: Yields(None),
+            },
+            Case {
+                scenario: "empty configured URL",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(""),
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                },
+                expect: Yields(None),
+            },
+            Case {
+                scenario: "no option request",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: None,
+                },
+                expect: Yields(None),
+            },
+            Case {
+                scenario: "only a different option requested",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::DomainNameServers]),
+                },
+                expect: Yields(None),
+            },
+        ],
+        |input| async move {
+            let config = dpu_config_with_bindings(BTreeMap::from([(
+                INTERFACE.to_string(),
+                InterfaceInfo {
+                    address: Some("192.0.2.20".parse().unwrap()),
+                    gateway: Some("192.0.2.1".parse().unwrap()),
+                    prefix: Some("192.0.2.0/24".to_string()),
+                    fqdn: "host.example.com".to_string(),
+                    booturl: input.boot_url.map(str::to_owned),
+                    mtu: Some(9000),
+                    ipv6: Some(InterfaceInfoV6 {
+                        address: (input.message_type != MessageType::InformationRequest)
+                            .then(|| "2001:db8::20".parse().unwrap()),
+                        prefix: "2001:db8::/64".to_string(),
+                    }),
+                },
+            )]));
+            let server_id =
+                (input.message_type == MessageType::Request).then(|| SERVER_IDENTIFIER.to_vec());
+            let mut request = client_message(input.message_type, DUID_LL, None, server_id);
+            if let Some(opts) = input.requested_options {
+                request.opts_mut().insert(DhcpOption::ORO(ORO { opts }));
+            }
+            let mut cache = machine_cache();
+            let packet = process_packet(
+                &encode(&request),
+                "fe80::20".parse().unwrap(),
+                &config,
+                INTERFACE,
+                &Dpu {},
+                &mut cache,
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected a DHCPv6 response".to_string())?;
+            let response = decode_response(&packet);
+            let boot_url = match response.opts().get(OptionCode::OptBootfileUrl) {
+                Some(DhcpOption::Unknown(option)) => Some(option.data().to_vec()),
+                None => None,
+                other => panic!("expected raw boot-file URL option, got {other:?}"),
+            };
+            Ok::<_, String>(boot_url)
+        },
+    )
+    .await;
+}
 
 /// Verifies a stateful SOLICIT preserves IAID and returns the configured address and server ID.
 #[tokio::test]

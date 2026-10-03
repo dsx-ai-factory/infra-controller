@@ -483,6 +483,25 @@ fn encode_mode_reply(
         _ => None,
     };
 
+    let booturl = match &outcome {
+        V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record.booturl.as_ref(),
+        V6Outcome::NoAddress => None,
+    };
+    if let Some(booturl) = booturl
+        && !booturl.is_empty()
+        && matches!(
+            request.message.opts().get(OptionCode::ORO),
+            Some(DhcpOption::ORO(requested)) if requested.opts.contains(&OptionCode::OptBootfileUrl)
+        )
+    {
+        reply
+            .opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::OptBootfileUrl,
+                booturl.as_bytes().to_vec(),
+            )));
+    }
+
     match outcome {
         V6Outcome::Stateful(record) => {
             add_config_options(&mut reply, Some(&record.fqdn), requested_fqdn_flags, config)?;
