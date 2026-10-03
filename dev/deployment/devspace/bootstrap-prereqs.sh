@@ -158,6 +158,20 @@ metadata:
   name: forge-system
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: nico-ntp-client
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: nico-ntp
+  ports:
+    - name: ntp
+      port: 123
+      targetPort: 123
+      protocol: UDP
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: nico-system.nico.nico-pg-cluster.credentials
@@ -740,6 +754,10 @@ EOF
 }
 
 print_summary() {
+  local profile="full"
+  if [[ "${INSTALL_REST_PREREQS}" == "0" ]]; then
+    profile="core-only"
+  fi
   cat <<EOF
 
 Bootstrap complete.
@@ -752,7 +770,7 @@ Cert issuer: ${CERT_ISSUER_KIND}/${CERT_ISSUER_NAME}
 REST prerequisites: ${INSTALL_REST_PREREQS}
 
 Next step:
-  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE}
+  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE} --profile ${profile}
 EOF
 }
 
@@ -763,6 +781,7 @@ main() {
 
   install_cert_manager
   apply_core_objects
+  bash "${REPO_ROOT}/helm-prereqs/bootstrap_ssh_host_key.sh" "${NAMESPACE}"
   apply_local_postgres
   apply_local_vault
   load_admin_root_cert_pem

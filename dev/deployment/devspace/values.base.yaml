@@ -122,6 +122,11 @@ nico-api:
       run_interval = "10s"
       concurrency_limit = 100
 
+nico-dhcp:
+  config:
+    kea:
+      hookLibraryPath: /usr/lib/kea/hooks/libdhcp.so
+
 nico-bmc-proxy:
   replicas: 1 # save on local resources
   configFiles:

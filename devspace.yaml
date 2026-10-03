@@ -86,7 +86,7 @@ images:
     image: nico-api
     custom:
       command: |-
-        docker build -t ${runtime.images.nico-api.image}:${runtime.images.nico-api.tag} -f dev/deployment/devspace/Dockerfile.api .
+        docker build --build-arg KEA_VERSION="$(cat dev/docker/kea.version)" -t ${runtime.images.nico-api.image}:${runtime.images.nico-api.tag} -f dev/deployment/devspace/Dockerfile.api .
       onChange:
         - .dockerignore
         - Cargo.toml
@@ -362,6 +362,11 @@ hooks:
       LOCAL_DEV_REST_API_FORWARD_PORT=${LOCAL_DEV_REST_API_FORWARD_PORT} \
       LOCAL_DEV_KEYCLOAK_FORWARD_PORT=${LOCAL_DEV_KEYCLOAK_FORWARD_PORT} \
         dev/deployment/devspace/setup-rest-integration.sh
+  - name: setup-core-services
+    events: ["after:deploy"]
+    command: |-
+      bash dev/deployment/devspace/setup-core-services.sh ${LOCAL_DEV_NAMESPACE} &&
+      bash dev/deployment/devspace/verify-core-services.sh ${LOCAL_DEV_NAMESPACE}
 
 profiles:
   - name: dsx-exchange

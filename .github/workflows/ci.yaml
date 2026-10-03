@@ -2066,8 +2066,8 @@ jobs:
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
       # Uses python3-yaml installed by the configuration check above.
-      - name: Test DevSpace bootstrap manifests
-        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+      - name: Test DevSpace bootstrap and readiness
+        run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace -p 'test_*.py'
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
