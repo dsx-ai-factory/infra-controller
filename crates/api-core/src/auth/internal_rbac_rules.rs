@@ -547,11 +547,11 @@ impl InternalRBACRules {
         x.perm("GetMachineValidationRuns", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "FindMachineValidationRunItemIds",
-            vec![ForgeAdminCLI, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent, Scout],
         );
         x.perm(
             "FindMachineValidationRunItemsByIds",
-            vec![ForgeAdminCLI, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent, Scout],
         );
         x.perm(
             "GetMachineValidationAttempt",
@@ -1478,6 +1478,22 @@ mod rbac_rule_tests {
                 "elektra-site-agent".to_string()
             )]
         ));
+
+        for method in [
+            "FindMachineValidationRunItemIds",
+            "FindMachineValidationRunItemsByIds",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(
+                    method,
+                    &[
+                        Principal::SpiffeMachineIdentifier("fm100htest".to_string()),
+                        Principal::TrustedCertificate
+                    ]
+                ),
+                "{method} should allow a machine"
+            );
+        }
         assert!(InternalRBACRules::allowed_from_static(
             "FindNetworkSegmentsByIds",
             &[

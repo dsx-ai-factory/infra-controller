@@ -535,6 +535,7 @@ impl<T: Authorization> Default for AuthContext<T> {
 // extensions typemap, so .get::<Arc<ConnectionAttributes>>() is what you want.
 pub struct ConnectionAttributes {
     pub peer_address: SocketAddr,
+    /// As the client sent them: TLS verified only the first.
     pub peer_certificates: Vec<CertificateDer<'static>>,
 }
 
@@ -554,11 +555,8 @@ pub struct ConnectionAttributes {
 )]
 struct AuthenticationConnectionAttributesMissing;
 
-/// A request whose presented certificate chain minted no principal, counted
-/// once per request with the end-entity certificate's error. A healthy chain
-/// whose intermediates don't map -- CA certificates never do -- is not a
-/// rejection. The peer and the exact error ride the log line at the DEBUG
-/// level this site has always logged at.
+/// A request whose end-entity certificate failed to map to a principal. The
+/// peer and the error ride the DEBUG log line.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "client_cert_rejected",
@@ -663,63 +661,44 @@ where
 
         let extensions = request.extensions_mut();
         if let Some(conn_attrs) = extensions.get::<Arc<ConnectionAttributes>>() {
-            let peer_certs = &conn_attrs.peer_certificates;
-            // rustls presents the end-entity certificate first, intermediates
-            // after -- and an intermediate CA certificate never maps to a
-            // principal, so counting per certificate would brand every
-            // healthy chain-presenting client a rejection on every request.
-            // Failures are collected instead, and the rejection counts once
-            // per request, only when the whole chain minted no principal.
-            let mut rejections = Vec::new();
-            let minted_before = auth_context.principals.len();
-            // Tracked so the `TrustedCertificate` decision below can tell a
-            // machine cert we deliberately refused from one that simply minted
-            // nothing.
-            let mut refused_machine_cert = false;
-            for cert in peer_certs {
-                match Principal::try_from_client_certificate(cert, &self.authorization_context) {
+            // TLS verified only the end-entity certificate; the client can
+            // append anything after it.
+            if let Some(end_entity) = conn_attrs.peer_certificates.first() {
+                let refused_machine_cert = match Principal::try_from_client_certificate(
+                    end_entity,
+                    &self.authorization_context,
+                ) {
                     // `[node_auth] mtls_enabled = false`: machine certs no
                     // longer grant node identity (bearer JWTs are the only node
                     // auth path); service/admin cert principals pass through.
                     Ok(Principal::SpiffeMachineIdentifier(_))
                         if !self.authorization_context.machine_certs_enabled =>
                     {
-                        refused_machine_cert = true;
                         tracing::debug!(
                             target: "node_auth",
                             "node-auth: machine mTLS authentication disabled; ignoring machine client certificate"
                         );
+                        true
                     }
-                    Ok(principal) => auth_context.principals.push(principal),
-                    Err(e) => rejections.push(e),
+                    Ok(principal) => {
+                        auth_context.principals.push(principal);
+                        false
+                    }
+                    Err(error) => {
+                        carbide_instrument::emit(ClientCertRejected {
+                            reason: RejectReason::from(&error),
+                            peer_address: conn_attrs.peer_address,
+                            error: error.to_string(),
+                        });
+                        false
+                    }
+                };
+                // Not for a refused machine certificate: the shipped Casbin
+                // policy grants `TrustedCertificate` `forge/*` and `nico/*`,
+                // which would undo the refusal.
+                if !refused_machine_cert {
+                    auth_context.principals.push(Principal::TrustedCertificate);
                 }
-            }
-            if auth_context.principals.len() == minted_before
-                && let Some(leaf_error) = rejections.first()
-            {
-                carbide_instrument::emit(ClientCertRejected {
-                    reason: RejectReason::from(leaf_error),
-                    peer_address: conn_attrs.peer_address,
-                    error: leaf_error.to_string(),
-                });
-            }
-            // Regardless of whether we were able to get a specific Principal
-            // flavor out of the certificate, having a trusted certificate
-            // presented by the client is worth recording on its own.
-            //
-            // Except when the only thing presented was a machine certificate we
-            // just refused. `TrustedCertificate` is not a bookkeeping marker —
-            // the shipped Casbin policy grants it `forge/*` and `nico/*`, so
-            // handing it out here would re-authorize the very request the
-            // machine-cert gate above declined, and `mtls_enabled = false`
-            // would filter the machine principal while leaving the caller fully
-            // authorized under another name. Scoped to that case, so service and
-            // admin-CLI certs keep it, as does a cert that failed to mint a
-            // principal for unrelated reasons.
-            let refused_the_only_credential =
-                refused_machine_cert && auth_context.principals.len() == minted_before;
-            if !peer_certs.is_empty() && !refused_the_only_credential {
-                auth_context.principals.push(Principal::TrustedCertificate);
             }
         } else {
             carbide_instrument::emit(AuthenticationConnectionAttributesMissing);
@@ -738,6 +717,8 @@ mod tests {
     use std::task::{Context, Poll};
 
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
     use hyper::header::AUTHORIZATION;
     use tower::{Layer, ServiceExt};
 
@@ -1110,6 +1091,59 @@ mod tests {
                 peer_certificates,
             }));
         svc.oneshot(request).await.unwrap()
+    }
+
+    async fn principals_for_chain(
+        (machine_certs_enabled, chain): (bool, &[&str]),
+    ) -> Vec<Principal> {
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context())
+            .with_machine_certs_enabled(machine_certs_enabled);
+        let chain = chain
+            .iter()
+            .map(|path| spiffe_leaf_certificate(path))
+            .collect();
+        principals_for_certs(middleware, None, chain).await
+    }
+
+    /// Certificates after the end-entity one yield no principals.
+    #[tokio::test]
+    async fn only_the_end_entity_certificate_names_the_caller() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "a service appends another service's certificate",
+                    input: (
+                        true,
+                        &[
+                            "/carbide-system/sa/some-service",
+                            "/carbide-system/sa/nico-api",
+                        ][..],
+                    ),
+                    expect: Yields(vec![
+                        Principal::SpiffeServiceIdentifier("some-service".to_string()),
+                        Principal::TrustedCertificate,
+                    ]),
+                },
+                Case {
+                    scenario: "a client whose own certificate names no one appends a service's",
+                    input: (
+                        true,
+                        &["/elsewhere/unknown", "/carbide-system/sa/nico-api"][..],
+                    ),
+                    expect: Yields(vec![Principal::TrustedCertificate]),
+                },
+                Case {
+                    scenario: "a refused machine appends a service's certificate",
+                    input: (
+                        false,
+                        &["/carbide-system/machine/m1", "/carbide-system/sa/nico-api"][..],
+                    ),
+                    expect: Yields(vec![]),
+                },
+            ],
+            |input| async move { Ok::<_, Infallible>(principals_for_chain(input).await) },
+        )
+        .await;
     }
 
     #[tokio::test]
