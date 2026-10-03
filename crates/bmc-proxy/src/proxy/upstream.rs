@@ -457,6 +457,8 @@ mod tests {
     use carbide_utils::HostPortPair;
     use rpc::forge_api_client::ForgeApiClient;
     use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use tokio::task::JoinSet;
+    use tokio_util::sync::CancellationToken;
     use url::Url;
 
     use super::{
@@ -501,17 +503,34 @@ mod tests {
         credentials: CredentialSummary,
     }
 
-    async fn spawn_http(app: Router) -> std::net::SocketAddr {
+    async fn spawn_http(
+        app: Router,
+        tasks: &mut JoinSet<std::io::Result<()>>,
+        shutdown: CancellationToken,
+    ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test HTTP server");
         let address = listener.local_addr().expect("test server address");
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
                 .await
-                .expect("test HTTP server runs");
         });
         address
+    }
+
+    async fn stop_http(tasks: &mut JoinSet<std::io::Result<()>>, shutdown: &CancellationToken) {
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = tasks.join_next().await {
+                result
+                    .expect("test HTTP server task did not panic")
+                    .expect("test HTTP server stopped successfully");
+            }
+        })
+        .await
+        .expect("test HTTP servers stop within five seconds");
     }
 
     #[test]
@@ -551,6 +570,9 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_client_does_not_follow_cross_origin_redirect() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
         let destination_hits = Arc::new(AtomicUsize::new(0));
         let destination = Router::new()
             .route(
@@ -561,7 +583,7 @@ mod tests {
                 }),
             )
             .with_state(destination_hits.clone());
-        let destination = spawn_http(destination).await;
+        let destination = spawn_http(destination, &mut servers, shutdown.clone()).await;
         let location = format!("http://{destination}/target");
         let source = Router::new().route(
             "/start",
@@ -575,7 +597,7 @@ mod tests {
                 }
             }),
         );
-        let source = spawn_http(source).await;
+        let source = spawn_http(source, &mut servers, shutdown.clone()).await;
 
         let response = build_http_client(RedirectMode::FollowSameOrigin)
             .expect("HTTP client builds")
@@ -587,10 +609,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
+        drop(response);
+        stop_http(&mut servers, &shutdown).await;
     }
 
     #[tokio::test]
     async fn upstream_client_stops_after_five_same_origin_redirects() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
         let requests = Arc::new(AtomicUsize::new(0));
         let chain =
             Router::new()
@@ -613,7 +640,7 @@ mod tests {
                     ),
                 )
                 .with_state(requests.clone());
-        let chain = spawn_http(chain).await;
+        let chain = spawn_http(chain, &mut servers, shutdown.clone()).await;
 
         build_http_client(RedirectMode::FollowSameOrigin)
             .expect("HTTP client builds")
@@ -623,6 +650,7 @@ mod tests {
             .expect_err("sixth redirect exceeds the configured limit");
 
         assert_eq!(requests.load(Ordering::SeqCst), 6);
+        stop_http(&mut servers, &shutdown).await;
     }
 
     fn header_for_copy_case(case: HeaderCopyCase) -> (HeaderName, HeaderValue) {
