@@ -1,4 +1,4 @@
-# Troubleshoot an Instance Boot Connection Timeout
+# Troubleshoot an Instance Boot Connection Timeout <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when an assigned machine times out while downloading a tenant
 operating-system image from a PXE or HTTP server hosted on another instance.

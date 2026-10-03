@@ -1,6 +1,6 @@
-# Upgrading NICo <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Upgrading NICo <Badge intent="info">v2.1</Badge>
 
-`setup.sh` is designed to be **idempotent** for supported deployment topologies: running it against an existing NICo installation upgrades each component in place. The same script and values files used for initial installation are the mechanism for upgrades — there is no separate upgrade script. For a predecessor Flow Deployment that bundles PSM or NSM, first choose whether to preserve it or follow the [manual Flow-only overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm).
+`setup.sh` is designed to be **idempotent** for supported deployment topologies: running it against an existing NICo installation upgrades each component in place. The same script and values files used for initial installation are the mechanism for upgrades — there is no separate upgrade script. For a predecessor Flow Deployment that bundles PSM or NSM, first choose whether to preserve it or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm).
 
 This page documents how each component behaves when you re-run `setup.sh` against a live cluster, what to prepare before upgrading, and version-specific considerations for the 2.0-to-2.1 upgrade path.
 
@@ -46,7 +46,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 
 Complete every item before running `setup.sh`. Missing any of these can cause the upgrade to fail or leave the cluster in a partially upgraded state.
 
-If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, do not run setup yet. Preserve that release, or follow the [manual Flow-only overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). Setup rejects that predecessor topology or an incomplete Flow-only rollout before making any cluster change.
+If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, do not run setup yet. Preserve that release, or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). Setup rejects that predecessor topology or an incomplete Flow-only rollout before making any cluster change.
 
 <Steps toc={true}>
 

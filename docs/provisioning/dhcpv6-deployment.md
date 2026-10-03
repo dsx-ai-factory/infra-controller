@@ -1,4 +1,4 @@
-# Deploy DHCPv6
+# Deploy DHCPv6 <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Dynamic Host Configuration Protocol for IPv6 (DHCPv6) is opt-in and has not been deployed to production. The deployment work is tracked by [DHCP06](https://github.com/NVIDIA/infra-controller/issues/2388). Validate the target pod network and relay path before enabling it.
 

@@ -1,4 +1,4 @@
-# Force a Managed Host to Boot into Linux Scout
+# Force a Managed Host to Boot into Linux Scout <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when you need the Linux Scout environment for managed-host
 diagnostics and the normal NICo boot workflow does not select it.

@@ -1,4 +1,4 @@
-# Rack Management Service (RMS) Backend
+# Rack Management Service (RMS) Backend <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 NICo delegates rack-level hardware operations to the **Rack Management Service (RMS)**, a
 separate service that owns the protocols each device class speaks. NICo decides *what* should

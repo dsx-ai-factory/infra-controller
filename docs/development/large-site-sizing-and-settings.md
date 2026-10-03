@@ -1,4 +1,4 @@
-# Large Site Sizing and Settings
+# Large Site Sizing and Settings <Badge intent="info">v2.3</Badge> <Badge intent="launch" minimal>New</Badge>
 
 This page records what a 250-rack ingestion measured on a 3-node site controller
 and which settings it needed. Use it to size a site controller and to set the
