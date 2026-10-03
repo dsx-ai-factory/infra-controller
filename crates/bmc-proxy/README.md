@@ -69,6 +69,28 @@ additional_issuer_cns = []
 "spiffe-service-id/dpf" = ["/redfish/v1/**"]
 ```
 
+### Inbound TLS
+
+The certificate, key and main client CA file must load successfully at startup.
+An unreadable admin CA file (`admin_root_cafile_path`) is skipped; if readable,
+PEM parse errors fail startup or reload. The configuration reloads on the first
+connection after five minutes, using the same loading rules. A failed reload
+retains the previous configuration and retries on the first connection at least
+30 seconds later. Retention has no age limit: removed trust roots remain trusted
+until a successful reload or restart. Failures increment
+`carbide_bmc_proxy_tls_reload_failures_total`; connections served with the retained
+configuration do not increment the connection-failure counter.
+Retries reuse an unfinished reload task instead of starting another.
+
+Accepted connections have 10 seconds to complete TLS, including any reload wait.
+Timeouts close the connection and increment
+`carbide_bmc_proxy_tls_connection_fail_total{reason="tls_connection_failure"}`.
+Established HTTP connections have no fixed lifetime. Shutdown closes active
+connections immediately and joins connection and reload tasks. A blocking TLS
+file read that has already started cannot be cancelled; shutdown waits for it
+to finish. TCP accept errors retry after one second; shutdown interrupts that
+wait. These timers do not limit connection concurrency.
+
 ### `redirects.mode`
 
 `follow_same_origin` follows up to five redirects within the original scheme, host, and effective
