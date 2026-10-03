@@ -2989,7 +2989,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 machine_state,
                                 "Failed to explore endpoint"
                             );
@@ -2999,7 +2998,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 "Failed to explore endpoint"
                             );
                         }
