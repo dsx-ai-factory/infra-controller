@@ -13567,16 +13567,13 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchRackFirmwareUpdateRequest'
             examples:
-              all-racks-latest:
-                value:
-                  siteId: 550e8400-e29b-41d4-a716-446655440000
-              filtered-with-version:
+              filtered-with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     names:
                       - Rack-001
-                  version: '24.11.0'
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -13626,13 +13623,10 @@ paths:
             schema:
               $ref: '#/components/schemas/FirmwareUpdateRequest'
             examples:
-              with-version:
+              with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  version: '24.11.0'
-              without-version:
-                value:
-                  siteId: 550e8400-e29b-41d4-a716-446655440000
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -15959,15 +15953,17 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchTrayFirmwareUpdateRequest'
             examples:
-              all-trays-latest:
+              legacy-compute-from-catalog:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-              filtered-with-version:
+                  filter:
+                    type: Compute
+              filtered-with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     rackId: rack-01
-                  version: '24.11.0'
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -16016,11 +16012,11 @@ paths:
             schema:
               $ref: '#/components/schemas/FirmwareUpdateRequest'
             examples:
-              with-version:
+              with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  version: '24.11.0'
-              without-version:
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
+              legacy-compute-from-catalog:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
       responses:
@@ -26647,8 +26643,31 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            A rack request is not a compute-only legacy host update. Flow's
+            built-in firmware rule includes both Compute and NVSwitch stages,
+            so do not send a legacy host-catalog component map to this endpoint.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples only illustrate its shape.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
@@ -27853,8 +27872,36 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            Core's built-in non-rack-scale host firmware controller
+            (`nicolegacy`) does not use this field to select the bundle that
+            Core applies. For a normal on-demand update, omit `version`; Core
+            resolves the configured desired bundle and artifacts from its
+            effective host firmware catalog. If provided, the field must be a
+            complete component-to-version JSON map that exactly matches a
+            desired catalog entry. `nicolegacy` uses that map only for preflight
+            validation and the already-up-to-date check.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples only illustrate its shape.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
@@ -27934,7 +27981,7 @@ components:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           filter:
             type: NVSwitch
-          version: '24.11.0'
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
           targets: [bmc, nvos]
     UpdatePowerStateRequest:
       title: UpdatePowerStateRequest
@@ -28068,8 +28115,36 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            Core's built-in non-rack-scale host firmware controller
+            (`nicolegacy`) does not use this field to select the bundle that
+            Core applies. For a normal on-demand update, omit `version`; Core
+            resolves the configured desired bundle and artifacts from its
+            effective host firmware catalog. If provided, the field must be a
+            complete component-to-version JSON map that exactly matches a
+            desired catalog entry. `nicolegacy` uses that map only for preflight
+            validation and the already-up-to-date check.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples only illustrate its shape.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
@@ -28146,9 +28221,9 @@ components:
             maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          version: '24.11.0'
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          version: '24.11.0'
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
           targets: [bmc, nvos]
         - siteId: 550e8400-e29b-41d4-a716-446655440000
     FirmwareUpdateResponse:
