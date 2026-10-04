@@ -981,39 +981,30 @@ script = '''
   : "${BFB_CUSTOM_INITRAMFS:?Set BFB_CUSTOM_INITRAMFS to the initramfs path}"
   : "${BFB_CUSTOM_BOOT_ARGS:?Set BFB_CUSTOM_BOOT_ARGS to the kernel command line}"
 
-  if [ ! -f "${BFB_CUSTOM_BASE_BFB}" ]; then
-    if [ "${BFB_CUSTOM_BASE_BFB}" = "/tmp/bfb-dump/${BFB_NAME}" ]; then
-      wget -Nnv "${BFB_URL}/${BFB_NAME}" -P /tmp/bfb-dump
-    else
-      echo "BFB_CUSTOM_BASE_BFB does not exist: ${BFB_CUSTOM_BASE_BFB}" >&2
-      exit 1
-    fi
-  fi
-
-  test -f "${BFB_CUSTOM_IMAGE}"
-  test -f "${BFB_CUSTOM_INITRAMFS}"
-
   case "${BFB_CUSTOM_OUTPUT}" in
     /*) output="${BFB_CUSTOM_OUTPUT}" ;;
     *) output="${REPO_ROOT}/${BFB_CUSTOM_OUTPUT}" ;;
   esac
 
-  mkdir -p "$(dirname "${output}")"
-
   set -- \
-    "${BFB_CUSTOM_BASE_BFB}" \
-    "--image=${BFB_CUSTOM_IMAGE}" \
-    "--initramfs=${BFB_CUSTOM_INITRAMFS}" \
-    "--boot-args==${BFB_CUSTOM_BOOT_ARGS}" \
-    "--boot-desc==${BFB_CUSTOM_DESC}"
+    create-custom-kernel-initramfs \
+    --base-bfb "${BFB_CUSTOM_BASE_BFB}" \
+    --image "${BFB_CUSTOM_IMAGE}" \
+    --initramfs "${BFB_CUSTOM_INITRAMFS}" \
+    --boot-args "${BFB_CUSTOM_BOOT_ARGS}" \
+    --description "${BFB_CUSTOM_DESC}" \
+    --output "${output}" \
+    --mlx-mkbfb "${BFB_CUSTOM_MLX_MKBFB}"
 
-  if [ -n "${BFB_CUSTOM_BOOT_PATH:-}" ]; then
-    set -- "$@" "--boot-path==${BFB_CUSTOM_BOOT_PATH}"
+  if [ "${BFB_CUSTOM_BASE_BFB}" = "/tmp/bfb-dump/${BFB_NAME}" ]; then
+    set -- "$@" --download-url "${BFB_URL}/${BFB_NAME}"
   fi
 
-  python3 "${BFB_CUSTOM_MLX_MKBFB}" "$@" "${output}"
-  python3 "${BFB_CUSTOM_MLX_MKBFB}" -c "${output}"
-  echo "Wrote ${output}"
+  if [ -n "${BFB_CUSTOM_BOOT_PATH:-}" ]; then
+    set -- "$@" --boot-path "${BFB_CUSTOM_BOOT_PATH}"
+  fi
+
+  cargo run --manifest-path "${REPO_ROOT}/Cargo.toml" --package carbide-bfb -- "$@"
 '''
 
 [tasks.bfb-extract]

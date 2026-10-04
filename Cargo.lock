@@ -1595,6 +1595,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-bfb"
+version = "0.0.1"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "carbide-bmc-proxy"
 version = "0.0.0"
 dependencies = [

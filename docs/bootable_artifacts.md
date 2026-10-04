@@ -80,10 +80,11 @@ export BFB_CUSTOM_OUTPUT=/tmp/custom-installer.bfb
 cargo make --cwd pxe bfb-create-custom-kernel-initramfs
 ```
 
-The task calls `mlx-mkbfb`, runs `mlx-mkbfb -c` on the generated BFB, and leaves
-the existing `build-boot-artifacts-bfb` flow unchanged. If `BFB_CUSTOM_BASE_BFB`
-is not set, the task uses the repository's configured BF-Bundle release as the
-carrier. Prefer a minimal carrier BFB for boot-only recovery payloads when one is
+The task runs the Rust `carbide-bfb` helper, which calls `mlx-mkbfb`, runs
+`mlx-mkbfb -c` on the generated BFB, and leaves the existing
+`build-boot-artifacts-bfb` flow unchanged. If `BFB_CUSTOM_BASE_BFB` is not set,
+the task uses the repository's configured BF-Bundle release as the carrier.
+Prefer a minimal carrier BFB for boot-only recovery payloads when one is
 available; full BF-Bundles may include firmware or OS-install content that needs
 site-specific review before use.
 
