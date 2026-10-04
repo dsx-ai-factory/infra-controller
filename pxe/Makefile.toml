@@ -55,6 +55,10 @@ IPXE_BANNER_VERSION = { script = [
   "echo ${VERSION:-$(git describe --tags --first-parent --always --long)}",
 ] }
 BUILD_LOCATION = "/tmp/bfb-dump/initramfs-tmp"
+BFB_CUSTOM_BASE_BFB = { value = "/tmp/bfb-dump/${BFB_NAME}", condition = { env_not_set = ["BFB_CUSTOM_BASE_BFB"] } }
+BFB_CUSTOM_OUTPUT = { value = "${REPO_ROOT}/pxe/static/blobs/internal/aarch64/custom.bfb", condition = { env_not_set = ["BFB_CUSTOM_OUTPUT"] } }
+BFB_CUSTOM_DESC = { value = "Custom BlueField boot image", condition = { env_not_set = ["BFB_CUSTOM_DESC"] } }
+BFB_CUSTOM_MLX_MKBFB = { value = "/tmp/bfb-dump/mlx-mkbfb", condition = { env_not_set = ["BFB_CUSTOM_MLX_MKBFB"] } }
 
 # Detect sudo/doas elevation command from env
 # Prefer doas since if both are present it is likely the intended command.
@@ -965,6 +969,52 @@ args = [
   "-P",
   "/tmp/bfb-dump",
 ]
+
+[tasks.bfb-create-custom-kernel-initramfs]
+category = "iPXE Kernel"
+description = "Create a custom BFB from a kernel, initramfs, and boot arguments"
+dependencies = ["mkdir-static", "bfb-create-tmp", "bfbtools-download"]
+script = '''
+  set -eu
+
+  : "${BFB_CUSTOM_IMAGE:?Set BFB_CUSTOM_IMAGE to the kernel image path}"
+  : "${BFB_CUSTOM_INITRAMFS:?Set BFB_CUSTOM_INITRAMFS to the initramfs path}"
+  : "${BFB_CUSTOM_BOOT_ARGS:?Set BFB_CUSTOM_BOOT_ARGS to the kernel command line}"
+
+  if [ ! -f "${BFB_CUSTOM_BASE_BFB}" ]; then
+    if [ "${BFB_CUSTOM_BASE_BFB}" = "/tmp/bfb-dump/${BFB_NAME}" ]; then
+      wget -Nnv "${BFB_URL}/${BFB_NAME}" -P /tmp/bfb-dump
+    else
+      echo "BFB_CUSTOM_BASE_BFB does not exist: ${BFB_CUSTOM_BASE_BFB}" >&2
+      exit 1
+    fi
+  fi
+
+  test -f "${BFB_CUSTOM_IMAGE}"
+  test -f "${BFB_CUSTOM_INITRAMFS}"
+
+  case "${BFB_CUSTOM_OUTPUT}" in
+    /*) output="${BFB_CUSTOM_OUTPUT}" ;;
+    *) output="${REPO_ROOT}/${BFB_CUSTOM_OUTPUT}" ;;
+  esac
+
+  mkdir -p "$(dirname "${output}")"
+
+  set -- \
+    "${BFB_CUSTOM_BASE_BFB}" \
+    "--image=${BFB_CUSTOM_IMAGE}" \
+    "--initramfs=${BFB_CUSTOM_INITRAMFS}" \
+    "--boot-args==${BFB_CUSTOM_BOOT_ARGS}" \
+    "--boot-desc==${BFB_CUSTOM_DESC}"
+
+  if [ -n "${BFB_CUSTOM_BOOT_PATH:-}" ]; then
+    set -- "$@" "--boot-path==${BFB_CUSTOM_BOOT_PATH}"
+  fi
+
+  python3 "${BFB_CUSTOM_MLX_MKBFB}" "$@" "${output}"
+  python3 "${BFB_CUSTOM_MLX_MKBFB}" -c "${output}"
+  echo "Wrote ${output}"
+'''
 
 [tasks.bfb-extract]
 category = "iPXE Kernel"

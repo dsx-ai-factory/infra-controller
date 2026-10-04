@@ -64,6 +64,37 @@ Embedding moves trust into the artifact. Protect artifact publication and
 distribution with verified signatures. Enforce Secure Boot or an equivalent
 chain of trust before treating the embedded CA as a pinned anchor.
 
+### Build a custom kernel/initramfs BFB
+
+For recovery images or non-standard installer payloads, build a BFB from an
+explicit kernel, initramfs, and kernel command line without changing the normal
+production BFB artifact pipeline:
+
+```bash
+export BFB_CUSTOM_BASE_BFB=/path/to/compatible-carrier.bfb
+export BFB_CUSTOM_IMAGE=/path/to/Image
+export BFB_CUSTOM_INITRAMFS=/path/to/initramfs
+export BFB_CUSTOM_BOOT_ARGS='console=hvc0 console=ttyAMA0,115200'
+export BFB_CUSTOM_OUTPUT=/tmp/custom-installer.bfb
+
+cargo make --cwd pxe bfb-create-custom-kernel-initramfs
+```
+
+The task calls `mlx-mkbfb`, runs `mlx-mkbfb -c` on the generated BFB, and leaves
+the existing `build-boot-artifacts-bfb` flow unchanged. If `BFB_CUSTOM_BASE_BFB`
+is not set, the task uses the repository's configured BF-Bundle release as the
+carrier. Prefer a minimal carrier BFB for boot-only recovery payloads when one is
+available; full BF-Bundles may include firmware or OS-install content that needs
+site-specific review before use.
+
+Optional variables:
+
+- `BFB_CUSTOM_DESC`: boot menu description. Defaults to `Custom BlueField boot
+  image`.
+- `BFB_CUSTOM_BOOT_PATH`: optional BFB boot-path image value.
+- `BFB_CUSTOM_MLX_MKBFB`: override the `mlx-mkbfb` path. Defaults to the
+  downloaded BFB tool.
+
 ### 3. Build iPXE Image
 
 Run
