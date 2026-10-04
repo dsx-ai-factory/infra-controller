@@ -128,6 +128,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				SiteID:              siteID,
 				RackGroupID:         reported.RackGroupID,
 				Topology:            reported.Topology,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                reported.Name,
 				Description:         reported.Description,
@@ -152,6 +153,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 
 		// update if any field differs
 		if cur.Topology != reported.Topology ||
+			!reflect.DeepEqual(cur.Protocol, reported.Protocol) ||
 			!reflect.DeepEqual(cur.Racks, reported.Racks) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
@@ -166,6 +168,8 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				ExpectedRackGroupID: cur.ID,
 				ExpectedUpdated:     &cur.Updated,
 				Topology:            &reported.Topology,
+				ProtocolSet:         true,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                &reported.Name,
 				Description:         &reported.Description,
