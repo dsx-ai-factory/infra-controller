@@ -15,50 +15,72 @@
  * limitations under the License.
  */
 
+//! Build helper for BlueField bootstream (BFB) artifacts.
+//!
+//! This binary wraps NVIDIA's `mlx-mkbfb` tool for the custom kernel/initramfs
+//! flow used by the PXE cargo-make tasks. It intentionally stays small: the
+//! repository's production BFB pipeline remains in `pxe/Makefile.toml`, while
+//! this helper owns input validation, command construction, and post-build
+//! artifact validation for the custom payload path.
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 
+/// Command-line entry point for BlueField BFB helper operations.
 #[derive(Parser, Debug)]
 #[command(name = "carbide-bfb")]
 struct Cli {
+    /// Operation to run.
     #[command(subcommand)]
     command: Commands,
 }
 
+/// Supported BFB helper commands.
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Build a BFB from caller-supplied kernel, initramfs, and boot arguments.
     #[command(about = "Create a BlueField BFB from a kernel, initramfs, and boot arguments")]
     CreateCustomKernelInitramfs(CreateCustomKernelInitramfs),
 }
 
+/// Arguments for creating a BFB from custom Linux boot artifacts.
 #[derive(Parser, Debug)]
 struct CreateCustomKernelInitramfs {
+    /// Compatible carrier BFB used as the base artifact.
     #[arg(long)]
     base_bfb: PathBuf,
 
+    /// Kernel image to embed in the generated BFB.
     #[arg(long)]
     image: PathBuf,
 
+    /// Initramfs image to embed in the generated BFB.
     #[arg(long)]
     initramfs: PathBuf,
 
+    /// Kernel command line for the generated boot entry.
     #[arg(long)]
     boot_args: String,
 
+    /// Human-readable boot entry description.
     #[arg(long, default_value = "Custom BlueField boot image")]
     description: String,
 
+    /// Destination path for the generated BFB.
     #[arg(long)]
     output: PathBuf,
 
+    /// Optional BFB boot-path image value.
     #[arg(long)]
     boot_path: Option<String>,
 
+    /// Path to the NVIDIA `mlx-mkbfb` helper.
     #[arg(long, default_value = "/tmp/bfb-dump/mlx-mkbfb")]
     mlx_mkbfb: PathBuf,
 
+    /// Optional URL to download the base BFB from when it is missing locally.
     #[arg(long)]
     download_url: Option<String>,
 }
@@ -79,6 +101,7 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Creates a custom BFB and validates it with `mlx-mkbfb -c`.
 fn create_custom_kernel_initramfs(args: CreateCustomKernelInitramfs) -> Result<(), String> {
     ensure_base_bfb(&args.base_bfb, args.download_url.as_deref())?;
     require_file(&args.base_bfb, "base BFB")?;
@@ -98,6 +121,7 @@ fn create_custom_kernel_initramfs(args: CreateCustomKernelInitramfs) -> Result<(
     Ok(())
 }
 
+/// Ensures the base BFB exists, downloading it only when a URL was supplied.
 fn ensure_base_bfb(base_bfb: &Path, download_url: Option<&str>) -> Result<(), String> {
     if base_bfb.is_file() {
         return Ok(());
@@ -129,6 +153,7 @@ fn ensure_base_bfb(base_bfb: &Path, download_url: Option<&str>) -> Result<(), St
     Ok(())
 }
 
+/// Returns an error when `path` is not a regular file.
 fn require_file(path: &Path, label: &str) -> Result<(), String> {
     if path.is_file() {
         Ok(())
@@ -137,6 +162,7 @@ fn require_file(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
+/// Runs `mlx-mkbfb` with arguments built from the custom payload request.
 fn run_mlx_mkbfb(args: &CreateCustomKernelInitramfs) -> Result<(), String> {
     let mut command = Command::new(&args.mlx_mkbfb);
     for arg in mlx_mkbfb_args(args) {
@@ -155,11 +181,14 @@ fn run_mlx_mkbfb(args: &CreateCustomKernelInitramfs) -> Result<(), String> {
     Ok(())
 }
 
+/// Builds the `mlx-mkbfb` argv vector for custom kernel/initramfs embedding.
 fn mlx_mkbfb_args(args: &CreateCustomKernelInitramfs) -> Vec<String> {
     let mut command_args = vec![
         args.base_bfb.display().to_string(),
         format!("--image={}", args.image.display()),
         format!("--initramfs={}", args.initramfs.display()),
+        // mlx-mkbfb expects the extra `=` so values that contain `=` remain
+        // part of the option value rather than being split by its parser.
         format!("--boot-args=={}", args.boot_args),
         format!("--boot-desc=={}", args.description),
     ];
@@ -170,6 +199,7 @@ fn mlx_mkbfb_args(args: &CreateCustomKernelInitramfs) -> Vec<String> {
     command_args
 }
 
+/// Verifies the generated BFB with `mlx-mkbfb -c`.
 fn run_mlx_mkbfb_check(mlx_mkbfb: &Path, output: &Path) -> Result<(), String> {
     let status = Command::new(mlx_mkbfb)
         .arg("-c")
