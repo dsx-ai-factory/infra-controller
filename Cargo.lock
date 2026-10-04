@@ -3065,6 +3065,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-resource-pool"
+version = "0.0.0"
+dependencies = [
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-macros",
+ "carbide-sqlx-testing",
+ "carbide-test-support",
+ "ctor",
+ "sqlx",
+]
+
+[[package]]
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
