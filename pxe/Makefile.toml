@@ -981,6 +981,8 @@ script = '''
   : "${BFB_CUSTOM_INITRAMFS:?Set BFB_CUSTOM_INITRAMFS to the initramfs path}"
   : "${BFB_CUSTOM_BOOT_ARGS:?Set BFB_CUSTOM_BOOT_ARGS to the kernel command line}"
 
+  # Keep shell limited to cargo-make env plumbing. The Rust helper owns path
+  # validation, mlx-mkbfb argv construction, and post-build BFB verification.
   case "${BFB_CUSTOM_OUTPUT}" in
     /*) output="${BFB_CUSTOM_OUTPUT}" ;;
     *) output="${REPO_ROOT}/${BFB_CUSTOM_OUTPUT}" ;;
@@ -997,6 +999,8 @@ script = '''
     --mlx-mkbfb "${BFB_CUSTOM_MLX_MKBFB}"
 
   if [ "${BFB_CUSTOM_BASE_BFB}" = "/tmp/bfb-dump/${BFB_NAME}" ]; then
+    # Only the configured default carrier is auto-downloaded. Custom carrier
+    # paths must already exist so operators do not silently build from the wrong BFB.
     set -- "$@" --download-url "${BFB_URL}/${BFB_NAME}"
   fi
 
