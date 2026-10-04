@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -54,51 +55,84 @@ func newMockPostgresStore(t *testing.T) (*PostgresStore, sqlmock.Sqlmock) {
 }
 
 func TestPostgresStore_Get(t *testing.T) {
-	t.Run("preserves no rows for missing run", func(t *testing.T) {
-		store, mock := newMockPostgresStore(t)
-		id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-		mock.ExpectQuery("SELECT").
-			WillReturnError(sql.ErrNoRows)
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "preserves no rows for missing run", run: func(t *testing.T) {
+			store, mock := newMockPostgresStore(t)
+			id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+			mock.ExpectQuery("SELECT").
+				WillReturnError(sql.ErrNoRows)
 
-		run, err := store.Get(context.Background(), id)
+			run, err := store.Get(context.Background(), id)
 
-		require.Nil(t, run)
-		require.ErrorIs(t, err, sql.ErrNoRows)
-		require.ErrorContains(t, err, "operation run "+id.String()+" not found")
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
+			require.Nil(t, run)
+			require.ErrorIs(t, err, sql.ErrNoRows)
+			require.ErrorContains(t, err, "operation run "+id.String()+" not found")
+			require.NoError(t, mock.ExpectationsWereMet())
+		}},
 
-	t.Run("returns persisted phase count", func(t *testing.T) {
-		store, mock := newMockPostgresStore(t)
-		id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-		mock.ExpectQuery(`SELECT orun\.\* FROM "operation_run" AS "orun"`).
-			WillReturnRows(
-				sqlmock.NewRows([]string{"id", "total_phases"}).
-					AddRow(id, 2),
-			)
+		{name: "returns persisted phase count", run: func(t *testing.T) {
+			store, mock := newMockPostgresStore(t)
+			id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+			query := newOfflineBun().NewSelect().
+				Model((*dbmodel.OperationRun)(nil)).
+				Where("orun.id = ?", id).
+				String()
+			mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WillReturnRows(
+					sqlmock.NewRows([]string{"id", "total_phases"}).
+						AddRow(id, 2),
+				)
 
-		run, err := store.Get(context.Background(), id)
+			run, err := store.Get(context.Background(), id)
 
-		require.NoError(t, err)
-		require.Equal(t, int32(2), run.TotalPhases)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
+			require.NoError(t, err)
+			require.Equal(t, int32(2), run.TotalPhases)
+			require.NoError(t, mock.ExpectationsWereMet())
+		}},
+		{name: "decodes all fields across an added column", run: func(t *testing.T) {
+			testOperationRunReadAcrossAddedColumn(t, (*PostgresStore).Get)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
 }
 
-func TestPostgresStore_LockOperationRunReturnsPersistedPhaseCount(t *testing.T) {
-	store, mock := newMockPostgresStore(t)
-	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	mock.ExpectQuery(`(?s)SELECT orun\.\* FROM "operation_run" AS "orun".*FOR UPDATE`).
-		WillReturnRows(
-			sqlmock.NewRows([]string{"id", "total_phases"}).
-				AddRow(id, 2),
-		)
+func TestPostgresStore_LockOperationRun(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "returns persisted phase count under FOR UPDATE", run: func(t *testing.T) {
+			store, mock := newMockPostgresStore(t)
+			id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+			query := newOfflineBun().NewSelect().
+				Model((*dbmodel.OperationRun)(nil)).
+				Where("orun.id = ?", id).
+				For("UPDATE").
+				String()
+			mock.ExpectQuery(regexp.QuoteMeta(query)).
+				WillReturnRows(
+					sqlmock.NewRows([]string{"id", "total_phases"}).
+						AddRow(id, 2),
+				)
 
-	run, err := store.LockOperationRun(context.Background(), id)
+			run, err := store.LockOperationRun(context.Background(), id)
 
-	require.NoError(t, err)
-	require.Equal(t, int32(2), run.TotalPhases)
-	require.NoError(t, mock.ExpectationsWereMet())
+			require.NoError(t, err)
+			require.Equal(t, int32(2), run.TotalPhases)
+			require.NoError(t, mock.ExpectationsWereMet())
+		}},
+		{name: "decodes all fields across an added column", run: func(t *testing.T) {
+			testOperationRunReadAcrossAddedColumn(t, (*PostgresStore).LockOperationRun)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
 }
 
 func TestPostgresStore_List(t *testing.T) {
