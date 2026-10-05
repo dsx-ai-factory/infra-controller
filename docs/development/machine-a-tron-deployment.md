@@ -435,6 +435,37 @@ matching `expected_machines` row exists (by BMC MAC). Otherwise it logs
 auto-registers these when `machineATron.registerExpectedMachines: true` (the
 default in the values file). DHCP discovery alone is **not** sufficient.
 
+Racks follow the same rule. For every rack ID under `racks.<group>`,
+machine-a-tron declares an expected rack group only if no group declares the
+rack yet. That group is keyed by the rack ID (one group per rack, listing its
+compute trays, switches, and power shelves) with protocol `NVLINK_V5` and
+topology `gb200_nvl72r1_c2g4` or `gb300_nvl72r1_c2g4`. An existing group that
+declares the rack is used as is, whatever its ID, topology, and members. A
+group that carries the rack ID without declaring the rack is a configuration
+error. machine-a-tron then declares the expected rack. nico-api derives the
+rack profile from the rack's group, so `rack_profile_id` must name the profile
+derived from the group in effect. For the group machine-a-tron declares that
+is `GB200_NVL72R1_C2G4_WIWYNN` for `wiwynn_gb200_nvl72` and
+`GB300_NVL72R1_C2G4_LENOVO` for `lenovo_gb300_nvl72`; for an existing group it
+is whatever that group's topology, protocol, and members derive. machine-a-tron
+checks this at startup, before it registers anything, and refuses to start on
+a mismatch. The nico-api chart ships both derived profiles, so a site needs no
+profile override for them. Inspect the declarations with
+`nico-admin-cli expected-rack-group show` and
+`nico-admin-cli expected-rack show`.
+
+A site whose racks were registered before this rule stores a different
+profile, and machine-a-tron rejects an existing rack whose profile differs
+from `rack_profile_id`. Before the pods restart, check each rack's group with
+`nico-admin-cli expected-rack-group show <rack-group-id>`. If the group derives
+a profile other than `rack_profile_id` (for example topology `gb200_nvl72`),
+either set `rack_profile_id` to that profile or delete the group with
+`nico-admin-cli expected-rack-group delete <rack-group-id>` so that
+machine-a-tron declares it again. Deleting only the rack keeps the group, and
+the recreated rack would receive the group's profile and fail the next
+restart the same way. Then delete the rack with
+`nico-admin-cli expected-rack delete <rack-id>`.
+
 ## Controller Mode
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
@@ -554,7 +585,8 @@ helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service, as
 described under [Deploying a 250-Rack Site](#deploying-a-250-rack-site). The
-shipped `[rack_profiles.NVL72]` profile covers these racks.
+nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
+derives for these racks, so the site needs no profile override.
 
 ### Deploying a 250-Rack Site
 
@@ -587,7 +619,7 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-001, rack-002, rack-003]  # 25 ids per pod
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.104.0.1"
@@ -597,7 +629,7 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-026, rack-027, rack-028]
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.104.0.1"
@@ -629,7 +661,8 @@ memory for 300 BMCs per pod. Raise it for 1,775 BMCs per pod.
 `machine-a-tron-scale-4500.yaml` allots 8Gi to pods of up to 8,100 BMCs.
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service. The
-shipped `[rack_profiles.NVL72]` profile covers these racks. Refer to
+nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
+derives for these racks, so the site needs no profile override. Refer to
 [Machine-a-tron RMS Mock](machine-a-tron-rms-mock.md#pointing-nico-at-it) and
 to [RMS Configuration](../configuration/rms.md). 250 racks need 17,750 BMC
 addresses, more than the shipped `simulated-oob` prefix holds. Refer to
