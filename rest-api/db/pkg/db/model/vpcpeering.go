@@ -214,6 +214,7 @@ type VpcPeeringDAO interface {
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*VpcPeering, error)
 	//
 	UpdateStatusByID(ctx context.Context, tx *db.Tx, id uuid.UUID, newStatus string) error
+	UpdateStatusByIDIfCurrent(ctx context.Context, tx *db.Tx, id uuid.UUID, currentStatus string, newStatus string) (bool, error)
 	//
 	Clear(ctx context.Context, tx *db.Tx, input VpcPeeringClearInput) (*VpcPeering, error)
 	//
@@ -434,6 +435,39 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 		Exec(ctx)
 
 	return err
+}
+
+// UpdateStatusByIDIfCurrent updates an active peering only if its status still
+// matches currentStatus. A changed status, missing row, or soft-deleted row
+// returns (false, nil). Invalid statuses return db.ErrInvalidValue.
+func (vpsd VpcPeeringSQLDAO) UpdateStatusByIDIfCurrent(
+	ctx context.Context,
+	tx *db.Tx,
+	id uuid.UUID,
+	currentStatus string,
+	newStatus string,
+) (_ bool, retErr error) {
+	if !VpcPeeringStatusMap[currentStatus] || !VpcPeeringStatusMap[newStatus] {
+		return false, db.ErrInvalidValue
+	}
+
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPeeringDAO.UpdateStatusByIDIfCurrent")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("status", newStatus))
+
+	result, err := db.GetIDB(tx, vpsd.dbSession).
+		NewUpdate().
+		Model((*VpcPeering)(nil)).
+		Set("status = ?", newStatus).
+		Set("updated = ?", db.GetCurTime()).
+		Where("id = ?", id).
+		Where("status = ?", currentStatus).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	return updated > 0, err
 }
 
 // Clear clears VpcPeering attributes based on provided arguments

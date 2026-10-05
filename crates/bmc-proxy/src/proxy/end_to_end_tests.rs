@@ -31,7 +31,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
-use carbide_authn::middleware::AuthContext;
+use carbide_authn::middleware::{AuthContext, Principal};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
@@ -1101,12 +1101,24 @@ fn keep_callsites_enabled() {
     DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
 }
 
+/// A class for every request of the SPIFFE service `nv-dps`.
+const DPS_CLASS: &str = r#"
+    [[class]]
+    name = "dps"
+    principals = ["spiffe-service-id/nv-dps"]
+    match = ["/**"]
+"#;
+
 /// What a request for `method` on [`SLOW_PATH`] that names no BMC gets from a
-/// proxy with [`QUICK_CLASS`]: (status the caller got, the class its trace
-/// span names). The proxy refuses the request right after classifying it,
-/// so no task outlives the capture: a span such a task closed after the
-/// capture ended would reach a subscriber that never saw it.
-async fn class_on_the_span(metrics: &MetricsCapture, method: Method) -> (u16, String) {
+/// proxy with [`DPS_CLASS`] and [`QUICK_CLASS`], when its caller is the
+/// SPIFFE service `spiffe_service`, if any: (status the caller got, the class
+/// its trace span names). The proxy refuses the request right after
+/// classifying it, so no task outlives the capture: a span such a task closed
+/// after the capture ended would reach a subscriber that never saw it.
+async fn class_on_the_span(
+    metrics: &MetricsCapture,
+    (method, spiffe_service): (Method, Option<&'static str>),
+) -> (u16, String) {
     keep_callsites_enabled();
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
@@ -1119,17 +1131,20 @@ async fn class_on_the_span(metrics: &MetricsCapture, method: Method) -> (u16, St
     let state = proxy_configured(
         ":1",
         r#"["/**"]"#,
-        QUICK_CLASS,
+        &format!("{DPS_CLASS}{QUICK_CLASS}"),
         root_password(),
         "follow_same_origin",
     )
     .await;
-    let answer = exchange(
-        metrics,
-        &state,
-        proxied(method, SLOW_PATH, None, &[], Body::empty()),
-    )
-    .await;
+    let mut request = proxied(method, SLOW_PATH, None, &[], Body::empty());
+    request.extensions_mut().insert(AuthContext::<()> {
+        principals: spiffe_service
+            .map(|service| Principal::SpiffeServiceIdentifier(service.to_string()))
+            .into_iter()
+            .collect(),
+        authorization: None,
+    });
+    let answer = exchange(metrics, &state, request).await;
     let span = exporter
         .get_finished_spans()
         .expect("finished spans")
@@ -1147,7 +1162,8 @@ async fn class_on_the_span(metrics: &MetricsCapture, method: Method) -> (u16, St
     (answer.status, class)
 }
 
-/// A request's trace span names the class it was classified into.
+/// A request's trace span names the class it was classified into, by its
+/// caller's identity and its pattern.
 #[tokio::test]
 async fn the_request_span_names_its_class() {
     let metrics = MetricsCapture::start();
@@ -1156,18 +1172,21 @@ async fn the_request_span_names_its_class() {
         [
             Case {
                 scenario: "a class pattern matches",
-                input: Method::GET,
+                input: (Method::GET, None),
                 expect: Yields((400, "quick".to_string())),
             },
             Case {
                 scenario: "no class pattern matches",
-                input: Method::POST,
+                input: (Method::POST, None),
                 expect: Yields((400, "default".to_string())),
             },
+            Case {
+                scenario: "a class takes the caller's requests",
+                input: (Method::POST, Some("nv-dps")),
+                expect: Yields((400, "dps".to_string())),
+            },
         ],
-        |method| async move {
-            Ok::<_, Infallible>(class_on_the_span(metrics_window, method).await)
-        },
+        |input| async move { Ok::<_, Infallible>(class_on_the_span(metrics_window, input).await) },
     )
     .await;
 }
@@ -1194,7 +1213,7 @@ const ONE_AT_A_TIME: &str = r#"
 
 /// A request holds its slot at its BMC until its response body has been
 /// sent. While one's body is unread, the next request of a class of one at a
-/// time waits, never reaching the BMC, and is refused with 503 when its
+/// time waits, never reaching the BMC, and is refused with 429 when its
 /// budget runs out; once that body is gone, the next request goes through at
 /// once, long before the held slot's bound would have reclaimed it.
 #[tokio::test]
@@ -1226,7 +1245,7 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
             after_at_once,
             bmc.received().len()
         ),
-        (503, 1, 200, true, 2),
+        (429, 1, 200, true, 2),
     );
 }
 
@@ -1317,6 +1336,6 @@ async fn a_replay_keeps_its_slot() {
     drop(unread);
     assert_eq!(
         (unread_status, waited_out, reached_while_unread),
-        (200, 503, 2)
+        (200, 429, 2)
     );
 }

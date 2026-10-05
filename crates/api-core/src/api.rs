@@ -3033,6 +3033,41 @@ impl Forge for Api {
         crate::handlers::firmware::delete_host_firmware_config(self, request).await
     }
 
+    async fn create_nic_firmware_profile(
+        &self,
+        request: Request<rpc::CreateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::create(self, request).await
+    }
+
+    async fn find_nic_firmware_profile_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfileIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfileIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_ids(self, request).await
+    }
+
+    async fn find_nic_firmware_profiles_by_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfilesByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfilesByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_by_ids(self, request).await
+    }
+
+    async fn update_nic_firmware_profile(
+        &self,
+        request: Request<rpc::UpdateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::update(self, request).await
+    }
+
+    async fn delete_nic_firmware_profile(
+        &self,
+        request: Request<rpc::DeleteNicFirmwareProfileRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::delete(self, request).await
+    }
+
     async fn create_sku(
         &self,
         request: Request<rpc::SkuList>,

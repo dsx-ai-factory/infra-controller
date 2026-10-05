@@ -79,6 +79,7 @@ pub mod secrets;
 mod setup;
 mod site_prefix_controller;
 mod storage;
+mod vpc_peering_controller;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

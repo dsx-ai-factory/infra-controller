@@ -38,6 +38,10 @@ replicas: 1
 serviceAccountName: flow
 automountServiceAccountToken: true
 
+## Additional pod annotations, including OpenTelemetry sidecar injection.
+## Chart-owned annotations take precedence over entries with the same keys.
+podAnnotations: {}
+
 ## flow's GetDeploymentEnv requires FLOW_ENV to be set to one of
 ## "development", "staging", or "production". There is no implicit default in
 ## carbide-rest/flow/internal/service/config.go — an unset value causes the
@@ -52,6 +56,7 @@ images:
 
 ports:
   flow: 50051
+  metrics: 9360
 
 resources:
   flow:
@@ -164,6 +169,8 @@ flowConfig:
   ## Skip the periodic leak detection job. Boolean, default false.
   disableLeakDetection: false
 
+## Additional environment variables. Use the standard OTEL_* variables to
+## configure Flow's existing OpenTelemetry exporter.
 extraEnv:
   flow: []
 

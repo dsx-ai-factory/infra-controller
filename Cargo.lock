@@ -2185,6 +2185,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -6961,7 +6962,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.7#a963e59d7106f62991a5c3abd6886fe62fb4cbe0"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.8#1ba3499cd53c919990f619966ba911d5d87bb41b"
 dependencies = [
  "chrono",
  "clap",

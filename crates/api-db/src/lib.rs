@@ -78,6 +78,7 @@ pub mod network_devices;
 pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
+pub mod nic_firmware;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -462,11 +463,15 @@ impl DatabaseError {
     }
 
     pub fn is_fqdn_conflict(&self) -> bool {
+        self.violates_constraint("fqdn_must_be_unique")
+    }
+
+    /// Returns `true` if the database error identifies the named constraint
+    /// or unique index as the cause of the failure.
+    pub fn violates_constraint(&self, name: &str) -> bool {
         match self {
             DatabaseError::Sqlx(sqlx_error) => match &sqlx_error.source {
-                sqlx::Error::Database(database_error) => {
-                    database_error.constraint() == Some("fqdn_must_be_unique")
-                }
+                sqlx::Error::Database(database_error) => database_error.constraint() == Some(name),
                 _ => false,
             },
             _ => false,

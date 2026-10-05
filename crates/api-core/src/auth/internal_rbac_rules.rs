@@ -672,6 +672,11 @@ impl InternalRBACRules {
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CreateNicFirmwareProfile", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareProfileIds", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareProfilesByIds", vec![ForgeAdminCLI]);
+        x.perm("UpdateNicFirmwareProfile", vec![ForgeAdminCLI]);
+        x.perm("DeleteNicFirmwareProfile", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
         x.perm("AssignSkuToMachine", vec![ForgeAdminCLI]);
@@ -1252,6 +1257,43 @@ mod rbac_rule_tests {
                     allowed,
                     "{method}: {}",
                     principal.as_identifier(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nic_firmware_profile_operator_permissions() {
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+                false,
+            ),
+            (Principal::SpiffeMachineIdentifier("host".into()), false),
+        ] {
+            for method in [
+                "CreateNicFirmwareProfile",
+                "FindNicFirmwareProfileIds",
+                "FindNicFirmwareProfilesByIds",
+                "UpdateNicFirmwareProfile",
+                "DeleteNicFirmwareProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal)
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier()
                 );
             }
         }

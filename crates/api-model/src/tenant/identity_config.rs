@@ -542,10 +542,6 @@ mod key_id_tests {
 // value and reading it back exercises the `Decode`-from-`PgValueRef` path the
 // in-memory tests can't reach; the per-test pool comes from the shared
 // `sqlx_test` harness, so `carbide-test-support` itself stays db-agnostic.
-//
-// Deliberately one test covering every codec: the harness builds its template
-// database lazily on first use, and concurrent first-time builds race, so a
-// single `sqlx_test` per crate sidesteps that cold-start flake.
 #[cfg(test)]
 mod sqlx_db_tests {
     use carbide_test_support::Outcome::*;

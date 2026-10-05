@@ -1051,6 +1051,53 @@ impl MachineATronContext {
     }
 }
 
+#[cfg(test)]
+impl MachineATronContext {
+    /// Context for actor tests. Nothing listens at the API address, so no call can succeed.
+    pub(crate) fn for_test() -> Arc<Self> {
+        let app_config: MachineATronConfig = toml::from_str(
+            r#"
+carbide_api_url = "https://127.0.0.1:1"
+
+[machines.config]
+host_count = 1
+dpu_per_host_count = 0
+underlay_dhcp_relay_address = "192.168.176.1"
+bmc_dhcp_relay_address = "192.168.192.1"
+run_interval_working = "100ms"
+run_interval_idle = "1s"
+network_status_run_interval = "5s"
+scout_run_interval = "5s"
+"#,
+        )
+        .expect("test config must parse");
+        let forge_client_config = ForgeClientConfig::new(String::new(), None);
+        let api_config = rpc::forge_tls_client::ApiConfig::new(
+            &app_config.carbide_api_url,
+            &forge_client_config,
+        );
+        let forge_api_client = ForgeApiClient::new(&api_config);
+        let api_client: ApiClient = forge_api_client.clone().into();
+        let pool_config =
+            bmc_mock::mac_address_pool::PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24)
+                .expect("test MAC pool must be valid");
+        Arc::new(Self {
+            app_config,
+            forge_client_config,
+            bmc_mock_certs_dir: None,
+            bmc_registry: BmcMockRegistry::default(),
+            api_throttler: crate::api_throttler::run(
+                tokio::time::interval(Duration::from_secs(2)),
+                api_client.clone(),
+            ),
+            desired_firmware_versions: std::sync::RwLock::new(Vec::new()),
+            forge_api_client,
+            dhcp_client: crate::dhcp_wrapper::DhcpClient::Api(api_client),
+            mac_address_pool: Arc::new(Mutex::new(MacAddressPool::new_pool(pool_config))),
+        })
+    }
+}
+
 fn as_std_duration<S>(d: &std::time::Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,

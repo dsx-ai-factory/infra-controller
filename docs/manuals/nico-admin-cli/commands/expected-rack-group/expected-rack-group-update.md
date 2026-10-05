@@ -10,10 +10,10 @@ existing expected rack group
 ## SYNOPSIS
 
 ```text
-nico-admin-cli expected-rack-group update <--topology>
-[--rack] [--meta-name] [--meta-description]
-[--label] [--extended] [--sort-by]
-[-h|--help] <RACK_GROUP_ID>
+nico-admin-cli expected-rack-group update <--protocol>
+<--topology> [--rack] [--meta-name]
+[--meta-description] [--label] [--extended]
+[--sort-by] [-h|--help] <RACK_GROUP_ID>
 ```
 
 ## DESCRIPTION
@@ -21,6 +21,10 @@ nico-admin-cli expected-rack-group update <--topology>
 Replace all fields of an existing expected rack group
 
 ## OPTIONS
+
+`--protocol <PROTOCOL>`
+
+Replacement rack-management protocol identifier (required)
 
 `--topology <TOPOLOGY>`
 
@@ -61,9 +65,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -76,8 +80,8 @@ Existing external group ID
 ## Examples
 
 ```sh
-nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --topology gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
-nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --topology gb200_nvl72r1_c2g4
+nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4 --rack '{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}' --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
+nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4
 ```
 
 ---

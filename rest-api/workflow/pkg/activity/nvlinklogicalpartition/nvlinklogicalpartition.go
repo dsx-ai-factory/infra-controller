@@ -29,7 +29,7 @@ type ManageNVLinkLogicalPartition struct {
 
 // Activity functions
 // UpdateNVLinkLogicalPartitionsInDB is a Temporal activity that takes a collection of NVLinkPartition data pushed by Site Agent and updates the DB
-func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx context.Context, siteID uuid.UUID, nvlinklogicalpartitionInventory *corev1.NVLinkLogicalPartitionInventory) error {
+func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx context.Context, siteID uuid.UUID, nvlinkLogicalPartitionInventory *corev1.NVLinkLogicalPartitionInventory) error {
 	logger := log.With().Str("Activity", "UpdateNVLinkLogicalPartitionsInDB").Str("Site ID", siteID.String()).Logger()
 
 	logger.Info().Msg("starting activity")
@@ -46,7 +46,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 		return err
 	}
 
-	if nvlinklogicalpartitionInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if nvlinkLogicalPartitionInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 		return nil
 	}
@@ -77,12 +77,12 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 
 	reportedNVLinkLogicalPartitionIDMap := map[uuid.UUID]bool{}
 
-	if nvlinklogicalpartitionInventory.InventoryPage != nil {
+	if nvlinkLogicalPartitionInventory.InventoryPage != nil {
 		logger.Info().Msgf("Received NVLink Logical Partition inventory page: %d of %d, page size: %d, total count: %d",
-			nvlinklogicalpartitionInventory.InventoryPage.CurrentPage, nvlinklogicalpartitionInventory.InventoryPage.TotalPages,
-			nvlinklogicalpartitionInventory.InventoryPage.PageSize, nvlinklogicalpartitionInventory.InventoryPage.TotalItems)
+			nvlinkLogicalPartitionInventory.InventoryPage.CurrentPage, nvlinkLogicalPartitionInventory.InventoryPage.TotalPages,
+			nvlinkLogicalPartitionInventory.InventoryPage.PageSize, nvlinkLogicalPartitionInventory.InventoryPage.TotalItems)
 
-		for _, strId := range nvlinklogicalpartitionInventory.InventoryPage.ItemIds {
+		for _, strId := range nvlinkLogicalPartitionInventory.InventoryPage.ItemIds {
 			id, err := uuid.Parse(strId)
 			if err != nil {
 				logger.Error().Err(err).Str("ID", strId).Msg("failed to parse NVLink Logical Partition ID from inventory page")
@@ -94,7 +94,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mnlp.dbSession)
 	// Iterate through NVLinkPartition Inventory and update DB
-	for _, controllerNvllp := range nvlinklogicalpartitionInventory.Partitions {
+	for _, controllerNvllp := range nvlinkLogicalPartitionInventory.Partitions {
 		slogger := logger.With().Str("NVLink Logical Partition ID", controllerNvllp.Id.Value).Logger()
 
 		nvllp, ok := existingNVLinkLogicalPartitionIDMap[controllerNvllp.Id.Value]
@@ -187,7 +187,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 	nvlinklogicalpartitionsToDelete := []*cdbm.NVLinkLogicalPartition{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if nvlinklogicalpartitionInventory.InventoryPage == nil || nvlinklogicalpartitionInventory.InventoryPage.TotalPages == 0 || (nvlinklogicalpartitionInventory.InventoryPage.CurrentPage == nvlinklogicalpartitionInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(nvlinkLogicalPartitionInventory.GetInventoryPage()) {
 		for _, nvllp := range existingNVLinkLogicalPartitionIDMap {
 			found := false
 

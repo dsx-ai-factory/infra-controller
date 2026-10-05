@@ -3696,13 +3696,19 @@ async fn vpc_deletion_requires_explicit_inactive_vni_release(
     let pool_state_before = vpc_vni_pool_state(&env).await?;
 
     // There are no instances, but the retained allocation still requires
-    // operator cleanup before deletion may remove the VPC or its peerings.
+    // operator cleanup before deletion may remove the VPC.
     let error = env
         .api
         .delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())
         .await
         .expect_err("deletion must not implicitly release a retained VNI");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        format!(
+            "VPC `{vpc_id}` has an inactive or inconsistent VNI allocation; release the inactive VNI before deleting the VPC",
+        )
+    );
     assert_eq!(find_test_vpc(&env, vpc_id).await?, created);
     assert_eq!(vpc_vni_pool_state(&env).await?, pool_state_before);
     let peerings = env
@@ -3727,6 +3733,15 @@ async fn vpc_deletion_requires_explicit_inactive_vni_release(
         .await?
         .into_inner();
     assert_eq!(released.released_inactive_vni, u32::try_from(inactive_vni)?);
+
+    env.api
+        .delete_vpc_peering(tonic::Request::new(rpc::forge::VpcPeeringDeletionRequest {
+            id: peering.id,
+        }))
+        .await?;
+    super::vpc_peering::deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
 
     env.api
         .delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())

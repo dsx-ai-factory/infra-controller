@@ -554,7 +554,7 @@ To configure `unbound`:
 2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
 3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
-The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements.
+The Unbound Deployment declares a ConfigMap Reloader annotation. Where that controller is installed, configuration changes trigger a rollout. Otherwise, restart the Deployment through the site's normal workflow. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes optional IPv6 DNS and metrics exposure, including the supplied-image contract and listener restart requirements. For external resolver VIPs, refer to [Unbound External Services](../configuration/dns.md#unbound-external-services).
 
 ### 3.3 `.nico` DNS Service Endpoints
 

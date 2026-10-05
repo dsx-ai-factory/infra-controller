@@ -1839,19 +1839,28 @@ async fn create_test_env_with_overrides_inner(
 
     txn.commit().await.unwrap();
 
-    // Create domain
-    let domain: carbide_uuid::domain::DomainId = api
-        .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
-            name: "dwrt1.com".to_string(),
-            default_ttl: None,
-        }))
+    // Restart tests keep their database. Reuse the domain so its name stays
+    // unique and existing segments keep the same domain ID.
+    let domain_name = "dwrt1.com";
+    let existing_domain = db::dns::domain::find_by_name(&db_pool, domain_name)
         .await
-        .unwrap()
-        .into_inner()
-        .id
-        .map(::carbide_uuid::domain::DomainId::try_from)
-        .unwrap()
-        .unwrap();
+        .expect("fixture domain lookup succeeds")
+        .into_iter()
+        .find(|domain| domain.vpc_id.is_none());
+    let domain = match existing_domain {
+        Some(domain) => domain.id,
+        None => api
+            .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
+                name: domain_name.to_string(),
+                default_ttl: None,
+                vpc_id: None,
+            }))
+            .await
+            .expect("fixture domain creation succeeds")
+            .into_inner()
+            .id
+            .expect("created domain has an ID"),
+    };
 
     let (admin_segments, underlay_segment) = if overrides.create_network_segments.unwrap_or(true) {
         // Create admin network

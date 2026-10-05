@@ -28,11 +28,11 @@
 //! freed slot goes to the highest-priority class that has a request waiting
 //! and is under its own `max_in_flight`; classes of equal priority take
 //! turns, and each class's requests go in the order they came. A request is
-//! refused with `503` when its class's queue at that BMC is full of requests
-//! still waiting, when no slot frees before its deadline, when the proxy
-//! already tracks [`MAX_BMCS`] BMCs and this is another, or when the proxy is
-//! shutting down. Limits are per proxy replica: with two replicas, a BMC can
-//! receive twice a limit.
+//! refused with `429` when its class's queue at that BMC is full of requests
+//! still waiting, or when no slot frees before its deadline, and with `503`
+//! when the proxy already tracks [`MAX_BMCS`] BMCs and this is another, or
+//! when the proxy is shutting down. Limits are per proxy replica: with two
+//! replicas, a BMC can receive twice a limit.
 //!
 //! Each BMC in use has its own `nv_redfish_dispatcher` runtime, driven by a
 //! task of its own, as nico-api's admission drives one for its callers.
@@ -61,6 +61,7 @@ use std::time::Duration;
 use axum::body::Body;
 use bytes::Bytes;
 use carbide_instrument::{Event, LabelValue, emit};
+use http::StatusCode;
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use nv_redfish_dispatcher::schedulers::{
     AdmissionContext, AdmissionDecision, AdmissionPolicy, BoundedConcurrency, BoundedQueue,
@@ -121,6 +122,18 @@ pub(super) enum Refused {
     ShuttingDown,
 }
 
+impl Refused {
+    /// What the caller is answered: `429` when the proxy's per-BMC limits
+    /// turned the request away, `503` when the proxy itself could not take
+    /// it. Either way, the BMC never received the request.
+    pub(super) fn status(self) -> StatusCode {
+        match self {
+            Self::QueueFull | Self::Timeout => StatusCode::TOO_MANY_REQUESTS,
+            Self::TooManyBmcs | Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
 /// A request got its slot at a BMC. Metric-only.
 #[derive(Event)]
 #[event(
@@ -138,9 +151,9 @@ struct AdmissionGranted {
     waited: Duration,
 }
 
-/// The proxy refused a request with `503` for want of a slot at its BMC.
-/// Metric-only: refusals come as fast as callers retry, and the caller's
-/// `503` names the reason.
+/// The proxy refused a request for want of a slot at its BMC. Metric-only:
+/// refusals come as fast as callers retry, and the caller's answer names the
+/// reason.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_admission_refused",
@@ -148,7 +161,7 @@ struct AdmissionGranted {
     component = "nico-bmc-proxy",
     log = off,
     metric = counter,
-    describe = "Number of requests the proxy refused with 503 for want of a slot at their BMC, by request class and reason (queue_full, timeout, too_many_bmcs, shutting_down)"
+    describe = "Number of requests the proxy refused without sending them, for want of a slot at their BMC, by request class and reason (queue_full, timeout, too_many_bmcs, shutting_down)"
 )]
 struct AdmissionRefused {
     #[label]
@@ -572,7 +585,7 @@ mod tests {
     use axum::body::Body;
     use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use futures::FutureExt;
     use hyper::body::Body as HttpBody;
     use tokio::task::JoinSet;
@@ -627,7 +640,7 @@ mod tests {
         path: &str,
         hold_for: Duration,
     ) -> Result<Slot, Refused> {
-        let class = state.config.classes.classify(&method, path);
+        let class = state.config.classes.classify(&method, path, &[]);
         let deadline = Instant::now() + class.upstream_timeout;
         state.admission.acquire(at, class, deadline, hold_for).await
     }
@@ -642,7 +655,7 @@ mod tests {
         let budget = state
             .config
             .classes
-            .classify(&method, path)
+            .classify(&method, path, &[])
             .upstream_timeout;
         slot_held_for(state, at, method, path, budget.saturating_mul(2)).await
     }
@@ -1024,7 +1037,7 @@ mod tests {
             shutdown.clone(),
             &mut tasks,
         );
-        let class = config.classes.classify(&http::Method::GET, METRICS);
+        let class = config.classes.classify(&http::Method::GET, METRICS, &[]);
         let acquire = || {
             admission.acquire(
                 bmc(1),
@@ -1092,6 +1105,37 @@ mod tests {
 
         drop(granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await);
         assert_eq!(running(), 2);
+    }
+
+    /// The caller is answered `429` when the proxy's per-BMC limits turned its
+    /// request away, and `503` when the proxy itself could not take it.
+    #[test]
+    fn a_refusal_answers_by_its_cause() {
+        check_values(
+            [
+                Check {
+                    scenario: "the queue is full",
+                    input: Refused::QueueFull,
+                    expect: 429,
+                },
+                Check {
+                    scenario: "no slot within the budget",
+                    input: Refused::Timeout,
+                    expect: 429,
+                },
+                Check {
+                    scenario: "the proxy tracks too many BMCs",
+                    input: Refused::TooManyBmcs,
+                    expect: 503,
+                },
+                Check {
+                    scenario: "the proxy is shutting down",
+                    input: Refused::ShuttingDown,
+                    expect: 503,
+                },
+            ],
+            |refused| refused.status().as_u16(),
+        );
     }
 
     /// A body keeps its length and its end when it holds a slot, so the

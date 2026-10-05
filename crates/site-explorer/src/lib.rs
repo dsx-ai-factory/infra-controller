@@ -1429,11 +1429,6 @@ impl SiteExplorer {
             .await
             .map_err(|e| DatabaseError::new("begin load create_power_shelf", e))?;
 
-        tracing::info!(
-            bmc_ip_address = %explored_endpoint.address,
-            "Creating power shelf"
-        );
-
         // Defense against the duplicate-power-shelves bug: if a power shelf
         // already exists in the database for this BMC MAC, don't make another
         // one. This mirrors the dedup check on the switch creation path and
@@ -1478,6 +1473,11 @@ impl SiteExplorer {
                 }
             }
         }
+
+        tracing::info!(
+            bmc_ip_address = %explored_endpoint.address,
+            "Creating power shelf"
+        );
 
         // Create a new power shelf
         // Generate power_shelf_id similar to machine_id using deterministic hashing.
@@ -2989,7 +2989,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 machine_state,
                                 "Failed to explore endpoint"
                             );
@@ -2999,7 +2998,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 "Failed to explore endpoint"
                             );
                         }

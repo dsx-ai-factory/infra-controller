@@ -95,34 +95,26 @@ async fn find_nvos_mac_claimed_elsewhere(
 
     let (sql, exclude_key) = match switch.expected_switch_id {
         Some(id) => (
-            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
-                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
-                nvos_ip_address
-                FROM expected_switches WHERE expected_switch_id != $1::uuid AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            "SELECT nvos_mac_addresses FROM expected_switches WHERE expected_switch_id != $1::uuid AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
             id.to_string(),
         ),
         None => (
-            "SELECT expected_switch_id, bmc_mac_address, bmc_username, bmc_password, serial_number,
-                bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id,
-                nvos_username, nvos_password, nvos_mac_addresses, bmc_retain_credentials,
-                nvos_ip_address
-                FROM expected_switches WHERE bmc_mac_address != $1::macaddr AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
+            "SELECT nvos_mac_addresses FROM expected_switches WHERE bmc_mac_address != $1::macaddr AND nvos_mac_addresses && $2::macaddr[] LIMIT 1",
             switch.bmc_mac_address.to_string(),
         ),
     };
 
-    let other: Option<ExpectedSwitch> = sqlx::query_as(sql)
+    let other_macs = sqlx::query_scalar::<_, Vec<MacAddress>>(sql)
         .bind(exclude_key)
         .bind(nvos_mac_addresses)
         .fetch_optional(txn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
 
-    Ok(other.map(|other| {
+    Ok(other_macs.map(|other_macs| {
         nvos_mac_addresses
             .iter()
-            .find(|mac| other.nvos_mac_addresses.contains(mac))
+            .find(|mac| other_macs.contains(mac))
             .copied()
             // The SQL overlap guarantees a shared entry; the first requested
             // MAC is a safe stand-in if equality ever disagrees.

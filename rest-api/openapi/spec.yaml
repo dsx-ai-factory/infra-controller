@@ -3284,7 +3284,7 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Deletion was rejected because certain preconditions were not satisfied.
+          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
@@ -3293,6 +3293,8 @@ paths:
         Delete a specific VPC by ID.
 
         Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+
+        First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -3827,21 +3829,47 @@ paths:
         - VPC Peering
       operationId: delete-vpc-peering
       description: |-
-        Delete a VPC peering by ID.
+        Request deletion of a VPC peering by ID.
+
+        The peering remains visible with status `Deleting` while Core waits for affected DPUs to apply the removal of peering permissions. Poll this peering's GET endpoint until it returns `404` before deleting either VPC. REST removes the record after Site inventory confirms the peering is gone, so completion can take longer than the DPU update.
+
+        Repeating DELETE while the REST record still exists returns `202` if Core accepts the request or has already removed the peering. Once the REST record is gone, DELETE returns `404`.
+
+        A Site precondition failure returns `412` and leaves the peering's REST status unchanged. This can happen when a concurrent network update prevents deletion from being accepted. Retry the request; contact support if it continues to fail.
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted. The peering remains in Deleting until Site inventory confirms removal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                accepted:
+                  value:
+                    message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                precondition-failed:
+                  value:
+                    source: nico
+                    message: Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.
+                    data: null
   '/v2/org/{org}/nico/vpc-prefix':
     parameters:
       - schema:
@@ -5636,7 +5664,7 @@ paths:
         description: |-
           Expected Rack update request.
 
-          Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
+          Provide a non-null value for at least one of rackId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
         required: true
       responses:
         '200':
@@ -5707,6 +5735,7 @@ paths:
                   siteId: f97df110-f4de-492e-8849-4a6af68026b0
                   rackGroupId: nvl5-gp1-jhb01
                   topology: gb200_nvl72r1_c2g4
+                  protocol: NVLINK_V6
                   racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
                   name: NVL rack group 1
                   description: Production NVL rack group in row A
@@ -5840,6 +5869,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp1-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
                       name: NVL rack group 1
                       description: Production NVL rack group in row A
@@ -5852,6 +5882,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp2-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
                       name: NVL rack group 2
                       description: Production NVL rack group in row A
@@ -10571,10 +10602,26 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The Operating System ID is invalid, an Image Operating System has an associated Site that is not Registered, or the Operating System is being used by one or more Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operating-system-in-use:
+                  value:
+                    source: nico
+                    message: Operating System is being used by one or more Instances and cannot be deleted
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Delete an Operating System by ID
+
+        An Operating System being used by one or more Instances cannot be deleted. Delete the associated Instances before retrying.
 
         If the Operating System has `infrastructureProviderId` set, then org must have an Infrastructure Provider entity and its ID should match the Operating System Infrastructure Provider ID. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -21974,7 +22021,7 @@ components:
     VpcPeeringStatus:
       title: VpcPeeringStatus
       type: string
-      description: Status values for VPC peering objects
+      description: Status values for VPC peering objects. Deleting means removal is pending; wait until the peering's GET endpoint returns 404 before deleting either VPC.
       enum:
         - Pending
         - Configuring
@@ -30132,7 +30179,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. For protocol NVLINK_V6, a topology beginning with `gb` followed by digits and `_` is normalized to the `vr_` topology family for profile derivation, and Core records a warning. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -30230,7 +30277,7 @@ components:
       description: |-
         Request data to update an existing Expected Rack.
 
-        Provide a non-null value for at least one of `rackId`, `rackProfileId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
+        Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
 
         For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
@@ -30302,6 +30349,7 @@ components:
           rackGroupId: nvl5-gp1-jhb01
           siteId: f97df110-f4de-492e-8849-4a6af68026b0
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30345,6 +30393,11 @@ components:
         topology:
           type: string
           description: External group-level NVLink topology identifier.
+        protocol:
+          type:
+            - string
+            - 'null'
+          description: Rack fabric protocol. Null only for declarations created before protocol became required.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -30384,6 +30437,7 @@ components:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           rackGroupId: nvl5-gp1-jhb01
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -30417,6 +30471,11 @@ components:
           minLength: 1
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30447,6 +30506,7 @@ components:
         - siteId
         - rackGroupId
         - topology
+        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -30458,6 +30518,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp1-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
               name: NVL rack group 1
               description: Production NVL rack group in row A
@@ -30470,6 +30531,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp2-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
               name: NVL rack group 2
               description: Production NVL rack group in row A
@@ -30504,6 +30566,7 @@ components:
           properties:
             rackGroupId: {type: 'null'}
             topology: {type: 'null'}
+            protocol: {type: 'null'}
             racks: {type: 'null'}
             name: {type: 'null'}
             description: {type: 'null'}
@@ -30515,7 +30578,7 @@ components:
 
         For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 
-        Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
+        Provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all seven fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
 
         The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.
 
@@ -30524,6 +30587,7 @@ components:
         - `location.region`, `location.datacenter`, `location.room`, `location.position`
       examples:
         - topology: gb300_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
           name: NVL rack group 1 (updated)
           description: Production NVL rack group in row A, expanded membership
@@ -30556,6 +30620,13 @@ components:
           minLength: 1
           maxLength: 128
           description: Optional replacement topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -30583,7 +30654,7 @@ components:
           propertyNames:
             pattern: '^[\x00-\x7F]+$'
           description: |-
-            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false

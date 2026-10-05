@@ -381,7 +381,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 	vpcsToDelete := []*cdbm.Vpc{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcInventory.InventoryPage == nil || vpcInventory.InventoryPage.TotalPages == 0 || (vpcInventory.InventoryPage.CurrentPage == vpcInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcInventory.GetInventoryPage()) {
 		for _, vpc := range existingVpcIDMap {
 			found := false
 

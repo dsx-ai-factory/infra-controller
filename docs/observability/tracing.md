@@ -170,6 +170,8 @@ DPS stays one trace across the proxy hop (issue
   the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
   a Prometheus label), and, once the request passes its ACL, its request class
   (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  A `429` the proxy answers for want of a slot at the BMC leaves the span ok as well;
+  `carbide_bmc_proxy_admission_refused_total` counts those.
 
 Example config:
 

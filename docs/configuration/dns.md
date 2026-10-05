@@ -66,7 +66,7 @@ The combined `nico-unbound` Service serves DNS on UDP/TCP 53 and, when `exporter
 
 You supply the Unbound and exporter images. IPv6 enablement requires that Unbound consumes the configuration mounted at `/etc/unbound/local.conf.d`, listens on IPv6 UDP and TCP 53, retains its existing IPv4 listeners, and permits the intended IPv6 clients. The exporter must separately listen on IPv6 TCP 9167 when enabled. Both containers need the pod's working IPv6 network. Image tags alone do not establish these capabilities.
 
-Use the image's existing configuration mechanism. For an image that includes the chart's fragments and has no listener directives elsewhere, the following umbrella-chart values illustrate the complete DNS listener and access configuration. Replace the IPv6 prefix with the source network Unbound will actually see. Preserve your site's existing IPv4 listener addresses and access rules. The example repeats the chart's default IPv4 access rule. Omit listener directives already present elsewhere in the image's effective configuration, since explicit interfaces accumulate. A subchart installation uses these values without the outer `unbound:` key.
+Use the image's existing configuration mechanism. For an image that includes the chart's fragments and has no listener directives elsewhere, the following umbrella-chart values illustrate the complete DNS listener and access configuration. Replace the IPv6 prefix with the source network Unbound will actually see. Preserve your site's existing IPv4 listener addresses and access rules. The example repeats the chart's default IPv4 access rule. Omit listener directives already present elsewhere in the image's effective configuration, since explicit interfaces accumulate. When installing the Unbound chart directly, omit the outer `unbound:` key.
 
 ```yaml
 unbound:
@@ -85,7 +85,7 @@ unbound:
 
 This string replaces the existing `access_control.conf` value. Merge all required site access rules into it, including any source addresses introduced by network address translation (NAT). `do-ip6: yes` also permits outbound IPv6 DNS traffic. You can still use existing IPv4 forwarders. Apply listener configuration first, restart the resolver through the site's normal rollout workflow, and verify it before enabling the Service's IPv6 exposure. Interface changes require a restart. A configuration reload alone is insufficient. The [Unbound configuration reference](https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html) describes listener and access-control semantics.
 
-For Kustomize, configure the image through the existing `deploy/nico-unbound-base/local.conf.d/access_control.conf` and change only `nico-unbound`'s Service `ipFamilyPolicy` to `PreferDualStack` in the site overlay, retaining its IPv4 primary family and all three ports. The base remains IPv4-only. The root deployment publishes this combined Service through a LoadBalancer, so IPv6 enablement also requires compatible virtual IP address (VIP) allocation and routing there. The Helm chart's separate external DNS Services remain IPv4-only. An internal dual-stack Service does not provide an external IPv6 resolver VIP for bare-metal hosts.
+For Kustomize, configure the image through the existing `deploy/nico-unbound-base/local.conf.d/access_control.conf` and change only `nico-unbound`'s Service `ipFamilyPolicy` to `PreferDualStack` in the site overlay, retaining its IPv4 primary family and all three ports. The base remains IPv4-only. The root deployment publishes this combined Service through a LoadBalancer, so IPv6 enablement also requires compatible virtual IP address (VIP) allocation and routing there. For Helm, configure the separate [Unbound External Services](#unbound-external-services). An internal dual-stack Service does not provide an external IPv6 resolver VIP for bare-metal hosts.
 
 Before advertising an IPv6 resolver to clients, validate the deployed images from an intended client network:
 
@@ -95,6 +95,46 @@ Before advertising an IPv6 resolver to clients, validate the deployed images fro
 - Confirm an IPv4-only installation still upgrades with its existing values. The default-off flag introduces no listener configuration or pod-template change.
 
 DNS transport and record type are independent: either IPv4 or IPv6 transport can carry A or AAAA queries. A TCP readiness connection proves neither DNS answers nor IPv6 Service routing. External IPv6 DNS additionally requires a reachable resolver VIP and advertising it to clients through the site's DHCPv6 configuration.
+
+## Unbound External Services
+
+The Unbound chart disables external Services by default (`externalService.enabled: false`). Enabling them creates separate UDP and TCP Services on port 53, with `LoadBalancer` as the default type. Both Services use the same address-family settings and VIP annotations. They expose recursive DNS, not exporter metrics.
+
+Set `unbound.externalService.ipFamilies` and `unbound.externalService.ipFamilyPolicy` in the umbrella-chart values to select IPv4, IPv6, or both. Their chart defaults are `[IPv4]` and `SingleStack`. An omitted, null, or empty setting uses its chart default; an empty list does not select the cluster's default family. These settings do not change the combined internal Service or its independent `unbound.ipv6.enabled` flag.
+
+For IPv6-only external DNS Services, use the following values. Replace the example VIP with an address from your MetalLB pool. When installing the Unbound chart directly, omit the outer `unbound:` key and its `enabled` field.
+
+```yaml
+unbound:
+  enabled: true
+  externalService:
+    enabled: true
+    ipFamilyPolicy: SingleStack
+    ipFamilies: [IPv6]
+    annotations:
+      metallb.io/loadBalancerIPs: "2001:db8:10::53"
+```
+
+For dual-stack external DNS Services with IPv4 primary, use the following values. `RequireDualStack` requires both address families; Kubernetes rejects the Service if the cluster does not support both.
+
+```yaml
+unbound:
+  enabled: true
+  externalService:
+    enabled: true
+    ipFamilyPolicy: RequireDualStack
+    ipFamilies: [IPv4, IPv6]
+    annotations:
+      metallb.io/loadBalancerIPs: "192.0.2.53,2001:db8:10::53"
+```
+
+The `ipFamilies` list contains unique `IPv4` or `IPv6` entries. `SingleStack` accepts one family; a dual-stack list accepts either order. The first entry is primary. Kubernetes permits adding or removing a secondary family but rejects an in-place primary-family change, causing `helm upgrade` to fail. Plan Service replacement and an interruption to resolver access when changing the primary family, including a change from IPv4-only to IPv6-only. Refer to [Kubernetes IPv4/IPv6 Dual-Stack](https://kubernetes.io/docs/concepts/services-networking/dual-stack/#services) for policy and update rules.
+
+With `PreferDualStack` and one preferred family in `ipFamilies`, Kubernetes adds the other family on a dual-stack cluster. On a single-stack cluster, it uses only the listed family, which the cluster must support. Omit pinned VIP annotations to let MetalLB allocate addresses for the resulting Service families, or supply VIPs that match those families.
+
+The chart adds a shared-IP annotation so the UDP and TCP Services can share the configured VIPs. A pinned dual-stack configuration needs one VIP per family and a MetalLB pool containing both families. Refer to [MetalLB IPv6 and Dual-Stack Services](https://metallb.io/usage/#ipv6-and-dual-stack-services). Setup preflight checks supplied VIPs against configured pools and rejects a VIP from the wrong family for `SingleStack`. Omitting VIP annotations permits automatic allocation.
+
+Configure and verify the [Unbound IPv6 Transport](#unbound-ipv6-transport) listeners and access rules before enabling external IPv6 exposure. These Service settings do not configure pod networking, DNS listeners, client access, or routing. Validate DNS answers over UDP and TCP from the intended client network through each enabled VIP family before advertising the resolver.
 
 ## Troubleshooting
 

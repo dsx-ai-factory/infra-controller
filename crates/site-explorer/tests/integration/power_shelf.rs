@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use carbide_instrument::testing::capture_logs_async;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use config_version::ConfigVersion;
@@ -408,11 +409,16 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         rack_id: None,
         bmc_retain_credentials: None,
     };
+    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+        explored_endpoint.clone(),
+        &expected_first,
+        &env.pool,
+    ))
+    .await;
+    assert!(created?, "first discovery must create a power_shelves row");
     assert!(
-        explorer
-            .create_power_shelf(explored_endpoint.clone(), &expected_first, &env.pool)
-            .await?,
-        "first discovery must create a power_shelves row"
+        logs.iter().any(|log| log.message == "Creating power shelf"),
+        "first discovery must log that it is creating the power shelf"
     );
 
     let mut txn = env.pool.begin().await?;
@@ -436,11 +442,24 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         },
         ..expected_first
     };
+    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+        explored_endpoint,
+        &expected_second,
+        &env.pool,
+    ))
+    .await;
     assert!(
-        !explorer
-            .create_power_shelf(explored_endpoint, &expected_second, &env.pool)
-            .await?,
+        !created?,
         "second discovery with same BMC MAC must not create a duplicate row"
+    );
+    assert!(
+        logs.iter()
+            .any(|log| log.message == "Power shelf already exists; skipping discovery"),
+        "second discovery must log that it skipped the existing power shelf"
+    );
+    assert!(
+        logs.iter().all(|log| log.message != "Creating power shelf"),
+        "second discovery must not log that it is creating a power shelf"
     );
 
     let mut txn = env.pool.begin().await?;
