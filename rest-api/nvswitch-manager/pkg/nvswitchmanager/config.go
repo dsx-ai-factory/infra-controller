@@ -4,7 +4,7 @@
 package nvswitchmanager
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/credentials"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/credentials"
 
 	"github.com/uptrace/bun"
 )

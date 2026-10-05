@@ -6,16 +6,16 @@ package operatingsystem
 import (
 	"fmt"
 
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	osActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	osActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // UpdateOsImageInventory is a workflow called by Site Agent to update image based Operating System for a Site

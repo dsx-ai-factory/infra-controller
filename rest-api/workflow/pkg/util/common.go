@@ -6,8 +6,8 @@ package util
 import (
 	"context"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 )
 

@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 func TestAPIVpcPeeringCreateRequest_Validate(t *testing.T) {

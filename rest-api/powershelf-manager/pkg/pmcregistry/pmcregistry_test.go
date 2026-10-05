@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/stretchr/testify/assert"
 )

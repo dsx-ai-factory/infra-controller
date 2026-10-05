@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
 // NVLDomainRackReader provides the inventory lookup needed to expand NVLink

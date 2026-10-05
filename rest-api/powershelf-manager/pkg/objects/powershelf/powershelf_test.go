@@ -6,10 +6,10 @@ package powershelf
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powersupply"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powersupply"
 
 	rfcommon "github.com/stmcginnis/gofish/common"
 	gofish "github.com/stmcginnis/gofish/redfish"

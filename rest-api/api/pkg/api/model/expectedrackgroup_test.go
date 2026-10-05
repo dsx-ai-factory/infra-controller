@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/stretchr/testify/require"
 )

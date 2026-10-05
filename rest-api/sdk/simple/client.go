@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard"
 )
 
 // ClientInterface defines the methods for the simple SDK Client

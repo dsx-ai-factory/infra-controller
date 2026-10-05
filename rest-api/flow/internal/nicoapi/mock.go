@@ -8,9 +8,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type mockClient struct {

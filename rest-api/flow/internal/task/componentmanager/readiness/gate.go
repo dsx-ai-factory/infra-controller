@@ -30,8 +30,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // Default polling parameters, chosen to err on the side of waiting. 30 min

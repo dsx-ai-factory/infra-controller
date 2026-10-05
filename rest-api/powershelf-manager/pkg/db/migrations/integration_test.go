@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	dbtestutil "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/testutil"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	dbtestutil "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/testutil"
 )
 
 // skipIfNoDatabase skips the test if database environment variables are not set.

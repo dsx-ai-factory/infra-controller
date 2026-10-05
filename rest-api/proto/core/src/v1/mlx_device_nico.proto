@@ -8,7 +8,7 @@ package mlx_device;
 import "common_nico.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 // MlxVariableRegistry represents a registry of mlxconfig variables
 // with optional device filtering constraints.

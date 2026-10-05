@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 	"github.com/uptrace/bun/extra/bundebug"
 
-	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	cipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 )
 
 // TestDBConfig describes a test DB config params

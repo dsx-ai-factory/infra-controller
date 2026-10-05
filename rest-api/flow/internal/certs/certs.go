@@ -13,8 +13,8 @@ import (
 	"os"
 	"path/filepath"
 
-	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
-	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
+	dynamictls "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/tls"
+	pkgcerts "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/certs"
 )
 
 // Default certificate directory and file names for the Kubernetes SPIFFE

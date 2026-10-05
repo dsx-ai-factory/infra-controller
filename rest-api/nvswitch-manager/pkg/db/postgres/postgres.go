@@ -14,7 +14,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/db"
 )
 
 // Postgres wraps a Bun DB connection and error checker for Postgres-specific behavior.

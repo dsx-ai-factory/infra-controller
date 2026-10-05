@@ -8,11 +8,11 @@ import (
 	"os"
 	"time"
 
-	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
+	dynamictls "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/tls"
 	"go.temporal.io/sdk/client"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
-	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/endpoint"
+	ctemporal "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/temporal"
 )
 
 const (

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 )
 
 const defaultMaxDeliveryAttempts = 3

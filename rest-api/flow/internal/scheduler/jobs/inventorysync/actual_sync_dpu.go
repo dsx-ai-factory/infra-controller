@@ -13,11 +13,11 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type dpuBMCReconciliationPlan struct {

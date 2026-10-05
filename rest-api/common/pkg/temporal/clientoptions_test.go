@@ -17,7 +17,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 func TestClientOptions(t *testing.T) {

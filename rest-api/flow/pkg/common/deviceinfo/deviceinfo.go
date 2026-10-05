@@ -6,7 +6,7 @@ package deviceinfo
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/utils"
 	"github.com/google/uuid"
 )
 

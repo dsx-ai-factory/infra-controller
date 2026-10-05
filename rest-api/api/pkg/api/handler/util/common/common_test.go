@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -28,13 +28,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 )
 
 func testCommonInitDB(t *testing.T) *cdb.Session {

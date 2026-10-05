@@ -13,24 +13,24 @@ import (
 	"testing"
 	"time"
 
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 )
 

@@ -13,8 +13,8 @@ import (
 	"context"
 	"time"
 
-	scheme "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/scheme"
-	v1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	scheme "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/scheme"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"

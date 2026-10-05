@@ -6,10 +6,10 @@ package ipxetemplate
 import (
 	"fmt"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	ipxeTemplateActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/ipxetemplate"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	ipxeTemplateActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/ipxetemplate"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"

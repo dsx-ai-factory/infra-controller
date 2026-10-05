@@ -10,7 +10,7 @@ Code is generated
 package fake
 
 import (
-	v1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )

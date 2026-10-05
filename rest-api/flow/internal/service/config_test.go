@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
-	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/authz"
+	pkgcerts "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/certs"
 )
 
 const allowedServiceIdentity = "spiffe://example.test/ns/site/sa/site-workflow"

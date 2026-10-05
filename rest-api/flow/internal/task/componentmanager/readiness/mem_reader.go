@@ -7,8 +7,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // MemReader is an in-memory StatusReader intended for unit tests of code

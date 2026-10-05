@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 func TestFlowServerImpl_CreateOperationRule(t *testing.T) {

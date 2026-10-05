@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
+	cClient "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
 func TestManageInstance_UpdateInstanceConfigOnSite(t *testing.T) {

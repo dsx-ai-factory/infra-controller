@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestAPIAggregateHealth_FromFlowProto(t *testing.T) {

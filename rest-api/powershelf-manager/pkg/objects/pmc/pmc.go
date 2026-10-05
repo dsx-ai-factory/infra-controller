@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
 )
 
 // PMC specifies the information for a PMC which includes MAC address, IP

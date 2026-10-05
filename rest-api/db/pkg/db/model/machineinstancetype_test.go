@@ -8,9 +8,9 @@ import (
 	"database/sql"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	otrace "go.opentelemetry.io/otel/trace"

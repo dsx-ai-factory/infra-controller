@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestFlowAtomicClient_GetInitialCertMD5(t *testing.T) {

@@ -4,8 +4,8 @@
 package main
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/cmd"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/common/log"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/cmd"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/common/log"
 )
 
 func main() {

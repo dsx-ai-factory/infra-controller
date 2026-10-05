@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/target"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 func (p *Processor) plan(

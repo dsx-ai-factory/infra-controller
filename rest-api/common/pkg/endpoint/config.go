@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
 )
 
 // Config represents a network endpoint with optional authentication and TLS.

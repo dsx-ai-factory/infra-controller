@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
 )
 
 // ExecutionPlan is the closed set of immutable, action-specific executor

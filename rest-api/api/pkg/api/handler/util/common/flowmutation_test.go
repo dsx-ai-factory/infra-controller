@@ -19,10 +19,10 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // proxiedCall is what a mutation helper handed to the proxy workflow.

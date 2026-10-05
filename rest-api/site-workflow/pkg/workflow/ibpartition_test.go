@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	iActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"

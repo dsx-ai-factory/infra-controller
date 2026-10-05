@@ -10,26 +10,26 @@ import (
 	"testing"
 	"time"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 
 	"os"
 
 	"go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	"go.temporal.io/sdk/testsuite"
 )
 

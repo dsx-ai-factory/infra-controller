@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 type linkedInventoryTestClient struct {

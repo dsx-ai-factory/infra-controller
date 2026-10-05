@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	crdsv1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+	cutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	crdsv1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/types"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

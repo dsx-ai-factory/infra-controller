@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // dispatchRun advances one runnable operation run, then submits any targets

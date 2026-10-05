@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"os"
 
-	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
+	dynamictls "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/tls"
 )
 
 // Config holds explicit file paths for the CA cert, TLS cert, and TLS key.

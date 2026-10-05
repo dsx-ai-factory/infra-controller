@@ -8,7 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
 )
 
 // MetadataHandler is an API handler to return system information about the API

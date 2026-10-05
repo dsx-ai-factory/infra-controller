@@ -8,7 +8,7 @@ import (
 	"encoding/pem"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/core"
 )
 
 // PKICACertificateHandlerAPIVersion defines the version

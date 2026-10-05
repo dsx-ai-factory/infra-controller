@@ -15,15 +15,15 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/alert"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/message"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/report"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/alert"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/message"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/report"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // sendAlert dispatches an alert on a best-effort basis. The call must never

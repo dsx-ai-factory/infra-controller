@@ -11,9 +11,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	cmcatalog "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // LoadConfig loads the component manager configuration from a YAML file using

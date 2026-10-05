@@ -21,9 +21,9 @@ import (
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
-	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
-	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
+	ctemporal "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/temporal"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
+	swu "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // Orchestrator - Workflow Orchestrator

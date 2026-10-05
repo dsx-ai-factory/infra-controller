@@ -8,19 +8,19 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
-	commonConfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
+	commonConfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/processors"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/processors"
 	temporalClient "go.temporal.io/sdk/client"
 )
 

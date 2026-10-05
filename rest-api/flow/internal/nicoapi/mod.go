@@ -10,8 +10,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently

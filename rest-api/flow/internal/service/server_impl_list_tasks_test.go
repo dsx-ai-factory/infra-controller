@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 func TestStripTaskReports(t *testing.T) {

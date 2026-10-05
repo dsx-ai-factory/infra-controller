@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // Store is the operation-run persistence surface used by Dispatcher.

@@ -15,11 +15,11 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 type fakeSQLResult struct {

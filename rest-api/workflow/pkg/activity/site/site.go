@@ -21,20 +21,20 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	ccu "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	ccu "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/ipam"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	csm "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/sitemgr"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 )
 
 const (

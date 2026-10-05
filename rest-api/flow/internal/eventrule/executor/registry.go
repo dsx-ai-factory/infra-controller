@@ -6,7 +6,7 @@ package executor
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 )
 
 // Registry stores one executor for each action type.

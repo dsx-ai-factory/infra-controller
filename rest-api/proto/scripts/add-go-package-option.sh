@@ -10,7 +10,7 @@ set -e
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <proto_file> <go_package_path>"
-    echo "Example: $0 myfile.proto github.com/NVIDIA/infra-controller/rest-api/proto"
+    echo "Example: $0 myfile.proto github.com/dsx-ai-factory/infra-controller/rest-api/proto"
     exit 1
 fi
 

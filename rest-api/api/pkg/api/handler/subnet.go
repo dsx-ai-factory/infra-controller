@@ -14,7 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	cip "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	cip "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 
 	"go.opentelemetry.io/otel/attribute"
 	temporalClient "go.temporal.io/sdk/client"
@@ -23,22 +23,22 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	auth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/ipam"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 const DefaultReservedIPCount = 2

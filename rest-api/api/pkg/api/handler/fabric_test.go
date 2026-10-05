@@ -12,10 +12,10 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -23,11 +23,11 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
 	tmocks "go.temporal.io/sdk/mocks"
 )
 

@@ -10,7 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/types"
 )
 
 // Scheduler manages a set of scheduled jobs. Register jobs with Schedule,

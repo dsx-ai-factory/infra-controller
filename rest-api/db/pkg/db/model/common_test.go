@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestLabels_FromProto(t *testing.T) {

@@ -9,10 +9,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/firmwareauth"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // Canonical Temporal activity names. These constants are the single source of

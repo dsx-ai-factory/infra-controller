@@ -18,8 +18,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // Version is the report document schema version.

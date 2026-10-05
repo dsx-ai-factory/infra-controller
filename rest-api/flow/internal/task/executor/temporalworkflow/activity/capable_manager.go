@@ -6,9 +6,9 @@ package activity
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 )
 
 // Activity implementations use these helpers to bridge descriptor-level

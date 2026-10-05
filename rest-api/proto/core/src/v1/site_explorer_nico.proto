@@ -7,7 +7,7 @@ package site_explorer;
 
 import "google/protobuf/duration.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 message OperatorErrorSchema {
   // Stable identifier for alerting and centralized log filtering.

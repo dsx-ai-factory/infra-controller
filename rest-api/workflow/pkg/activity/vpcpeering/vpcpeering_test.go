@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
-	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
+	cwu "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,12 +25,12 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
 
 	"os"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func testTemporalSiteClientPool(t *testing.T) *sc.ClientPool {

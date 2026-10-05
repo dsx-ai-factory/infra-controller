@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
 
 	log "github.com/sirupsen/logrus"
 )

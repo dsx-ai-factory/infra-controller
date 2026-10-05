@@ -35,13 +35,13 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
 
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
-	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	taskmanager "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/manager"
+	taskstore "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/store"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 const (

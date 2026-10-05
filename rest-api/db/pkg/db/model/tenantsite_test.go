@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	otrace "go.opentelemetry.io/otel/trace"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/roles"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/roles"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 )
 
 func TestNewTenantSiteDAO(t *testing.T) {

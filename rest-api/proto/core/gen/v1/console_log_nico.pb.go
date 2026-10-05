@@ -133,7 +133,7 @@ const file_console_log_nico_proto_rawDesc = "" +
 	"\x0eConsoleLogLine\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data2n\n" +
 	"\x11ConsoleLogService\x12Y\n" +
-	"\x11StreamConsoleLogs\x12%.console_log.StreamConsoleLogsRequest\x1a\x1b.console_log.ConsoleLogLine0\x01B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x11StreamConsoleLogs\x12%.console_log.StreamConsoleLogsRequest\x1a\x1b.console_log.ConsoleLogLine0\x01B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_console_log_nico_proto_rawDescOnce sync.Once

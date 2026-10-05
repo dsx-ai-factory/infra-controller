@@ -14,10 +14,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestAPIDpuExtensionServiceObservabilityConfigPrometheus_Validate(t *testing.T) {

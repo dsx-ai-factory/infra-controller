@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 var _ TargetLookup = (*testTargetLookup)(nil)

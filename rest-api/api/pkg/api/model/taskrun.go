@@ -13,8 +13,8 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // A Run is the REST representation of Flow's operation run: a phased,

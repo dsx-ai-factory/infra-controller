@@ -8,8 +8,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

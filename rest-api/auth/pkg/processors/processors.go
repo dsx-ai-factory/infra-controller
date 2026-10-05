@@ -4,9 +4,9 @@
 package processors
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
-	commonConfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
+	commonConfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 	"github.com/prometheus/client_golang/prometheus"
 	temporalClient "go.temporal.io/sdk/client"
 )

@@ -10,12 +10,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	opmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	opmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 func TestOperationRunFromDefaults(t *testing.T) {

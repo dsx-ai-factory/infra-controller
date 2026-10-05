@@ -6,13 +6,13 @@ package workflow
 import (
 	"time"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // EnableDisableMachineValidationTest is a workflow to enable/disable machine validation test using EnableDisableMachineValidationTestOnSite activity

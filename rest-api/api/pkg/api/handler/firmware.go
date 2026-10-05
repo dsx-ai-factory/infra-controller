@@ -9,8 +9,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 func firmwareRequestBindError(c echo.Context, err error) error {

@@ -15,11 +15,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/vpcprefix"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	ipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 )
 
 func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {

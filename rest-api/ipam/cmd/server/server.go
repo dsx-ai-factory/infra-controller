@@ -14,9 +14,9 @@ import (
 
 	"connectrpc.com/connect"
 	"connectrpc.com/otelconnect"
-	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
-	"github.com/NVIDIA/infra-controller/rest-api/ipam/api/v1/apiv1connect"
-	"github.com/NVIDIA/infra-controller/rest-api/ipam/pkg/service"
+	goipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/ipam/api/v1/apiv1connect"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/ipam/pkg/service"
 	compress "github.com/klauspost/connect-compress/v2"
 	"github.com/metal-stack/v"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

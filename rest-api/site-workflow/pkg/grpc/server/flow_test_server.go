@@ -19,8 +19,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 var (

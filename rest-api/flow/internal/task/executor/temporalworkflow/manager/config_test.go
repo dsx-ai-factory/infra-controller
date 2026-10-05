@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/clients/temporal"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/endpoint"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/clients/temporal"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/secret"
 )
 
 func TestConfigValidateDataCipher(t *testing.T) {

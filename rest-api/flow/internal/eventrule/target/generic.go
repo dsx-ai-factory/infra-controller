@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 )
 
 type componentResolver struct{}

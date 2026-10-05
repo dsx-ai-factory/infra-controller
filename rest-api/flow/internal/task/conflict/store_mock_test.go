@@ -8,10 +8,10 @@ import (
 
 	"github.com/google/uuid"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // mockStore is a minimal in-memory implementation of taskstore.Store used in

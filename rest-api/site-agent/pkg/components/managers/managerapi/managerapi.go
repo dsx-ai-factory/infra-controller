@@ -4,8 +4,8 @@
 package managerapi
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/conftypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 )
 
 // ManagerHdl - local handle to be assigned

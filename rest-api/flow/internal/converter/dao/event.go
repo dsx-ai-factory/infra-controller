@@ -6,9 +6,9 @@ package dao
 import (
 	"fmt"
 
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventrulecodec "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/codec"
 )
 
 // EventTo converts a durable domain event to its database representation.

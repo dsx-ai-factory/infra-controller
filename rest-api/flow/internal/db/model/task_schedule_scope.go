@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
 )
 
 // ComponentFilterKind aliases the shared operation target filter kind.

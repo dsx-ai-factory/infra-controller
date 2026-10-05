@@ -6,9 +6,9 @@ package processor
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/target"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
 )
 
 // ExecutionNotifier hints that newly committed pending work is available. Notify

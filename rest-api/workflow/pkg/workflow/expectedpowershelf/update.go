@@ -6,16 +6,16 @@ package expectedpowershelf
 import (
 	"fmt"
 
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	expectedPowerShelfActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedpowershelf"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	expectedPowerShelfActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedpowershelf"
 )
 
 // UpdateExpectedPowerShelfInventory is a workflow called by Site Agent to update ExpectedPowerShelf inventory for a Site

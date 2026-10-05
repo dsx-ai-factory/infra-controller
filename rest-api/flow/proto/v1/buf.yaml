@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 version: v1
-name: github.com/NVIDIA/infra-controller/rest-api/flow
+name: github.com/dsx-ai-factory/infra-controller/rest-api/flow
 lint:
   use:
     - DEFAULT

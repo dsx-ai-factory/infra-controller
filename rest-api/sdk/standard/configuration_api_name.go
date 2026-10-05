@@ -6,7 +6,7 @@ package standard
 import (
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard/helpers"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard/helpers"
 )
 
 // NewConfigurationWithAPIName returns a generated configuration with an

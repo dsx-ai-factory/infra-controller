@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
 )
 
 var testMAC1 = net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x01}

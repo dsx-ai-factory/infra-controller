@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"slices"
 
-	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	converterdao "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/dao"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/google/uuid"
 )
 

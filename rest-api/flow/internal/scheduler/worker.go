@@ -11,7 +11,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/types"
 )
 
 // worker processes workItems one at a time until workCh is closed.

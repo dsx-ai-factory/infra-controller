@@ -20,8 +20,8 @@ import (
 
 	"time"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	goipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 	"github.com/metal-stack/v"
 	"github.com/urfave/cli/v2"
 	"go.mongodb.org/mongo-driver/mongo/options"

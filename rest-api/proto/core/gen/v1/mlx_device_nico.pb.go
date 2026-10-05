@@ -8125,7 +8125,7 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	"LockStatus\x12\x17\n" +
 	"\x13LOCK_STATUS_UNKNOWN\x10\x00\x12\x16\n" +
 	"\x12LOCK_STATUS_LOCKED\x10\x01\x12\x18\n" +
-	"\x14LOCK_STATUS_UNLOCKED\x10\x02B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x14LOCK_STATUS_UNLOCKED\x10\x02B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_mlx_device_nico_proto_rawDescOnce sync.Once

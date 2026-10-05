@@ -3,7 +3,7 @@
 
 package nico
 
-import corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+import corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
 // ResultIdentifier returns the identifier used by the request. MAC-targeted
 // batches use Core's echoed MAC even when Core also resolved an external ID.

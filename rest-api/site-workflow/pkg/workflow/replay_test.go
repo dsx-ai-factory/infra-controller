@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/worker"
 )

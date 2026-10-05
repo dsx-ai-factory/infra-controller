@@ -12,7 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Logger returns a middleware that logs HTTP requests

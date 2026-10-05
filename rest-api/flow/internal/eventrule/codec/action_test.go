@@ -6,10 +6,10 @@ package codec_test
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/codec"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 

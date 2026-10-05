@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

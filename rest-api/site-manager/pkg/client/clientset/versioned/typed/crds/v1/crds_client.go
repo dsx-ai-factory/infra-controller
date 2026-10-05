@@ -12,8 +12,8 @@ package v1
 import (
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/scheme"
-	v1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/scheme"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	rest "k8s.io/client-go/rest"
 )
 

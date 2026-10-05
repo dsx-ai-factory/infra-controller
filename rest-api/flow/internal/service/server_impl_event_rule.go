@@ -13,9 +13,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/protobuf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 type eventRuleManager interface {

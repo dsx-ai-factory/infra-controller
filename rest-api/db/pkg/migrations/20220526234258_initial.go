@@ -10,8 +10,8 @@ import (
 
 	"github.com/uptrace/bun"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 )
 
 func init() {

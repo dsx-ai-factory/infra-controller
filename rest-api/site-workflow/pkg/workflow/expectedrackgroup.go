@@ -10,7 +10,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 // DiscoverExpectedRackGroupInventory is a workflow to fetch Expected Rack Group inventory on Site and publish to Cloud

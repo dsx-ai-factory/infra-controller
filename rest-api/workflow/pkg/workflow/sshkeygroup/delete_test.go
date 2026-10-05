@@ -17,7 +17,7 @@ import (
 
 	tmocks "go.temporal.io/sdk/mocks"
 
-	sshKeyGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
+	sshKeyGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
 )
 
 type DeleteSSHKeyGroupTestSuite struct {

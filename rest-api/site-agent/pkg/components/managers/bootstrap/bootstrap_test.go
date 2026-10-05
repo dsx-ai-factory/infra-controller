@@ -15,10 +15,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	Manager "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
-	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
+	Manager "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
+	bootstraptypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
 )
 
 // testOTP matches what Site Manager issues: 20 random bytes in URL-safe base64.

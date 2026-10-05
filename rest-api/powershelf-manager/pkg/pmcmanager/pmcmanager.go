@@ -12,11 +12,11 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/credentials"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/pmcregistry"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/redfish"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/credentials"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/pmcregistry"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/redfish"
 )
 
 const redfishTimeout = time.Minute * 1

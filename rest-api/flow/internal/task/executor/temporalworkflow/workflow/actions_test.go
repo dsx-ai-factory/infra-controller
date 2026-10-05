@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
 )
 
 func TestActionBatchCount(t *testing.T) {

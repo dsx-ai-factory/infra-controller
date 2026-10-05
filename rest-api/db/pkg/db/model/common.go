@@ -6,7 +6,7 @@ package model
 import (
 	"strconv"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

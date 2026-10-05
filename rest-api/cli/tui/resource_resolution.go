@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
 )
 
 // GeneratedResourceDescriptor describes how an OpenAPI parameter can be

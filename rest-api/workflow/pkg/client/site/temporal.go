@@ -18,8 +18,8 @@ import (
 
 	tsdkClient "go.temporal.io/sdk/client"
 
-	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
+	cconfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
+	ctemporal "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/temporal"
 )
 
 // ClientPool contains Temporal clients for different site agents

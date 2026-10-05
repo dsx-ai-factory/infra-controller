@@ -17,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 // TestFullIntegration verifies the complete flow with a real SDK provider: the

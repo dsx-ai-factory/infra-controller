@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 func testInfiniBandInterfaceSetupSchema(t *testing.T, dbSession *db.Session) {

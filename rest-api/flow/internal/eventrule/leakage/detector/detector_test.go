@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 

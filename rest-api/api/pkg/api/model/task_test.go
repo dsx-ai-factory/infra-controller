@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
 )
 
 func TestAPITaskStats_FromProto(t *testing.T) {

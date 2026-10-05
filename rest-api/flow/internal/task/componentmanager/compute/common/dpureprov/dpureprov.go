@@ -47,7 +47,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/nicoapi"
 )
 
 // Defaults for the polling loop. Chosen so a typical (Δt ≈ 30-45 min)

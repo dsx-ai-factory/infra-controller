@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // Descriptor describes a component manager implementation registered in this

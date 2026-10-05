@@ -12,9 +12,9 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	instanceActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // RebootInstanceByID is a helper Temporal workflow to reboot a Machine associated with an Instance

@@ -10,8 +10,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	gsv "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/server"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	gsv "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/server"
 )
 
 // Test the nico grpc client

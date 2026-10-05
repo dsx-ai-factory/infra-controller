@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 
-	taskactivity "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	taskactivity "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 func mockUpdateTaskStatus(_ context.Context, _ *taskdef.TaskStatusUpdate) error {

@@ -6,9 +6,9 @@ package expectedrackgroup
 import (
 	"testing"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	metrics "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	activity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedrackgroup"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	metrics "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	activity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedrackgroup"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

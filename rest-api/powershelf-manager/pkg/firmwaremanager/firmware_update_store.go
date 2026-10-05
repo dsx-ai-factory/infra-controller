@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
 )
 
 // ErrNotFound is returned by Get when no firmware update record exists for

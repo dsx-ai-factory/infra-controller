@@ -4,8 +4,8 @@
 package site
 
 import (
-	Manager "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	Manager "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 )
 
 // ManagerAccess is access to all managers.

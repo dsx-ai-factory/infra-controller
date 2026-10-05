@@ -6,7 +6,7 @@ package client
 import (
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // UpgradeFirmwareResult represents the result of a firmware upgrade operation.

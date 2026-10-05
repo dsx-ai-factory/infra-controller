@@ -6,7 +6,7 @@ package api
 import (
 	"net/http"
 
-	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
+	apiHandler "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler"
 )
 
 // NewSystemAPIRoutes returns API routes that provide system level  functions

@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	taskstore "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/store"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 type leakHandlingStore struct {

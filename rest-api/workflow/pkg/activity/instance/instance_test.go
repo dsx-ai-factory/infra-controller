@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -26,11 +26,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
 	"os"
 

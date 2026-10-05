@@ -12,12 +12,12 @@ import (
 
 	"github.com/google/uuid"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
 // ComponentDrift represents a drift detected between expected (local DB) and actual (source system) data.

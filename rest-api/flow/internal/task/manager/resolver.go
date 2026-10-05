@@ -9,12 +9,12 @@ import (
 
 	"github.com/google/uuid"
 
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
 // TargetFetcher provides the methods needed to fetch racks and components for target resolution.

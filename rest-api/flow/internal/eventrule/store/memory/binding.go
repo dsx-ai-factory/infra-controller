@@ -7,9 +7,9 @@ import (
 	"context"
 	"fmt"
 
-	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	converterdao "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/dao"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 )
 
 // Bind stores a rule-to-scope association.

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

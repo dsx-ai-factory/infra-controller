@@ -14,8 +14,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	subnetActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 type DeleteSubnetTestSuite struct {

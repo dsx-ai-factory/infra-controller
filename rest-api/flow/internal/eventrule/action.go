@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // ActionCondition determines whether one action applies to an envelope.

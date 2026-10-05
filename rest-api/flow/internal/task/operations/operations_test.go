@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/secret"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/stretchr/testify/require"
 )
 

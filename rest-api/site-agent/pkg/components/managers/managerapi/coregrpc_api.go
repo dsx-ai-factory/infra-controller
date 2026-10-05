@@ -4,7 +4,7 @@
 package managerapi
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
 // CoreGrpcExpansion - CoreGrpc Expansion

@@ -136,7 +136,7 @@ const file_dpu_machine_proto_rawDesc = "" +
 	"\amachine\x18\x01 \x01(\v2\x0e.forge.MachineR\amachine\x12U\n" +
 	"\x12dpu_network_config\x18\x02 \x01(\v2'.forge.ManagedHostNetworkConfigResponseR\x10dpuNetworkConfig\"D\n" +
 	"\x0eDpuMachineList\x122\n" +
-	"\bmachines\x18\x01 \x03(\v2\x16.dpumachine.DpuMachineR\bmachinesB8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\bmachines\x18\x01 \x03(\v2\x16.dpumachine.DpuMachineR\bmachinesB@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_dpu_machine_proto_rawDescOnce sync.Once

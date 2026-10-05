@@ -10,7 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 
-	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"

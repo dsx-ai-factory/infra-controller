@@ -11,11 +11,11 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateInstanceType is a workflow to create new InstanceTypes using the CreateInstanceTypeOnSite activity

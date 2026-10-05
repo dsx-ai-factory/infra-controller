@@ -18,8 +18,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	cli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
+	cli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/vpcprefix"
 )
 
 // Command represents a registered interactive command.

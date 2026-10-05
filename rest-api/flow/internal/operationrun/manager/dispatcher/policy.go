@@ -3,7 +3,7 @@
 
 package dispatcher
 
-import operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+import operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 
 type pauseDecision struct {
 	pause   bool

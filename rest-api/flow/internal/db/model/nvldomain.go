@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )

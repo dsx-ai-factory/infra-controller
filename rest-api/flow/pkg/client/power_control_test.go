@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 type recordingPowerControlClient struct {

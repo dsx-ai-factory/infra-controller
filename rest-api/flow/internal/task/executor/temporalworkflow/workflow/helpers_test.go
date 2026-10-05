@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 func TestBuildTargets(t *testing.T) {

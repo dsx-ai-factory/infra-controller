@@ -6,10 +6,10 @@ package dao
 import (
 	"fmt"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventrulecodec "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/codec"
 )
 
 // EventActionExecutionTo converts a domain execution to a database model.

@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/location"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 )
 
 func TestNewRack(t *testing.T) {

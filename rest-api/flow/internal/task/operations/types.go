@@ -4,7 +4,7 @@
 package operations
 
 import (
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 type PowerOperation int

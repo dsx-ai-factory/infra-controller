@@ -6,7 +6,7 @@ package model
 import (
 	"time"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // APIUser is a data structure to capture information about user at the API layer

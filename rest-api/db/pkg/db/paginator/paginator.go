@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 	"github.com/uptrace/bun"
 )
 

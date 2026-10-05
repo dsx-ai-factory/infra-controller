@@ -13,11 +13,11 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
-	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	cClient "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ManageTenant is activity to manage a Tenant on Site

@@ -5,8 +5,8 @@
 package testing
 
 import (
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/Nerzal/gocloak/v13"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
 )
 
 // Test domain constants - consolidate similar patterns across test files

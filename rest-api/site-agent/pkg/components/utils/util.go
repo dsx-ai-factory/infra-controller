@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/protobuf/types/known/timestamppb"

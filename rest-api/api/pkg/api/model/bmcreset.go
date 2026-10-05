@@ -4,7 +4,7 @@
 package model
 
 import (
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // APIMachineBMCResetRequest represents a request to reset the BMC of a Machine

@@ -10,9 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
 )
 
 // TaskManager is the downstream task-submission surface used by TaskExecutor.

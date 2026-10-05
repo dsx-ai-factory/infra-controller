@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	goset "github.com/deckarep/golang-set/v2"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
+	dpsclient "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ValidatePowerProfile validates and normalizes set operations when direct DPS

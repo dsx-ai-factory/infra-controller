@@ -12,11 +12,11 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/vpcprefix"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	ipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (

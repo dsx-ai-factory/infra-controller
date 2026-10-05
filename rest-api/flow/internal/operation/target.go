@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // -----------------------------------------------------------------------------

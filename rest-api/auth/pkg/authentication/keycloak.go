@@ -14,8 +14,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
 )
 
 const (

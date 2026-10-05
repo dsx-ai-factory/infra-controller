@@ -6,11 +6,11 @@ package protobuf
 import (
 	"testing"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powersupply"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powersupply"
 
 	rfcommon "github.com/stmcginnis/gofish/common"
 	gofish "github.com/stmcginnis/gofish/redfish"

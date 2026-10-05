@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	instanceActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 // DeleteInstanceByID is a helper Temporal workflow to delete an Instance by ID

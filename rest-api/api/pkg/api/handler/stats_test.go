@@ -17,13 +17,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 )
 
 // ~~~~~ Test Helpers ~~~~~ //

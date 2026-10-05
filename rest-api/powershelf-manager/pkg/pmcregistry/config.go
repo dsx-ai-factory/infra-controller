@@ -3,7 +3,7 @@
 
 package pmcregistry
 
-import cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+import cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
 // PmcRegisterType enumerates registry backends.
 type PmcRegisterType string

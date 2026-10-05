@@ -16,11 +16,11 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	temporalworkflow "go.temporal.io/sdk/workflow"
 
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	taskactivity "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	taskactivity "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // --- WorkflowDescriptor.validate() ---

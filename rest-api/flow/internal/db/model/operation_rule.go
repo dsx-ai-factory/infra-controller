@@ -14,8 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 var defaultOperationRulePagination = dbquery.Pagination{

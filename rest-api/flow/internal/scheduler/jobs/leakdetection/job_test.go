@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	schedtypes "github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	schedtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/stretchr/testify/require"
 )
 

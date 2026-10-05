@@ -18,8 +18,8 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	csmtypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/types"
 )
 
 const (

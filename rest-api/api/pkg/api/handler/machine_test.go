@@ -14,14 +14,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -31,10 +31,10 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 
 	"go.temporal.io/api/enums/v1"
 	temporalClient "go.temporal.io/sdk/client"
@@ -42,8 +42,8 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
 )
 
 func testMachineInitDB(t *testing.T) *cdb.Session {

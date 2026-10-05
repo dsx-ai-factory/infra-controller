@@ -12,17 +12,17 @@ import (
 	"syscall"
 	"time"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/spf13/cobra"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	svc "github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/internal/service"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/credentials"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	svc "github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/internal/service"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/credentials"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
 )
 
 // getEnvOrDefault returns the value of an environment variable or a default value.

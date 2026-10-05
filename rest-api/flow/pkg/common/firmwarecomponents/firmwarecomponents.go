@@ -42,7 +42,7 @@ import (
 	"sort"
 	"strings"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // === NICo (Core) per-tray enums. ==========================================

@@ -13,18 +13,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	_ "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	_ "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	cconfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 	echo "github.com/labstack/echo/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -39,7 +39,7 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Test_ProxyTimeoutsFitWriteTimeout guards the ceiling that the gRPC proxy

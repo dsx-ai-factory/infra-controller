@@ -4,8 +4,8 @@
 package nico
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ExtractPowerState derives an operations.PowerStatus from the first

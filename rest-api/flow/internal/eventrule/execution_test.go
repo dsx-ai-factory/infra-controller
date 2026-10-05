@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
 )
 
 func TestNewExecution(t *testing.T) {

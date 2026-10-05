@@ -6,7 +6,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/openapi"
 )
 
 func TestParseSpec_EmbeddedSpec(t *testing.T) {

@@ -1219,7 +1219,7 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\x1fDNS_LOOKUP_OUTCOME_NO_SUCH_NAME\x10\x03\x12(\n" +
 	"$DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE\x10\x04\x12\x1e\n" +
 	"\x1aDNS_LOOKUP_OUTCOME_REFUSED\x10\x05\x12&\n" +
-	"\"DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED\x10\x06B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\"DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED\x10\x06B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_dns_nico_proto_rawDescOnce sync.Once

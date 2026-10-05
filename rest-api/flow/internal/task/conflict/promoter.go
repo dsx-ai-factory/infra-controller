@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	taskstore "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/store"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 const (

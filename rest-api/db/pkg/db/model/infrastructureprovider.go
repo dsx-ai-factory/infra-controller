@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/uptrace/bun"
 )

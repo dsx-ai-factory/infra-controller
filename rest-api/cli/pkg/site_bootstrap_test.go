@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/openapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

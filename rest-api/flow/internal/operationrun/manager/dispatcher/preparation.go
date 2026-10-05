@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // preparedDispatch holds the locked run state and reconciled target summary

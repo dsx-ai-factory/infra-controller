@@ -9,12 +9,12 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	auth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // GetUserHandler is an API Handler to return information about the current user

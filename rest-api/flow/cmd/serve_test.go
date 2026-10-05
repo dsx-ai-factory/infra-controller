@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
-	cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/authz"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/secret"
+	cmconfig "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // TestApplyComputeImplementationOverride covers the env-var fallback

@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // Get returns one operation run.

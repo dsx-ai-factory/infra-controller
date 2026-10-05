@@ -6,8 +6,8 @@ package resolver
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 

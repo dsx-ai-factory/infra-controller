@@ -16,9 +16,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	siteActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/site"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	siteActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/site"
 )
 
 func TestUpdateSiteConfigInventory(t *testing.T) {

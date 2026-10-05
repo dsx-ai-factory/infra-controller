@@ -8,8 +8,8 @@ import (
 	"os"
 	"testing"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

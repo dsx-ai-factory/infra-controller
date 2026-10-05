@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	ccu "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	ccu "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 	"github.com/labstack/echo/v4"
 )
 

@@ -9,7 +9,7 @@ import (
 
 	"database/sql"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/uptrace/bun"
 )
 

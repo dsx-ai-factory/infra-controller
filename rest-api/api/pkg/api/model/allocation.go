@@ -12,9 +12,9 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
 )
 
 var (

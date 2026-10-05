@@ -26,15 +26,15 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
+	cipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 )
 
 var (

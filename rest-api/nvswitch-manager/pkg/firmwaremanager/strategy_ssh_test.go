@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

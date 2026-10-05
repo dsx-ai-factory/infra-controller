@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	sshKeyGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
+	sshKeyGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
 )
 
 type SyncSSHKeyGroupTestSuite struct {

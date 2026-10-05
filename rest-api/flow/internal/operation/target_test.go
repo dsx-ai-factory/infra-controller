@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
 )
 
 func TestTargetSpecValidateTargetKinds(t *testing.T) {

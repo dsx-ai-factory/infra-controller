@@ -15690,7 +15690,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x11PauseOperationRun\x12\x1c.v1.PauseOperationRunRequest\x1a\x10.v1.OperationRun\x12E\n" +
 	"\x12ResumeOperationRun\x12\x1d.v1.ResumeOperationRunRequest\x1a\x10.v1.OperationRun\x12Q\n" +
 	"\x18AdvanceOperationRunPhase\x12#.v1.AdvanceOperationRunPhaseRequest\x1a\x10.v1.OperationRun\x12E\n" +
-	"\x12CancelOperationRun\x12\x1d.v1.CancelOperationRunRequest\x1a\x10.v1.OperationRunB8Z6github.com/NVIDIA/infra-controller/rest-api/proto/flowb\x06proto3"
+	"\x12CancelOperationRun\x12\x1d.v1.CancelOperationRunRequest\x1a\x10.v1.OperationRunB@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/flowb\x06proto3"
 
 var (
 	file_flow_proto_rawDescOnce sync.Once

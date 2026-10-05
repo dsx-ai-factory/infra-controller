@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
-	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
-	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	dpsclient "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps"
+	cauth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
+	cconfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"

@@ -8,9 +8,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
-	cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	cmcatalog "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
+	cmconfig "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 const (

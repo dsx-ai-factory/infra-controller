@@ -9,13 +9,13 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
-	eventprocessor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/processor"
-	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventexecutor "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/executor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	eventprocessor "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/processor"
+	eventscheduler "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/scheduler"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/target"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
 	"github.com/google/uuid"
 )
 

@@ -6,7 +6,7 @@ package operationrules
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 func TestIsValidOperation(t *testing.T) {

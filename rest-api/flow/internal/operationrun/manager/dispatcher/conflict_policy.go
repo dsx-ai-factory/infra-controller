@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	taskmanager "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/manager"
 )
 
 type conflictPolicyRuntime interface {

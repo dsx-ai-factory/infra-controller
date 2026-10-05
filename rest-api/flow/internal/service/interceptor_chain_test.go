@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
-	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/authz"
+	flowmetrics "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"

@@ -16,9 +16,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/certs"
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
-	crdclient "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/certs"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/core"
+	crdclient "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
 	"github.com/getsentry/sentry-go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"

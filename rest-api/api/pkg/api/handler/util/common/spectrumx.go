@@ -9,11 +9,11 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 // GetSpectrumXCapabilitiesForMachines reads the inventory projection used for

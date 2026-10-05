@@ -8,8 +8,8 @@ import (
 	"errors"
 	"time"
 
-	coregrpctypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/coregrpc"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	coregrpctypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/coregrpc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

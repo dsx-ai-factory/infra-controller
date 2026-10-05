@@ -13,8 +13,8 @@ import (
 	"net/netip"
 
 	"connectrpc.com/connect"
-	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
-	v1 "github.com/NVIDIA/infra-controller/rest-api/ipam/api/v1"
+	goipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/ipam/api/v1"
 )
 
 type IPAMService struct {

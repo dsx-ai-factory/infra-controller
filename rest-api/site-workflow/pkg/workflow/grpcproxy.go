@@ -4,8 +4,8 @@
 package workflow
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"

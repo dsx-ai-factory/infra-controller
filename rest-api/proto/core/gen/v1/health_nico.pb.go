@@ -323,7 +323,7 @@ const file_health_nico_proto_rawDesc = "" +
 	"\x12HealthProbeSuccess\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\x06target\x18\x02 \x01(\tH\x00R\x06target\x88\x01\x01B\t\n" +
-	"\a_targetB8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\a_targetB@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_health_nico_proto_rawDescOnce sync.Once

@@ -6,17 +6,17 @@ package tenant
 import (
 	"fmt"
 
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"go.temporal.io/sdk/workflow"
 
-	tenantActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/tenant"
+	tenantActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/tenant"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // UpdateTenantInventory is a workflow called by Site Agent to update Tenant inventory for a Site

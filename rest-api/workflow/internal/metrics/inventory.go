@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 )
 
 const (

@@ -14,9 +14,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
-	crds "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/crds"
-	internalinterfaces "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
+	versioned "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
+	crds "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/crds"
+	internalinterfaces "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

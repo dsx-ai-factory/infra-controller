@@ -9,9 +9,9 @@ import (
 	"net"
 	"sync"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/runner"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/pmcmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/runner"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/pmcmanager"
 
 	log "github.com/sirupsen/logrus"
 

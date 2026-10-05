@@ -13,10 +13,10 @@ import (
 	"go.temporal.io/api/serviceerror"
 	temporalclient "go.temporal.io/sdk/client"
 
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // workflowStatusToTaskStatus maps Temporal workflow execution statuses to the

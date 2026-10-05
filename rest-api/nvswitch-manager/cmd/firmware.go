@@ -10,7 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"

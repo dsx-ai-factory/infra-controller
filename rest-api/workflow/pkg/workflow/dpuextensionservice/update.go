@@ -6,15 +6,15 @@ package dpuextensionservice
 import (
 	"fmt"
 
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // UpdateDpuExtensionServiceInventory is a workflow called by Site Agent to update Dpu Extension Service inventory for a Site

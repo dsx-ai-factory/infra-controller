@@ -11,8 +11,8 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 func newListOrderTestDB(t *testing.T) (*bun.DB, sqlmock.Sqlmock) {

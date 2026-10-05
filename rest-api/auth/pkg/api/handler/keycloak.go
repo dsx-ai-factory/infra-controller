@@ -9,11 +9,11 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
-	caa "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/api/model"
+	caa "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authentication"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	ccu "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	ccu "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // LoginHandler is the API Handler for user authentication with OAuth2 flow

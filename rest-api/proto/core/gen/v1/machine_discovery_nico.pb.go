@@ -1767,7 +1767,7 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\aAARCH64\x10\x00\x12\n" +
 	"\n" +
 	"\x06X86_64\x10\x01\x12\v\n" +
-	"\aUNKNOWN\x10\x02B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\aUNKNOWN\x10\x02B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_machine_discovery_nico_proto_rawDescOnce sync.Once

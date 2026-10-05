@@ -11,7 +11,7 @@ import "google/protobuf/timestamp.proto";
 import "machine_discovery_nico.proto";
 import "nico_nico.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 // InventoryStatus - response status for inventory collection
 enum InventoryStatus {

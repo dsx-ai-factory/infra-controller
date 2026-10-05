@@ -10,10 +10,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 )
 
 //go:embed 20260930235900_nullable_domain_name.up.sql

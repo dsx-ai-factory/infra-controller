@@ -183,7 +183,7 @@ const file_scout_firmware_upgrade_nico_proto_rawDesc = "" +
 	"\x0efile_artifacts\x18\a \x03(\v2$.scout_firmware_upgrade.FileArtifactR\rfileArtifacts\"8\n" +
 	"\fFileArtifact\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x16\n" +
-	"\x06sha256\x18\x02 \x01(\tR\x06sha256B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x06sha256\x18\x02 \x01(\tR\x06sha256B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_scout_firmware_upgrade_nico_proto_rawDescOnce sync.Once

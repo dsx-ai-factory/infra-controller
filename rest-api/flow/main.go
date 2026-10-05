@@ -4,7 +4,7 @@
 package main
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/flow/cmd"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/cmd"
 )
 
 func main() {

@@ -22,15 +22,15 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskschedule "github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/taskschedule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/protobuf"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	taskschedule "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/taskschedule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 // CreateTaskSchedule creates a new task schedule.

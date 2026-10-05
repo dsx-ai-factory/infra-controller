@@ -6,7 +6,7 @@ package main
 import (
 	"flag"
 
-	gsv "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/server"
+	gsv "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/server"
 )
 
 // Test the Flow grpc client

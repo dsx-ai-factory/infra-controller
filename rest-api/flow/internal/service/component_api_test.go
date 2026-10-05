@@ -15,17 +15,17 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
-	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	inventorymanager "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/manager"
+	inventorystore "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/store"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // --- Minimal mock for inventorymanager.Manager ---

@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/credentials"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/firmwaremanager"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/inventorymanager"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/pmcmanager"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/pmcregistry"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/credentials"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/firmwaremanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/inventorymanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/pmcmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/pmcregistry"
 
 	log "github.com/sirupsen/logrus"
 )

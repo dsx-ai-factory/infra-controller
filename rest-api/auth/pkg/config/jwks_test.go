@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core"
 	mapset "github.com/deckarep/golang-set/v2"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/core"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"

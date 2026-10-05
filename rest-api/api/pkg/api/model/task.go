@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 var ProtoToAPITaskStatusName = map[flowv1.TaskStatus]string{

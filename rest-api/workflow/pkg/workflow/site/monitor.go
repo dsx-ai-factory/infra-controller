@@ -15,8 +15,8 @@ import (
 
 	"go.temporal.io/sdk/client"
 
-	siteActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/site"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	siteActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/site"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // MonitorHealthForAllSites is a Temporal cron workflow to periodically checks if Site inventory has been received from Site Agent

@@ -13,12 +13,12 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 
-	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	cClient "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // ManageInstanceType is an activity wrapper for InstanceType management tasks that allows injecting DB access

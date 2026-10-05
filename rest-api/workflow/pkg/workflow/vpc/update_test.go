@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpc"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	vpcActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/vpc"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -16,7 +16,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateVpcTestSuite struct {

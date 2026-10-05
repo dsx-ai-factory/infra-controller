@@ -14,9 +14,9 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	iActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 type CreateSubnetV2TestSuite struct {

@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	operationrunplanner "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun/manager/planner"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
+	operationrunplanner "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun/manager/planner"
 )
 
 // Manager is the operation-run business logic boundary used by service code.

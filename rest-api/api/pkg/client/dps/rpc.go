@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	dpsv1 "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps/internal/dpssdk/v1"
+	dpsv1 "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps/internal/dpssdk/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

@@ -1747,7 +1747,7 @@ const file_common_nico_proto_rawDesc = "" +
 	"\x1eSYSTEM_POWER_CONTROL_FORCE_OFF\x10\x03\x12)\n" +
 	"%SYSTEM_POWER_CONTROL_GRACEFUL_RESTART\x10\x04\x12&\n" +
 	"\"SYSTEM_POWER_CONTROL_FORCE_RESTART\x10\x05\x12&\n" +
-	"\"SYSTEM_POWER_CONTROL_AC_POWERCYCLE\x10\x06B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\"SYSTEM_POWER_CONTROL_AC_POWERCYCLE\x10\x06B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_common_nico_proto_rawDescOnce sync.Once

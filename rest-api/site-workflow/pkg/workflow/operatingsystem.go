@@ -10,11 +10,11 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateOsImage is a workflow to create an OsImage using CreateOsImageOnSite activity

@@ -15,8 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/db/postgres"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/db/postgres"
 )
 
 // CreateTestDB creates a fresh test database for integration tests.

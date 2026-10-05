@@ -9,8 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/util"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
 )
 
 // FirmwareRepo holds parsed firmware upgrade edges and the supported starting-version range for a vendor.

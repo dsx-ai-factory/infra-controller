@@ -21,9 +21,9 @@ import (
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // Client is the gRPC client for interacting with the Flow service.

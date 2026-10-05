@@ -11,12 +11,12 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/errors"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/converter/dao"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/db/migrations"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/errors"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/converter/dao"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/db/migrations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
 )
 
 // PostgresPmcRegistry implements the PmcRegister interface and it uses PostgresQL

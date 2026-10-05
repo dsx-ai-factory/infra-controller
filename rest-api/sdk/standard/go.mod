@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-module github.com/NVIDIA/infra-controller/rest-api/sdk/standard
+module github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard
 
 go 1.26.4
 

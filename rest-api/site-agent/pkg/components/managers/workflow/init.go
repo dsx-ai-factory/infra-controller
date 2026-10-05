@@ -6,7 +6,7 @@ package workflow
 import (
 	"fmt"
 
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"

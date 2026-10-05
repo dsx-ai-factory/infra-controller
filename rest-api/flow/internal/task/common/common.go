@@ -6,8 +6,8 @@ package common
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/google/uuid"
 )
 

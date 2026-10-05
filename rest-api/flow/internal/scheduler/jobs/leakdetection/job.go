@@ -9,15 +9,15 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/config"
-	eventingestion "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/ingestion"
-	leakagedetector "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage/detector"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico" //nolint
-	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/config"
+	eventingestion "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/ingestion"
+	leakagedetector "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/leakage/detector"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
+	nicoprovider "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico" //nolint
+	taskmanager "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/manager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 type detectorRunner interface {

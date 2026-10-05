@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

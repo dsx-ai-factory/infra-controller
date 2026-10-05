@@ -17,14 +17,14 @@ import (
 
 	"github.com/uptrace/bun/extra/bundebug"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/roles"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/roles"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
 )
 
 // TestInitDB init DB

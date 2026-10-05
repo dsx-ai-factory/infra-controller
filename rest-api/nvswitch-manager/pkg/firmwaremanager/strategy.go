@@ -6,7 +6,7 @@ package firmwaremanager
 import (
 	"context"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
 )
 
 // UpdateStrategy defines the interface for a firmware update strategy.

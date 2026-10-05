@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	cauth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"

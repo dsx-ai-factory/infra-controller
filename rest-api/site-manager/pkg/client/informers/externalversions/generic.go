@@ -12,7 +12,7 @@ package externalversions
 import (
 	"fmt"
 
-	v1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 )

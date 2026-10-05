@@ -24,8 +24,8 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // newProxyEchoContext returns a context and recorder for helpers whose HTTP

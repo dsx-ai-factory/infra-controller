@@ -11,12 +11,12 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	pb "github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/converter/protobuf"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/converter/protobuf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

@@ -19,18 +19,18 @@ import (
 
 	tClient "go.temporal.io/sdk/client"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	capis "github.com/NVIDIA/infra-controller/rest-api/api/internal/server"
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	capis "github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/server"
+	dpsclient "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
 
 	// Imports for API doc generation
-	_ "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	_ "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
 )
 
 const (

@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/vpcprefix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

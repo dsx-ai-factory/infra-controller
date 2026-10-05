@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"

@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
-	cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
-	computenicolegacy "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/compute/nicolegacy"
-	cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager"
+	cmcatalog "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
+	computenicolegacy "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/compute/nicolegacy"
+	cmconfig "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 )
 
 // newProviderDecoderRegistry creates the provider config decoder registry used

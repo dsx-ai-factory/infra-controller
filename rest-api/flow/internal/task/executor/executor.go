@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // Executor is the engine-agnostic interface for executing tasks. Implementations

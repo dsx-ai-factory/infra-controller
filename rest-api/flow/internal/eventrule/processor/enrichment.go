@@ -8,11 +8,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/google/uuid"
 )
 

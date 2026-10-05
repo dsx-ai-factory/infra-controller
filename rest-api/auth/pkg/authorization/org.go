@@ -6,9 +6,9 @@ package authz
 import (
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/roles"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/roles"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // Role-name constants are sourced from common/pkg/roles so they can be

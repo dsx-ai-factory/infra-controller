@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

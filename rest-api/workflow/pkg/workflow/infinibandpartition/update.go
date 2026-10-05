@@ -6,17 +6,17 @@ package infinibandpartition
 import (
 	"fmt"
 
-	cwi "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/inventory"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
+	cwi "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/inventory"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"go.temporal.io/sdk/workflow"
 
-	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	ibpActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // UpdateInfiniBandPartitionInventory is a workflow called by Site Agent to update InfiniBandPartition inventory for a Site

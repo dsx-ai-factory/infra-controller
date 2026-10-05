@@ -8,8 +8,8 @@ import (
 
 	"go.temporal.io/sdk/client"
 
-	wfmgr "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
-	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
+	wfmgr "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
+	sww "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
 const (

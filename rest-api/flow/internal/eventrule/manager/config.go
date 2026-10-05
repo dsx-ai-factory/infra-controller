@@ -6,10 +6,10 @@ package manager
 import (
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
-	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
-	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventexecutor "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/executor"
+	eventscheduler "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/scheduler"
+	inventoryresolver "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
 )
 
 // SchedulerConfig identifies the manager-owned scheduler and controls its

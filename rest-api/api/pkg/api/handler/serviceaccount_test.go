@@ -10,18 +10,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	cauth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 func TestServiceAccountHandler_GetCurrent(t *testing.T) {

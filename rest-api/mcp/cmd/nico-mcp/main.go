@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/NVIDIA/infra-controller/rest-api/mcp/internal/server"
-	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/mcp/internal/server"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/openapi"
 	"github.com/urfave/cli/v2"
 )
 

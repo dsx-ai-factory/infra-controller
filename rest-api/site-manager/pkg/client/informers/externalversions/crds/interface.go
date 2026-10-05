@@ -10,8 +10,8 @@ Code is generated
 package crds
 
 import (
-	v1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/crds/v1"
-	internalinterfaces "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/crds/v1"
+	internalinterfaces "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to each of this group's versions.

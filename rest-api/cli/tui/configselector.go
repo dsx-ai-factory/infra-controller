@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/term"
 
-	cli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	cli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
 )
 
 // ChooseConfigFile scans ~/.nico for config*.yaml files and shows an interactive

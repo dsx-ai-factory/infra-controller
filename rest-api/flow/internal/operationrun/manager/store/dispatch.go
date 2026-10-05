@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/dao"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // FetchRunnableIDs returns up to limit pending/running operation runs for

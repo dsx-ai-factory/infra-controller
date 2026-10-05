@@ -4,8 +4,8 @@
 package config
 
 import (
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/core"
 	"github.com/golang-jwt/jwt/v5"
 )
 

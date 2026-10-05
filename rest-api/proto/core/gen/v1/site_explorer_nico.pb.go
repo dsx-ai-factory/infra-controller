@@ -3133,7 +3133,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\x16InternalLockdownStatus\x12\v\n" +
 	"\aENABLED\x10\x00\x12\v\n" +
 	"\aPARTIAL\x10\x01\x12\f\n" +
-	"\bDISABLED\x10\x02B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\bDISABLED\x10\x02B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_site_explorer_nico_proto_rawDescOnce sync.Once

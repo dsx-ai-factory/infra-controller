@@ -11,17 +11,17 @@ import (
 
 	"go.temporal.io/sdk/client"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cwutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 )
 
 // ManageTenant is an activity wrapper for managing Tenant lifecycle that allows

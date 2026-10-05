@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // IdentifierType describes the identifiers accepted by the component manager API.

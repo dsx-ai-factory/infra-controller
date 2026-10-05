@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	handler "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api"
+	handler "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/api"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
-	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	cerr "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/middleware"
+	cconfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
+	cerr "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/getsentry/sentry-go"
 	sentryZerolog "github.com/getsentry/sentry-go/zerolog"
@@ -29,21 +29,21 @@ import (
 
 	tsdkClient "go.temporal.io/sdk/client"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api"
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api"
+	dpsclient "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otelecho"
+	ctemporal "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/temporal"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	authn "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authentication"
 	"golang.org/x/time/rate"
 
 	// Imports for API doc generation
-	_ "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	_ "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
 )
 
 const (

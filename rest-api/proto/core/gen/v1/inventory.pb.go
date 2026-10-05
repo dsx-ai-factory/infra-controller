@@ -2567,7 +2567,7 @@ const file_inventory_proto_rawDesc = "" +
 	"\x0fInventoryStatus\x12 \n" +
 	"\x1cINVENTORY_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18INVENTORY_STATUS_SUCCESS\x10\x01\x12\x1b\n" +
-	"\x17INVENTORY_STATUS_FAILED\x10\x02B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x17INVENTORY_STATUS_FAILED\x10\x02B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_inventory_proto_rawDescOnce sync.Once

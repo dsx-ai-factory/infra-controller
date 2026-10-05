@@ -24,11 +24,11 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
-	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	cutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/conftypes"
+	bootstraptypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
 	"gopkg.in/fsnotify.v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"

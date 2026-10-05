@@ -15,7 +15,7 @@ import (
 )
 
 // tracerName identifies spans created through this package's helpers.
-const tracerName = "github.com/NVIDIA/infra-controller/rest-api"
+const tracerName = "github.com/dsx-ai-factory/infra-controller/rest-api"
 
 // StartSpan starts a child span using the global TracerProvider; the parent is
 // taken from ctx via its W3C span context, so it works under otelecho, Temporal

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

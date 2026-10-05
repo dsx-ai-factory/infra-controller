@@ -4,7 +4,7 @@
 package util
 
 import (
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ShouldReconcileDeletions reports whether a page carries the complete set of IDs the Site

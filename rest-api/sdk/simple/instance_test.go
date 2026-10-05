@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard"
 )
 
 // TestToStandardInstanceUpdateRequest verifies that nil slice/map fields in an

@@ -7,13 +7,13 @@ import (
 	"errors"
 	"testing"
 
-	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	iActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type InventorySSHKeyGroupTestSuite struct {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/types"
 )
 
 // createTestCA creates a temporary CA for testing and returns paths to cert and key files

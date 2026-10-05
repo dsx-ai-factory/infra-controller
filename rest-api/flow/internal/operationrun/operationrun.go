@@ -14,9 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 // OperationRunStatus is the durable lifecycle state for an operation run.

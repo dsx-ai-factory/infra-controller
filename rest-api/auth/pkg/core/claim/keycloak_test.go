@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	testutil "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/testing"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	authz "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
+	testutil "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/testing"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 )

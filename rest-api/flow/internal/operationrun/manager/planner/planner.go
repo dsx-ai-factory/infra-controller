@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // ErrPhaseHasNoTargets reports that a user-configured phase cannot be

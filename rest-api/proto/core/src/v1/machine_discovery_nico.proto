@@ -5,7 +5,7 @@ syntax = "proto3";
 
 package machine_discovery;
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 // Carries information about a host that was discovered by the NICo system
 message DiscoveryInfo {

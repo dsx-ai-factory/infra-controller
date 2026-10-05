@@ -10,12 +10,12 @@ import (
 	"net/netip"
 	"strings"
 
-	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	cipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
 	"github.com/uptrace/bun"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 var (

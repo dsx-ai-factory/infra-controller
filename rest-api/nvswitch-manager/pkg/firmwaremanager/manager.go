@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchmanager"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager/packages"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"

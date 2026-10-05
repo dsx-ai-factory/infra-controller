@@ -6,8 +6,8 @@ package expectedrackgroup
 import (
 	"github.com/google/uuid"
 
-	swa "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
+	swa "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
+	sww "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
 // RegisterPublisher registers ExpectedRackGroup inventory workflow and activity with Temporal

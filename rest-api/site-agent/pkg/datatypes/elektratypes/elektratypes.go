@@ -6,8 +6,8 @@ package elektratypes
 import (
 	"os"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/conftypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 	"github.com/rs/zerolog"
 	"go.uber.org/atomic"
 )

@@ -6,7 +6,7 @@ package ingestion
 import (
 	"context"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
 )
 
 // Sink accepts normalized events. A nil error means the event was accepted as

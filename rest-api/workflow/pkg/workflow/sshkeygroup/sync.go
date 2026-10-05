@@ -17,8 +17,8 @@ import (
 
 	"go.temporal.io/sdk/client"
 
-	sshKeyGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	sshKeyGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // SyncSSHKeyGroup is a Temporal workflow to create/update SSH Key Group via Site Agent

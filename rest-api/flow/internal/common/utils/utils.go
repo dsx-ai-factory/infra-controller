@@ -10,9 +10,9 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	dbtestutil "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/testutil"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/migrations"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	dbtestutil "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/testutil"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/migrations"
 )
 
 func UnitTestDB(ctx context.Context, t *testing.T, dbConf cdb.Config) (*cdb.Session, error) {

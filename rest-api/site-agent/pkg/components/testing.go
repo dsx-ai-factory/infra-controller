@@ -24,15 +24,15 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	cutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/conftypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/rs/zerolog/log"
 
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
-	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
-	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
+	bootstraptypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
+	workflowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
 )
 
 var (

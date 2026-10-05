@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	mapset "github.com/deckarep/golang-set/v2"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/core"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"

@@ -13,8 +13,8 @@ import (
 	"os"
 
 	"connectrpc.com/connect"
-	v1 "github.com/NVIDIA/infra-controller/rest-api/ipam/api/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/ipam/api/v1/apiv1connect"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/ipam/api/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/ipam/api/v1/apiv1connect"
 	compress "github.com/klauspost/connect-compress/v2"
 	"github.com/metal-stack/v"
 	"github.com/urfave/cli/v2"

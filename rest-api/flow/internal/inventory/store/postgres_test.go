@@ -16,15 +16,15 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	commonutils "github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
-	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	commonutils "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/protobuf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/inventory/resolver"
+	identifier "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 func TestUniqueRackByName(t *testing.T) {

@@ -14,7 +14,7 @@
 
 package compat
 
-import standard "github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+import standard "github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard"
 
 // NewInstanceCreateRequestWithInterfaces preserves the pre-`auto`
 // `NewInstanceCreateRequest` signature, which took an explicit

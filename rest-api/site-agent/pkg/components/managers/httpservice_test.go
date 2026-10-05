@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	computils "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/stretchr/testify/assert"
 )
 

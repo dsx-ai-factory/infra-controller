@@ -15,7 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
 
-	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	cconfig "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/config"
 )
 
 const (

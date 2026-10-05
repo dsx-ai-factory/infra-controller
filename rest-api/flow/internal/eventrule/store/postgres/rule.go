@@ -9,10 +9,10 @@ import (
 	"errors"
 	"fmt"
 
-	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
-	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
+	converterdao "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/dao"
+	dbmodel "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventrulecodec "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/codec"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )

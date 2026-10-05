@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 // Store is the operation-run persistence surface used by Manager.

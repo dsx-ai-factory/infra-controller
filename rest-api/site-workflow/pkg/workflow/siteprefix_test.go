@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	iActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	sdkactivity "go.temporal.io/sdk/activity"

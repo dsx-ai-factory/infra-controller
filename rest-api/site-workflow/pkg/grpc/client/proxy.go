@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
 )
 
 // ErrUnknownProxyMethod is returned when a method name does not resolve to a

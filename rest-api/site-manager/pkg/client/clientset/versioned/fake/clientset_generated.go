@@ -10,9 +10,9 @@ Code is generated
 package fake
 
 import (
-	clientset "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
-	forgev1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
-	fakeforgev1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1/fake"
+	clientset "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
+	forgev1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
+	fakeforgev1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"

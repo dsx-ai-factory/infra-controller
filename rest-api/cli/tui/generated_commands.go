@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
-	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/openapi"
 )
 
 // generatedCommandAliases records generated REST leaves already covered by a

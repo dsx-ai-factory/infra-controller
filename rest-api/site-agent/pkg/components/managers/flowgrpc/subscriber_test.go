@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
-	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	workflowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/worker"
 )

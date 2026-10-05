@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/types"
 )
 
 // NativeCertificateIssuer implements types.CertificateIssuer using native Go crypto

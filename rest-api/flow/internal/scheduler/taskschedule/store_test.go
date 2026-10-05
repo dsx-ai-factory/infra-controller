@@ -11,8 +11,8 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	dbquery "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/query"
 )
 
 func TestPostgresStore_List_StableOrderBeforePagination(t *testing.T) {

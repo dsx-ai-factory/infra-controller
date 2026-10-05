@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // Requirement is a component-manager capability needed before a task can be

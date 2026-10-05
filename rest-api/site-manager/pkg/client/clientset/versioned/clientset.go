@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"net/http"
 
-	forgev1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
+	forgev1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/typed/crds/v1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"

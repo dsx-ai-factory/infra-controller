@@ -15,9 +15,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
 func TestInvokeGRPCProxyOnSite(t *testing.T) {

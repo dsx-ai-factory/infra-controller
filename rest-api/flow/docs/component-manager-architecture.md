@@ -191,7 +191,7 @@ package myapi
 import (
     "time"
     "github.com/rs/zerolog/log"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/myapi"  // Your API client
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/myapi"  // Your API client
 )
 
 const (
@@ -305,14 +305,14 @@ import (
     "context"
     "fmt"
 
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
-    cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
-    myapiprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/myapi"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-    "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/capability"
+    cmcatalog "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
+    myapiprovider "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/providers/myapi"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/operations"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 const ImplementationName = "myimpl"
@@ -389,10 +389,10 @@ Update the service-supported manager catalog in
 
 ```go
 import (
-    "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
-    cmcatalog "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
-    cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
-    myimpl "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/compute/myimpl"
+    "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager"
+    cmcatalog "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/catalog"
+    cmconfig "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/config"
+    myimpl "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager/compute/myimpl"
 )
 
 func serviceDescriptors() []cmcatalog.Descriptor {

@@ -7,11 +7,11 @@ import (
 	"net"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/sqltypes"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/sqltypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
 )
 
 // pickValidVendor returns a supported vendor code; hard-fails if none are accepted.

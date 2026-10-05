@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
-	skuActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sku"
+	skuActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sku"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateSkuTestSuite struct {

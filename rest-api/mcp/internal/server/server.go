@@ -28,7 +28,7 @@ import (
 	"github.com/sirupsen/logrus"
 	urfave "github.com/urfave/cli/v2"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
 )
 
 // BuildServer constructs an *mcp.Server with one tool registered for

@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/secretstring"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/sshclient"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/secretstring"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/sshclient"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"

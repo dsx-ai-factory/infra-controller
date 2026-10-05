@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+	csmtypes "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/types"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"

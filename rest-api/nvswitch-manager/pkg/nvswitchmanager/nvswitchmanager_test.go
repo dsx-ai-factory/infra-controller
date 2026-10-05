@@ -7,12 +7,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/credentials"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchregistry"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/bmc"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/credentials"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchregistry"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/bmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

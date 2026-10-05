@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/core"
 	"github.com/getsentry/sentry-go"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )

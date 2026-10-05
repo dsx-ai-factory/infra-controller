@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 // Power control sequence names - use shared operation codes

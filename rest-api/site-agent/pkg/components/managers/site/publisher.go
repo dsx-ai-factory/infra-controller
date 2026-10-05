@@ -8,12 +8,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	wfmgr "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata"
-	swa "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
-	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	wfmgr "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/metadata"
+	swa "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
+	swu "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/util"
+	sww "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
 // RegisterPublisher registers Site Config inventory workflow and activity with Temporal.

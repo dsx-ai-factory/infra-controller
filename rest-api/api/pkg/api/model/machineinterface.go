@@ -6,8 +6,8 @@ package model
 import (
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // APIMachineInterface is the data structure to capture API representation of a MachineInterface

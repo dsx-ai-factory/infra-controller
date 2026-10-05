@@ -10,7 +10,7 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/flow";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow";
 
 service Flow {
     // Version

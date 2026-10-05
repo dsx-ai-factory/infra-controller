@@ -16,9 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
-	caa "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/api/model"
+	caa "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authentication"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
 )
 
 var (

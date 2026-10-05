@@ -13,7 +13,7 @@ import (
 	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
 )
 
 func TestInvokeGRPCProxyActivityDeadlinePrecedesWorkflowTimeout(t *testing.T) {

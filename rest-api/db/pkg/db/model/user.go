@@ -12,8 +12,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otrace "go.opentelemetry.io/otel/trace"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -22,7 +22,7 @@ import (
 
 	"github.com/uptrace/bun"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 )
 
 const (

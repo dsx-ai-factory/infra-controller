@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
+	pkgcerts "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/certs"
 )
 
 // generateTestCerts creates a self-signed CA and a client cert/key in a temp

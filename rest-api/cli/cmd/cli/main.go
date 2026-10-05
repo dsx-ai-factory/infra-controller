@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
-	"github.com/NVIDIA/infra-controller/rest-api/cli/tui"
-	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cli/tui"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/openapi"
 	"github.com/urfave/cli/v2"
 )
 

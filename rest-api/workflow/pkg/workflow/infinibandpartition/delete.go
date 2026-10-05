@@ -12,9 +12,9 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	ibpActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 // DeleteInfiniBandPartitionByID is a helper Temporal workflow to delete an existing InfiniBand Partition by ID

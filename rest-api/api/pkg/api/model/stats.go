@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/samber/lo"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // ~~~~~ Machine GPU Stats ~~~~~ //

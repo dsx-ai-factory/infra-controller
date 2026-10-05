@@ -7,7 +7,7 @@ package console_log;
 
 import "common_nico.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 // Private service implemented by nico-ssh-console and proxied by NICo.
 service ConsoleLogService {

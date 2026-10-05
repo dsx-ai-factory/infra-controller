@@ -7,7 +7,7 @@ package fmds;
 
 import "common_nico.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 // gRPC service definition that the standalone FMDS service
 // exposes for receiving config updates from nico-dpu-agent.

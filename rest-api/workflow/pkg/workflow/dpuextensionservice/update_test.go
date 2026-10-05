@@ -13,9 +13,9 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
 )
 
 type UpdateDpuExtensionServiceTestSuite struct {

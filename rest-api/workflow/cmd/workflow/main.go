@@ -24,87 +24,87 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	ctemporal "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/temporal"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
 
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	cwfh "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/health"
-	cwfn "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	cwfh "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/health"
+	cwfn "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/namespace"
 
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
 
-	machineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/machine"
-	machineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/machine"
+	machineActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/machine"
+	machineWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/machine"
 
-	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpc"
-	vpcWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/vpc"
+	vpcActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/vpc"
+	vpcWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/vpc"
 
-	subnetActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/subnet"
-	subnetWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/subnet"
+	subnetActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/subnet"
+	subnetWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/subnet"
 
-	instanceActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/instance"
-	instanceWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/instance"
+	instanceActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/instance"
+	instanceWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/instance"
 
-	userActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/user"
-	userWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/user"
+	userActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/user"
+	userWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/user"
 
-	siteActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/site"
-	siteWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/site"
+	siteActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/site"
+	siteWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/site"
 
-	sshKeyGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
-	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
+	sshKeyGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sshkeygroup"
+	sshKeyGroupWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
 
-	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
-	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
-	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
-	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
+	ibpActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	sxpActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
+	ibpWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
+	sxpWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
-	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
-	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
+	expectedMachineActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
+	expectedMachineWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
 
-	expectedPowerShelfActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedpowershelf"
-	expectedPowerShelfWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedpowershelf"
+	expectedPowerShelfActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedpowershelf"
+	expectedPowerShelfWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/expectedpowershelf"
 
-	expectedRackActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedrack"
-	expectedRackGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedrackgroup"
-	expectedRackWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedrack"
-	expectedRackGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedrackgroup"
+	expectedRackActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedrack"
+	expectedRackGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedrackgroup"
+	expectedRackWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/expectedrack"
+	expectedRackGroupWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/expectedrackgroup"
 
-	expectedSwitchActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedswitch"
-	expectedSwitchWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedswitch"
+	expectedSwitchActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/expectedswitch"
+	expectedSwitchWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/expectedswitch"
 
-	tenantActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/tenant"
-	tenantWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/tenant"
+	tenantActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/tenant"
+	tenantWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/tenant"
 
-	instanceTypeActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/instancetype"
-	instanceTypeWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/instancetype"
+	instanceTypeActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/instancetype"
+	instanceTypeWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/instancetype"
 
-	networkSecurityGroupActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/networksecuritygroup"
-	networkSecurityGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/networksecuritygroup"
+	networkSecurityGroupActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/networksecuritygroup"
+	networkSecurityGroupWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/networksecuritygroup"
 
-	osImageActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
-	osImageWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/operatingsystem"
+	osImageActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/operatingsystem"
+	osImageWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/operatingsystem"
 
-	ipxeTemplateActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/ipxetemplate"
-	ipxeTemplateWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/ipxetemplate"
+	ipxeTemplateActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/ipxetemplate"
+	ipxeTemplateWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/ipxetemplate"
 
-	skuActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/sku"
-	skuWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sku"
+	skuActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/sku"
+	skuWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/sku"
 
-	vpcPrefixActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcprefix"
-	vpcPrefixWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/vpcprefix"
+	vpcPrefixActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/vpcprefix"
+	vpcPrefixWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/vpcprefix"
 
-	vpcPeeringActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcpeering"
-	vpcPeeringWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/vpcpeering"
+	vpcPeeringActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/vpcpeering"
+	vpcPeeringWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/vpcpeering"
 
-	dpuExtensionServiceActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
-	dpuExtensionServiceWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/dpuextensionservice"
+	dpuExtensionServiceActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/dpuextensionservice"
+	dpuExtensionServiceWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/dpuextensionservice"
 
-	nvLinkLogicalPartitionActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
-	nvLinkLogicalPartitionWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
+	nvLinkLogicalPartitionActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
+	nvLinkLogicalPartitionWorkflow "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
 )
 
 const (

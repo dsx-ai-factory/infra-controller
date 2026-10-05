@@ -12,19 +12,19 @@ import (
 	"os"
 	"time"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/certs"
-	pb "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/db/migrations"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/db/postgres"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/internal/certs"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/db/migrations"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/db/postgres"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchmanager"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"

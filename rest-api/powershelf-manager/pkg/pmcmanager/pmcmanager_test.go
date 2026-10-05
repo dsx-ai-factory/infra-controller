@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/redfish"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/redfish"
 
 	"github.com/stretchr/testify/assert"
 )

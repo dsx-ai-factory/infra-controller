@@ -19,10 +19,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
-	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core"
-	testutil "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/testing"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/core"
+	testutil "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/testing"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
 )
 
 // setupTestEnvironment creates a test environment with mock JWKS server and database

@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
 )
 
 // Wrapper wraps the operation type and its serialized information.

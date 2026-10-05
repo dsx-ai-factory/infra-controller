@@ -13,7 +13,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // APIToProtoComponentTypeName maps API tray type strings to protobuf ComponentType enum names.

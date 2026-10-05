@@ -5,7 +5,7 @@
 package certs
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/types"
 )
 
 // CertificateIssuer is an alias for types.CertificateIssuer for backward compatibility

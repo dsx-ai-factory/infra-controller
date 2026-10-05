@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/ipam"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/util"
+	cipam "github.com/dsx-ai-factory/infra-controller/rest-api/ipam"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +29,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/config"
 
 	"os"
 
@@ -40,9 +40,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	cwm "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/internal/metrics"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/util"
 )
 
 // testTemporalSiteClientPool Building site client pool

@@ -6,7 +6,7 @@ package db
 import (
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

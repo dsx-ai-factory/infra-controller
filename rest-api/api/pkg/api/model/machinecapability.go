@@ -10,9 +10,9 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cwma "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/machine"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cwma "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/machine"
 )
 
 // APIMachineCapabilities is a typed slice that owns the list-level

@@ -32,9 +32,9 @@ flow:
 	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
 	GIT_COMMIT=$$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
 	go build -C build \
-		-ldflags "-X 'github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.Version=$${VERSION}' \
-		          -X 'github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.BuildTime=$${BUILD_TIME}' \
-		          -X 'github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.GitCommit=$${GIT_COMMIT}'" \
+		-ldflags "-X 'github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/metadata.Version=$${VERSION}' \
+		          -X 'github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/metadata.BuildTime=$${BUILD_TIME}' \
+		          -X 'github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/metadata.GitCommit=$${GIT_COMMIT}'" \
 		..
 
 container: flow

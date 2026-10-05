@@ -6,8 +6,8 @@ package nicoapi
 import (
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // model.go abstracts the raw grpc definitions away.  Don't bother implementing fields you don't think you'll use.

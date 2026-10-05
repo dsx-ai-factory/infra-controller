@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-module github.com/NVIDIA/infra-controller/rest-api
+module github.com/dsx-ai-factory/infra-controller/rest-api
 
 go 1.26.4
 
@@ -11,7 +11,7 @@ require (
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.9.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
-	github.com/NVIDIA/infra-controller/rest-api/sdk/standard v0.0.0-00010101000000-000000000000
+	github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard v0.0.0-00010101000000-000000000000
 	github.com/Nerzal/gocloak/v13 v13.9.0
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/creack/pty v1.1.24
@@ -107,7 +107,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 )
 
-replace github.com/NVIDIA/infra-controller/rest-api/sdk/standard => ./sdk/standard
+replace github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard => ./sdk/standard
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect

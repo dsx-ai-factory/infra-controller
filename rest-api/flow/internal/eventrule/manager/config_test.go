@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

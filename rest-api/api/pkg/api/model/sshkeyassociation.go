@@ -6,7 +6,7 @@ package model
 import (
 	"time"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 )
 
 // APISSHKeyAssociation is the data structure to capture API representation of an sshkey association

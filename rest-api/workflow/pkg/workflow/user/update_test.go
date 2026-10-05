@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
@@ -16,7 +16,7 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/testsuite"
 
-	userActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/user"
+	userActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/user"
 )
 
 type UnitTestSuite struct {

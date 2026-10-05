@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/sqltypes"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/sqltypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/pmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/objects/powershelf"
 )
 
 // PmcTo converts a domain PMC to a database model.

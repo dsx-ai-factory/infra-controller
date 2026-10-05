@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	flowtypes "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

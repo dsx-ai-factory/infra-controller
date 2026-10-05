@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/common/vendor"
 	log "github.com/sirupsen/logrus"
 )
 

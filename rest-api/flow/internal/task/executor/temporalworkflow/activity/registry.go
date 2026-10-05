@@ -4,9 +4,9 @@
 package activity
 
 import (
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/secret"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/componentmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
 )
 
 // Activities holds the per-manager-instance dependencies for all Temporal

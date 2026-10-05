@@ -16,10 +16,10 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	iActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 type UpdateInstanceTestSuite struct {

@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/client"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/client"
 )
 
 var ruleDeleteCmd = &cobra.Command{

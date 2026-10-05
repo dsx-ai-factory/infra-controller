@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/types"
 )
 
 // Proto to types conversions

@@ -16,9 +16,9 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	userActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/user"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	userActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/user"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 const (

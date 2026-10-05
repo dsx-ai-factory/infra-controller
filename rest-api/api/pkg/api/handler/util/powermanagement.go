@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	dpsclient "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/dps"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 )
 
 // MachinePowerAssignment describes one machine's DPS policy assignment.

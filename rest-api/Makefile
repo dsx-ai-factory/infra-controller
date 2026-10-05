@@ -372,7 +372,7 @@ flow-proto-fetch:
 	@for file in flow/proto/v1/*.proto; do \
 		cp "$$file" "proto/flow/src/v1/"; \
 		echo "Copied: $$file"; \
-		./proto/scripts/add-go-package-option.sh "proto/flow/src/v1/$$(basename "$$file")" "github.com/NVIDIA/infra-controller/rest-api/proto/flow"; \
+		./proto/scripts/add-go-package-option.sh "proto/flow/src/v1/$$(basename "$$file")" "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow"; \
 	done
 
 flow-protogen: .tools-stamp

@@ -17,7 +17,7 @@ import (
 	"go.temporal.io/sdk/interceptor"
 	tsdkLog "go.temporal.io/sdk/log"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 // DataConverter returns the composite payload converter shared by every

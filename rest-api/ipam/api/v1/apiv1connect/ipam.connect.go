@@ -17,7 +17,7 @@ import (
 	strings "strings"
 
 	connect "connectrpc.com/connect"
-	v1 "github.com/NVIDIA/infra-controller/rest-api/ipam/api/v1"
+	v1 "github.com/dsx-ai-factory/infra-controller/rest-api/ipam/api/v1"
 )
 
 // This is a compile-time assertion to ensure that this generated file and the connect package are

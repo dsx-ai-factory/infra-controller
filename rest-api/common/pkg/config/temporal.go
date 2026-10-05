@@ -7,9 +7,9 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
-	ctls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
-	cwfns "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/endpoint"
+	ctls "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/tls"
+	cwfns "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/namespace"
 )
 
 // TemporalConfig holds configuration for Temporal communication

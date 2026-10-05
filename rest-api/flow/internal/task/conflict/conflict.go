@@ -18,11 +18,11 @@ package conflict
 import (
 	"context"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
-	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/common"
+	taskstore "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/store"
+	taskdef "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/google/uuid"
 )
 

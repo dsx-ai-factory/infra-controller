@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/metadata"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	components "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	components "github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/rs/zerolog/log"
 )
 

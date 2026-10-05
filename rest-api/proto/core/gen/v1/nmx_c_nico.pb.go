@@ -9115,7 +9115,7 @@ const file_nmx_c_nico_proto_rawDesc = "" +
 	"\fGetConnCount\x12\x1a.nmx_c.GetConnCountRequest\x1a\x1b.nmx_c.GetConnCountResponse\"\x00\x12R\n" +
 	"\x0fGetConnInfoList\x12\x1d.nmx_c.GetConnInfoListRequest\x1a\x1e.nmx_c.GetConnInfoListResponse\"\x00\x12S\n" +
 	"\x13GetConnInfoCombined\x12!.nmx_c.GetConnInfoCombinedRequest\x1a\x17.nmx_c.ConnInfoCombined\"\x00\x12O\n" +
-	"\x0eGetStateReport\x12\x1c.nmx_c.GetStateReportRequest\x1a\x1d.nmx_c.GetStateReportResponse\"\x00B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x0eGetStateReport\x12\x1c.nmx_c.GetStateReportRequest\x1a\x1d.nmx_c.GetStateReportResponse\"\x00B@Z>github.com/dsx-ai-factory/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_nmx_c_nico_proto_rawDescOnce sync.Once

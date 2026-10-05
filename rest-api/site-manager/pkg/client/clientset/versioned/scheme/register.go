@@ -10,7 +10,7 @@ Code is generated
 package scheme
 
 import (
-	forgev1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	forgev1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

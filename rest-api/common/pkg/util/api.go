@@ -8,7 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (

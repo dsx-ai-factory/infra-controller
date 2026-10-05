@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/migrations"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/migrations"
 	"github.com/stretchr/testify/require"
 )
 

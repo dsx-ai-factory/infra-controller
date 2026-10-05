@@ -7,9 +7,9 @@ import (
 	"context"
 	"testing"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/redfish"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/redfish"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

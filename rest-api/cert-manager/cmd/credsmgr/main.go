@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/certs"
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/certs"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/cert-manager/pkg/core"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 	cli "github.com/urfave/cli/v2"
 )
 

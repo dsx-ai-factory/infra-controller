@@ -4,8 +4,8 @@
 package machine
 
 import (
-	swa "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
-	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
+	swa "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
+	sww "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
 // RegisterSubscriber registers Machine CRUD workflows and activities with Temporal

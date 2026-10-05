@@ -15,9 +15,9 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 
-	machineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/machine"
+	machineActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/machine"
 )
 
 type UpdateMachineInventoryTestSuite struct {

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
+	pkgcerts "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/certs"
 )
 
 // Config represents the configuration needed to create a new Flow service

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"

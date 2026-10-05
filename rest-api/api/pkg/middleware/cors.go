@@ -7,7 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/pagination"
 )
 
 // CORS configures echo to accept requests from scripts from domains different

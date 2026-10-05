@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	flow "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	flow "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 // TestDecommissionRackRequest_MarshalRoundTrip verifies that a populated

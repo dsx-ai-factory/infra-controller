@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	eventingestion "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/ingestion"
+	eventingestion "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/ingestion"
 )
 
 func TestLeakDetectionPipelineFromEnv(t *testing.T) {

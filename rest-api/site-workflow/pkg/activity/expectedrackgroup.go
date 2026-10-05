@@ -14,8 +14,8 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	cclient "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 )
 
 // ManageExpectedRackGroupInventory is an activity wrapper for Expected Rack Group inventory collection and publishing

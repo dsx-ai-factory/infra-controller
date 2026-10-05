@@ -16,13 +16,13 @@ import (
 
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
-	camu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	camu "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model/util"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (

@@ -4,7 +4,7 @@
 syntax = "proto3";
 
 package v1;
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/proto/v1";
 
 import "google/protobuf/empty.proto";
 import "google/protobuf/duration.proto";

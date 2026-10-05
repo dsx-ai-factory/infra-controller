@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
 
 	"golang.org/x/crypto/ssh"
 )

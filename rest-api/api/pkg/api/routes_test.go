@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/internal/config"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	sc "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/client/site"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
 	"github.com/stretchr/testify/assert"
 
 	temporalClient "go.temporal.io/sdk/client"

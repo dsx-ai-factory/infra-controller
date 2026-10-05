@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"time"
 
-	crdsv1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+	crdsv1 "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/crds/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/types"
 	"github.com/gorilla/mux"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

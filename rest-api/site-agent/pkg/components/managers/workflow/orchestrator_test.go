@@ -27,10 +27,10 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"google.golang.org/grpc"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/conftypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 )
 
 func TestWorkflowOrchestrator(t *testing.T) {

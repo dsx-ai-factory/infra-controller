@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
 )
 
 //go:embed 20260912010000_bmc_mac_lookup.up.sql

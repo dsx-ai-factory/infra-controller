@@ -9,10 +9,10 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/grpcproxy"
+	cloudutils "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/rs/zerolog/log"
 )
 

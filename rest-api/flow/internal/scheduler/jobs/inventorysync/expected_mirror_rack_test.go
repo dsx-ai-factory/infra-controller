@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	daoconverter "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
-	pbconverter "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	daoconverter "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/dao"
+	pbconverter "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/converter/protobuf"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/nicoapi"
 )
 
 func TestNaturalKeyIsCollisionFree(t *testing.T) {

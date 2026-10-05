@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
+	operationrun "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/operationrun"
 )
 
 type dispatchRunAction int

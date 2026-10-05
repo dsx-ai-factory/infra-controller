@@ -12,8 +12,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule"
+	eventexecutor "github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/eventrule/executor"
 )
 
 type claimExecutionsFunc func(

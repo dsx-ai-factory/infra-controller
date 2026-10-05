@@ -7,7 +7,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard"
 )
 
 // InstanceCreateRequest represents a simplified request to create an Instance

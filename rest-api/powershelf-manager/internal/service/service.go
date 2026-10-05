@@ -12,16 +12,16 @@ import (
 	"os"
 	"time"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/internal/certs"
-	pb "github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/internal/certs"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/internal/proto/v1"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/powershelf-manager/pkg/powershelfmanager"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"

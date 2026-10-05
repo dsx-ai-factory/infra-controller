@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/sdk/standard"
 )
 
 // ExpectedMachine represents a simplified Expected Machine

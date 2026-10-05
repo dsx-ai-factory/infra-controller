@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	appcli "github.com/dsx-ai-factory/infra-controller/rest-api/cli/pkg"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

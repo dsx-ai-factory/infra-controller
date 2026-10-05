@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
+	swu "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/util"
 )
 
 // TestInventoryDefaultScheduleIsReportable pins the default against the two rules the rest of the

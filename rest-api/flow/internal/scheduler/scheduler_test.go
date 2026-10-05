@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/flow/internal/scheduler/types"
 )
 
 func TestMain(m *testing.M) {

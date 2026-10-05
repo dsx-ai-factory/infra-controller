@@ -10,7 +10,7 @@ Code is generated
 package v1
 
 import (
-	internalinterfaces "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
+	internalinterfaces "github.com/dsx-ai-factory/infra-controller/rest-api/site-manager/pkg/client/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to all the informers in this group version.

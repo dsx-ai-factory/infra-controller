@@ -8,7 +8,7 @@ package dns;
 import "common_nico.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+option go_package = "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core";
 
 message DnsResourceRecordLookupRequest {
   string qtype = 1;

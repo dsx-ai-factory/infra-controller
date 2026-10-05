@@ -7,14 +7,14 @@ import (
 	"errors"
 	"testing"
 
-	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
+	sxpActivity "github.com/dsx-ai-factory/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 type UpdateSpectrumXPartitionTestSuite struct {

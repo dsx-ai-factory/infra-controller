@@ -27,8 +27,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cotel "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -36,16 +36,16 @@ import (
 
 	tclient "go.temporal.io/sdk/client"
 
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	auth "github.com/dsx-ai-factory/infra-controller/rest-api/auth/pkg/authorization"
 
 	temporalEnums "go.temporal.io/api/enums/v1"
 
-	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	cam "github.com/dsx-ai-factory/infra-controller/rest-api/api/pkg/api/model"
+	cdb "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/dsx-ai-factory/infra-controller/rest-api/db/pkg/db/paginator"
+	flowv1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 const (

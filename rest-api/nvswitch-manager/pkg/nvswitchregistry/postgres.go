@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/sqltypes"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/common/vendor"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/bmc"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
-	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/sqltypes"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/common/vendor"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/bmc"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvswitch"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"

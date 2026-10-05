@@ -10,7 +10,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	"github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/credential"
 	log "github.com/sirupsen/logrus"
 )
 

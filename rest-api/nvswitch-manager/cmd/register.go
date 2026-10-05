@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	pb "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
+	pb "github.com/dsx-ai-factory/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"

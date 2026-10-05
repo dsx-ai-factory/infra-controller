@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	vpcActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+	corev1 "github.com/dsx-ai-factory/infra-controller/rest-api/proto/core/gen/v1"
+	vpcActivity "github.com/dsx-ai-factory/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
 // DeleteVpc is a Temporal workflow to delete an existing VPC via Site Agent

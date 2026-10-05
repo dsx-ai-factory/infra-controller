@@ -7,8 +7,8 @@ import (
 	"crypto/tls"
 	"path/filepath"
 
-	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
-	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
+	dynamictls "github.com/dsx-ai-factory/infra-controller/rest-api/common/pkg/tls"
+	pkgcerts "github.com/dsx-ai-factory/infra-controller/rest-api/flow/pkg/certs"
 )
 
 const (
