@@ -107,12 +107,13 @@ impl RackRegistration {
         })
     }
 
-    /// Rack profile nico-api derives for this rack from `group`.
+    /// Rack profile nico-api derives for this rack from `group`. A group
+    /// read back from nico-api may predate protocols and carry none.
     pub(crate) fn derived_rack_profile_id(
         &self,
         group: ExpectedRackGroup,
     ) -> eyre::Result<RackProfileId> {
-        let group = model::expected_rack_group::ExpectedRackGroup::try_from(group)?;
+        let group = rpc::model::expected_rack_group::stored_expected_rack_group(group)?;
         derive_rack_profile_id(&group, &self.rack_id).map_err(eyre::Report::msg)
     }
 

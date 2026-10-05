@@ -440,7 +440,8 @@ machine-a-tron declares an expected rack group only if no group declares the
 rack yet. That group is keyed by the rack ID (one group per rack, listing its
 compute trays, switches, and power shelves) with protocol `NVLINK_V5` and
 topology `gb200_nvl72r1_c2g4` or `gb300_nvl72r1_c2g4`. An existing group that
-declares the rack is used as is, whatever its ID, topology, and members. A
+declares the rack is used as is, whatever its ID, topology, and members,
+including a group stored before nico-api recorded protocols. A
 group that carries the rack ID without declaring the rack is a configuration
 error. machine-a-tron then declares the expected rack. nico-api derives the
 rack profile from the rack's group, so `rack_profile_id` must name the profile

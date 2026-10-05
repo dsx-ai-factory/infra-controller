@@ -1562,6 +1562,9 @@ scout_run_interval = "5s"
                                   GB200_NVL72R1_C2G4_WIWYNN from expected rack group rack-001";
         let existing_group_mismatch = "rack rack-001 configures rack_profile_id GB200_NVL72R1_C2G4_WIWYNN, \
                                        but nico-api derives GB200_NVL72_WIWYNN from expected rack group site-group";
+        // nico-api returns a group stored before the protocol column with an empty protocol.
+        let mut legacy_group = existing_group(&rack, "gb200_nvl72r1_c2g4");
+        legacy_group.protocol.clear();
 
         check_cases(
             [
@@ -1587,6 +1590,11 @@ scout_run_interval = "5s"
                     scenario: "existing group, profile of the own group",
                     input: (rack.clone(), Some(existing_group(&rack, "gb200_nvl72"))),
                     expect: FailsWith(existing_group_mismatch.to_string()),
+                },
+                Case {
+                    scenario: "existing group stored before the protocol column",
+                    input: (rack.clone(), Some(legacy_group)),
+                    expect: Yields(None),
                 },
             ],
             |(rack, existing)| {
