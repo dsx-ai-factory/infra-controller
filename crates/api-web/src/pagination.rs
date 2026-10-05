@@ -205,6 +205,7 @@ pub(super) fn paginate_vec<T>(
 
 #[cfg(test)]
 mod tests {
+    use askama::Template;
     use axum::extract::Query;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{scenarios, value_scenarios};
@@ -552,6 +553,41 @@ mod tests {
                 range_end: context.page_range_end(),
             },
             expected,
+        );
+    }
+
+    #[derive(Template)]
+    #[template(path = "pages_footer.html")]
+    struct PaginationFooter {
+        page: PageContext,
+    }
+
+    #[test]
+    fn pagination_footer_renders_ordinary_and_maximum_pages() {
+        value_scenarios!(run = |current_page| {
+            let info = PaginationInfo {
+                current_page,
+                limit: 25,
+                total_items: 26,
+            };
+            let html = PaginationFooter {
+                page: PageContext::new(info, "/admin/dpu/versions"),
+            }
+            .render()
+            .expect("footer writes to a String");
+
+            html.lines()
+                .map(str::trim)
+                .find(|line| line.contains("page-status"))
+                .map(str::to_owned)
+        };
+            "ordinary first page" {
+                0 => Some(r#"<span class="page-status">Page 1 of 2</span>"#.to_string()),
+            }
+
+            "maximum page index" {
+                usize::MAX => Some(format!(r#"<span class="page-status">Page {} of 2</span>"#, usize::MAX)),
+            }
         );
     }
 
