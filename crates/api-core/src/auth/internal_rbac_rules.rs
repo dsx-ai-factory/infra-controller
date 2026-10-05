@@ -530,7 +530,7 @@ impl InternalRBACRules {
         x.perm("PersistValidationResult", vec![Scout, SiteAgent]);
         x.perm(
             "GetMachineValidationResults",
-            vec![ForgeAdminCLI, Scout, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("MachineValidationCompleted", vec![Machineatron, Scout]);
         x.perm("MachineSetAutoUpdate", vec![ForgeAdminCLI, Flow]);
@@ -599,7 +599,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "RemoveMachineValidationExternalConfig",
-            vec![ForgeAdminCLI, Scout, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm(
             "GetMachineValidationTests",
@@ -1492,6 +1492,21 @@ mod rbac_rule_tests {
                     ]
                 ),
                 "{method} should allow a machine"
+            );
+        }
+        for method in [
+            "GetMachineValidationResults",
+            "RemoveMachineValidationExternalConfig",
+        ] {
+            assert!(
+                !InternalRBACRules::allowed_from_static(
+                    method,
+                    &[
+                        Principal::SpiffeMachineIdentifier("fm100htest".to_string()),
+                        Principal::TrustedCertificate
+                    ]
+                ),
+                "{method} should reject a machine"
             );
         }
         assert!(InternalRBACRules::allowed_from_static(
