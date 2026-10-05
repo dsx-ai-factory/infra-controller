@@ -898,8 +898,12 @@ responsible for resolving them. Two ways to do that:
    fill the addresses with the VIPs you've already assigned to the
    corresponding service above (those live in the same file under each
    chart's `externalService.annotations.metallb.universe.tf/loadBalancerIPs`).
-2. Assign a MetalLB VIP to unbound itself (so DPUs can reach it via DHCP
-   option 6). Add it as another `externalService` entry the same way.
+2. Assign an IPv4 MetalLB VIP to unbound itself and advertise it through
+   DHCP option 6. Add it as another `externalService` entry the same way.
+   IPv6 resolver addresses use DHCPv6 option 23 instead. For IPv6-only or
+   dual-stack resolver VIPs, refer to
+   [Unbound External Services](../docs/configuration/dns.md#unbound-external-services)
+   for address-family settings, IPv4 defaults, and Service update restrictions.
 3. Re-run `setup.sh`. The chart deploys unbound with the `.forge` zone
    pre-populated; DPUs reach it via DHCP-served DNS.
 4. Verify with `helm-prereqs/health-check.sh` — the `.forge DNS Endpoint

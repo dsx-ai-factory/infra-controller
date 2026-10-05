@@ -13,6 +13,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
@@ -175,7 +176,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 	// Delete any SKU present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled).
 	// The source of truth for NICo is reportedIDs.
-	if skuInventory.InventoryPage == nil || skuInventory.InventoryPage.TotalPages == 0 || (skuInventory.InventoryPage.CurrentPage == skuInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(skuInventory.GetInventoryPage()) {
 		for _, sk := range existingSkus {
 			if _, keep := reportedIDs[sk.ID]; keep {
 				continue

@@ -18,6 +18,7 @@
 use std::str::FromStr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -25,7 +26,8 @@ use mac_address::MacAddress;
 
 use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::mlx_device::{
-    FirmwareFlashReport as FirmwareFlashReportPb, MlxDeviceInfo as MlxDeviceInfoPb,
+    FirmwareFlashReport as FirmwareFlashReportPb, FirmwareSpec as FirmwareSpecPb,
+    MlxDeviceInfo as MlxDeviceInfoPb,
 };
 
 impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
@@ -93,6 +95,26 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
     }
 }
 
+impl From<FirmwareSpec> for FirmwareSpecPb {
+    fn from(spec: FirmwareSpec) -> Self {
+        FirmwareSpecPb {
+            part_number: spec.part_number,
+            psid: spec.psid,
+            version: spec.version,
+        }
+    }
+}
+
+impl From<FirmwareSpecPb> for FirmwareSpec {
+    fn from(proto: FirmwareSpecPb) -> Self {
+        FirmwareSpec {
+            part_number: proto.part_number,
+            psid: proto.psid,
+            version: proto.version,
+        }
+    }
+}
+
 // From implementations for converting FirmwareFlashReport
 // to/from a FirmwareFlashReportPb protobuf message and back.
 impl From<FirmwareFlashReport> for FirmwareFlashReportPb {
@@ -127,6 +149,18 @@ mod test {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn test_firmware_spec_roundtrip() {
+        let original = FirmwareSpec {
+            part_number: "900-9D3B4-00CV-TA0".to_string(),
+            psid: "MT_0000000884".to_string(),
+            version: "32.43.1014".to_string(),
+        };
+        let proto: FirmwareSpecPb = original.clone().into();
+        let converted: FirmwareSpec = proto.into();
+        assert_eq!(original, converted);
+    }
 
     // Proto -> model `TryFrom`: every input proto should convert back to the
     // expected `MlxDeviceInfo`, with empty proto strings (and an empty MAC)

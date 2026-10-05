@@ -303,7 +303,9 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
 /// The OpenTelemetry status for a proxied request that answered with `status`.
 ///
 /// Only a 5xx marks the span failed: a rejected or malformed request is the caller's error, and
-/// counting it against the proxy would bury the hops that actually broke.
+/// counting it against the proxy would bury the hops that actually broke. A request refused with
+/// `429` for want of a slot at its BMC leaves the span ok too;
+/// `carbide_bmc_proxy_admission_refused_total` counts those.
 fn span_status(status: StatusCode) -> &'static str {
     if status.is_server_error() {
         "error"
@@ -316,13 +318,13 @@ async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
-    if !state.allows(&request) {
+    let Some(principals) = state.authorized_caller(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
-    }
+    };
     let class = state
         .config
         .classes
-        .classify(request.method(), request.uri().path());
+        .classify(request.method(), request.uri().path(), &principals);
     tracing::Span::current().record("bmc_proxy.class", class.name.as_str());
     let (parts, body) = request.into_parts();
     let forwarded_target = forwarded_header_value(&parts.headers)
@@ -406,9 +408,7 @@ async fn proxy_request_inner(
             upstream_body.exchange_bound(class.upstream_timeout),
         )
         .await
-        .map_err(|refused| {
-            error_response((StatusCode::SERVICE_UNAVAILABLE, refused.to_string()).into())
-        })?;
+        .map_err(|refused| error_response((refused.status(), refused.to_string()).into()))?;
     let mut upstream_response = send_upstream(
         &state,
         target_ip,

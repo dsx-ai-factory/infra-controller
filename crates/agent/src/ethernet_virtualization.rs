@@ -32,6 +32,7 @@ use ::rpc::forge::{
 };
 use carbide_network::ip::prefix::{IpNet, Ipv6Net, aggregate};
 use carbide_network::virtualization::{VpcVirtualizationType, build_dual_stack_list};
+use carbide_rpc_utils::dhcp::DhcpConfig;
 use eyre::WrapErr;
 use mac_address::MacAddress;
 use nvue_client::client::{NvueClient, NvueClientError};
@@ -1120,23 +1121,11 @@ async fn stop_dhcp_via_grpc(grpc_addr: &str) -> eyre::Result<bool> {
     Ok(false)
 }
 
-/// Sends the current DHCP server config to the dhcp-server process via gRPC.
-///
-/// Builds YAML representations of [`DhcpConfig`] and [`HostConfig`] from the
-/// supplied network config and service addresses, then calls `UpdateConfig`
-/// followed by `ReloadConfig` on the remote control service.  The server only
-/// restarts when the content has actually changed (see server-side diffing in
-/// `grpc_server.rs`), so this is safe to call on every agent tick.
-///
-/// Returns `Ok(true)` on success (matching the convention of the file-write
-/// path) so callers can treat both paths uniformly.
-async fn update_dhcp_via_grpc(
-    grpc_addr: &str,
+/// Build the same DHCP options for file and gRPC delivery.
+fn build_dhcp_server_config(
     network_config: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
-    hbn_device_names: HBNDeviceNames,
-    interface_translation_mode: Option<&InterfaceTranslationMode>,
-) -> eyre::Result<bool> {
+) -> eyre::Result<DhcpConfig> {
     let Some(mh_nc) = &network_config.managed_host_config else {
         eyre::bail!("loopback IP is missing. can't write dhcp-server config");
     };
@@ -1160,7 +1149,15 @@ async fn update_dhcp_via_grpc(
             )
         })?;
 
-    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
+    let pxe_ip_v6 = service_addrs
+        .pxe_ips
+        .iter()
+        .find_map(|address| match address {
+            IpAddr::V6(address) => Some(*address),
+            IpAddr::V4(_) => None,
+        });
+
+    let mut dhcp_config = DhcpConfig::from_forge_dhcp_config(
         pxe_ip_v4,
         ntpservers_v4,
         nameservers_v4,
@@ -1168,11 +1165,26 @@ async fn update_dhcp_via_grpc(
         loopback_ip,
     )?;
 
-    // Keep the gRPC model byte-equivalent to the file-backed YAML builder.
+    dhcp_config.carbide_provisioning_server_ipv6 = pxe_ip_v6;
     dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
     dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
     dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
     dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference(network_config)?;
+    Ok(dhcp_config)
+}
+
+/// Send DHCP and host configuration through `UpdateAndReloadConfig`.
+///
+/// The server only restarts when the content changes, so this is safe to call
+/// on every agent tick. Returns `Ok(true)` after a successful control request.
+async fn update_dhcp_via_grpc(
+    grpc_addr: &str,
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+    service_addrs: &ServiceAddresses,
+    hbn_device_names: HBNDeviceNames,
+    interface_translation_mode: Option<&InterfaceTranslationMode>,
+) -> eyre::Result<bool> {
+    let dhcp_config = build_dhcp_server_config(network_config, service_addrs)?;
     let mut host_config = carbide_rpc_utils::dhcp::HostConfig::try_from(
         network_config.clone(),
         hbn_device_names.reps[0],
@@ -1551,30 +1563,7 @@ fn write_dhcp_v4_server_config(
         interfaces
     };
 
-    let Some(mh_nc) = &nc.managed_host_config else {
-        return Err(eyre::eyre!(
-            "loopback IP is missing. can't write dhcp-server config"
-        ));
-    };
-
-    let loopback_ip = mh_nc.loopback_ip.parse()?;
-
-    // Split the dual-stack nameservers by family for the sibling v4 and v6
-    // listeners that consume this shared server configuration.
-    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
-
-    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(nc, service_addrs);
-
-    let pxe_ip_v4 = service_addrs
-        .pxe_ips
-        .iter()
-        .find_map(|x| match x {
-            IpAddr::V4(x) => Some(*x),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            eyre::eyre!("DHCPv4 server config requires an IPv4 PXE/UEFI HTTP boot address, but none found in {:?}", service_addrs.pxe_ips)
-        })?;
+    let dhcp_config = build_dhcp_server_config(nc, service_addrs)?;
 
     let mut has_changes = false;
 
@@ -1600,15 +1589,7 @@ fn write_dhcp_v4_server_config(
         ),
     }
 
-    let next_contents = dhcp::build_server_config(
-        pxe_ip_v4,
-        ntpservers_v4,
-        ntpservers_v6,
-        nameservers_v4,
-        nameservers_v6,
-        loopback_ip,
-        dhcpv6_server_preference(nc)?,
-    )?;
+    let next_contents = serde_yaml::to_string(&dhcp_config)?;
     match write(
         next_contents,
         &dhcp_server_path.config,
@@ -4436,6 +4417,10 @@ esac
             received.carbide_provisioning_server_ipv4,
             expected.carbide_provisioning_server_ipv4
         );
+        assert_eq!(
+            received.carbide_provisioning_server_ipv6,
+            expected.carbide_provisioning_server_ipv6
+        );
         assert_eq!(received.carbide_dhcp_server, expected.carbide_dhcp_server);
         assert_eq!(
             received.carbide_nameservers_v6,
@@ -4634,6 +4619,7 @@ esac
             carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
             carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
             carbide_provisioning_server_ipv4: Ipv4Addr::from([10, 0, 0, 1]),
+            carbide_provisioning_server_ipv6: Some("2001:db8::80".parse().unwrap()),
             lease_time_secs: 604800,
             renewal_time_secs: 3600,
             rebinding_time_secs: 432000,
@@ -4740,7 +4726,11 @@ esac
         let ip = FPath(PathBuf::from(i.path()));
 
         let service_addrs = ServiceAddresses {
-            pxe_ips: vec![IpAddr::from([10, 0, 0, 1])],
+            pxe_ips: vec![
+                "2001:db8::80".parse().unwrap(),
+                IpAddr::from([10, 0, 0, 1]),
+                "2001:db8::81".parse().unwrap(),
+            ],
             ntpservers: vec![
                 IpAddr::from([127, 0, 0, 1]),
                 IpAddr::from([127, 0, 0, 2]),

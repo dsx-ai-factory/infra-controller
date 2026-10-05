@@ -21,12 +21,19 @@ use sqlx::PgConnection;
 
 use crate::DatabaseError;
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 /// Create a power option entry for a host into db.
 pub async fn create(
     host_id: &MachineId,
     txn: &mut PgConnection,
 ) -> Result<PowerOptions, DatabaseError> {
-    let query = "INSERT INTO power_options ( host_id ) VALUES ($1) RETURNING *";
+    let query = "INSERT INTO power_options ( host_id ) VALUES ($1) RETURNING
+            host_id, last_fetched_updated_at, last_fetched_next_try_at,
+            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
+            desired_power_state, wait_until_time_before_performing_next_power_action,
+            tried_triggering_on_at, tried_triggering_on_counter";
 
     let options = sqlx::query_as(query)
         .bind(host_id)
@@ -43,7 +50,14 @@ pub async fn update_desired_state(
     current_version: &ConfigVersion,
     txn: &mut PgConnection,
 ) -> Result<PowerOptions, DatabaseError> {
-    let query = "UPDATE power_options SET desired_power_state=$1, desired_power_state_version=$2 WHERE host_id=$3 RETURNING *";
+    let query = "UPDATE power_options
+        SET desired_power_state=$1, desired_power_state_version=$2
+        WHERE host_id=$3
+        RETURNING
+            host_id, last_fetched_updated_at, last_fetched_next_try_at,
+            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
+            desired_power_state, wait_until_time_before_performing_next_power_action,
+            tried_triggering_on_at, tried_triggering_on_counter";
 
     let config_version = current_version.increment();
 
@@ -59,7 +73,12 @@ pub async fn update_desired_state(
 }
 
 pub async fn get_all(txn: &mut PgConnection) -> Result<Vec<PowerOptions>, DatabaseError> {
-    let query = "SELECT * FROM power_options";
+    let query = "SELECT
+            host_id, last_fetched_updated_at, last_fetched_next_try_at,
+            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
+            desired_power_state, wait_until_time_before_performing_next_power_action,
+            tried_triggering_on_at, tried_triggering_on_counter
+        FROM power_options";
 
     let all_options = sqlx::query_as(query)
         .fetch_all(txn)
@@ -73,7 +92,13 @@ pub async fn get_by_ids(
     machine_ids: &[HostMachineId],
     txn: &mut PgConnection,
 ) -> Result<Vec<PowerOptions>, DatabaseError> {
-    let query = "SELECT * FROM power_options WHERE host_id = ANY($1)";
+    let query = "SELECT
+            host_id, last_fetched_updated_at, last_fetched_next_try_at,
+            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
+            desired_power_state, wait_until_time_before_performing_next_power_action,
+            tried_triggering_on_at, tried_triggering_on_counter
+        FROM power_options
+        WHERE host_id = ANY($1)";
 
     let all_options = sqlx::query_as(query)
         .bind(machine_ids)

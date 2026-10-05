@@ -146,6 +146,7 @@ func (cerh CreateExpectedRackGroupHandler) Handle(c echo.Context) error {
 		SiteID:              site.ID,
 		RackGroupID:         apiRequest.RackGroupID,
 		Topology:            apiRequest.Topology,
+		Protocol:            cutil.GetPtr(apiRequest.Protocol),
 		Labels:              apiRequest.Labels,
 		CreatedBy:           dbUser.ID,
 	}
@@ -600,6 +601,8 @@ func (uerh UpdateExpectedRackGroupHandler) Handle(c echo.Context) error {
 	updateInput := cdbm.ExpectedRackGroupUpdateInput{
 		ExpectedRackGroupID: expectedRackGroup.ID,
 		Topology:            apiRequest.Topology,
+		ProtocolSet:         apiRequest.Protocol != nil,
+		Protocol:            apiRequest.Protocol,
 		Name:                apiRequest.Name,
 		Description:         apiRequest.Description,
 	}
@@ -870,6 +873,7 @@ func (raerh ReplaceAllExpectedRackGroupsHandler) Handle(c echo.Context) error {
 			SiteID:              site.ID,
 			RackGroupID:         er.RackGroupID,
 			Topology:            er.Topology,
+			Protocol:            cutil.GetPtr(er.Protocol),
 			Labels:              er.Labels,
 			CreatedBy:           dbUser.ID,
 		}

@@ -34,6 +34,7 @@ use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
+use crate::run_jitter::{first_run_offset, jitter_interval};
 use crate::saturating_add_duration_to_instant;
 use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus};
 use crate::switch_fsm::{Action, DhcpEndpoint, Event, SwitchFsm, Timer};
@@ -144,6 +145,8 @@ pub(crate) struct SwitchActor {
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     fsm: SwitchFsm,
     actions: VecDeque<Action>,
+    /// Spreads a fleet that starts together over the idle interval.
+    first_run_delay: Option<Duration>,
     run_alarm: Option<AlarmId>,
     power_cycle_alarm: Option<AlarmId>,
     dhcp_retry_alarm: Option<AlarmId>,
@@ -159,6 +162,7 @@ impl SwitchActor {
     ) -> Self {
         // Simulated switches start powered so NVOS can boot and expose its management interface.
         let (fsm, actions) = SwitchFsm::init(true);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -174,6 +178,7 @@ impl SwitchActor {
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -202,6 +207,7 @@ impl SwitchActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = SwitchFsm::init(true);
+        let first_run_delay = Some(first_run_offset(config.run_interval_idle));
         let mut live_state = SwitchLiveState::new(&fsm);
         live_state.bmc_credentials = persisted.bmc_accounts;
         Self {
@@ -216,6 +222,7 @@ impl SwitchActor {
             bmc_dhcp_info: None,
             fsm,
             actions: actions.into_iter().collect(),
+            first_run_delay,
             run_alarm: None,
             power_cycle_alarm: None,
             dhcp_retry_alarm: None,
@@ -255,13 +262,17 @@ impl SwitchActor {
             }
             return ActorResult::Noop;
         }
+        if let Some(delay) = self.first_run_delay.take() {
+            self.schedule_run(mailbox, delay);
+            return ActorResult::Noop;
+        }
 
         let sleep_duration = if let Some(duration) = self.process_actions(mailbox).await {
             duration
         } else {
             self.config.run_interval_idle
         };
-        self.schedule_run(mailbox, sleep_duration);
+        self.schedule_run(mailbox, jitter_interval(sleep_duration));
         ActorResult::Noop
     }
 
@@ -708,8 +719,39 @@ impl SwitchHandle {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use mac_address::MacAddress;
 
     use super::*;
+
+    #[tokio::test]
+    async fn first_run_offset_waits_for_resume() {
+        let app_context = MachineATronContext::for_test();
+        let config = app_context.app_config.machines["config"].clone();
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let mut mac_pool = MacAddressPool::new_pool(MacAddressPoolConfig::new(mac, 24).unwrap());
+        let mut actor = SwitchActor::new(
+            app_context,
+            "config".to_string(),
+            config,
+            &mut mac_pool,
+            MacAddressPoolConfig::new(mac, 24).unwrap(),
+        );
+        let (_actor_task, mailbox) = Actor::new();
+
+        actor.fsm_event(Event::Pause);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_some());
+        assert!(actor.run_alarm.is_none());
+
+        actor.fsm_event(Event::Resume);
+        actor.process_state(&mailbox).await;
+        assert!(actor.first_run_delay.is_none());
+        assert!(actor.run_alarm.is_some());
+        assert_eq!(
+            actor.actions.front(),
+            Some(&Action::Dhcp(DhcpEndpoint::Bmc))
+        );
+    }
 
     #[test]
     fn power_change_abandons_queued_nvos_dhcp() {

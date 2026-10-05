@@ -401,6 +401,7 @@ impl From<VpcPeering> for rpc::forge::VpcPeering {
             id,
             vpc_id,
             peer_vpc_id,
+            deletion_version,
         } = db_vpc_peering;
 
         let id = Some(id);
@@ -411,6 +412,11 @@ impl From<VpcPeering> for rpc::forge::VpcPeering {
             id,
             vpc_id,
             peer_vpc_id,
+            state: if deletion_version.is_some() {
+                rpc::forge::VpcPeeringState::Deleting
+            } else {
+                rpc::forge::VpcPeeringState::Ready
+            } as i32,
         }
     }
 }

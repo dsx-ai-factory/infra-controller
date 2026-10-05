@@ -42,6 +42,9 @@ use crate::{
     FilterableQueryBuilder, ObjectColumnFilter,
 };
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Copy, Clone)]
 pub struct IdColumn;
 impl ColumnInfo<'_> for IdColumn {
@@ -68,7 +71,11 @@ macro_rules! network_segment_snapshot_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes
      FROM network_segments ns
      LEFT JOIN LATERAL (
@@ -86,7 +93,11 @@ macro_rules! network_segment_snapshot_with_history_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes,
         COALESCE(history_agg.json, '[]'::json) AS history
      FROM network_segments ns

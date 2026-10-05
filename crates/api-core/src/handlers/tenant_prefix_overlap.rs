@@ -399,8 +399,9 @@ pub(super) async fn validate_retained_host(
     Ok(())
 }
 
-/// Returns the direct source VPCs whose prefixes or VNIs the receiver imports,
-/// including the receiver itself. This follows the renderer's directional rules.
+/// Returns source VPCs whose prefixes or VNIs must remain reserved for this
+/// receiver, including itself. Direction matches rendering, but admission keeps
+/// deleting peerings until their DPUs acknowledge permission removal.
 pub(super) async fn receiver_sources(
     runtime_config: &CarbideConfig,
     txn: &mut PgConnection,

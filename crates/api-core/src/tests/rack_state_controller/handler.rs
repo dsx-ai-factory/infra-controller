@@ -5465,35 +5465,32 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
 }
 
 #[crate::sqlx_test]
-async fn test_configure_nmx_cluster_rejects_ambiguous_nvos_endpoints_before_rotation(
+async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let switch_id = switch_ids
-        .first()
-        .ok_or_else(|| eyre::eyre!("expected at least one switch fixture"))?;
+    let [secondary_switch_id, primary_switch_id] = switch_ids.as_slice() else {
+        return Err(eyre::eyre!("expected exactly two switch fixtures").into());
+    };
 
     let mut txn = pool.begin().await?;
 
-    let switch = db_switch::find_by_id(txn.as_mut(), switch_id)
+    let expected = db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &[*primary_switch_id])
         .await?
-        .ok_or_else(|| eyre::eyre!("expected switch {}", switch_id))?;
-
-    let bmc_mac_address = switch
-        .bmc_mac_address
-        .ok_or_else(|| eyre::eyre!("expected switch {} to have a BMC MAC", switch_id))?;
+        .pop()
+        .expect("seeded switch endpoint");
 
     let extra_nvos_mac = EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate();
 
     sqlx::query(
         "UPDATE expected_switches
-         SET nvos_mac_addresses = array_append(nvos_mac_addresses, $1)
+         SET nvos_mac_addresses = array_prepend($1, nvos_mac_addresses)
          WHERE bmc_mac_address = $2",
     )
     .bind(extra_nvos_mac)
-    .bind(bmc_mac_address)
+    .bind(expected.bmc_mac)
     .execute(txn.as_mut())
     .await?;
 
@@ -5511,15 +5508,118 @@ async fn test_configure_nmx_cluster_rejects_ambiguous_nvos_endpoints_before_rota
 
     txn.commit().await?;
 
+    let topology_type = RackHardwareTopology::Gb200Nvl72r1C2g4Topology.to_string();
+
+    queue_configure_nmx_cluster_v2_success(
+        &env,
+        &switch_ids,
+        *secondary_switch_id,
+        *primary_switch_id,
+        &topology_type,
+        true,
+    )
+    .await;
+
+    run_configure_nmx_cluster_v2_workflow(&env, &rack_id, true).await?;
+
+    let certificate_requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+
+    let fabric_requests = env
+        .rms_sim
+        .submitted_configure_scale_up_fabric_manager_v2_requests()
+        .await;
+
+    assert_eq!(certificate_requests.len(), 2);
+    assert_eq!(fabric_requests.len(), 1);
+
+    assert_node_set_contains_switches(certificate_requests[0].nodes.as_ref(), &switch_ids);
+
+    assert_node_set_contains_switches(
+        certificate_requests[1].nodes.as_ref(),
+        &[*primary_switch_id],
+    );
+
+    assert_node_set_contains_switches(fabric_requests[0].nodes.as_ref(), &switch_ids);
+
+    let fabric_nodes = &fabric_requests[0].nodes.as_ref().expect("V2 nodes").nodes;
+
+    for node in certificate_requests.iter().flat_map(|request| {
+        request
+            .nodes
+            .as_ref()
+            .expect("certificate nodes")
+            .nodes
+            .iter()
+    }) {
+        let certificate_interface = node
+            .host_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.interface.as_ref())
+            .expect("certificate NVOS interface");
+
+        let fabric_node = fabric_nodes
+            .iter()
+            .find(|candidate| candidate.node_id == node.node_id)
+            .expect("matching V2 node");
+
+        let fabric_interface = fabric_node
+            .host_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.interface.as_ref())
+            .expect("V2 NVOS interface");
+
+        assert_eq!(certificate_interface, fabric_interface);
+
+        if node.node_id == primary_switch_id.to_string() {
+            assert_eq!(
+                certificate_interface.mac_address,
+                expected.nvos_mac.expect("seeded NVOS MAC").to_string()
+            );
+
+            assert_eq!(
+                certificate_interface.ip_address,
+                expected.nvos_ip.expect("seeded NVOS IP").to_string()
+            );
+
+            assert_eq!(certificate_interface.host_name, expected.nvos_hostname);
+        }
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, rack_id, switch_ids) =
+        create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
+
+    let mut txn = pool.begin().await?;
+
+    sqlx::query(
+        "DELETE FROM machine_interface_addresses WHERE interface_id IN (
+        SELECT mi.id FROM machine_interfaces mi
+        JOIN expected_switches es ON mi.mac_address = ANY(es.nvos_mac_addresses)
+        JOIN switches s ON s.bmc_mac_address = es.bmc_mac_address WHERE s.id = $1)",
+    )
+    .bind(switch_ids[0])
+    .execute(txn.as_mut())
+    .await?;
+
+    txn.commit().await?;
     env.run_rack_controller_iteration().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    assert!(matches!(
-        rack.controller_state.value,
-        RackState::Error { ref cause, .. }
-            if cause.contains("multiple usable NVOS endpoints")
-    ));
+    assert!(matches!(rack.controller_state.value, RackState::Error {
+        ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    } if cause.contains("no usable NVOS endpoint")));
+
+    assert!(rack.config.maintenance_requested.is_none());
 
     assert!(
         env.rms_sim

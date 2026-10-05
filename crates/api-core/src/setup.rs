@@ -1882,6 +1882,13 @@ async fn initialize_and_start_controllers<'a>(
         ))
         .build_and_spawn(join_set, cancel_token.clone())?;
 
+    StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())

@@ -36,6 +36,9 @@ use sqlx::{PgConnection, PgTransaction};
 use crate::db_read::DbReader;
 use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 const SECRET_ENTRY_BINDS: usize = 7;
 
 /// The envelope-encryption columns for one journal entry, exactly as the
@@ -52,7 +55,8 @@ pub struct NewSecretEntry<'a> {
 
 /// Return the newest entry for a path.
 pub async fn get_latest(txn: impl DbReader<'_>, path: &str) -> DatabaseResult<Option<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE path = $1
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+         created_at, encrypted_dek, dek_nonce FROM secrets WHERE path = $1
          ORDER BY seq DESC LIMIT 1";
     sqlx::query_as(sql)
         .bind(path)
@@ -255,7 +259,8 @@ pub async fn delete_by_id(txn: &mut PgConnection, secret_id: SecretId) -> Databa
 
 /// Return every journal entry for a path, newest first.
 pub async fn get_history(txn: impl DbReader<'_>, path: &str) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE path = $1
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+         created_at, encrypted_dek, dek_nonce FROM secrets WHERE path = $1
          ORDER BY seq DESC";
     sqlx::query_as(sql)
         .bind(path)
@@ -269,7 +274,8 @@ pub async fn get_by_id(
     txn: impl DbReader<'_>,
     secret_id: SecretId,
 ) -> DatabaseResult<Option<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE secret_id = $1";
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+         created_at, encrypted_dek, dek_nonce FROM secrets WHERE secret_id = $1";
     sqlx::query_as(sql)
         .bind(secret_id)
         .fetch_optional(txn)
@@ -284,7 +290,8 @@ pub async fn get_all_for_kek_id(
     txn: impl DbReader<'_>,
     kek_id: &str,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+         created_at, encrypted_dek, dek_nonce FROM secrets
          WHERE kek_id = $1 AND left(path, 1) <> '/'
          ORDER BY seq DESC";
     sqlx::query_as(sql)
@@ -301,8 +308,10 @@ pub async fn get_latest_with_kek_id(
     txn: impl DbReader<'_>,
     kek_id: &str,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM (
-             SELECT DISTINCT ON (path) *
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+             created_at, encrypted_dek, dek_nonce FROM (
+             SELECT DISTINCT ON (path) secret_id, seq, path, encrypted_value,
+                 nonce, kek_id, created_at, encrypted_dek, dek_nonce
              FROM secrets
              WHERE left(path, 1) <> '/'
              ORDER BY path, seq DESC
@@ -324,7 +333,8 @@ pub async fn find_batch_after(
     after_seq: Option<i64>,
     limit: i64,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets
+    let sql = "SELECT secret_id, seq, path, encrypted_value, nonce, kek_id,
+         created_at, encrypted_dek, dek_nonce FROM secrets
          WHERE ($1::bigint IS NULL OR seq > $1)
          ORDER BY seq LIMIT $2";
     sqlx::query_as(sql)

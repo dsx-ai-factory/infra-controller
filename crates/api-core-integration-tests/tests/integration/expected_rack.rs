@@ -112,6 +112,7 @@ async fn new_rack_id(env: &TestHarness) -> RackId {
         .add_expected_rack_group(tonic::Request::new(rpc::forge::ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new(rack_id.to_string())),
             topology: "gb200_nvl72r1_c2g4".into(),
+            protocol: "NVLINK_V5".into(),
             racks: vec![rpc::forge::ExpectedRackGroupRack {
                 rack_id: Some(rack_id.clone()),
                 members: ["Compute", "Switch"]

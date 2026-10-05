@@ -26,10 +26,10 @@ pub(crate) trait RedfishEventMapper: Send + Sync {
     /// Returns the latest-wins queue key for one log record.
     ///
     /// Decoded protobuf notifications use their payload hash. Redfish state
-    /// notifications share a resource key. Periodic entries use their service
-    /// and entry IDs. SSE records prefer the event ID, then the linked log
-    /// entry URI, then the event record URI. Other records use message or body
-    /// content as a fallback.
+    /// notifications share a resource key. Periodic entries use their
+    /// service, entry ID, and fingerprint. SSE records prefer the event ID,
+    /// then the linked log entry URI, then the event record URI. Other records
+    /// use message or body content as a fallback.
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
 }
 
@@ -38,10 +38,10 @@ pub trait RedfishEventMapper: Send + Sync {
     /// Returns the latest-wins queue key for one log record.
     ///
     /// Decoded protobuf notifications use their payload hash. Redfish state
-    /// notifications share a resource key. Periodic entries use their service
-    /// and entry IDs. SSE records prefer the event ID, then the linked log
-    /// entry URI, then the event record URI. Other records use message or body
-    /// content as a fallback.
+    /// notifications share a resource key. Periodic entries use their
+    /// service, entry ID, and fingerprint. SSE records prefer the event ID,
+    /// then the linked log entry URI, then the event record URI. Other records
+    /// use message or body content as a fallback.
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
 }
 
@@ -85,6 +85,16 @@ impl RedfishEventMapper for OpenBmcEventMapper {
         }
 
         let message_id = Self::find_attr(attributes, "message_id").unwrap_or("");
+
+        // Content distinguishes reused numeric IDs after a reset; exact retries
+        // keep the same queue key. Periodic occurrences precede state coalescing.
+        if let (Some(service_id), Some(entry_id), Some(fingerprint)) = (
+            Self::find_attr(attributes, "service_id").filter(|value| !value.is_empty()),
+            Self::find_attr(attributes, "entry_id").filter(|value| !value.is_empty()),
+            Self::find_attr(attributes, "entry_fingerprint"),
+        ) {
+            return format!("{bmc_id}|redfish-entry|{service_id}|{entry_id}|{fingerprint}");
+        }
 
         // State notifications share a resource key so a later state replaces
         // the queued state for that resource.
@@ -254,6 +264,23 @@ mod tests {
             "periodic entry IDs are scoped by log service" {
                 (&[("service_id", "EventLog"), ("entry_id", "41")][..],
                  &[("service_id", "Journal"), ("entry_id", "41")][..]) => false,
+            }
+
+            "reused periodic ID with a different fingerprint is a distinct occurrence" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "old")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "new")][..]) => false,
+            }
+
+            "replayed periodic entry retains its queue key" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "same")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "same")][..]) => true,
+            }
+
+            "state-pattern MessageId does not coalesce periodic occurrences" {
+                (&[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "old"),
+                   ("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"GPU0\"]")][..],
+                 &[("service_id", "EventLog"), ("entry_id", "41"), ("entry_fingerprint", "new"),
+                   ("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"GPU0\"]")][..]) => false,
             }
 
             "periodic entry identity takes precedence over its event ID" {

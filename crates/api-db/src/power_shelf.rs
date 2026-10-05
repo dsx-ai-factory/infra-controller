@@ -37,6 +37,8 @@ use crate::{
 };
 
 #[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
 mod test_metadata;
 
 #[derive(Debug, Clone, Default)]
@@ -261,7 +263,14 @@ pub async fn find_ids(
 /// mirroring how the machine snapshot query materializes `bmc_info` (see
 /// `sql/machine_snapshots.sql.template`). Keeping the alias `power_shelves` lets
 /// the generic `FilterableQueryBuilder` filters reference unqualified columns.
-const POWER_SHELVES_WITH_BMC_INFO: &str = r#"SELECT * FROM (
+const POWER_SHELVES_WITH_BMC_INFO: &str = r#"SELECT
+    id, config, status, deleted, bmc_mac_address, bmc_info,
+    bmc_credential_rotation_requested, decommission_requested,
+    controller_state, controller_state_version, controller_state_outcome,
+    power_shelf_maintenance_requested, power_shelf_reprovisioning_requested,
+    firmware_upgrade_status, nvlink_domain_uuid, name, description, labels,
+    version, rack_id, health_reports
+FROM (
     SELECT ps.*, bmc.json AS bmc_info
     FROM power_shelves ps
     LEFT JOIN LATERAL (

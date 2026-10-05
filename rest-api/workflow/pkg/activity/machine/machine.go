@@ -759,7 +759,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if machineInventory.InventoryPage == nil || machineInventory.InventoryPage.TotalPages == 0 || (machineInventory.InventoryPage.CurrentPage == machineInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
 		for _, existingMachine := range existingMachines {
 			if existingMachine.Deleted != nil {
 				continue
@@ -882,6 +882,8 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 		deviceType = &dtEmpty
 		if gpuCap.DeviceType != nil {
 			switch *gpuCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
 				dt := cdbm.MachineCapabilityDeviceTypeNVLink
 				deviceType = &dt
@@ -964,6 +966,8 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 		deviceType = &dtEmpty
 		if netCap.DeviceType != nil {
 			switch *netCap.DeviceType {
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+				// No action required
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 				dt := cdbm.MachineCapabilityDeviceTypeDPU
 				deviceType = &dt

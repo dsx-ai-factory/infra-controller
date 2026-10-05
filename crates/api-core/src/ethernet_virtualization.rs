@@ -742,7 +742,7 @@ pub(crate) async fn tenant_network(
                     .capabilities()
                     .peers_with
                     .to_vec();
-                db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
+                db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
                     .await?
                     .into_iter()
                     .map(|(id, _)| id)
@@ -769,7 +769,7 @@ pub(crate) async fn tenant_network(
                 .copied()
                 .filter(|t| t.vni_advertised_to_peers())
                 .collect();
-            vpc_peer_vnis = db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
+            vpc_peer_vnis = db::vpc_peering::get_active_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
                 .await?
                 .iter()
                 .map(|(_, vni)| *vni as u32)

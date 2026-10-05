@@ -60,6 +60,7 @@ func TestExpectedRackGroupProtoConversion(t *testing.T) {
 		original := &ExpectedRackGroup{
 			RackGroupID: "nvl5-gp1-jhb01",
 			Topology:    "gb200_nvl72r1_c2g4",
+			Protocol:    cutil.GetPtr("NVLINK_V6"),
 			Racks:       []ExpectedRackGroupRack{{RackID: "rack-01", Members: []ExpectedRackGroupMember{{Type: ExpectedRackGroupMemberTypeCompute, Manufacturer: "NVIDIA", ID: "device-01"}}}, {RackID: "rack-02", Members: []ExpectedRackGroupMember{}}},
 			Name:        "NVL group 1",
 			Description: "JHB row 1",
@@ -74,6 +75,7 @@ func TestExpectedRackGroupProtoConversion(t *testing.T) {
 
 		assert.Equal(t, original.RackGroupID, got.RackGroupID)
 		assert.Equal(t, original.Topology, got.Topology)
+		assert.Equal(t, original.Protocol, got.Protocol)
 		assert.Equal(t, original.Racks, got.Racks)
 		assert.Equal(t, original.Name, got.Name)
 		assert.Equal(t, original.Description, got.Description)
@@ -115,20 +117,22 @@ func TestExpectedRackGroupPersistence(t *testing.T) {
 	dao := NewExpectedRackGroupDAO(session)
 	devices := []ExpectedRackGroupMember{{Type: ExpectedRackGroupMemberTypeNVSwitch, Manufacturer: "NVIDIA", ID: "device-01"}}
 	inputs := []ExpectedRackGroupCreateInput{
-		{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "gb200_nvl72r1_c2g4", Racks: []ExpectedRackGroupRack{{RackID: "rack-02", Members: devices}, {RackID: "rack-01", Members: []ExpectedRackGroupMember{}}}, CreatedBy: user.ID},
+		{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "gb200_nvl72r1_c2g4", Protocol: cutil.GetPtr("NVLINK_V6"), Racks: []ExpectedRackGroupRack{{RackID: "rack-02", Members: devices}, {RackID: "rack-01", Members: []ExpectedRackGroupMember{}}}, CreatedBy: user.ID},
 		{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-b", Topology: "gb200_nvl72r1_c2g4", Racks: []ExpectedRackGroupRack{{RackID: "rack-01", Members: devices}}, CreatedBy: user.ID},
 	}
 	err = db.WithTx(ctx, session, func(tx *db.Tx) error {
 		rows, err := dao.CreateMultiple(ctx, tx, inputs)
 		require.NoError(t, err)
 		require.Equal(t, inputs[0].Racks, rows[0].Racks)
+		require.Equal(t, inputs[0].Protocol, rows[0].Protocol)
 		require.Equal(t, devices, rows[0].Racks[0].Members)
 		updated, err := dao.UpdateMultiple(ctx, tx, []ExpectedRackGroupUpdateInput{
-			{ExpectedRackGroupID: rows[0].ID, Racks: []ExpectedRackGroupRack{}},
+			{ExpectedRackGroupID: rows[0].ID, ProtocolSet: true, Racks: []ExpectedRackGroupRack{}},
 			{ExpectedRackGroupID: rows[1].ID, Name: cutil.GetPtr("renamed")},
 		})
 		require.NoError(t, err)
 		require.Empty(t, updated[0].Racks)
+		require.Nil(t, updated[0].Protocol)
 		require.Equal(t, devices, updated[1].Racks[0].Members)
 		return nil
 	})
@@ -136,6 +140,7 @@ func TestExpectedRackGroupPersistence(t *testing.T) {
 	got, err := dao.Get(ctx, nil, inputs[1].ExpectedRackGroupID, nil, false)
 	require.NoError(t, err)
 	require.Equal(t, devices, got.Racks[0].Members)
+	require.Nil(t, got.Protocol)
 }
 
 func TestExpectedRackGroupSQLDAO_Update(t *testing.T) {
