@@ -501,10 +501,13 @@ nicocli --config ~/.nico/acme-corp.yaml tenant current
 nicocli --config ~/.nico/acme-corp.yaml tenant-account update --data '{}' <account-id>
 ```
 
-If `api.org` still names the Provider, the request fails with
-`403 Requested organization not found in token claims` even though login succeeded. The
-message names neither the setting nor the flag, so it reads like a token problem when
-the token is fine. `--org acme-corp` overrides `api.org` for a single command. Step 4
+If `api.org` still names the Provider, the result depends on the roles the Tenant's
+identity holds. With only `acme-corp:TENANT_ADMIN`, as created above, the request fails
+with `403 Requested organization not found in token claims` even though login succeeded.
+The message names neither the setting nor the flag, so it reads like a token problem when
+the token is fine. An identity that also holds a role in the Provider org doesn't get this
+`403`, since its token names the Provider too. The request runs as the Provider instead.
+`--org acme-corp` overrides `api.org` for a single command. Step 4
 then runs as before with the Provider's file, which the Tenant's login never touched.
 
 ## Granting the Privileged Tenant Capability

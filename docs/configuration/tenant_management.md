@@ -186,7 +186,7 @@ The tenant admin accepts the invitation, which moves the account to `Ready`.
 
 Accepting is a tenant call, so `nicocli` has to act as the tenant. Two things decide who it acts as: the token it sends, and the org in the request path. Both have to name the tenant org.
 
-Give the tenant its own config file, and set `api.org` to the tenant org in it. Pass that file with `--config` to `nicocli login` and to every tenant command. The request then carries the tenant's token. If `api.org` names any other org, the request fails with `403 Requested organization not found in token claims`.
+Give the tenant its own config file, and set `api.org` to the tenant org in it. Pass that file with `--config` to `nicocli login` and to every tenant command. The request then carries the tenant's token, which can act only in orgs it holds a role for. If it holds no role for the org in `api.org`, the request fails with `403 Requested organization not found in token claims`. If it holds roles in several orgs, `api.org` picks which one it acts as.
 
 Don't log in to the provider's config file. Login overwrites the provider's `auth.oidc` credentials there. A provider token in `auth.token` also outranks `auth.oidc.token`. In that case the tenant's login changes nothing that is sent.
 
