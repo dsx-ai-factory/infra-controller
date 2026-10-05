@@ -30832,14 +30832,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
         switchSerialNumber:
           type: string
           minLength: 1
@@ -30994,16 +30993,15 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
           type:
             - string

@@ -27,9 +27,9 @@ type ExpectedSwitchUpdateRequest struct {
 	// Immutable MAC address of the Expected Switch's BMC (Baseboard Management Controller). Omit this field when updating. A formatting-equivalent value is accepted for compatibility and preserves the originally stored spelling, but changing the physical MAC address is rejected with HTTP 400.
 	// Deprecated
 	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+	// Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+	// Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Switch
 	SwitchSerialNumber NullableString `json:"switchSerialNumber,omitempty"`
