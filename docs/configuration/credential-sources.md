@@ -25,7 +25,7 @@ The optional `[credentials]` section has three fields:
 | Field | What it does | Default |
 |---|---|---|
 | `path` | Absolute or working-directory-relative path to a JSON or YAML credential file. The file must exist and parse at startup. Required. | (required) |
-| `poll_interval` | How often the watcher re-reads the file in addition to filesystem events, so a projected Secret replaced without an event is still noticed. Must be greater than zero. | `"60s"` |
+| `poll_interval` | How often the watcher re-reads the file in addition to filesystem events, so a projected Secret replaced without an event is still noticed. It is also the longest a change can go unnoticed when the kernel watch is unavailable; refer to [File Source](#file-source). Must be greater than zero. | `"60s"` |
 
 Unknown fields in either table fail the boot.
 
@@ -127,6 +127,8 @@ machine_identity:
 The remaining top-level keys take a single `username` and `password` pair: `host_redfish_site_default`, `dpu_redfish_site_default`, `dpu_redfish_factory_default` (the legacy catch-all used when no per-model entry exists), `host_uefi_site_default`, `dpu_uefi_site_default`, and `dpu_uefi_factory_default`. For UFM, the password is the bearer token, and an empty password selects the default SPIFFE client certificate.
 
 The watcher reloads the file on filesystem events and on every `poll_interval`, so a Kubernetes projected Secret that is replaced atomically takes effect without restarting NICo. A valid reload replaces the whole snapshot, and entries removed from the file stop resolving. A reload that is malformed or unreadable keeps the last valid snapshot and logs the failure with the secret values redacted. A file that is missing, unreadable, or malformed at startup, or a zero `poll_interval`, fails startup with an error that redacts the secret values in the same way.
+
+The filesystem events come from a kernel inotify watch that `nico-api` arms at startup. inotify instances are a per-user, node-wide resource capped by the `fs.inotify.max_user_instances` sysctl. The kernel default is 128, and `nico-api` shares that budget with every other process running as the same user on the node, including the kubelet and the container runtime. When the watch cannot be armed, `nico-api` logs `primary static credential watcher unavailable; relying on polling` at `WARN` with the operating-system error and the poll interval, increments `carbide_static_credential_watcher_failures_total{operation="primary_watch_setup"}`, and starts normally. Every reload then waits for the next poll, so a change can take up to `poll_interval` to apply. NICo does not need the watch to function; raising the sysctl on the node, for example to 8192, restores event-driven reloads at the next `nico-api` restart.
 
 The file may contain only `bmc_site_wide_root`. This unversioned entry supplies
 version 0 of the site-wide BMC root. Set `bmc_site_wide_root_source = "local"`
