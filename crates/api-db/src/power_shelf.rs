@@ -633,42 +633,20 @@ use std::net::IpAddr;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
 
-/// Resolve PowerShelfIds to BMC/PMC IPs through the shelf's own BMC interface.
+/// Resolve PowerShelfIds to BMC/PMC IPs.
 ///
-/// An ingested shelf always has `power_shelves.bmc_mac_address` recorded, so the
-/// stored MAC is never NULL. See [`find_power_shelf_endpoints_by_ids`] for which
-/// interface is accepted.
+/// This is [`find_power_shelf_endpoints_by_ids`] without the PMC MAC, so both
+/// share one set of identity checks. See that function for which interface is
+/// accepted and which shelves do not resolve.
 pub async fn find_bmc_ips_by_power_shelf_ids(
     db: impl crate::db_read::DbReader<'_>,
     power_shelf_ids: &[PowerShelfId],
 ) -> DatabaseResult<Vec<(PowerShelfId, IpAddr)>> {
-    let sql = r#"
-        SELECT DISTINCT ON (ps.id)
-            ps.id,
-            mia.address
-        FROM power_shelves ps
-        JOIN expected_power_shelves eps ON eps.bmc_mac_address = ps.bmc_mac_address
-        JOIN machine_interfaces mi
-            ON mi.power_shelf_id = ps.id
-           AND mi.interface_type = 'Bmc'
-           AND mi.mac_address = ps.bmc_mac_address
-        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
-        WHERE ps.id = ANY($1)
-          AND NOT EXISTS (
-              SELECT 1
-              FROM machine_interfaces other
-              WHERE other.power_shelf_id = ps.id
-                AND other.interface_type = 'Bmc'
-                AND other.mac_address <> ps.bmc_mac_address
-          )
-        ORDER BY ps.id, family(mia.address), mia.address
-    "#;
-
-    sqlx::query_as(sql)
-        .bind(power_shelf_ids)
-        .fetch_all(db)
-        .await
-        .map_err(|err| DatabaseError::new("power_shelf::find_bmc_ips_by_power_shelf_ids", err))
+    Ok(find_power_shelf_endpoints_by_ids(db, power_shelf_ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.power_shelf_id, row.pmc_ip))
+        .collect())
 }
 
 /// Full endpoint info for a power shelf: PMC MAC and PMC IP.
@@ -736,9 +714,14 @@ pub struct PreIngestionPowerShelfEndpointRow {
 /// Resolve PMC MACs to endpoint info (PMC MAC + IP) for power shelves that may
 /// not be ingested yet.
 ///
-/// Identical joins to [`find_power_shelf_endpoints_by_ids`] but anchored on
-/// `expected_power_shelves.bmc_mac_address` instead of a `power_shelves` row, so
-/// it works before ingestion creates the power shelf. `DISTINCT ON
+/// Anchored on `expected_power_shelves.bmc_mac_address` instead of a
+/// `power_shelves` row, so it works before ingestion creates the power shelf.
+///
+/// Unlike [`find_power_shelf_endpoints_by_ids`], this does not require the
+/// interface to be the shelf's own linked `Bmc` interface: before ingestion
+/// there is no shelf to own it, so the interface is found by MAC alone. Callers
+/// that have an ingested shelf ID should use the ID lookup, which also rejects
+/// an interface that does not belong to the shelf. `DISTINCT ON
 /// (eps.bmc_mac_address)` collapses duplicate address rows, and the
 /// `family(mia.address), mia.address` tie-break makes the retained `pmc_ip`
 /// deterministic: it selects the IPv4 management address (then the lowest
@@ -1583,11 +1566,11 @@ mod tests {
         Ok(())
     }
 
-    /// Regression test for issue #7060: endpoint resolution must follow each
-    /// shelf's own `bmc_mac_address`, not the blank `config.name` /
-    /// `serial_number` that every shelf shares. Shelves with blank names must
-    /// not resolve to another shelf's PMC, a shelf without a MAC must not
-    /// resolve at all, and a dual-stack PMC resolves to its IPv4 address.
+    /// Endpoint resolution must follow each shelf's own `bmc_mac_address`,
+    /// not the blank `config.name` / `serial_number` that every shelf shares.
+    /// Shelves with blank names must not resolve to another shelf's PMC,
+    /// a shelf without a MAC must not resolve at all, and a dual-stack PMC
+    /// resolves to its IPv4 address.
     #[crate::sqlx_test]
     async fn endpoint_resolution_follows_shelf_bmc_mac_not_name(
         pool: sqlx::PgPool,
@@ -1791,7 +1774,7 @@ mod tests {
         Ok(())
     }
 
-    /// Issue #7060 review: the stored MAC alone must not select an endpoint.
+    /// The stored MAC alone must not select an endpoint.
     /// The address has to come from an interface the shelf itself owns as its
     /// `Bmc` interface, so an unrelated interface sharing the MAC is ignored,
     /// and a shelf whose linked BMC identity conflicts with its stored MAC
@@ -1864,7 +1847,7 @@ mod tests {
             segment_2,
             mac_owned,
             "unrelated-data",
-            None,
+            Some(conflicting),
             "10.71.149.100".parse()?,
         )
         .await?;
