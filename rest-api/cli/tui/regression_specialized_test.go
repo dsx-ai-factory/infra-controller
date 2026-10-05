@@ -382,6 +382,55 @@ func TestPromptOperatingSystemTypeStopsOnUnexpectedTenantError(t *testing.T) {
 	assert.Equal(t, int32(1), tenantCalls.Load())
 }
 
+func TestPromptRawIPXEOperatingSystem(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantScript    string
+		wantCancelled bool
+	}{
+		{
+			name:       "required URL retries blank input and leaves next answer unread",
+			input:      "\nhttps://example.test/boot.ipxe?token=boot-token\nnext-answer\n",
+			wantScript: "https://example.test/boot.ipxe?token=boot-token",
+		},
+		{
+			name:       "multiline script preserves whitespace and leaves next answer unread",
+			input:      "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe\n.\nnext-answer\n",
+			wantScript: "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe",
+		},
+		{
+			name:          "unfinished script cancels without setting boot data",
+			input:         "#!ipxe\nboot\n",
+			wantCancelled: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			_, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				promptErr := promptRawIPXEOperatingSystem(body)
+				if promptErr != nil {
+					return promptErr
+				}
+				nextAnswer, readErr := readPromptLine()
+				if readErr != nil {
+					return readErr
+				}
+				assert.Equal(t, "next-answer", nextAnswer)
+				return nil
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				assert.Empty(t, body)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, map[string]interface{}{"ipxeScript": test.wantScript}, body)
+		})
+	}
+}
+
 func TestPromptOperatingSystemOptions(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -476,6 +525,7 @@ func TestCmdOSCreate(t *testing.T) {
 				"Raw iPXE description",
 				operatingSystemTypeIPXE,
 				"#!ipxe",
+				".",
 				"#cloud-config",
 				"y",
 				"n",

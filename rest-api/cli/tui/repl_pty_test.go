@@ -210,9 +210,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "(required)")
 		terminal.waitFor(t, "iPXE script or URL")
-		terminal.send(t, "https://example.test/boot.ipxe\r")
+		terminal.send(t, "https://example.test/boot.ipxe?token=boot-token\r")
 		terminal.waitFor(t, "User data (optional)")
-		terminal.send(t, "#cloud-config\r")
+		terminal.send(t, "#cloud-config password=cloud-secret\r")
 		terminal.waitFor(t, "Enable phone home?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "Subnet for Ethernet interface:")
@@ -236,6 +236,13 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		assert.NotContains(t, ethernetTranscript, "pending-subnet")
 		assert.NotContains(t, ethernetTranscript, "Allow override at instance creation?")
 		assert.Contains(t, ethernetTranscript, "--data")
+		ethernetLogStart := strings.Index(ethernetTranscript, "INFO:")
+		require.NotEqual(t, -1, ethernetLogStart)
+		ethernetLog := ethernetTranscript[ethernetLogStart:]
+		assert.Contains(t, ethernetLog, `"ipxeScript":"\u003credacted\u003e"`)
+		assert.Contains(t, ethernetLog, `"userData":"\u003credacted\u003e"`)
+		assert.NotContains(t, ethernetLog, "boot-token")
+		assert.NotContains(t, ethernetLog, "cloud-secret")
 		assert.Contains(t, ethernetTranscript, `"interfaces":[{"isPhysical":true,"subnetId":"subnet-1"},{"isPhysical":false,"subnetId":"subnet-2","virtualFunctionId":7}]`)
 		assert.Contains(t, ethernetTranscript, `"infinibandInterfaces":[{"device":"ConnectX-7","deviceInstance":0,"isPhysical":true,"partitionId":"ib-partition-1"},{"device":"ConnectX-7","deviceInstance":2,"isPhysical":true,"partitionId":"ib-partition-2"}]`)
 
@@ -334,7 +341,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "flat-instance\r")
 		terminal.waitFor(t, "iPXE script or URL")
-		terminal.send(t, "#!ipxe\r")
+		terminal.send(t, "#!ipxe\r\rset token script-token\rchain https://example.test/boot.ipxe?token=${token}\r.\r")
 		terminal.waitFor(t, "User data (optional)")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Enable phone home?")
@@ -344,6 +351,12 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		assert.NotContains(t, flatTranscript, "Select an existing operating system?")
 		assert.NotContains(t, flatTranscript, "Subnet for Ethernet interface:")
 		assert.NotContains(t, flatTranscript, "VPC prefix for Ethernet interface:")
+		flatLogStart := strings.Index(flatTranscript, "INFO:")
+		require.NotEqual(t, -1, flatLogStart)
+		flatLog := flatTranscript[flatLogStart:]
+		assert.Contains(t, flatLog, `"ipxeScript":"\u003credacted\u003e"`)
+		assert.NotContains(t, flatLog, "script-token")
+		assert.NotContains(t, flatLog, "userData")
 
 		// A Tenant without effective TargetedInstanceCreation at the selected
 		// Site must fail locally before the TUI offers the Machine picker.
@@ -558,8 +571,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"ethernet-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-1",
-				"ipxeScript":"https://example.test/boot.ipxe",
-				"userData":"#cloud-config",
+				"ipxeScript":"https://example.test/boot.ipxe?token=boot-token",
+				"userData":"#cloud-config password=cloud-secret",
 				"phoneHomeEnabled":true,
 				"interfaces":[
 					{"subnetId":"subnet-1","isPhysical":true},
@@ -605,7 +618,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		)
 		assert.JSONEq(
 			t,
-			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true,"ipxeScript":"#!ipxe","phoneHomeEnabled":false}`,
+			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true,"ipxeScript":"#!ipxe\n\nset token script-token\nchain https://example.test/boot.ipxe?token=${token}","phoneHomeEnabled":false}`,
 			instanceRequests[3].Body,
 		)
 		assert.NotContains(t, instanceRequests[3].Body, "interfaces")

@@ -1417,9 +1417,24 @@ func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) 
 }
 
 func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
+	fmt.Println("Enter a URL on one line, or a script starting with #!ipxe; finish the script with a line containing only '.'")
 	ipxeScript, err := PromptText("iPXE script or URL", true)
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(ipxeScript, "#!ipxe") {
+		lines := []string{ipxeScript}
+		for {
+			line, readErr := readPromptLine()
+			if readErr != nil {
+				return readErr
+			}
+			if line == "." {
+				break
+			}
+			lines = append(lines, line)
+		}
+		ipxeScript = strings.Join(lines, "\n")
 	}
 	body["ipxeScript"] = ipxeScript
 	return nil
@@ -3707,7 +3722,19 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("encoding instance create request: %w", err)
 	}
-	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(bodyJSON)))
+	logBody := make(map[string]interface{}, len(body))
+	for key, value := range body {
+		if key == "userData" || key == "ipxeScript" {
+			logBody[key] = "<redacted>"
+			continue
+		}
+		logBody[key] = value
+	}
+	logBodyJSON, err := json.Marshal(logBody)
+	if err != nil {
+		return fmt.Errorf("encoding instance create request for logging: %w", err)
+	}
+	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(logBodyJSON)))
 	resp, _, err := s.Client.Do("POST", apiPath(s, "instance"), nil, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("creating instance: %w", err)
