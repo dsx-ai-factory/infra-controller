@@ -4,6 +4,7 @@
 package siteprefix
 
 import (
+	"bytes"
 	"context"
 	"slices"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 	"go.temporal.io/sdk/temporal"
@@ -88,6 +91,30 @@ func (f fixture) namespace() string {
 		f.site.InfrastructureProviderID.String(), f.site.ID.String())
 }
 
+func (f fixture) retiredRoot(t *testing.T) *cdbm.IPBlock {
+	t.Helper()
+	ctx := context.Background()
+	root := f.root(t, true)
+	dao := cdbm.NewIPBlockDAO(f.session)
+	err := cdb.WithTx(ctx, f.session, func(tx *cdb.Tx) error {
+		_, err := dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: root.ID, Status: cutil.GetPtr(cdbm.IPBlockStatusDeleting)})
+		if err != nil {
+			return err
+		}
+		err = dao.Delete(ctx, tx, root.ID)
+		if err != nil {
+			return err
+		}
+		return ipam.DeleteIpamEntryForIPBlock(ctx, ipam.NewIpamStorage(f.session.DB, tx.GetBunTx()),
+			root.Prefix, root.PrefixLength, root.RoutingType, root.InfrastructureProviderID.String(), root.SiteID.String())
+	})
+	require.NoError(t, err)
+	retired, err := dao.GetBySitePrefixID(ctx, nil, *root.SitePrefixID)
+	require.NoError(t, err)
+	require.NotNil(t, retired.Deleted)
+	return retired
+}
+
 func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
@@ -110,11 +137,13 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			block := f.blocks(t)[0]
 			inventory.InventoryPage = &corev1.InventoryPage{TotalItems: -1, ItemIds: []string{"not a prefix ID"}}
 			inventory.SitePrefixes[0].Metadata.Name = "updated"
+			inventory.SitePrefixes[0].Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, block.ID, blocks[0].ID)
-			require.Equal(t, "updated", blocks[0].Name)
+			require.Equal(t, block.Name, blocks[0].Name)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, blocks[0].Status)
 		}},
 		{"out of order pages reconcile independently with increasing estimates", func(t *testing.T, f fixture) {
 			ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
@@ -153,7 +182,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
 			hook := &siteDeletionHook{session: f.session, siteID: f.site.ID}
 			f.session.DB.AddQueryHook(hook)
-			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrDoesNotExist)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.NoError(t, hook.err)
 			require.Equal(t, 2, hook.reads)
 			blocks := f.blocks(t)
@@ -169,9 +198,82 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, inventory.SitePrefixes[0].Id.Value, blocks[0].SitePrefixID.String())
+			require.True(t, blocks[0].Managed)
 			require.Equal(t, inventory.SitePrefixes[0].Metadata.Name, blocks[0].Name)
 			require.Equal(t, &inventory.SitePrefixes[0].Metadata.Description, blocks[0].Description)
 			_, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, "10.0.0.0/24", f.namespace())
+			require.NoError(t, err)
+		}},
+		{"unreconcilable entries do not hold back later prefixes", func(t *testing.T, f fixture) {
+			var output bytes.Buffer
+			previousLogger := log.Logger
+			log.Logger = zerolog.New(&output)
+			t.Cleanup(func() { log.Logger = previousLogger })
+			malformed, unknown, valid := testPrefix(), testPrefix(), testPrefix()
+			malformed.Config.Prefix = "10.1.0.1/24"
+			unknown.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			unknown.Config.TenantOrganizationId = cutil.GetPtr("unknown")
+			inventory := testInventory(malformed)
+			inventory.SitePrefixes = []*corev1.SitePrefix{nil, malformed, unknown, valid}
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, valid.Id.Value, blocks[0].SitePrefixID.String())
+			require.Contains(t, output.String(), malformed.Id.Value)
+			require.Contains(t, output.String(), "network-aligned CIDR")
+			require.Contains(t, output.String(), unknown.Id.Value)
+			require.Contains(t, output.String(), "unknown or ambiguous")
+		}},
+		{"public operator uses public IPAM namespace", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Config.Prefix = "203.0.113.0/24"
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			require.Equal(t, cdbm.IPBlockRoutingTypePublic, blocks[0].RoutingType)
+			namespace := ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypePublic,
+				f.site.InfrastructureProviderID.String(), f.site.ID.String())
+			_, err := ipam.NewIpamStorage(f.session.DB, nil).ReadPrefix(ctx, prefix.Config.Prefix, namespace)
+			require.NoError(t, err)
+		}},
+		{"public operator adoption and restoration preserve routing and metadata", func(t *testing.T, f fixture) {
+			dao := cdbm.NewIPBlockDAO(f.session)
+			root, err := dao.Create(ctx, nil, cdbm.IPBlockCreateInput{
+				Name: "site-fabric-ipv6-root", Description: cutil.GetPtr("provider description"),
+				SiteID: f.site.ID, InfrastructureProviderID: f.site.InfrastructureProviderID,
+				Prefix: "2001:db8::", PrefixLength: 48, RoutingType: cdbm.IPBlockRoutingTypePublic,
+				ProtocolVersion: cdbm.IPBlockProtocolVersionV6, Status: cdbm.IPBlockStatusReady,
+			})
+			require.NoError(t, err)
+			storage := ipam.NewIpamStorage(f.session.DB, nil)
+			_, err = ipam.CreateIpamEntryForIPBlock(ctx, storage, root.Prefix, root.PrefixLength,
+				root.RoutingType, root.InfrastructureProviderID.String(), root.SiteID.String())
+			require.NoError(t, err)
+			prefix := testPrefix()
+			prefix.Config.Prefix = "2001:db8::/48"
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			adopted, err := dao.GetByID(ctx, nil, root.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, prefix.Id.Value, adopted.SitePrefixID.String())
+			require.Equal(t, cdbm.IPBlockStatusDeleting, adopted.Status)
+			require.Equal(t, root.Name, adopted.Name)
+			require.Equal(t, root.Description, adopted.Description)
+			// Model retirement without implementing the follow-up cleanup workflow.
+			require.NoError(t, dao.Delete(ctx, nil, root.ID))
+			require.NoError(t, ipam.DeleteIpamEntryForIPBlock(ctx, storage, root.Prefix, root.PrefixLength,
+				root.RoutingType, root.InfrastructureProviderID.String(), root.SiteID.String()))
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			restored, err := dao.GetByID(ctx, nil, root.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, cdbm.IPBlockStatusReady, restored.Status)
+			require.Equal(t, root.RoutingType, restored.RoutingType)
+			require.Equal(t, root.Name, restored.Name)
+			require.Equal(t, root.Description, restored.Description)
+			namespace := ipam.GetIpamNamespaceForIPBlock(ctx, root.RoutingType,
+				root.InfrastructureProviderID.String(), root.SiteID.String())
+			_, err = storage.ReadPrefix(ctx, prefix.Config.Prefix, namespace)
 			require.NoError(t, err)
 		}},
 		{"unnamed operator root uses CIDR and absent description", func(t *testing.T, f fixture) {
@@ -190,7 +292,6 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			child, err := allocator.AcquireChildPrefix(ctx, "10.0.0.0/24", 28)
 			require.NoError(t, err)
 			prefix := testPrefix()
-			prefix.Metadata = &corev1.Metadata{}
 			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			blocks := f.blocks(t)
@@ -209,7 +310,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, *child, retained)
 		}},
-		{"linked operator preserves absent metadata and applies populated metadata", func(t *testing.T, f fixture) {
+		{"linked operator preserves REST metadata", func(t *testing.T, f fixture) {
 			root := f.root(t, true)
 			prefix := testPrefix()
 			prefix.Id.Value = root.SitePrefixID.String()
@@ -228,12 +329,13 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					blocks := f.blocks(t)
 					require.Len(t, blocks, 1)
 					require.Equal(t, root.ID, blocks[0].ID)
-					require.Equal(t, "test-prefix", blocks[0].Name)
-					require.Equal(t, cutil.GetPtr("reported by Core"), blocks[0].Description)
+					require.Equal(t, root.Name, blocks[0].Name)
+					require.Equal(t, root.Description, blocks[0].Description)
+					require.Equal(t, root.Updated, blocks[0].Updated)
 				})
 			}
 		}},
-		{"tenant metadata updates can clear the description", func(t *testing.T, f fixture) {
+		{"tenant inventory preserves REST metadata while updating lifecycle", func(t *testing.T, f fixture) {
 			prefix := testPrefix()
 			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
 			prefix.Config.TenantOrganizationId = &f.tenant.Org
@@ -243,13 +345,15 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Equal(t, &prefix.Metadata.Description, block.Description)
 			prefix.Metadata.Name = "renamed tenant prefix"
 			prefix.Metadata.Description = ""
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 			inventory.Timestamp = timestamppb.New(inventory.Timestamp.AsTime().Add(time.Second))
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, block.ID, blocks[0].ID)
-			require.Equal(t, prefix.Metadata.Name, blocks[0].Name)
-			require.Equal(t, cutil.GetPtr(""), blocks[0].Description)
+			require.Equal(t, block.Name, blocks[0].Name)
+			require.Equal(t, block.Description, blocks[0].Description)
+			require.Equal(t, cdbm.IPBlockStatusDeleting, blocks[0].Status)
 		}},
 		{"tenant lifecycle and overlapping tenant ownership use no cloud IPAM", func(t *testing.T, f fixture) {
 			prefix := testPrefix()
@@ -263,6 +367,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 				blocks := f.blocks(t)
 				require.Len(t, blocks, 1)
 				require.Equal(t, &f.tenant.ID, blocks[0].TenantID)
+				require.False(t, blocks[0].Managed)
 				require.Equal(t, status, blocks[0].Status)
 			}
 			other := util.TestBuildTenant(t, f.session, "other", "other", nil, &cdbm.User{ID: f.site.CreatedBy})
@@ -276,7 +381,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, prefixes)
 		}},
-		{"operator replacement is received but deferred", func(t *testing.T, f fixture) {
+		{"conflicting operator identity is skipped", func(t *testing.T, f fixture) {
 			root := f.root(t, true)
 			inventory := testInventory(testPrefix())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
@@ -319,7 +424,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.Len(t, details, 1)
 			inventory.SitePrefixes[0].Metadata.Name = "changed"
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			require.Equal(t, "changed", f.blocks(t)[0].Name)
+			require.Equal(t, block, f.blocks(t)[0])
 		}},
 		{"empty inventory does not infer absence", func(t *testing.T, f fixture) {
 			inventory := testInventory(testPrefix())
@@ -369,7 +474,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory := testInventory(first)
 			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
 			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "unknown or ambiguous")
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			firstBlock := blocks[0]
@@ -393,7 +498,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			inventory := testInventory(first)
 			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
 			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), "network-aligned CIDR")
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			blocks := f.blocks(t)
 			require.Len(t, blocks, 1)
 			require.Equal(t, first.Id.Value, blocks[0].SitePrefixID.String())
@@ -401,39 +506,128 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []string{first.Config.Prefix}, prefixes)
 		}},
-		{"failed prefix rolls back its IPAM and record without undoing earlier commits", func(t *testing.T, f fixture) {
+		{"failed prefix rolls back its IPAM and record without stopping later entries", func(t *testing.T, f fixture) {
 			first, second := testPrefix(), testPrefix()
 			ids := []string{first.Id.Value, second.Id.Value}
 			slices.Sort(ids)
 			first.Id.Value, second.Id.Value = ids[0], ids[1]
 			second.Config.Prefix = "10.1.0.0/24"
 			inventory := testInventory(first)
-			inventory.SitePrefixes = append(inventory.SitePrefixes, second)
+			third := testPrefix()
+			third.Config.Prefix = "10.2.0.0/24"
+			inventory.SitePrefixes = append(inventory.SitePrefixes, second, third)
 			inventory.InventoryPage.ItemIds, inventory.InventoryPage.TotalItems = ids, 2
 			f.session.DB.AddQueryHook(&statusDetailFailureHook{remaining: 2})
-			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), context.Canceled)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			blocks := f.blocks(t)
-			require.Len(t, blocks, 1)
+			require.Len(t, blocks, 2)
 			firstBlock := blocks[0]
 			require.Equal(t, first.Id.Value, firstBlock.SitePrefixID.String())
 			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
 			require.NoError(t, err)
-			require.Equal(t, []string{first.Config.Prefix}, prefixes)
+			require.ElementsMatch(t, []string{first.Config.Prefix, third.Config.Prefix}, prefixes)
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
-			require.Len(t, f.blocks(t), 2)
+			require.Len(t, f.blocks(t), 3)
 			retained, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, firstBlock.ID, nil)
 			require.NoError(t, err)
 			require.Equal(t, firstBlock, *retained)
 			prefixes, err = ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
 			require.NoError(t, err)
-			require.ElementsMatch(t, []string{first.Config.Prefix, second.Config.Prefix}, prefixes)
+			require.ElementsMatch(t, []string{first.Config.Prefix, second.Config.Prefix, third.Config.Prefix}, prefixes)
 		}},
-		{"soft deleted Core ID cannot be reused", func(t *testing.T, f fixture) {
-			root := f.root(t, true)
-			require.NoError(t, cdbm.NewIPBlockDAO(f.session).Delete(ctx, nil, root.ID))
+		{"retired operator Deleting reports are skipped without stopping the page", func(t *testing.T, f fixture) {
+			root := f.retiredRoot(t)
+			prefix, next := testPrefix(), testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			prefix.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
+			next.Config.Prefix = "10.1.0.0/24"
+			inventory := testInventory(prefix)
+			inventory.SitePrefixes = append(inventory.SitePrefixes, next)
+			for range 2 {
+				require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			}
+			retained, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, *root.SitePrefixID)
+			require.NoError(t, err)
+			require.Equal(t, root, retained)
+			require.Len(t, f.blocks(t), 2)
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{next.Config.Prefix}, prefixes)
+			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
+				cdbm.StatusDetailFilterInput{EntityIDs: []string{root.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Empty(t, details)
+		}},
+		{"retired operator Ready restores its identity and IPAM idempotently", func(t *testing.T, f fixture) {
+			root := f.retiredRoot(t)
 			prefix := testPrefix()
 			prefix.Id.Value = root.SitePrefixID.String()
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			blocks := f.blocks(t)
+			require.Len(t, blocks, 1)
+			restored := blocks[0]
+			require.Equal(t, root.ID, restored.ID)
+			require.Equal(t, root.SitePrefixID, restored.SitePrefixID)
+			require.Equal(t, root.Created, restored.Created)
+			require.Nil(t, restored.Deleted)
+			require.Equal(t, cdbm.IPBlockStatusReady, restored.Status)
+			require.Equal(t, root.Name, restored.Name)
+			require.Equal(t, root.Description, restored.Description)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, restored, f.blocks(t)[0])
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{prefix.Config.Prefix}, prefixes)
+			details, _, err := cdbm.NewStatusDetailDAO(f.session).GetAll(ctx, nil,
+				cdbm.StatusDetailFilterInput{EntityIDs: []string{root.ID.String()}}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, details, 1)
+			require.Equal(t, cdbm.IPBlockStatusReady, details[0].Status)
+		}},
+		{"failed operator restoration rolls back the link IPAM and status", func(t *testing.T, f fixture) {
+			root := f.retiredRoot(t)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			f.session.DB.AddQueryHook(&statusDetailFailureHook{remaining: 1})
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, *root, f.blocks(t)[0])
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Empty(t, prefixes)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			restored := f.blocks(t)[0]
+			require.Equal(t, root.ID, restored.ID)
+			require.Nil(t, restored.Deleted)
+			require.Equal(t, cdbm.IPBlockStatusReady, restored.Status)
+			prefixes, err = ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{prefix.Config.Prefix}, prefixes)
+		}},
+		{"IPAM conflict leaves the retired operator and existing tree unchanged", func(t *testing.T, f fixture) {
+			root := f.retiredRoot(t)
+			storage := ipam.NewIpamStorage(f.session.DB, nil)
+			_, err := ipam.CreateIpamEntryForIPBlock(ctx, storage, "10.0.0.0", 23,
+				root.RoutingType, root.InfrastructureProviderID.String(), root.SiteID.String())
+			require.NoError(t, err)
+			before, err := storage.ReadAllPrefixes(ctx, f.namespace())
+			require.NoError(t, err)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, *root, f.blocks(t)[0])
+			after, err := storage.ReadAllPrefixes(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+		}},
+		{"soft deleted tenant Core ID cannot be reused", func(t *testing.T, f fixture) {
+			prefix := testPrefix()
+			prefix.Status.Authority = corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED
+			prefix.Config.TenantOrganizationId = &f.tenant.Org
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			root := f.blocks(t)[0]
+			require.NoError(t, cdbm.NewIPBlockDAO(f.session).Delete(ctx, nil, root.ID))
+			prefix.Id.Value = root.SitePrefixID.String()
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			require.NotNil(t, f.blocks(t)[0].Deleted)
 		}},
 		{"Core identity cannot move between owners", func(t *testing.T, f fixture) {
@@ -462,7 +656,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					_, err := f.session.DB.NewUpdate().Model(&changed).
 						Column("site_id", "infrastructure_provider_id", "tenant_id").WherePK().Exec(ctx)
 					require.NoError(t, err)
-					require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
+					require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 					require.Equal(t, root.Name, f.blocks(t)[0].Name)
 				})
 			}
@@ -473,7 +667,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			defer func() { _ = tx.Rollback() }()
 			require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), false))
 			inventory := testInventory(testPrefix())
-			require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrXactAdvisoryLockFailed)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
 			require.Empty(t, f.blocks(t))
 			require.NoError(t, tx.Commit())
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
@@ -482,6 +676,58 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { tt.check(t, setup(t)) })
+	}
+	for _, cidr := range []string{"10.0.0.0/24", "10.0.0.0/23"} {
+		t.Run("operator restoration waits for conflicting "+cidr, func(t *testing.T) {
+			f := setup(t)
+			root := f.retiredRoot(t)
+			replacement := testPrefix()
+			replacement.Config.Prefix = cidr
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(replacement)))
+			before := f.blocks(t)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.ElementsMatch(t, before, f.blocks(t))
+			prefixes, err := ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{cidr}, prefixes)
+			replacementBlock, err := cdbm.NewIPBlockDAO(f.session).GetBySitePrefixID(ctx, nil, uuid.MustParse(replacement.Id.Value))
+			require.NoError(t, err)
+			err = cdb.WithTx(ctx, f.session, func(tx *cdb.Tx) error {
+				err := cdbm.NewIPBlockDAO(f.session).Delete(ctx, tx, replacementBlock.ID)
+				if err != nil {
+					return err
+				}
+				return ipam.DeleteIpamEntryForIPBlock(ctx, ipam.NewIpamStorage(f.session.DB, tx.GetBunTx()),
+					replacementBlock.Prefix, replacementBlock.PrefixLength, replacementBlock.RoutingType,
+					replacementBlock.InfrastructureProviderID.String(), replacementBlock.SiteID.String())
+			})
+			require.NoError(t, err)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			restored, err := cdbm.NewIPBlockDAO(f.session).GetByID(ctx, nil, root.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, root.SitePrefixID, restored.SitePrefixID)
+			require.Equal(t, cdbm.IPBlockStatusReady, restored.Status)
+			prefixes, err = ipam.NewIpamStorage(f.session.DB, nil).ReadAllPrefixCidrs(ctx, f.namespace())
+			require.NoError(t, err)
+			require.Equal(t, []string{prefix.Config.Prefix}, prefixes)
+		})
+	}
+	for _, state := range []corev1.SitePrefixLifecycleState{
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING,
+		corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY,
+	} {
+		t.Run("retired operator rejects changed identity before "+state.String(), func(t *testing.T) {
+			f := setup(t)
+			root := f.retiredRoot(t)
+			prefix := testPrefix()
+			prefix.Id.Value = root.SitePrefixID.String()
+			prefix.Config.Prefix = "10.0.0.0/23"
+			prefix.Status.LifecycleState = state
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
+			require.Equal(t, *root, f.blocks(t)[0])
+		})
 	}
 	for _, replacementFirst := range []bool{false, true} {
 		name := "resize lifecycle before replacement"
@@ -526,14 +772,13 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 	}
 
 	for _, change := range []struct {
-		name      string
-		apply     func(*cdbm.IPBlock)
-		errorText string
+		name  string
+		apply func(*cdbm.IPBlock)
 	}{
-		{"routing mismatch", func(b *cdbm.IPBlock) { b.RoutingType = cdbm.IPBlockRoutingTypePublic }, "incompatible adoption"},
-		{"family mismatch", func(b *cdbm.IPBlock) { b.ProtocolVersion = cdbm.IPBlockProtocolVersionV6 }, "incompatible adoption"},
-		{"overlapping root", func(b *cdbm.IPBlock) { b.PrefixLength = 16 }, "overlaps"},
-		{"ambiguous roots", func(_ *cdbm.IPBlock) {}, "ambiguous adoption"},
+		{"routing mismatch", func(b *cdbm.IPBlock) { b.RoutingType = cdbm.IPBlockRoutingTypePublic }},
+		{"family mismatch", func(b *cdbm.IPBlock) { b.ProtocolVersion = cdbm.IPBlockProtocolVersionV6 }},
+		{"overlapping root", func(b *cdbm.IPBlock) { b.PrefixLength = 16 }},
+		{"ambiguous roots", func(_ *cdbm.IPBlock) {}},
 	} {
 		t.Run(change.name, func(t *testing.T) {
 			f := setup(t)
@@ -547,7 +792,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 				_, err := f.session.DB.NewUpdate().Model(root).Column("routing_type", "protocol_version", "prefix_length").WherePK().Exec(ctx)
 				require.NoError(t, err)
 			}
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())), change.errorText)
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(testPrefix())))
 			for _, block := range f.blocks(t) {
 				require.Nil(t, block.SitePrefixID)
 			}
@@ -571,7 +816,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			prefix := testPrefix()
 			prefix.Id.Value = root.SitePrefixID.String()
 			change.apply(prefix)
-			require.ErrorContains(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)), "immutable REST identity")
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testInventory(prefix)))
 			require.Equal(t, root.Name, f.blocks(t)[0].Name)
 		})
 	}
@@ -739,7 +984,7 @@ func checkSiteDeletion(t *testing.T, f fixture, reconcileFirst bool) {
 			return err == nil && waiters > 0
 		}, 5*time.Second, 10*time.Millisecond, "inventory must reload Site under its row lock")
 		require.NoError(t, tx.Commit())
-		require.ErrorIs(t, <-done, cdb.ErrDoesNotExist)
+		require.NoError(t, <-done)
 		require.Empty(t, f.blocks(t))
 	}
 	require.ErrorIs(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory), cdb.ErrDoesNotExist)

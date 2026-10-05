@@ -24,6 +24,56 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 )
 
+func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "whole 10.0.0.0/8 range",
+			prefix: "10.0.0.0/8",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "last /16 of 172.16.0.0/12",
+			prefix: "172.31.0.0/16",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "inside 192.168.0.0/16",
+			prefix: "192.168.4.128/26",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "inside IPv6 unique local range",
+			prefix: "fd12:3456::/48",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "starts inside a private range but extends past it",
+			prefix: "192.168.0.0/15",
+			want:   IPBlockRoutingTypePublic,
+		},
+		{
+			name:   "public IPv4",
+			prefix: "203.0.113.0/24",
+			want:   IPBlockRoutingTypePublic,
+		},
+		{
+			name:   "public IPv6",
+			prefix: "2001:db8::/32",
+			want:   IPBlockRoutingTypePublic,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, GetSiteFabricIPBlockRoutingType(netip.MustParsePrefix(tt.prefix)))
+		})
+	}
+}
+
 func testIPBlockInitDB(t *testing.T) *db.Session {
 	dbSession := util.GetTestDBSession(t, false)
 	dbSession.DB.AddQueryHook(bundebug.NewQueryHook(
@@ -452,7 +502,7 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 	user := testInstanceBuildUser(t, dbSession, "testUser")
 	dao := NewIPBlockDAO(dbSession)
 
-	create := func(name string, tenantID, sitePrefixID *uuid.UUID, sequence int) *IPBlock {
+	create := func(name string, tenantID, sitePrefixID *uuid.UUID, managed *bool, sequence int) *IPBlock {
 		t.Helper()
 		ipBlock, err := dao.Create(ctx, nil, IPBlockCreateInput{
 			Name:                     name,
@@ -460,6 +510,7 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 			InfrastructureProviderID: provider.ID,
 			TenantID:                 tenantID,
 			SitePrefixID:             sitePrefixID,
+			Managed:                  managed,
 			RoutingType:              IPBlockRoutingTypeDatacenterOnly,
 			Prefix:                   fmt.Sprintf("10.%d.0.0", sequence),
 			PrefixLength:             24,
@@ -471,14 +522,18 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 		return ipBlock
 	}
 
-	// These are the three meaningful identifier combinations: no TenantID is a
-	// provider root, TenantID alone is an Allocation, and TenantID with
-	// SitePrefixID is a private Tenant SitePrefix.
+	// Management is independent of the Core link: an allocated block remains
+	// provider-visible even if it acquires a SitePrefix ID.
 	providerSitePrefixID := uuid.New()
-	providerRoot := create("provider-root", nil, &providerSitePrefixID, 30)
-	allocation := create("allocation", &tenant.ID, nil, 31)
+	providerRoot := create("provider-root", nil, &providerSitePrefixID, nil, 30)
+	allocation := create("allocation", &tenant.ID, nil, nil, 31)
 	tenantSitePrefixID := uuid.New()
-	tenantSitePrefix := create("tenant-site-prefix", &tenant.ID, &tenantSitePrefixID, 32)
+	tenantSitePrefix := create("tenant-site-prefix", &tenant.ID, &tenantSitePrefixID, cutil.GetPtr(false), 32)
+	linkedAllocation := create("linked-allocation", &tenant.ID, cutil.GetPtr(uuid.New()), cutil.GetPtr(true), 33)
+	unlinkedTenantBlock := create("unlinked-tenant-block", &tenant.ID, nil, cutil.GetPtr(false), 34)
+	require.True(t, providerRoot.Managed)
+	require.True(t, allocation.Managed)
+	require.False(t, tenantSitePrefix.Managed)
 
 	providerVisibleFilter := IPBlockFilterInput{}
 	providerVisibleFilter.ProviderVisible(provider.ID)
@@ -493,6 +548,20 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 		filter  IPBlockFilterInput
 		wantErr error
 	}{
+		{
+			name: "provider sees linked Allocation", id: linkedAllocation.ID, filter: providerVisibleFilter,
+		},
+		{
+			name: "Allocation filter sees linked Allocation", id: linkedAllocation.ID, filter: tenantAllocatedFilter,
+		},
+		{
+			name: "provider cannot see unlinked tenant-created block", id: unlinkedTenantBlock.ID,
+			filter: providerVisibleFilter, wantErr: db.ErrDoesNotExist,
+		},
+		{
+			name: "Allocation filter excludes unlinked tenant-created block", id: unlinkedTenantBlock.ID,
+			filter: tenantAllocatedFilter, wantErr: db.ErrDoesNotExist,
+		},
 		{
 			name:   "provider sees Site fabric root",
 			id:     providerRoot.ID,
@@ -594,6 +663,7 @@ func TestIPBlockSQLDAO_GetCountByStatus(t *testing.T) {
 	sitePrefixID := uuid.New()
 	_, err = ipsd.Create(ctx, nil, IPBlockCreateInput{
 		Name:                     "tenant-site-prefix",
+		Managed:                  cutil.GetPtr(false),
 		SiteID:                   site1.ID,
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
@@ -1462,6 +1532,7 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 		ipb                 *IPBlock
 		paramDescription    bool
 		paramTenantID       bool
+		paramDeleted        bool
 		expectedUpdate      bool
 		expectedDescription *string
 		expectedTenantID    *uuid.UUID
@@ -1509,16 +1580,32 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 			expectedTenantID:    ipb.TenantID,
 			expectedError:       false,
 		},
+		{
+			desc:                "can restore soft deleted IP Block without clearing other fields",
+			ipb:                 ipb2,
+			paramDeleted:        true,
+			expectedUpdate:      true,
+			expectedDescription: cutil.GetPtr("description"),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			if tc.paramDeleted {
+				require.NoError(t, ipbsd.Delete(ctx, nil, tc.ipb.ID))
+				_, err := ipbsd.GetByID(ctx, nil, tc.ipb.ID, nil)
+				require.ErrorIs(t, err, db.ErrDoesNotExist)
+			}
 			tmp, err := ipbsd.Clear(ctx, nil, IPBlockClearInput{
 				IPBlockID:   tc.ipb.ID,
 				Description: tc.paramDescription,
 				TenantID:    tc.paramTenantID,
+				Deleted:     tc.paramDeleted,
 			})
 			assert.Equal(t, tc.expectedError, err != nil)
 			assert.NotNil(t, tmp)
+			assert.Nil(t, tmp.Deleted)
+			assert.Equal(t, tc.ipb.ID, tmp.ID)
+			assert.Equal(t, tc.ipb.Created, tmp.Created)
 			assert.Equal(t, tc.expectedDescription == nil, tmp.Description == nil)
 			if tc.expectedDescription != nil {
 				assert.Equal(t, *tc.expectedDescription, *tmp.Description)
