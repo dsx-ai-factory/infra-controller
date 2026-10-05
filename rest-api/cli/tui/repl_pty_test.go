@@ -129,6 +129,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "VPC prefix name")
 		terminal.send(t, "tenant-ipv6-prefix\r")
 		terminal.waitFor(t, "IP block:")
+		terminal.waitFor(t, "tenant-ready-v6")
 		prefixPickerTranscript := terminal.transcript()
 		// The two spaces after the IPv4 block name keep this check distinct
 		// from the similarly named tenant-ready-v6 row.
@@ -167,6 +168,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "no-prefix-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "no Ready VPC prefixes available for selected VPC")
 
 		// A lone Escape must cancel a real selector without waiting forever.
@@ -201,6 +204,17 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "ethernet-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "n\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "(required)")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "https://example.test/boot.ipxe\r")
+		terminal.waitFor(t, "User data (optional)")
+		terminal.send(t, "#cloud-config\r")
+		terminal.waitFor(t, "Enable phone home?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "Subnet for Ethernet interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Add another Ethernet interface (have 1)?")
@@ -220,6 +234,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Instance created: ethernet-instance")
 		ethernetTranscript := terminal.transcript()[ethernetCommandStart:]
 		assert.NotContains(t, ethernetTranscript, "pending-subnet")
+		assert.NotContains(t, ethernetTranscript, "Allow override at instance creation?")
 		assert.Contains(t, ethernetTranscript, "--data")
 		assert.Contains(t, ethernetTranscript, `"interfaces":[{"isPhysical":true,"subnetId":"subnet-1"},{"isPhysical":false,"subnetId":"subnet-2","virtualFunctionId":7}]`)
 		assert.Contains(t, ethernetTranscript, `"infinibandInterfaces":[{"device":"ConnectX-7","deviceInstance":0,"isPhysical":true,"partitionId":"ib-partition-1"},{"device":"ConnectX-7","deviceInstance":2,"isPhysical":true,"partitionId":"ib-partition-2"}]`)
@@ -235,6 +250,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "fnn-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for DPU 0 physical interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
@@ -284,6 +301,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "fnn-fallback-instance\r")
+		terminal.waitFor(t, "Select an existing operating system?")
+		terminal.send(t, "y\r")
 		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)")
@@ -314,8 +333,15 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "flat-instance\r")
+		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "#!ipxe\r")
+		terminal.waitFor(t, "User data (optional)")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Enable phone home?")
+		terminal.send(t, "n\r")
 		terminal.waitFor(t, "Instance created: flat-instance")
 		flatTranscript := terminal.transcript()[flatCommandStart:]
+		assert.NotContains(t, flatTranscript, "Select an existing operating system?")
 		assert.NotContains(t, flatTranscript, "Subnet for Ethernet interface:")
 		assert.NotContains(t, flatTranscript, "VPC prefix for Ethernet interface:")
 
@@ -532,6 +558,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"ethernet-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-1",
+				"ipxeScript":"https://example.test/boot.ipxe",
+				"userData":"#cloud-config",
+				"phoneHomeEnabled":true,
 				"interfaces":[
 					{"subnetId":"subnet-1","isPhysical":true},
 					{"subnetId":"subnet-2","isPhysical":false,"virtualFunctionId":7}
@@ -550,6 +579,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"fnn-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-2",
+				"operatingSystemId":"os-1",
 				"interfaces":[
 					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.11","device":"dual-dpu-network","deviceInstance":0,"isPhysical":true},
 					{"vpcPrefixId":"vpc-prefix-1","ipAddress":"10.0.0.13","device":"dual-dpu-network","deviceInstance":0,"isPhysical":false,"virtualFunctionId":3},
@@ -565,6 +595,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 				"name":"fnn-fallback-instance",
 				"machineId":"machine-1",
 				"vpcId":"vpc-2",
+				"operatingSystemId":"os-1",
 				"interfaces":[
 					{"vpcPrefixId":"vpc-prefix-1","isPhysical":true},
 					{"vpcPrefixId":"vpc-prefix-1","isPhysical":false,"virtualFunctionId":5}
@@ -574,7 +605,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		)
 		assert.JSONEq(
 			t,
-			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true}`,
+			`{"name":"flat-instance","machineId":"machine-1","vpcId":"vpc-flat","autoNetwork":true,"ipxeScript":"#!ipxe","phoneHomeEnabled":false}`,
 			instanceRequests[3].Body,
 		)
 		assert.NotContains(t, instanceRequests[3].Body, "interfaces")
@@ -879,7 +910,12 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/operating-system":
-			_, _ = io.WriteString(w, `[]`)
+			// The final flat-VPC instance has no registered OS to select.
+			if len(recorder.matching(http.MethodPost, "/v2/org/acme/nico/instance")) == 3 {
+				_, _ = io.WriteString(w, `[]`)
+				return
+			}
+			_, _ = io.WriteString(w, `[{"id":"os-1","name":"existing-os"}]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/sshkeygroup":
 			_, _ = io.WriteString(w, `[]`)

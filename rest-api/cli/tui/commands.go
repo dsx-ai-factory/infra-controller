@@ -1357,7 +1357,7 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	err = promptOperatingSystemOptions(body)
+	err = promptOperatingSystemOptions(body, "os")
 	if err != nil {
 		return err
 	}
@@ -1590,20 +1590,22 @@ func promptIPXETemplateArtifact(name string) (map[string]interface{}, error) {
 	return artifact, nil
 }
 
-func promptOperatingSystemOptions(body map[string]interface{}) error {
+func promptOperatingSystemOptions(body map[string]interface{}, promptContext string) error {
 	userData, err := PromptText("User data (optional)", false)
 	if err != nil {
 		return err
 	}
-	allowOverride, err := PromptConfirm("Allow override at instance creation?")
-	if err != nil {
-		return err
+	if promptContext == "os" {
+		allowOverride, promptErr := PromptConfirm("Allow override at instance creation?")
+		if promptErr != nil {
+			return promptErr
+		}
+		body["allowOverride"] = allowOverride
 	}
 	phoneHomeEnabled, err := PromptConfirm("Enable phone home?")
 	if err != nil {
 		return err
 	}
-	body["allowOverride"] = allowOverride
 	body["phoneHomeEnabled"] = phoneHomeEnabled
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
@@ -3632,7 +3634,7 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	var osID *string
 	osList, osErr := s.Resolver.Fetch(ctx, "operating-system")
 	if osErr == nil && len(osList) > 0 {
-		useOS, confirmErr := PromptConfirm("Select an operating system?")
+		useOS, confirmErr := PromptConfirm("Select an existing operating system?")
 		if confirmErr != nil {
 			return confirmErr
 		}
@@ -3642,6 +3644,23 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 				return selectErr
 			}
 			osID = &osItem.ID
+		}
+	}
+	body := map[string]interface{}{
+		"name":      name,
+		"machineId": machine.ID,
+		"vpcId":     vpc.ID,
+	}
+	if osID != nil {
+		body["operatingSystemId"] = *osID
+	} else {
+		err = promptRawIPXEOperatingSystem(body)
+		if err != nil {
+			return err
+		}
+		err = promptOperatingSystemOptions(body, "instance")
+		if err != nil {
+			return err
 		}
 	}
 
@@ -3672,14 +3691,6 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		return err
 	}
 
-	body := map[string]interface{}{
-		"name":      name,
-		"machineId": machine.ID,
-		"vpcId":     vpc.ID,
-	}
-	if osID != nil {
-		body["operatingSystemId"] = *osID
-	}
 	if len(interfaces) > 0 {
 		body["interfaces"] = interfaces
 	}

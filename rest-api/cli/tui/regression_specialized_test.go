@@ -382,6 +382,71 @@ func TestPromptOperatingSystemTypeStopsOnUnexpectedTenantError(t *testing.T) {
 	assert.Equal(t, int32(1), tenantCalls.Load())
 }
 
+func TestPromptOperatingSystemOptions(t *testing.T) {
+	tests := []struct {
+		name          string
+		promptContext string
+		input         string
+		expectedBody  map[string]interface{}
+		wantCancelled bool
+	}{
+		{
+			name:          "OS context includes override permission",
+			promptContext: "os",
+			input:         "#cloud-config\nn\ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"allowOverride":    false,
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:          "instance context skips override permission",
+			promptContext: "instance",
+			input:         " #cloud-config \ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:          "blank instance user data is omitted",
+			promptContext: "instance",
+			input:         "  \nn\n",
+			expectedBody: map[string]interface{}{
+				"phoneHomeEnabled": false,
+			},
+		},
+		{
+			name:          "closed input at phone home cancels the prompt",
+			promptContext: "instance",
+			input:         "#cloud-config\n",
+			wantCancelled: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				return promptOperatingSystemOptions(body, test.promptContext)
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.expectedBody, body)
+			assert.Contains(t, output, "User data (optional)")
+			assert.Contains(t, output, "Enable phone home?")
+			if test.promptContext != "os" {
+				assert.NotContains(t, output, "Allow override at instance creation?")
+			} else {
+				assert.Contains(t, output, "Allow override at instance creation?")
+			}
+		})
+	}
+}
+
 func TestCmdOSCreate(t *testing.T) {
 	const (
 		siteID         = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
