@@ -17,9 +17,95 @@
 
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::metadata::Metadata;
+use sqlx::Connection;
 
 use super::*;
 use crate as db;
+
+#[crate::sqlx_test]
+async fn expected_power_shelf_queries_survive_added_columns(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut api_connection = pool.acquire().await?;
+    exercise_expected_power_shelf_queries(&mut api_connection).await?;
+    assert!(api_connection.cached_statements_size() > 0);
+
+    // Keep the API's prepared statements while another connection applies DDL.
+    let mut migration = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL lock_timeout = '5s';
+         ALTER TABLE expected_power_shelves ADD COLUMN test_added_column text;",
+    )
+    .execute(&mut *migration)
+    .await?;
+    migration.commit().await?;
+
+    exercise_expected_power_shelf_queries(&mut api_connection).await?;
+    Ok(())
+}
+
+async fn exercise_expected_power_shelf_queries(
+    connection: &mut PgConnection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = connection.begin().await?;
+    let id = Uuid::new_v4();
+    let rack_id = RackId::new("projection-rack");
+    let expected = ExpectedPowerShelf {
+        expected_power_shelf_id: Some(id),
+        bmc_mac_address: "02:00:00:00:03:01".parse()?,
+        bmc_username: "test-user".to_string(),
+        bmc_password: "test-password".to_string(),
+        serial_number: "projection-shelf".to_string(),
+        bmc_ip_address: Some("192.0.2.30".parse()?),
+        rack_id: Some(rack_id.clone()),
+        bmc_retain_credentials: Some(true),
+        metadata: Metadata {
+            name: "expected power shelf".to_string(),
+            description: "populated projection fixture".to_string(),
+            labels: HashMap::from([("location".to_string(), "rack-1".to_string())]),
+        },
+    };
+    assert_power_shelf(&create(&mut txn, expected.clone()).await?, &expected);
+
+    for found in [
+        find_by_bmc_mac_address(&mut txn, expected.bmc_mac_address).await?,
+        find_by_id(&mut txn, id).await?,
+        find_by_id_for_update(&mut txn, id).await?,
+    ] {
+        assert_power_shelf(&found.expect("the expected power shelf exists"), &expected);
+    }
+    for found in [
+        find_all(&mut txn).await?,
+        find_all_by_rack_id(&mut txn, &rack_id).await?,
+    ] {
+        assert_eq!(found.len(), 1);
+        assert_power_shelf(&found[0], &expected);
+    }
+    let found = find_many_by_bmc_mac_address(&mut txn, &[expected.bmc_mac_address]).await?;
+    assert_eq!(found.len(), 1);
+    assert_power_shelf(&found[&expected.bmc_mac_address], &expected);
+
+    txn.rollback().await?;
+    Ok(())
+}
+
+fn assert_power_shelf(actual: &ExpectedPowerShelf, expected: &ExpectedPowerShelf) {
+    assert_eq!(
+        actual.expected_power_shelf_id,
+        expected.expected_power_shelf_id
+    );
+    assert_eq!(actual.bmc_mac_address, expected.bmc_mac_address);
+    assert_eq!(actual.bmc_username, expected.bmc_username);
+    assert_eq!(actual.bmc_password, expected.bmc_password);
+    assert_eq!(actual.serial_number, expected.serial_number);
+    assert_eq!(actual.bmc_ip_address, expected.bmc_ip_address);
+    assert_eq!(actual.rack_id, expected.rack_id);
+    assert_eq!(
+        actual.bmc_retain_credentials,
+        expected.bmc_retain_credentials
+    );
+    assert_eq!(actual.metadata, expected.metadata);
+}
 
 fn expected_power_shelf_bmc_mac_address(index: u8) -> mac_address::MacAddress {
     mac_address::MacAddress::new([0x44, 0x44, 0x22, 0x22, 0x00, index])

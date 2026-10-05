@@ -35,6 +35,7 @@ use crate::{ADMIN_SSH_KEY_PATH, TENANT_SSH_KEY_PATH, TENANT_SSH_PUBKEY};
 
 pub(super) mod ipmi_sim;
 mod metrics;
+pub(crate) mod recording_ipmitool;
 pub(super) mod ssh_client;
 pub(super) mod ssh_console_test_helper;
 

@@ -3880,7 +3880,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
-	testVPCSetupSchema(t, dbSession)
+	common.TestSetupSchema(t, dbSession)
 
 	ipOrg := "test-provider-org"
 	ipOrgRoles := []string{authz.ProviderAdminRole}
@@ -3920,6 +3920,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	vpc3 := testVPCBuildVPC(t, dbSession, "test-vpc-3", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, map[string]string{"zone": "east1"}, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc3)
+	vpcWithPeering := testVPCBuildVPC(t, dbSession, "test-vpc-with-peering", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
 
 	os := common.TestBuildOperatingSystem(t, dbSession, "test-os", tn1, cdbm.OperatingSystemStatusReady, tnu1)
 	assert.NotNil(t, os)
@@ -3989,6 +3990,15 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 
 	tscWithNICoNotFound.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	peeringPrecondition := fmt.Sprintf("VPC `%s` still has peerings; delete its peerings and wait for them to disappear before deleting the VPC", vpcWithPeering.ID)
+	peeringWorkflowRun := &tmocks.WorkflowRun{}
+	peeringWorkflowRun.On("GetID").Return("workflow-with-peering-precondition")
+	peeringWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(peeringPrecondition, swe.ErrTypeNICoFailedPrecondition, errors.New(peeringPrecondition))).Once()
+	peeringSiteClient := &tmocks.Client{}
+	peeringSiteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteVPCV2", mock.Anything).Return(peeringWorkflowRun, nil).Once()
+	scpWithPeering := sc.NewClientPool(tcfg)
+	scpWithPeering.IDClientMap[st.ID.String()] = peeringSiteClient
+
 	// Prepare client pool for sync calls
 	// to site(s).
 
@@ -4019,7 +4029,26 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 		args               args
 		wantErr            bool
 		verifyChildSpanner bool
+		responseContains   string
+		expectedVpcStatus  string
 	}{
+		{
+			name: "VPC peering precondition reaches the caller without marking the VPC Deleting",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scpWithPeering,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithPeering.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusPreconditionFailed,
+			},
+			responseContains:  peeringPrecondition,
+			expectedVpcStatus: cdbm.VpcStatusReady,
+		},
 		{
 			name: "test VPC delete API endpoint success",
 			fields: fields{
@@ -4214,6 +4243,14 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.args.respCode, rec.Code)
+			if tt.responseContains != "" {
+				assert.Contains(t, rec.Body.String(), tt.responseContains)
+			}
+			if tt.expectedVpcStatus != "" {
+				vpc, err := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPC), nil)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedVpcStatus, vpc.Status)
+			}
 			if tt.args.respCode != http.StatusAccepted {
 				return
 			}
@@ -4232,6 +4269,8 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+	peeringSiteClient.AssertExpectations(t)
+	peeringWorkflowRun.AssertExpectations(t)
 }
 
 func TestNewCreateVPCHandler(t *testing.T) {

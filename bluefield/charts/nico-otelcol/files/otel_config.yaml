@@ -239,6 +239,15 @@ receivers:
       filesystem:
       paging:
 
+  punt_stats:
+    # Written by the punt-stats-helper sidecar (see daemonset.yaml), which is
+    # the only container with containerd-socket/crictl exec access. The
+    # chart replaces this path with puntStatsHelper.dstPath.
+    file_path: /var/run/punt-stats/punt
+    # 5m hits Prometheus staleness limit, causing a discontinuity in the
+    # graphed time series.
+    scrape_interval: 4m
+
 processors:
   batch/logs:
     send_batch_size: 8192
@@ -338,6 +347,11 @@ processors:
     attributes:
       - key: component
         value: dpu-workloads
+        action: upsert
+  resource/punt-stats:
+    attributes:
+      - key: component
+        value: punt_stats
         action: upsert
   resourcedetection:
     # Add hostname at the resource level
@@ -525,6 +539,15 @@ service:
         - memory_limiter
         - resourcedetection
         - resource/log-stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/punt-stats:
+      receivers: [punt_stats]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/punt-stats
+        - telemetry_stats
         - batch/metrics
       exporters: [otlp/site, prometheus]
   extensions: [file_storage/cursors]

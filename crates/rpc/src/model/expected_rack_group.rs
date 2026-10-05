@@ -6,7 +6,8 @@
 use std::collections::HashSet;
 
 use model::expected_rack_group::{
-    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupProtocol,
+    RackGroupTopology,
 };
 use model::metadata::Metadata;
 
@@ -30,6 +31,10 @@ impl From<ExpectedRackGroup> for rpc::forge::ExpectedRackGroup {
         Self {
             rack_group_id: Some(group.rack_group_id),
             topology: group.topology.to_string(),
+            protocol: group
+                .protocol
+                .map(|protocol| protocol.to_string())
+                .unwrap_or_default(),
             racks: group.racks.into_iter().map(Into::into).collect(),
             metadata: Some(group.metadata.into()),
         }
@@ -48,6 +53,11 @@ impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
         if value.topology.trim().is_empty() || value.topology.chars().count() > 128 {
             return Err(invalid(
                 "topology must contain 1 to 128 characters and not be blank",
+            ));
+        }
+        if value.protocol.trim().is_empty() || value.protocol.chars().count() > 128 {
+            return Err(invalid(
+                "protocol must contain 1 to 128 characters and not be blank",
             ));
         }
         let mut rack_ids = HashSet::new();
@@ -96,6 +106,7 @@ impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
         Ok(Self {
             rack_group_id,
             topology: RackGroupTopology::new(value.topology),
+            protocol: Some(RackGroupProtocol::new(value.protocol)),
             racks,
             metadata,
         })
@@ -129,6 +140,7 @@ mod tests {
         rpc::forge::ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new("54f74aea-76eb-4f0a-aab2-b607136f4d35")),
             topology: "gb200_nvl72r1_c2g4".to_string(),
+            protocol: "NVLINK_V6".to_string(),
             racks: vec![
                 rpc::forge::ExpectedRackGroupRack {
                     rack_id: Some(RackId::new("rack-02")),
@@ -158,6 +170,7 @@ mod tests {
         let cases: &[(&str, Mutation)] = &[
             ("missing identity", |v| v.rack_group_id = None),
             ("blank topology", |v| v.topology = " ".to_string()),
+            ("blank protocol", |v| v.protocol = " ".to_string()),
             ("duplicate rack", |v| v.racks.push(v.racks[0].clone())),
             ("duplicate device across racks", |v| {
                 let m = v.racks[0].members[0].clone();

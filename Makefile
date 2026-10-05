@@ -88,6 +88,8 @@ bootstrap: ## Set up an Ubuntu/Debian build host: apt deps, rustup, submodules, 
 #                       boot-artifact images (needs the full mkosi build host)
 #   make images-core   NICo Core image (nico) only
 #   make images-rest   REST service images only
+#   make images-machine-lifecycle  Machine lifecycle test image (QA tool; not part
+#                       of the deployable stack, so not included in images-all)
 #
 # Images are pushed as manifests at $(IMAGE_REGISTRY)/<name>:$(IMAGE_TAG)
 # containing whichever architectures NICO_ARCHES, BOOT_ARTIFACTS_ARCHES, and
@@ -125,7 +127,7 @@ CORE_RUNTIME_CONTAINER_ARM64 ?= $(IMAGE_REGISTRY)/nico-runtime-container:$(IMAGE
 
 .PHONY: images images-arm images-all images-all-arm images-validate images-all-validate images-registry \
 		images-base images-core images-rest images-machine-validation images-machine-validation-arm \
-		images-boot-artifacts images-bfb images-bfb-arm
+		images-boot-artifacts images-bfb images-bfb-arm images-machine-lifecycle
 
 images-validate:
 	$(call check-arches,$(NICO_ARCHES),NICO_ARCHES)
@@ -323,6 +325,22 @@ images-bfb-arm: ## Build the aarch64 DPU BFB boot-artifact image in a native ARM
 		--file dev/docker/Dockerfile.release-artifacts-aarch64 .
 	docker buildx imagetools create -t $(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG) \
 		$(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG)-arm64
+
+# The machine lifecycle test (tests/machine-lifecycle) is a QA tool, not part of
+# the deployable stack, so images-all does not include it. Its Dockerfile copies
+# the whole project, so the build context is that directory, not the repo root.
+images-machine-lifecycle: ## Build the machine lifecycle test image (NICO_ARCHES="amd64 arm64")
+	$(call check-arches,$(NICO_ARCHES),NICO_ARCHES)
+	$(MAKE) images-registry
+	@set -e; \
+	tags=""; \
+	for arch in $(NICO_ARCHES); do \
+		tag=$(IMAGE_REGISTRY)/machine-lifecycle-test:$(IMAGE_TAG)-$$arch; \
+		docker buildx build --platform linux/$$arch --push -t $$tag \
+			--file tests/machine-lifecycle/docker/mlt_image.Dockerfile tests/machine-lifecycle ; \
+		tags="$$tags $$tag"; \
+	done; \
+	docker buildx imagetools create -t $(IMAGE_REGISTRY)/machine-lifecycle-test:$(IMAGE_TAG) $$tags
 
 # =============================================================================
 # Rest (delegate to rest-api/Makefile)

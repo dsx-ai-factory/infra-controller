@@ -31,7 +31,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
-use carbide_authn::middleware::AuthContext;
+use carbide_authn::middleware::{AuthContext, Principal};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
@@ -73,6 +73,11 @@ const ROTATED_PATH: &str = "/redfish/v1/Rotated";
 const REJECTING_PATH: &str = "/redfish/v1/UpdateService/rejecting";
 /// Answers after [`SLOW_ANSWER_DELAY`].
 const SLOW_PATH: &str = "/redfish/v1/Slow";
+/// Answers after two and a half seconds.
+const BRIEFLY_SLOW_PATH: &str = "/redfish/v1/BrieflySlow";
+/// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
+/// after two and a half seconds.
+const BRIEFLY_SLOW_ROTATED_PATH: &str = "/redfish/v1/BrieflySlowRotated";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
 /// after [`SLOW_ANSWER_DELAY`].
 const SLOW_ROTATED_PATH: &str = "/redfish/v1/SlowRotated";
@@ -162,6 +167,17 @@ async fn fake_bmc_handler(
             SYSTEM_BODY.into_response()
         }
         (Method::GET, ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
+        (Method::GET, BRIEFLY_SLOW_PATH) => {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            SYSTEM_BODY.into_response()
+        }
+        (Method::GET, BRIEFLY_SLOW_ROTATED_PATH)
+            if authorization == Some(basic(FRESH_PASSWORD).as_str()) =>
+        {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            SYSTEM_BODY.into_response()
+        }
+        (Method::GET, BRIEFLY_SLOW_ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
         (Method::GET, SLOW_PATH) => {
             tokio::time::sleep(SLOW_ANSWER_DELAY).await;
             SYSTEM_BODY.into_response()
@@ -251,10 +267,13 @@ fn refusing_port() -> (tokio::net::TcpSocket, u16) {
 }
 
 /// nico-api as the proxy uses it to replace a credential: naming the BMC at
-/// an IP, and handing out that BMC's credential, [`FRESH_PASSWORD`]. It also
-/// answers `Version`, which the client calls to check its connection.
+/// an IP, and handing out that BMC's credential, [`FRESH_PASSWORD`], each
+/// after `lookup_delay`. It also answers `Version`, which the client calls to
+/// check its connection, at once.
 #[derive(Clone)]
-struct FakeNicoApi;
+struct FakeNicoApi {
+    lookup_delay: Duration,
+}
 
 impl tonic::server::NamedService for FakeNicoApi {
     const NAME: &'static str = "forge.Forge";
@@ -270,7 +289,11 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
     }
 
     fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        let lookup_delay = self.lookup_delay;
         Box::pin(async move {
+            if request.uri().path() != "/forge.Forge/Version" {
+                tokio::time::sleep(lookup_delay).await;
+            }
             Ok(match request.uri().path() {
                 "/forge.Forge/Version" => {
                     tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
@@ -338,13 +361,18 @@ where
 
 /// A client for a fake nico-api listening on a fresh local port.
 async fn fake_nico_api() -> ForgeApiClient {
+    fake_nico_api_answering_after(Duration::ZERO).await
+}
+
+/// [`fake_nico_api`], answering lookups after `lookup_delay`.
+async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
     let addr = listener.local_addr().expect("fake nico-api address");
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(FakeNicoApi)
+            .add_service(FakeNicoApi { lookup_delay })
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .expect("fake nico-api serves");
@@ -366,19 +394,23 @@ fn root_password() -> BmcCredentials {
 /// whose ACL grants the anonymous caller `acl`, and which holds
 /// `credentials` for [`FAKE_BMC_IP`] so no nico-api call is made.
 async fn proxy_to(upstream: &str, acl: &str, credentials: BmcCredentials) -> BmcProxyState {
-    proxy_configured(upstream, acl, "", credentials).await
+    proxy_configured(upstream, acl, "", credentials, "follow_same_origin").await
 }
 
-/// [`proxy_to`], with the `[[class]]` tables `classes`.
+/// [`proxy_to`], with explicit `[[class]]` tables and a redirect mode.
 async fn proxy_configured(
     upstream: &str,
     acl: &str,
     classes: &str,
     credentials: BmcCredentials,
+    redirect_mode: &str,
 ) -> BmcProxyState {
     let state = test_state_with_config(&format!(
         r#"
         bmc_proxy = "{upstream}"
+
+        [redirects]
+        mode = "{redirect_mode}"
 
         [tls]
         identity_pemfile_path = ""
@@ -445,7 +477,12 @@ struct Answer {
     body: Bytes,
 }
 
-async fn exchange(state: &BmcProxyState, request: Request<Body>) -> Answer {
+/// Sends one request while the caller holds the process-global metrics window.
+async fn exchange(
+    _metrics: &MetricsCapture,
+    state: &BmcProxyState,
+    request: Request<Body>,
+) -> Answer {
     let response = match proxy_request(axum::extract::State(state.clone()), request).await {
         Ok(response) | Err(response) => response,
     };
@@ -475,9 +512,11 @@ fn values(headers: &HeaderMap, name: &str) -> Vec<String> {
 /// the BMC's answer comes back with its headers and body.
 #[tokio::test]
 async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
+    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
     let answer = exchange(
+        &metrics,
         &state,
         proxied(
             Method::GET,
@@ -511,9 +550,10 @@ async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
 /// host in a `Forwarded` of its own, in place of the caller's.
 #[tokio::test]
 async fn a_host_override_is_told_the_bmc_in_forwarded() {
+    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_to(&addr.to_string(), r#"["/**"]"#, root_password()).await;
-    let answer = exchange(&state, get(SYSTEM_PATH)).await;
+    let answer = exchange(&metrics, &state, get(SYSTEM_PATH)).await;
 
     assert_eq!(answer.status, 200);
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
@@ -525,10 +565,14 @@ async fn a_host_override_is_told_the_bmc_in_forwarded() {
 
 /// What the BMC saw of the credential: every `Authorization` and every
 /// `X-Auth-Token` value.
-async fn credential_on_the_wire(credentials: BmcCredentials) -> (Vec<String>, Vec<String>) {
+async fn credential_on_the_wire(
+    metrics: &MetricsCapture,
+    credentials: BmcCredentials,
+) -> (Vec<String>, Vec<String>) {
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, credentials).await;
     let answer = exchange(
+        metrics,
         &state,
         proxied(
             Method::GET,
@@ -555,6 +599,8 @@ async fn credential_on_the_wire(credentials: BmcCredentials) -> (Vec<String>, Ve
 /// token header.
 #[tokio::test]
 async fn the_proxys_credential_replaces_the_callers() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -570,17 +616,20 @@ async fn the_proxys_credential_replaces_the_callers() {
                 expect: Yields((vec![], vec!["session-1".to_string()])),
             },
         ],
-        |credentials| async { Ok::<_, Infallible>(credential_on_the_wire(credentials).await) },
+        |credentials| async move {
+            Ok::<_, Infallible>(credential_on_the_wire(metrics_window, credentials).await)
+        },
     )
     .await;
 }
 
 /// How the BMC received a body: (status the caller got, bytes received,
 /// `Content-Length` values, `Transfer-Encoding` values).
-async fn upload(len: usize) -> (u16, usize, Vec<String>, Vec<String>) {
+async fn upload(metrics: &MetricsCapture, len: usize) -> (u16, usize, Vec<String>, Vec<String>) {
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
     let answer = exchange(
+        metrics,
         &state,
         proxied(
             Method::POST,
@@ -605,6 +654,8 @@ async fn upload(len: usize) -> (u16, usize, Vec<String>, Vec<String>) {
 /// reject chunked uploads.
 #[tokio::test]
 async fn request_bodies_reach_the_bmc_whole_with_their_length() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     let streamed = MAX_BUFFERED_BODY_SIZE + 1;
     check_cases_async(
         [
@@ -619,7 +670,7 @@ async fn request_bodies_reach_the_bmc_whole_with_their_length() {
                 expect: Yields((202, streamed, vec![streamed.to_string()], vec![])),
             },
         ],
-        |len| async move { Ok::<_, Infallible>(upload(len).await) },
+        |len| async move { Ok::<_, Infallible>(upload(metrics_window, len).await) },
     )
     .await;
 }
@@ -628,9 +679,10 @@ async fn request_bodies_reach_the_bmc_whole_with_their_length() {
 /// caller without it.
 #[tokio::test]
 async fn an_error_echoing_the_credential_is_redacted() {
+    let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
-    let answer = exchange(&state, get(LEAKY_PATH)).await;
+    let answer = exchange(&metrics, &state, get(LEAKY_PATH)).await;
 
     assert_eq!(answer.status, 500);
     let body = String::from_utf8_lossy(&answer.body);
@@ -659,7 +711,10 @@ fn credential_sent(received: &Received) -> &'static str {
 /// What a request the BMC rejects for its credential leads to: (status the
 /// caller got, the password each attempt carried, the password cached
 /// afterwards, whether the caller saw either password).
-async fn after_rejection(input: Rejected) -> (u16, Vec<&'static str>, Option<String>, bool) {
+async fn after_rejection(
+    metrics: &MetricsCapture,
+    input: Rejected,
+) -> (u16, Vec<&'static str>, Option<String>, bool) {
     let (addr, bmc) = spawn_fake_bmc();
     let mut state = proxy_reaching(addr, root_password()).await;
     state.api_client = fake_nico_api().await;
@@ -674,7 +729,7 @@ async fn after_rejection(input: Rejected) -> (u16, Vec<&'static str>, Option<Str
             Body::from(vec![b'x'; input.body_len]),
         )
     };
-    let answer = exchange(&state, request).await;
+    let answer = exchange(metrics, &state, request).await;
 
     let attempts = bmc.received().iter().map(credential_sent).collect();
     let cached = match state
@@ -698,6 +753,8 @@ async fn after_rejection(input: Rejected) -> (u16, Vec<&'static str>, Option<Str
 /// password is scrubbed of the one that attempt sent.
 #[tokio::test]
 async fn a_rejected_credential_is_replaced_once() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -733,7 +790,7 @@ async fn a_rejected_credential_is_replaced_once() {
                 expect: Yields((401, vec!["cached"], None, false)),
             },
         ],
-        |input| async { Ok::<_, Infallible>(after_rejection(input).await) },
+        |input| async move { Ok::<_, Infallible>(after_rejection(metrics_window, input).await) },
     )
     .await;
 }
@@ -742,9 +799,10 @@ async fn a_rejected_credential_is_replaced_once() {
 /// replayed, and the caller sees the final answer.
 #[tokio::test]
 async fn a_redirect_is_followed_to_the_final_answer() {
+    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
-    let answer = exchange(&state, get(MOVED_PATH)).await;
+    let answer = exchange(&metrics, &state, get(MOVED_PATH)).await;
 
     assert_eq!(answer.status, 200);
     assert_eq!(answer.body, SYSTEM_BODY);
@@ -756,10 +814,37 @@ async fn a_redirect_is_followed_to_the_final_answer() {
     assert_eq!(paths, [MOVED_PATH, SYSTEM_PATH]);
 }
 
+/// The experimental mode returns a safe same-BMC redirect as a relative
+/// reference, leaving the separately authorized follow-up to the caller.
+#[tokio::test]
+async fn return_to_client_mode_does_not_follow_the_redirect() {
+    let metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        root_password(),
+        "return_to_client",
+    )
+    .await;
+    let answer = exchange(&metrics, &state, get(MOVED_PATH)).await;
+
+    assert_eq!(answer.status, 307);
+    assert_eq!(values(&answer.headers, "location"), [SYSTEM_PATH]);
+    let paths: Vec<String> = bmc
+        .received()
+        .into_iter()
+        .map(|received| received.path_and_query)
+        .collect();
+    assert_eq!(paths, [MOVED_PATH]);
+}
+
 /// A caller naming its BMC by MAC address reaches the BMC at the IP that
 /// address resolves to.
 #[tokio::test]
 async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
+    let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
     state
@@ -770,6 +855,7 @@ async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
         )
         .await;
     let answer = exchange(
+        &metrics,
         &state,
         proxied(
             Method::GET,
@@ -794,7 +880,7 @@ struct Refused {
 }
 
 /// (status the caller got, whether the BMC received anything).
-async fn refusal(input: Refused) -> (u16, bool) {
+async fn refusal(metrics: &MetricsCapture, input: Refused) -> (u16, bool) {
     let (addr, bmc) = spawn_fake_bmc();
     let (_held, refusing) = refusing_port();
     let port = if input.bmc_listening {
@@ -803,7 +889,7 @@ async fn refusal(input: Refused) -> (u16, bool) {
         refusing
     };
     let state = proxy_to(&format!(":{port}"), input.acl, root_password()).await;
-    let answer = exchange(&state, (input.request)()).await;
+    let answer = exchange(metrics, &state, (input.request)()).await;
     (answer.status, !bmc.received().is_empty())
 }
 
@@ -811,6 +897,8 @@ async fn refusal(input: Refused) -> (u16, bool) {
 /// that says why, and none reaches the BMC.
 #[tokio::test]
 async fn requests_the_proxy_does_not_deliver() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
@@ -877,12 +965,13 @@ async fn requests_the_proxy_does_not_deliver() {
                 expect: Yields((502, false)),
             },
         ],
-        |input| async { Ok::<_, Infallible>(refusal(input).await) },
+        |input| async move { Ok::<_, Infallible>(refusal(metrics_window, input).await) },
     )
     .await;
 }
 
-/// A class for `GET`s of the slow paths. Its budget is far shorter than
+/// A class for `GET`s of the slow paths, and of [`ROTATED_PATH`], whose
+/// replay can wait on nico-api. Its budget is far shorter than
 /// [`SLOW_ANSWER_DELAY`], and long enough for an attempt to reach the BMC
 /// even on a loaded machine.
 const QUICK_CLASS: &str = r#"
@@ -892,16 +981,32 @@ const QUICK_CLASS: &str = r#"
         "GET /redfish/v1/Slow",
         "GET /redfish/v1/SlowRotated",
         "GET /redfish/v1/SlowBody",
+        "GET /redfish/v1/Rotated",
     ]
     upstream_timeout = "2s"
 "#;
 
+/// How nico-api answers the proxy's lookups of the BMC's credentials.
+#[derive(Clone, Copy)]
+enum Lookup {
+    /// At once, the proxy holding the BMC's credential already.
+    Prompt,
+    /// After [`SLOW_ANSWER_DELAY`], the proxy holding the BMC's credential
+    /// already.
+    SlowToReplace,
+    /// After [`SLOW_ANSWER_DELAY`], the proxy holding no credential for the
+    /// BMC.
+    SlowToFetch,
+}
+
 /// What a request for `method` on `path` gets from a proxy with
-/// [`QUICK_CLASS`]: (status the caller got, whether the body arrived
-/// "whole" or was "cut off", the credential each attempt at the BMC
-/// carried).
+/// [`QUICK_CLASS`], when nico-api answers its lookups as `lookup` says:
+/// (status the caller got, whether the body arrived "whole" or was "cut
+/// off", the credential each attempt at the BMC carried). The caller must
+/// get its answer long before the slow BMC or nico-api would have answered.
 async fn under_the_quick_class(
-    (method, path): (Method, &'static str),
+    _metrics: &MetricsCapture,
+    (method, path, lookup): (Method, &'static str, Lookup),
 ) -> (u16, &'static str, Vec<&'static str>) {
     let (addr, bmc) = spawn_fake_bmc();
     let mut state = proxy_configured(
@@ -909,15 +1014,27 @@ async fn under_the_quick_class(
         r#"["/**"]"#,
         QUICK_CLASS,
         root_password(),
+        "follow_same_origin",
     )
     .await;
-    state.api_client = fake_nico_api().await;
+    let lookup_delay = match lookup {
+        Lookup::Prompt => Duration::ZERO,
+        Lookup::SlowToReplace => SLOW_ANSWER_DELAY,
+        Lookup::SlowToFetch => {
+            state.credential_cache.invalidate_all();
+            SLOW_ANSWER_DELAY
+        }
+    };
+    state.api_client = fake_nico_api_answering_after(lookup_delay).await;
 
-    // The request emits metrics that other tests measure, so it is sent
-    // inside their serialized window.
-    let _metrics = MetricsCapture::start();
     let request = proxied(method, path, to_the_bmc(), &[], Body::empty());
-    let response = match proxy_request(axum::extract::State(state.clone()), request).await {
+    let response = tokio::time::timeout(
+        SLOW_ANSWER_DELAY / 2,
+        proxy_request(axum::extract::State(state.clone()), request),
+    )
+    .await
+    .expect("the budget ends the request long before the slow side answers");
+    let response = match response {
         Ok(response) | Err(response) => response,
     };
     let status = response.status().as_u16();
@@ -929,29 +1046,47 @@ async fn under_the_quick_class(
     (status, body, attempts)
 }
 
-/// A request is held to its class's upstream budget, response body and
-/// replay with fresh credentials included.
+/// A request is held to its class's upstream budget, response body, replay
+/// with fresh credentials, and nico-api's credential lookups included.
 #[tokio::test]
 async fn a_request_is_held_to_its_classs_budget() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
                 scenario: "the BMC answers after the budget, classified by path alone",
-                input: (Method::GET, "/redfish/v1/Slow?$select=PowerState"),
+                input: (
+                    Method::GET,
+                    "/redfish/v1/Slow?$select=PowerState",
+                    Lookup::Prompt,
+                ),
                 expect: Yields((502, "whole", vec!["cached"])),
             },
             Case {
                 scenario: "the replay with fresh credentials is answered after the budget",
-                input: (Method::GET, SLOW_ROTATED_PATH),
+                input: (Method::GET, SLOW_ROTATED_PATH, Lookup::Prompt),
                 expect: Yields((502, "whole", vec!["cached", "fresh"])),
             },
             Case {
                 scenario: "the body is still streaming when the budget runs out",
-                input: (Method::GET, SLOW_BODY_PATH),
+                input: (Method::GET, SLOW_BODY_PATH, Lookup::Prompt),
                 expect: Yields((200, "cut off", vec!["cached"])),
             },
+            Case {
+                scenario: "nico-api hands out the credentials after the budget",
+                input: (Method::GET, SLOW_PATH, Lookup::SlowToFetch),
+                expect: Yields((502, "whole", vec![])),
+            },
+            Case {
+                scenario: "nico-api hands out fresh credentials after the budget",
+                input: (Method::GET, ROTATED_PATH, Lookup::SlowToReplace),
+                expect: Yields((502, "whole", vec!["cached"])),
+            },
         ],
-        |input| async move { Ok::<_, Infallible>(under_the_quick_class(input).await) },
+        |input| async move {
+            Ok::<_, Infallible>(under_the_quick_class(metrics_window, input).await)
+        },
     )
     .await;
 }
@@ -966,12 +1101,24 @@ fn keep_callsites_enabled() {
     DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
 }
 
+/// A class for every request of the SPIFFE service `nv-dps`.
+const DPS_CLASS: &str = r#"
+    [[class]]
+    name = "dps"
+    principals = ["spiffe-service-id/nv-dps"]
+    match = ["/**"]
+"#;
+
 /// What a request for `method` on [`SLOW_PATH`] that names no BMC gets from a
-/// proxy with [`QUICK_CLASS`]: (status the caller got, the class its trace
-/// span names). The proxy refuses the request right after classifying it,
-/// so no task outlives the capture: a span such a task closed after the
-/// capture ended would reach a subscriber that never saw it.
-async fn class_on_the_span(method: Method) -> (u16, String) {
+/// proxy with [`DPS_CLASS`] and [`QUICK_CLASS`], when its caller is the
+/// SPIFFE service `spiffe_service`, if any: (status the caller got, the class
+/// its trace span names). The proxy refuses the request right after
+/// classifying it, so no task outlives the capture: a span such a task closed
+/// after the capture ended would reach a subscriber that never saw it.
+async fn class_on_the_span(
+    metrics: &MetricsCapture,
+    (method, spiffe_service): (Method, Option<&'static str>),
+) -> (u16, String) {
     keep_callsites_enabled();
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
@@ -981,8 +1128,23 @@ async fn class_on_the_span(method: Method) -> (u16, String) {
         tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
     );
-    let state = proxy_configured(":1", r#"["/**"]"#, QUICK_CLASS, root_password()).await;
-    let answer = exchange(&state, proxied(method, SLOW_PATH, None, &[], Body::empty())).await;
+    let state = proxy_configured(
+        ":1",
+        r#"["/**"]"#,
+        &format!("{DPS_CLASS}{QUICK_CLASS}"),
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    let mut request = proxied(method, SLOW_PATH, None, &[], Body::empty());
+    request.extensions_mut().insert(AuthContext::<()> {
+        principals: spiffe_service
+            .map(|service| Principal::SpiffeServiceIdentifier(service.to_string()))
+            .into_iter()
+            .collect(),
+        authorization: None,
+    });
+    let answer = exchange(metrics, &state, request).await;
     let span = exporter
         .get_finished_spans()
         .expect("finished spans")
@@ -1000,23 +1162,180 @@ async fn class_on_the_span(method: Method) -> (u16, String) {
     (answer.status, class)
 }
 
-/// A request's trace span names the class it was classified into.
+/// A request's trace span names the class it was classified into, by its
+/// caller's identity and its pattern.
 #[tokio::test]
 async fn the_request_span_names_its_class() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
                 scenario: "a class pattern matches",
-                input: Method::GET,
+                input: (Method::GET, None),
                 expect: Yields((400, "quick".to_string())),
             },
             Case {
                 scenario: "no class pattern matches",
-                input: Method::POST,
+                input: (Method::POST, None),
                 expect: Yields((400, "default".to_string())),
             },
+            Case {
+                scenario: "a class takes the caller's requests",
+                input: (Method::POST, Some("nv-dps")),
+                expect: Yields((400, "dps".to_string())),
+            },
         ],
-        |method| async move { Ok::<_, Infallible>(class_on_the_span(method).await) },
+        |input| async move { Ok::<_, Infallible>(class_on_the_span(metrics_window, input).await) },
     )
     .await;
+}
+
+/// The answer to `request`, its body not yet read. Unlike [`exchange`], it
+/// takes no [`MetricsCapture`]: a test that holds slots takes one before its
+/// first request and sends every request within it. Waiting for the capture
+/// blocks the test's thread, and a slot held meanwhile could outlive its
+/// exchange's bound and be reclaimed.
+async fn answer(state: &BmcProxyState, request: Request<Body>) -> http::Response<Body> {
+    match proxy_request(axum::extract::State(state.clone()), request).await {
+        Ok(response) | Err(response) => response,
+    }
+}
+
+/// A class of one request at a time at its BMC, with a short budget.
+const ONE_AT_A_TIME: &str = r#"
+    [[class]]
+    name = "one_at_a_time"
+    match = ["GET /redfish/v1/Systems/System_0"]
+    max_in_flight = 1
+    upstream_timeout = "2s"
+"#;
+
+/// A request holds its slot at its BMC until its response body has been
+/// sent. While one's body is unread, the next request of a class of one at a
+/// time waits, never reaching the BMC, and is refused with 429 when its
+/// budget runs out; once that body is gone, the next request goes through at
+/// once, long before the held slot's bound would have reclaimed it.
+#[tokio::test]
+async fn a_slot_is_held_until_the_response_body_is_sent() {
+    let _metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        ONE_AT_A_TIME,
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    let unread = answer(&state, get(SYSTEM_PATH)).await;
+    // The class's budget bounds the wait.
+    let waited_out = answer(&state, get(SYSTEM_PATH)).await.status().as_u16();
+    let reached_while_unread = bmc.received().len();
+    drop(unread);
+    let sent_at = tokio::time::Instant::now();
+    let after = answer(&state, get(SYSTEM_PATH)).await.status().as_u16();
+    let after_at_once = sent_at.elapsed() < Duration::from_secs(1);
+
+    assert_eq!(
+        (
+            waited_out,
+            reached_while_unread,
+            after,
+            after_at_once,
+            bmc.received().len()
+        ),
+        (429, 1, 200, true, 2),
+    );
+}
+
+/// What a request for `path` gets from a class of one at a time with a
+/// 3-second budget, once it has waited 1.5 seconds for its slot.
+async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
+    let _metrics = MetricsCapture::start();
+    let (addr, _bmc) = spawn_fake_bmc();
+    let mut state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        &format!(
+            r#"
+            [[class]]
+            name = "one_at_a_time"
+            match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {BRIEFLY_SLOW_ROTATED_PATH}"]
+            max_in_flight = 1
+            upstream_timeout = "3s"
+            "#
+        ),
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    state.api_client = fake_nico_api().await;
+    let unread = answer(&state, get(SYSTEM_PATH)).await;
+    let waiting = answer(&state, get(path));
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        drop(unread);
+    };
+    let (response, ()) = tokio::join!(waiting, release);
+    response.status().as_u16()
+}
+
+/// Time a request spends waiting for its slot comes out of its first
+/// attempt's budget, and not out of a replay's with fresh credentials. With
+/// 1.5 of its 3 seconds left, a BMC that answers in 2.5 seconds is cut off,
+/// unless it answers a replay.
+#[tokio::test]
+async fn waiting_for_a_slot_spends_the_first_attempts_budget() {
+    check_cases_async(
+        [
+            Case {
+                scenario: "the first attempt has what the wait left",
+                input: BRIEFLY_SLOW_PATH,
+                expect: Yields(502),
+            },
+            Case {
+                scenario: "a replay has the whole budget",
+                input: BRIEFLY_SLOW_ROTATED_PATH,
+                expect: Yields(200),
+            },
+        ],
+        |path| async move { Ok::<_, Infallible>(after_waiting_for_a_slot(path).await) },
+    )
+    .await;
+}
+
+/// A request replayed with fresh credentials keeps its slot: while the
+/// replay's answer is unread, the next request of a class of one at a time
+/// waits and is refused, and the BMC has received only the two attempts.
+#[tokio::test]
+async fn a_replay_keeps_its_slot() {
+    let _metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let mut state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        &format!(
+            r#"
+            [[class]]
+            name = "one_at_a_time"
+            match = ["GET {SYSTEM_PATH}", "GET {ROTATED_PATH}"]
+            max_in_flight = 1
+            upstream_timeout = "2s"
+            "#
+        ),
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    state.api_client = fake_nico_api().await;
+    let unread = answer(&state, get(ROTATED_PATH)).await;
+    let unread_status = unread.status().as_u16();
+    let waited_out = answer(&state, get(SYSTEM_PATH)).await.status().as_u16();
+    let reached_while_unread = bmc.received().len();
+    drop(unread);
+    assert_eq!(
+        (unread_status, waited_out, reached_while_unread),
+        (200, 429, 2)
+    );
 }

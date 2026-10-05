@@ -782,6 +782,105 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
 }
 
 #[sqlx_test]
+async fn test_exploration_failure_logs_error_once(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_instrument::testing::capture_logs;
+    use carbide_test_support::value_scenarios;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:15:01", "Vendor1"),
+        env.new_machine("02:00:00:00:15:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+
+    let hardware_info = HardwareInfo {
+        dmi_data: Some(DmiData {
+            product_serial: "failure-log-host".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let machine_id = from_hardware_info_with_type(&hardware_info, MachineType::Host)?;
+    let mut txn = env.pool.begin().await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    let interfaces =
+        db::machine_interface::find_by_mac_address(txn.as_mut(), machines[0].mac).await?;
+    db::machine_interface::associate_bmc_interface(
+        &interfaces[0].id,
+        MachineInterfaceAssociation::Machine(machine_id),
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let error = EndpointExplorationError::ConnectionRefused {
+        details: "simulated connection refusal".to_string(),
+    };
+    for machine in &machines {
+        explorer.insert_endpoint_result(machine.ip.parse()?, Err(error.clone()));
+    }
+
+    let (result, logs) = tokio::task::spawn_blocking(move || {
+        let mut result = None;
+        // Keep the subscriber active until the exploration runtime has shut down.
+        let logs = capture_logs(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create site-explorer test runtime");
+            result = Some(runtime.block_on(explorer.run_single_iteration()));
+        });
+        (result.expect("site-explorer iteration ran"), logs)
+    })
+    .await?;
+    result?;
+    let expected_error = error.to_string();
+
+    value_scenarios!(
+        run = |index: usize| {
+            let endpoint = format!("{}:443", machines[index].ip);
+            let mut events = logs.iter().filter(|log| {
+                log.message == "Failed to explore endpoint"
+                    && log.field("endpoint") == Some(endpoint.as_str())
+            });
+            let log = events.next().expect("endpoint exploration must log its failure");
+            assert!(events.next().is_none(), "expected one failure event per endpoint");
+            (
+                log.field("error"),
+                log.field("text"),
+                log.field("machine_state"),
+            )
+        };
+        "with machine state" {
+            0usize => (Some(expected_error.as_str()), None, Some("Ready")),
+        }
+        "without machine state" {
+            1usize => (Some(expected_error.as_str()), None, None),
+        }
+    );
+    Ok(())
+}
+
+#[sqlx_test]
 async fn test_handle_redfish_error_powers_on_machine(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

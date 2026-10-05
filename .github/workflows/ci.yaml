@@ -2701,10 +2701,9 @@ jobs:
   # ============================================================================
   # FINAL CORE CI GATE
   # ============================================================================
-  # Passes only when every required job reports `success` or `skipped`.
-  # `skipped` counts as pass — that's how rest-only PRs unblock when the
-  # `changes` gate intentionally skips the core pipeline.
-  # Any other result, plus missing or malformed data, fails closed.
+  # This is the final required Core check. A skip passes only when `changes`,
+  # `prepare`, the current ref, or the repository says that job did not need to
+  # run. Failures, cancellations, malformed decisions, and other skips fail.
   # Every job that can determine Core CI health is listed so an upstream
   # failure cannot be hidden when its downstream jobs become `skipped`.
   # Reporting-only jobs are explicitly exempted, and the checker in `changes`
@@ -2712,6 +2711,7 @@ jobs:
   # The checker also protects `if: always()` so a failed dependency cannot skip
   # this required check.
   # Branch protection should require only this gate and `rest-ci-pass`.
+  # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   core-ci-pass:
     name: core-ci-pass
     runs-on: linux-amd64-cpu4
@@ -2807,4 +2807,4 @@ jobs:
       - name: Decide pass/fail
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
-        run: python3 -B .github/ci/check_ci_gate.py results
+        run: python3 -B .github/ci/check_ci_gate.py results --workflow core

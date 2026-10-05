@@ -39,6 +39,7 @@ async fn expected_rack_derived_profile(pool: sqlx::PgPool) {
     let group = forge::ExpectedRackGroup {
         rack_group_id: Some(RackGroupId::new("group-01")),
         topology: "gb200_nvl72r1_c2g4".into(),
+        protocol: "NVLINK_V5".into(),
         racks: vec![forge::ExpectedRackGroupRack {
             rack_id: Some(rack_id),
             members: vec![

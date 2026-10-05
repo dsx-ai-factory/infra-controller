@@ -17,6 +17,10 @@ command needs to make sure that either no tenant image is running anymore, or ta
 (like rebooting the machine) to interrupt the image.
 Site providers would get a safe version of this workflow later on that moves the machine through all necessary cleanup steps*
 
+To leave the host in a clean pre-ingestion state before you remove its
+control-plane records, [decommission the host](../decommissioning/hosts.md)
+first, then use the appropriate flags to [force-delete it](../decommissioning/index.md#force-delete-after-decommissioning) afterward. The steps below do not apply to decommissioning.
+
 ## Force-Deletion Steps
 
 The following steps can be used to force-delete knowledge about a NICo host:
@@ -29,14 +33,15 @@ See nico-admin-cli access on a NICo deployment.
 
 Executing `nico-admin-cli machine force-delete` will wipe most knowledge about
 machines and instances running on top of them from the database, and clean up associated CRDs.
-It accepts the machine-id, hostname,  MAC or IP of either the managed host or DPU as input,
+It accepts the machine-id, hostname, MAC or IP of either the managed host or DPU as input,
 and will delete information about both of them (since they are heavily coupled).
 
-It returns all machine-ids and instance-ids it acted on, as well as the BMC information for the host.
+It returns all machine-ids and instance-ids it acted on, as well as the BMC
+IP for the managed host.
 
 Example:
 
-```
+```bash
 /opt/nico/nico-admin-cli -a https://127.0.0.1:1079 machine force-delete --machine="60cef902-9779-4666-8362-c9bb4b37184f"
 ```
 
@@ -50,13 +55,18 @@ retained boot targets), add:
   --delete-bmc-suppressions --delete-retained-boot-interfaces
 ```
 
-### 3. Use the returned BMC IP/port and machine-id to reboot the host
+### 3. Power-cycle the host through its BMC
 
-See [Rebooting a machine](machine_reboot.md).
-Supply the BMC IP and port of the managed host, as well as its `machine_id`
-as parameters.
+Use [`nico-admin-cli redfish ac-power-cycle`](../manuals/nico-admin-cli/commands/redfish/redfish-ac-power-cycle.md)
+with the returned BMC IP and current BMC credentials. This command connects
+directly to the BMC and does not require the deleted machine record.
 
-Force-deleting a machine will not delete its last set of credentials from `vault`. Therefore the site controller can still access those.
+When Site Explorer configured BMC credentials for the host, force-delete
+retains the last set in Vault by default so the site controller can continue
+to access the device. If no credentials were configured, there is nothing to
+retain and the site controller cannot access the BMC through Vault. The
+optional `--delete-bmc-credentials` flag deletes configured credentials; do
+not use it until any required device recovery is complete.
 
 Once a reboot is triggered, the DPU of the Machine should boot into the
 NICo discovery image again. This should initiate DPU discovery. A second
@@ -77,7 +87,7 @@ See nico-admin-cli access on a NICo deployment.
 
 ### 3. Execute the `nico-admin-cli instance reboot --custom-pxe` command
 
-```
+```text
 nico-admin-cli -f json -c https://127.0.0.1079/ instance reboot --custom-pxe -i 26204c21-83ac-445e-8ea7-b9130deb6315
 Reboot for instance 26204c21-83ac-445e-8ea7-b9130deb6315 (machine fm100hti4deucakqqgteo692efnfo7egh7pq1lkl7vkgas4o6e0c42hnb80) is requested successfully!
 ```

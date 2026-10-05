@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -173,7 +174,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 	// Delete any Expected Rack present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedRackIDs.
-	if expectedRackInventory.InventoryPage == nil || expectedRackInventory.InventoryPage.TotalPages == 0 || (expectedRackInventory.InventoryPage.CurrentPage == expectedRackInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedRackInventory.GetInventoryPage()) {
 		for _, er := range existingExpectedRacks {
 			if _, keep := reportedRackIDs[er.RackID]; keep {
 				continue

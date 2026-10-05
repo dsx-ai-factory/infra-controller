@@ -1414,7 +1414,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Allocate machines with topology optimization
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, logger)
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments, logger)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -2024,6 +2024,7 @@ func allocateMachinesForBatch(
 	count int,
 	topologyOptimized bool,
 	machineLabelSelector map[string]string,
+	spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest,
 	logger zerolog.Logger,
 ) ([]cdbm.Machine, *cutil.APIError) {
 	if instancetype == nil || count <= 0 {
@@ -2055,6 +2056,20 @@ func allocateMachinesForBatch(
 		return nil, cutil.NewAPIError(http.StatusConflict,
 			fmt.Sprintf("Insufficient machines available: requested %d, available %d", count, len(machines)), nil)
 	}
+
+	// Filter before choosing the NVLink domain. Choosing the largest unfiltered
+	// domain could hide compatible capacity elsewhere.
+	compatible, capErr := common.FilterMachinesBySpectrumXAttachments(ctx, tx, dbSession, machines, spectrumXAttachments)
+	if capErr != nil {
+		logger.Error().Err(capErr).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Capabilities for Machines", nil)
+	}
+	if len(compatible) < count {
+		return nil, cutil.NewAPIError(http.StatusConflict,
+			fmt.Sprintf("Insufficient Machines with the requested SpectrumX capabilities: requested %d, compatible %d", count, len(compatible)), nil)
+	}
+	spectrumXFiltered := len(compatible) < len(machines)
+	machines = compatible
 
 	var candidateMachines []*cdbm.Machine
 
@@ -2097,6 +2112,10 @@ func allocateMachinesForBatch(
 		if len(nvlinkDomainMap[bestDomainID]) < count {
 			logger.Warn().Str("bestDomainID", bestDomainID).Int("bestDomainCount", len(nvlinkDomainMap[bestDomainID])).Int("requested", count).
 				Msg("topology optimization requires same NVLink domain but insufficient machines in any single domain")
+			if spectrumXFiltered {
+				return nil, cutil.NewAPIError(http.StatusConflict,
+					fmt.Sprintf("Topology optimization requires all %d machines with the requested SpectrumX capabilities on same NVLink domain, but best domain only has %d compatible", count, len(nvlinkDomainMap[bestDomainID])), nil)
+			}
 			return nil, cutil.NewAPIError(http.StatusConflict,
 				fmt.Sprintf("Topology optimization requires all %d machines on same NVLink domain, but best domain only has %d available", count, len(nvlinkDomainMap[bestDomainID])), nil)
 		}

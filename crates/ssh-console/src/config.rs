@@ -69,6 +69,8 @@ pub struct Config {
     pub override_ipmi_port: Option<u16>,
     #[serde(default)]
     pub insecure_ipmi_ciphers: bool,
+    #[serde(default = "Defaults::ipmitool_path")]
+    pub ipmitool_path: PathBuf,
     #[serde(default)]
     pub force_deactivate_conflicting_ipmi_sol_sessions: bool,
     #[serde(default = "Defaults::root_ca_path")]
@@ -216,6 +218,7 @@ impl Config {
             override_bmc_ssh_port: _,
             override_ipmi_port: _,
             insecure_ipmi_ciphers,
+            ipmitool_path,
             force_deactivate_conflicting_ipmi_sol_sessions,
             forge_root_ca_path,
             client_cert_path,
@@ -329,6 +332,9 @@ insecure = {insecure}
 
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = {insecure_ipmi_ciphers}
+
+## Path to the ipmitool executable.
+ipmitool_path = {ipmitool_path:?}
 
 ## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
 ## whether the existing session is stale or belongs to an active operator, so enabling this may
@@ -494,6 +500,7 @@ impl Default for Config {
             override_bmcs: None,
             insecure: false,
             insecure_ipmi_ciphers: false,
+            ipmitool_path: Defaults::ipmitool_path(),
             force_deactivate_conflicting_ipmi_sol_sessions: false,
             override_bmc_ssh_host: None,
             admin_certificate_role: None,
@@ -550,6 +557,10 @@ impl Defaults {
 
     pub fn host_key_path() -> PathBuf {
         "/etc/ssh/ssh_host_ed25519_key".into()
+    }
+
+    pub fn ipmitool_path() -> PathBuf {
+        "ipmitool".into()
     }
 
     pub fn dpus() -> bool {

@@ -213,6 +213,15 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				ChassisSerialNumber: validChassisSerial,
+				BmcIpAddress:        cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
@@ -754,6 +763,14 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedMachineUpdateRequest{
+				ChassisSerialNumber: &validChassisSerial,
+				BmcIpAddress:        cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedMachineUpdateRequest{

@@ -35,7 +35,7 @@ use crate::tests::common::api_fixtures::{
     TestManagedHost, create_managed_host_multi_dpu, network_configured_with_health,
 };
 
-fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
+pub(super) fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
     StateController::builder()
         .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
         .processor_id("site-prefix-readiness-test".to_string())
@@ -79,7 +79,10 @@ async fn stored_prefix(env: &TestEnv, id: SitePrefixId) -> SitePrefix {
         .unwrap()
 }
 
-async fn stored_outcome(env: &TestEnv, id: SitePrefixId) -> PersistentStateHandlerOutcome {
+pub(super) async fn stored_outcome(
+    env: &TestEnv,
+    id: SitePrefixId,
+) -> PersistentStateHandlerOutcome {
     sqlx::query_scalar::<_, sqlx::types::Json<PersistentStateHandlerOutcome>>(
         "SELECT controller_state_outcome FROM site_prefixes WHERE id = $1",
     )
@@ -353,6 +356,40 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             }
             txn.commit().await.unwrap();
         }
+
+        // Retirement has no second DPU acknowledgement or fanout. A host with
+        // an unrelated outstanding version must not retain a childless root.
+        let mut txn = env.pool.begin().await.unwrap();
+        let before = host.snapshot(&mut txn).await;
+        assert_eq!(
+            db::machine::try_update_network_config(
+                &mut txn,
+                &host.id,
+                before.host_snapshot.network_config.version,
+                &before.host_snapshot.network_config.value,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        let outstanding = host.snapshot(&mut txn).await;
+        assert!(!outstanding.managed_host_network_config_version_synced());
+        txn.commit().await.unwrap();
+        controller(&env).run_single_iteration_ext(false).await;
+        assert!(
+            db::site_prefix::find_by_ids(&env.pool, &[id])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut txn = env.pool.begin().await.unwrap();
+        let after = host.snapshot(&mut txn).await;
+        assert_eq!(
+            after.host_snapshot.network_config.version,
+            outstanding.host_snapshot.network_config.version
+        );
+        assert!(!after.managed_host_network_config_version_synced());
+        txn.commit().await.unwrap();
     })
     .await;
 }

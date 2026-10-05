@@ -886,6 +886,13 @@ service Forge {
   rpc UpsertHostFirmwareConfig(UpsertHostFirmwareConfigRequest) returns (HostFirmwareConfigResponse);
   rpc DeleteHostFirmwareConfig(DeleteHostFirmwareConfigRequest) returns (google.protobuf.Empty);
 
+  // Operator-only NIC firmware definitions; these methods do not update devices.
+  rpc CreateNicFirmwareProfile(CreateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
+  rpc FindNicFirmwareProfileIds(FindNicFirmwareProfileIdsRequest) returns (FindNicFirmwareProfileIdsResponse);
+  rpc FindNicFirmwareProfilesByIds(FindNicFirmwareProfilesByIdsRequest) returns (FindNicFirmwareProfilesByIdsResponse);
+  rpc UpdateNicFirmwareProfile(UpdateNicFirmwareProfileRequest) returns (NicFirmwareProfileResponse);
+  rpc DeleteNicFirmwareProfile(DeleteNicFirmwareProfileRequest) returns (google.protobuf.Empty);
+
   // Create A SKU to be assigned to a machine so the machine hardware can be validated.
   rpc CreateSku(SkuList) returns (SkuIdList);
   // Generate a SKU from the hardware inventory of a machine.
@@ -1089,6 +1096,10 @@ service Forge {
   rpc MlxAdminShowDevice(mlx_device.MlxAdminDeviceInfoRequest) returns (mlx_device.MlxAdminDeviceInfoResponse);
   // MlxAdminShowMachine will show an MlxDeviceReport for a given machine.
   rpc MlxAdminShowMachine(mlx_device.MlxAdminDeviceReportRequest) returns (mlx_device.MlxAdminDeviceReportResponse);
+
+  // Read stored NIC identity evidence and current managed-DPU associations.
+  // Scout need not be connected. This does not establish update/reset eligibility.
+  rpc MlxAdminShowDeviceIdentities(mlx_device.MlxAdminDeviceIdentitiesRequest) returns (mlx_device.MlxAdminDeviceIdentitiesResponse);
 
   // Mellanox administrative endpoints for registry querying, which are called by
   // the CLI (nico-admin-cli) and potentially the UI. These endpoints ultimately
@@ -2298,6 +2309,8 @@ message VpcUpdateVirtualizationResult {
 }
 
 message VpcDeletionRequest {
+  // All VPC peerings must finish deleting before this request can succeed.
+  // Retained Ready or Deleting peerings return FAILED_PRECONDITION.
   common.VpcId id = 1;
 }
 
@@ -2424,10 +2437,24 @@ message VpcPrefixStateHistoriesRequest {
   repeated common.VpcPrefixId vpc_prefix_ids = 1;
 }
 
+// A peering remains discoverable until affected DPUs acknowledge its removal.
 message VpcPeering {
   common.VpcPeeringId id = 1;
   common.VpcId vpc_id = 2;
   common.VpcId peer_vpc_id = 3;
+  // Unspecified on older servers. New servers report Ready or Deleting.
+  VpcPeeringState state = 4;
+}
+
+enum VpcPeeringState {
+  VPC_PEERING_STATE_UNSPECIFIED = 0;
+  // Deletion has not been requested. Peer permissions are included in DPU
+  // configurations only when enabled by the site's peering activation policy.
+  // Creation does not request or wait for a DPU acknowledgement.
+  VPC_PEERING_STATE_READY = 1;
+  // Peer permissions are omitted from new DPU configurations. The peering
+  // remains reserved until every affected DPU acknowledges their removal.
+  VPC_PEERING_STATE_DELETING = 2;
 }
 
 message VpcPeeringIdList {
@@ -2439,6 +2466,9 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // A retained peering with the same endpoint pair or ID returns
+  // FAILED_PRECONDITION, including while that peering is Deleting. Wait for
+  // deletion to finish before creating a replacement.
   // ETV and FNN VPCs are incompatible. Requests that pair them return
   // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
@@ -2457,9 +2487,16 @@ message VpcPeeringsByIdsRequest {
 }
 
 message VpcPeeringDeletionRequest {
+  // Repeated requests while Deleting succeed without requesting another update.
+  // A missing peering returns NOT_FOUND.
+  // A receiver that changes or disappears during the initial network update
+  // returns FAILED_PRECONDITION with retry guidance. The deletion request and
+  // every tentative host update roll back; retry the request.
   common.VpcPeeringId id = 1;
 }
 
+// Deletion was requested, not necessarily completed. Poll FindVpcPeeringIds or
+// FindVpcPeeringsByIds for absence before deleting either VPC.
 message VpcPeeringDeletionResult {
 }
 
@@ -3045,6 +3082,8 @@ message ExpectedRackGroup {
   // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
   // May be empty; updates replace the complete list.
   repeated ExpectedRackGroupRack racks = 6;
+  // Required external rack-management protocol identifier.
+  string protocol = 7;
 }
 
 message ExpectedRackGroupRack {
@@ -11383,4 +11422,95 @@ message SwitchNvosPortInfo {
   optional uint32 service_port = 2;
   // At most one address per family, ordered IPv4 before IPv6.
   repeated IpAddress addresses = 3;
+}
+
+// A named definition, independent of site, machine, card or tenant selection.
+message NicFirmwareProfile {
+  // Immutable, case-sensitive operator-chosen ID. Must not be empty or contain
+  // control characters or surrounding whitespace.
+  string id = 1;
+  NicFirmwareProfileConfig config = 2;
+  // Edit-version token required by replacement and deletion requests.
+  string version = 3;
+}
+
+message NicFirmwareProfileConfig {
+  // Nonempty; unique (part_number, psid) pairs. Registration preserves order.
+  repeated NicFirmwareProfileEntry entries = 1;
+}
+
+message NicFirmwareProfileEntry {
+  // Required. Part number, PSID and exact version must be nonempty without
+  // surrounding whitespace or control characters. No version ordering is
+  // implied, so a target may be older than the installed firmware.
+  mlx_device.FirmwareSpec firmware = 1;
+  // Required firmware image and optional device configuration required by that image.
+  NicFirmwareArtifact image = 2;
+  optional NicFirmwareArtifact device_config = 3;
+  // Omission selects Scout. Unknown approaches are rejected.
+  NicFirmwareApproach approach = 4;
+}
+
+enum NicFirmwareApproach {
+  Scout = 0;
+}
+
+message NicFirmwareArtifact {
+  // Absolute HTTP(S) URL requiring no login, without userinfo, query or fragment.
+  // Stored in canonical URL form. Registration does not fetch the source.
+  string url = 1;
+  // Required 64 hexadecimal digits; stored lowercase. A consumer must verify
+  // downloaded bytes against this digest before use; registration does not.
+  string sha256 = 2;
+}
+
+message CreateNicFirmwareProfileRequest {
+  // Profile name; follows the NicFirmwareProfile.id contract.
+  string id = 1;
+  // Required. An existing ID returns ALREADY_EXISTS; use Update to replace its config.
+  NicFirmwareProfileConfig config = 2;
+}
+
+message NicFirmwareProfileResponse {
+  NicFirmwareProfile profile = 1;
+}
+
+message FindNicFirmwareProfileIdsRequest {
+}
+
+message FindNicFirmwareProfileIdsResponse {
+  // All registered IDs, ascending in database collation order. Empty if none exist.
+  repeated string profile_ids = 1;
+}
+
+message FindNicFirmwareProfilesByIdsRequest {
+  // Required nonempty batch, bounded by Core's max_find_by_ids setting.
+  // Any malformed ID rejects the entire request with INVALID_ARGUMENT.
+  repeated string profile_ids = 1;
+}
+
+message FindNicFirmwareProfilesByIdsResponse {
+  // Existing profiles once each, in database collation order by ID.
+  // Unknown valid IDs are omitted.
+  repeated NicFirmwareProfile profiles = 1;
+}
+
+message UpdateNicFirmwareProfileRequest {
+  // Profile name; follows the NicFirmwareProfile.id contract.
+  string id = 1;
+  // Required complete replacement, not a merge or patch.
+  NicFirmwareProfileConfig config = 2;
+  // Required edit-version token from a previous read. Missing or malformed
+  // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
+  // without changing the definition. Missing profiles return NOT_FOUND.
+  optional string if_version_match = 3;
+}
+
+message DeleteNicFirmwareProfileRequest {
+  // Profile name; follows the NicFirmwareProfile.id contract.
+  string id = 1;
+  // Required edit-version token from a previous read. Missing or malformed
+  // tokens return INVALID_ARGUMENT; stale tokens return FAILED_PRECONDITION
+  // without deleting the profile. Missing profiles return NOT_FOUND.
+  optional string if_version_match = 2;
 }

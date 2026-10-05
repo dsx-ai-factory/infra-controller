@@ -62,6 +62,7 @@ hyper = { workspace = true, features = ["full"] }
 lazy_static = { workspace = true }
 mac_address = { workspace = true }
 moka = { workspace = true }
+nv-redfish-dispatcher = { workspace = true }
 opentelemetry = { workspace = true, features = ["logs"] }
 opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
 opentelemetry-prometheus.workspace = true

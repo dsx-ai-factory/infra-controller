@@ -52,6 +52,8 @@ struct DeviceXml {
     versions: VersionsXml,
     #[serde(rename = "MACs", default)]
     macs: MacsXml,
+    #[serde(rename = "GUIDs", default)]
+    guids: GuidsXml,
     #[serde(rename = "Description", default)]
     description: String,
     #[serde(rename = "Status", default)]
@@ -87,6 +89,12 @@ struct VersionXml {
 struct MacsXml {
     #[serde(rename = "@Base_Mac", default)]
     base_mac: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GuidsXml {
+    #[serde(rename = "@Base_Guid", default)]
+    base_guid: String,
 }
 
 // discover_devices finds all devices using mlxfwmanager.
@@ -240,6 +248,7 @@ pub fn parse_mlxfwmanager_xml(xml_content: &str) -> Result<Vec<MlxDeviceInfo>, S
                 .as_ref()
                 .and_then(|virtio_net| parse_optional_xml_field(&virtio_net.current)),
             base_mac,
+            base_guid: parse_optional_xml_field(&device_xml.guids.base_guid),
         };
         devices.push(device_info);
     }

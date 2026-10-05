@@ -18,7 +18,8 @@ import (
 	"fmt"
 )
 
-// VpcPeeringStatus Status values for VPC peering objects
+// VpcPeeringStatus Status values for VPC peering objects. Deleting means removal is pending; wait
+// until the peering's GET endpoint returns 404 before deleting either VPC.
 type VpcPeeringStatus string
 
 // List of VpcPeeringStatus
