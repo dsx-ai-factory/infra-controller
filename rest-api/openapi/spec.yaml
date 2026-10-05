@@ -10602,10 +10602,24 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The Operating System ID is invalid, an Image Operating System has an associated Site that is not Registered, or the Operating System is being used by one or more Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operating-system-in-use:
+                  value:
+                    source: nico
+                    message: Operating System is being used by one or more Instances and cannot be deleted
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
         Delete an Operating System by ID
+
+        An Operating System being used by one or more Instances cannot be deleted. Delete the associated Instances before retrying.
 
         If the Operating System has `infrastructureProviderId` set, then org must have an Infrastructure Provider entity and its ID should match the Operating System Infrastructure Provider ID. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
