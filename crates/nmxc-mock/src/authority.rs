@@ -38,6 +38,8 @@ use crate::SimDomain;
 #[derive(Clone, Debug)]
 pub(crate) struct RequestAuthority(pub(crate) String);
 
+/// Middleware storing the request authority as a `RequestAuthority` extension
+/// so the service can select the domain it addresses.
 pub(crate) async fn record_authority(mut request: Request, next: Next) -> Response {
     if let Some(authority) = request_authority(&request) {
         request.extensions_mut().insert(RequestAuthority(authority));
@@ -92,6 +94,7 @@ mod tests {
 
     use super::*;
 
+    /// A domain with a single NVOS address, for authority resolution tests.
     fn domain(key: &str, nvos_ip: &str) -> SimDomain {
         SimDomain {
             key: key.into(),
@@ -100,6 +103,8 @@ mod tests {
         }
     }
 
+    /// Authorities resolve by NVOS address, fall back to the only domain, and fail
+    /// for unknown hosts when several domains exist.
     #[test]
     fn resolves_domain_by_authority() {
         let two: &[SimDomain] = &[domain("rack-a", "10.0.0.1"), domain("rack-b", "fd00::2")];

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
+/// Compiles `nmx_c.proto` into the client, and into the server as well when the
+/// `server` feature is enabled.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let proto_dir = manifest_dir.join("../rpc/proto");

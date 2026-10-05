@@ -25,7 +25,7 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
-use model::expected_rack_group::ExpectedRackGroup;
+use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupRack};
 use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
@@ -133,6 +133,16 @@ pub struct DpuNetworkStatusArgs<'a> {
     pub instance_id: Option<InstanceId>,
     pub interfaces: Vec<rpc::forge::InstanceInterfaceStatusObservation>,
     pub machine_config: &'a MachineConfig,
+}
+
+/// Rack IDs with member counts, as `[rack-001 (71 members), ...]`, for the
+/// message reporting an existing group that differs from the simulated one.
+fn describe_racks(racks: &[ExpectedRackGroupRack]) -> String {
+    let racks: Vec<String> = racks
+        .iter()
+        .map(|rack| format!("{} ({} members)", rack.rack_id, rack.members.len()))
+        .collect();
+    format!("[{}]", racks.join(", "))
 }
 
 impl ApiClient {
@@ -598,11 +608,20 @@ impl ApiClient {
                 if existing.topology == group.topology && existing.racks == group.racks {
                     Ok(())
                 } else {
+                    let difference = if existing.topology != group.topology {
+                        format!(
+                            "topology {} instead of the simulated {}",
+                            existing.topology, group.topology
+                        )
+                    } else {
+                        format!(
+                            "rack membership {} instead of the simulated {}",
+                            describe_racks(&existing.racks),
+                            describe_racks(&group.racks)
+                        )
+                    };
                     Err(ClientApiError::ConfigError(format!(
-                        "Expected rack group {rack_group_id} already exists with topology {} and {} rack(s) that differ from the simulated {} rack; delete it with `nico-admin-cli expected-rack-group delete`",
-                        existing.topology,
-                        existing.racks.len(),
-                        group.topology
+                        "Expected rack group {rack_group_id} already exists with {difference}; delete it with `nico-admin-cli expected-rack-group delete`"
                     )))
                 }
             }

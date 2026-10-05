@@ -63,6 +63,7 @@ printf '%s' "$out"
 
 
 def machines_values(relay="10.200.0.1", key="bmcDhcpRelayAddress", underlay=None, underlay_key="underlayDhcpRelayAddress"):
+    """Values for one machine-a-tron pod with a BMC relay and an optional underlay relay."""
     values = f"pods:\n  mat-0:\n    machines:\n      compute:\n        hwType: dell_poweredge_r750\n        hostCount: 10\n        {key}: \"{relay}\"\n"
     if underlay is not None:
         values += f"        {underlay_key}: \"{underlay}\"\n"

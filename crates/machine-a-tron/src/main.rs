@@ -54,6 +54,8 @@ use crate::nmxc_mock::HostedNmxcMock;
 use crate::rms_mock::HostedRmsMock;
 use crate::ufm_mock::HostedUfmMock;
 
+/// Loads the TOML configuration, starts the simulators and hosted mocks, and
+/// serves until shutdown.
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = MachineATronArgs::parse();

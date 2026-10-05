@@ -54,6 +54,7 @@ pub fn request_authority<B>(request: &Request<B>) -> Option<String> {
         .or_else(|| request.uri().authority().map(|v| v.as_str().to_owned()))
 }
 
+/// The `Host` header, when present and valid UTF-8.
 fn host_header<B>(request: &Request<B>) -> Option<String> {
     request
         .headers()
@@ -62,6 +63,8 @@ fn host_header<B>(request: &Request<B>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Dispatches the request to the router registered for its authority, taking the
+/// forwarded host first, then the `Host` header, then the URI authority.
 async fn process(State(state): State<AuthorityRouter>, request: Request<Body>) -> Response {
     let forwarded_host = forwarded_host(&request);
     let host = host_header(&request);

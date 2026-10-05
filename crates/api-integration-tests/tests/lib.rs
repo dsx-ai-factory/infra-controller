@@ -1301,6 +1301,8 @@ async fn test_machine_a_tron_scout_stream(
     .await
 }
 
+/// Simulates `host_count` hosts of `hw_type` with machine-a-tron against the
+/// integration test API and hands the ingested state to the caller's check.
 #[allow(clippy::too_many_arguments)]
 async fn run_machine_a_tron_machine_test<F, O>(
     hw_type: HardwareType,

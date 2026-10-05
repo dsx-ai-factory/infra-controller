@@ -298,6 +298,8 @@ func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 	assert.Empty(t, svc.Spec.ClusterIPs)
 }
 
+// TestServiceBuilder_BuildNvosService checks the per-switch NVOS Service: its
+// name, externalIP, and port 9370 forwarded to the bmc-mock listener.
 func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace: "test-ns",
@@ -341,6 +343,8 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	assert.Equal(t, intstr.FromInt32(8443), port.TargetPort, "forwarded to the bmc-mock listener")
 }
 
+// TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint checks that a
+// switch with an NVOS lease yields both a BMC and an NVOS Service.
 func TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace:    "test-ns",
@@ -368,6 +372,16 @@ func TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint(t *testing.T)
 				MatID:      "switch-2",
 				DeviceKind: matclient.DeviceKindSwitch,
 				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.2")},
+			},
+			wantNvosSvc: false,
+		},
+		{
+			name: "switch reporting an empty NVOS address gets only its BMC Service",
+			machine: matclient.MachineStatus{
+				MatID:      "switch-3",
+				DeviceKind: matclient.DeviceKindSwitch,
+				NvosIP:     ptr(""),
+				BMC:        matclient.BMCStatus{IP: ptr("10.100.0.4")},
 			},
 			wantNvosSvc: false,
 		},
@@ -489,6 +503,8 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 	}
 }
 
+// TestComputeServiceDiff checks which Services are created, updated, deleted
+// and recreated between the desired and existing sets.
 func TestComputeServiceDiff(t *testing.T) {
 	tests := []struct {
 		name              string

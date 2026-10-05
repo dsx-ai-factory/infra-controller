@@ -65,6 +65,8 @@ pub struct NmxcMock {
 }
 
 impl NmxcMock {
+    /// A mock serving `inventory`, with each domain's partition state created on
+    /// first use.
     pub fn new(inventory: Arc<dyn NmxcInventory>, config: NmxcMockConfig) -> Self {
         Self {
             inventory,
@@ -96,6 +98,8 @@ impl NmxcMock {
         Ok(f(domain, table))
     }
 
+    /// Initial partition state for `domain`: all of its GPUs in the factory default
+    /// partition when configured, otherwise no partitions.
     fn new_domain_state(&self, domain: &SimDomain) -> DomainState {
         let default_partition = self.config.boot_with_default_partition.then_some((
             self.config.default_partition_id,

@@ -45,6 +45,7 @@ impl HostedNmxcMock {
         }
     }
 
+    /// The axum router serving the hosted NMX-C gRPC service.
     pub(super) fn router(&self) -> Router {
         nmxc_mock::router(self.mock.clone())
     }

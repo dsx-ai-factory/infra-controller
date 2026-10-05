@@ -603,6 +603,7 @@ impl SwitchHandle {
         }))
     }
 
+    /// Overrides the switch's NVOS lease for control-router tests.
     #[cfg(test)]
     pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
         self.0.live_state.write().unwrap().nvos_ip = ip;

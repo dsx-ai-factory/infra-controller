@@ -296,6 +296,8 @@ fn hpe_proliant(host: &HostMachineInfo) -> DiscoveryInfo {
     }
 }
 
+/// Discovery report of a WiWynn GB200 NVL compute tray: two DPUs and four GB200
+/// GPUs with NVLink platform information.
 fn wiwynn_gb200(host: &HostMachineInfo) -> DiscoveryInfo {
     let (machine_type, machine_arch) = architecture(CpuArchitecture::Aarch64);
     let dpus = required_dpus::<2>(host);
@@ -363,6 +365,8 @@ fn wiwynn_gb200(host: &HostMachineInfo) -> DiscoveryInfo {
     }
 }
 
+/// Discovery report of a Lenovo GB300 NVL compute tray with its NVMe storage and
+/// four GB300 GPUs.
 fn lenovo_gb300(host: &HostMachineInfo) -> DiscoveryInfo {
     let (machine_type, machine_arch) = architecture(CpuArchitecture::Aarch64);
     let storage = [
@@ -727,6 +731,7 @@ fn nvlink_fabric_guid(host: &HostMachineInfo, module_id: u32) -> String {
     format!("{:#018x}", (mac << 8) | u64::from(module_id))
 }
 
+/// Four GB200 GPUs on two boards, each with a fabric GUID unique to this tray.
 fn gb200_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
     (0..2)
         .flat_map(|board| {
@@ -753,6 +758,7 @@ fn gb200_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
         .collect()
 }
 
+/// Four GB300 GPUs, each with a fabric GUID unique to this tray.
 fn gb300_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
     (0..4)
         .map(|index| Gpu {

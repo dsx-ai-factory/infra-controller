@@ -303,8 +303,10 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 			}
 		}
 
-		// A switch is also reachable at its NVOS address once it has one.
-		if machine.DeviceKind == matclient.DeviceKindSwitch && machine.NvosIP != nil {
+		// A switch is also reachable at its NVOS address once DHCP has assigned
+		// one; an empty address is withheld like an empty BMC address, so it
+		// never reaches externalIPs or the service diff.
+		if machine.DeviceKind == matclient.DeviceKindSwitch && machine.NvosIP != nil && *machine.NvosIP != "" {
 			services = append(services, b.BuildNvosService(&machine, podName))
 		}
 	}
@@ -545,6 +547,8 @@ func isControllerLabel(k string) bool {
 	}
 }
 
+// isControllerAnnotation reports whether k is one of the annotations this
+// controller owns on device Pods.
 func isControllerAnnotation(k string) bool {
 	switch k {
 	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:

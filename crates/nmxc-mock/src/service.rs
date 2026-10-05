@@ -88,6 +88,7 @@ nmx_controller_impl! {
             Ok(Response::new(hello))
         }
 
+        /// Reports the domain's size limits, derived from its inventory.
         async fn get_domain_properties(
             &self,
             request: Request<nmx::GetDomainPropertiesRequest>,
@@ -113,6 +114,7 @@ nmx_controller_impl! {
             Ok(Response::new(properties))
         }
 
+        /// Number of compute nodes in the addressed domain.
         async fn get_compute_node_count(
             &self,
             request: Request<nmx::GetComputeNodeCountRequest>,
@@ -125,6 +127,7 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// Every compute node with its location, GPUs and partition memberships.
         async fn get_compute_node_info_list(
             &self,
             request: Request<nmx::GetComputeNodeInfoListRequest>,
@@ -154,10 +157,13 @@ nmx_controller_impl! {
                 .partition_id
                 .as_ref()
                 .map(|partition| partition.partition_id);
-            let response = self.with_domain(&request, |domain, state| nmx::GetGpuInfoListResponse {
-                server_header: Some(self.header(domain, Ok(()))),
-                context: None,
-                gpu_info_list: domain
+            let response = self.with_domain(&request, |domain, state| {
+                // A filter naming a partition that is not provisioned is an
+                // error, not an empty success, as on the real controller.
+                let missing = only_partition
+                    .filter(|id| state.find(&[*id], &[]).is_empty())
+                    .map(PartitionError::IdNotInUse);
+                let gpu_info_list = domain
                     .compute_nodes
                     .iter()
                     .flat_map(|node| {
@@ -182,11 +188,17 @@ nmx_controller_impl! {
                         gpu_health: nmx::GpuHealth::NmxGpuHealthHealthy as i32,
                         partition_id: partition_id.map(partition_id_message),
                     })
-                    .collect(),
+                    .collect();
+                nmx::GetGpuInfoListResponse {
+                    server_header: Some(self.header(domain, missing.as_ref().map_or(Ok(()), Err))),
+                    context: None,
+                    gpu_info_list,
+                }
             })?;
             Ok(Response::new(response))
         }
 
+        /// Number of switch trays in the addressed domain.
         async fn get_switch_node_count(
             &self,
             request: Request<nmx::GetSwitchNodeCountRequest>,
@@ -199,6 +211,8 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// Every switch tray; each carries every partition, since a partition spans
+        /// the whole fabric.
         async fn get_switch_node_info_list(
             &self,
             request: Request<nmx::GetSwitchNodeInfoListRequest>,
@@ -223,6 +237,7 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// Number of partitions in the domain, including the factory default.
         async fn get_partition_count(
             &self,
             request: Request<nmx::GetPartitionCountRequest>,
@@ -235,6 +250,7 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// IDs of every partition in the domain.
         async fn get_partition_id_list(
             &self,
             request: Request<nmx::GetPartitionIdListRequest>,
@@ -310,6 +326,8 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// Removes the partition named by ID or name; an absent partition is not an
+        /// error, as on the real controller.
         async fn delete_partition(
             &self,
             request: Request<nmx::DeletePartitionRequest>,
@@ -330,6 +348,7 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
+        /// Adds the listed GPUs to an existing partition.
         async fn add_gpus_to_partition(
             &self,
             request: Request<nmx::UpdatePartitionRequest>,
@@ -337,6 +356,7 @@ nmx_controller_impl! {
             self.update_partition(request, DomainState::add_gpus)
         }
 
+        /// Removes the listed GPUs from an existing partition.
         async fn remove_gpus_from_partition(
             &self,
             request: Request<nmx::UpdatePartitionRequest>,
@@ -400,6 +420,9 @@ impl NmxcMock {
         }
     }
 
+    /// Shared body of the two membership RPCs: resolves the target partition and
+    /// applies `apply` under the domain lock, mapping partition errors to the
+    /// status in the response header.
     fn update_partition(
         &self,
         request: Request<nmx::UpdatePartitionRequest>,
@@ -441,10 +464,12 @@ fn gpu_uids(resource_ids: &[nmx::GpuResourceId]) -> Result<Vec<u64>, PartitionEr
         .collect()
 }
 
+/// Wraps a partition ID in its proto message.
 fn partition_id_message(partition_id: u32) -> nmx::PartitionId {
     nmx::PartitionId { partition_id }
 }
 
+/// Location of a tray: chassis serial, slot, tray index and host ID.
 fn location_info(
     chassis_serial: &str,
     slot_number: u32,
@@ -462,6 +487,8 @@ fn location_info(
     }
 }
 
+/// Proto view of a compute node with the sorted, de-duplicated IDs of the
+/// partitions its GPUs belong to.
 fn compute_node_info(node: &SimComputeNode, state: &DomainState) -> nmx::ComputeNodeInfo {
     let mut partition_ids: Vec<u32> = node
         .gpus
@@ -486,6 +513,7 @@ fn compute_node_info(node: &SimComputeNode, state: &DomainState) -> nmx::Compute
     }
 }
 
+/// Proto view of a switch tray carrying `partition_id_list`.
 fn switch_node_info(
     switch: &SimSwitch,
     partition_id_list: Vec<nmx::PartitionId>,

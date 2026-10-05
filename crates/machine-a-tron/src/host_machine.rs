@@ -607,6 +607,7 @@ impl MachineHandle {
         Self::for_control_test_in_section(dpus, ipmi_port, "test")
     }
 
+    /// A host handle for control-router tests configured by `machine_config_section`.
     #[cfg(test)]
     pub(crate) fn for_control_test_in_section(
         dpus: Vec<DpuMachineHandle>,

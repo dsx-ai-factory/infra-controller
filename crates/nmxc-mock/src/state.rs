@@ -77,6 +77,8 @@ pub(crate) enum PartitionRef {
 }
 
 impl PartitionRef {
+    /// A reference by non-zero ID when one is given, else by non-empty name;
+    /// neither is `Unidentified`.
     pub(crate) fn new(id: Option<u32>, name: &str) -> Result<Self, PartitionError> {
         match id {
             Some(id) if id != 0 => Ok(Self::Id(id)),
@@ -93,6 +95,8 @@ pub(crate) struct DomainState {
 }
 
 impl DomainState {
+    /// State for a domain owning `gpu_uids`, optionally with all of them in a
+    /// default partition.
     pub(crate) fn new(
         gpu_uids: impl IntoIterator<Item = u64>,
         default_partition: Option<(u32, &str)>,
@@ -116,6 +120,7 @@ impl DomainState {
         }
     }
 
+    /// All partitions in ID order.
     pub(crate) fn partitions(&self) -> impl Iterator<Item = &Partition> {
         self.partitions.values()
     }
@@ -131,12 +136,15 @@ impl DomainState {
             .collect()
     }
 
+    /// The partition holding `gpu_uid`, if any.
     pub(crate) fn partition_of(&self, gpu_uid: u64) -> Option<u32> {
         self.partitions()
             .find(|partition| partition.gpu_uids.contains(&gpu_uid))
             .map(|partition| partition.id)
     }
 
+    /// Creates a partition holding `gpu_uids`, allocating the next free ID when
+    /// none is requested.
     pub(crate) fn create(
         &mut self,
         name: &str,
@@ -191,6 +199,7 @@ impl DomainState {
         }
     }
 
+    /// Adds GPUs to the target partition and returns its ID.
     pub(crate) fn add_gpus(
         &mut self,
         target: PartitionRef,
@@ -226,6 +235,7 @@ impl DomainState {
         Ok(id)
     }
 
+    /// The ID of the partition `target` refers to.
     fn resolve(&self, target: PartitionRef) -> Result<u32, PartitionError> {
         match target {
             PartitionRef::Id(id) => self
@@ -237,6 +247,7 @@ impl DomainState {
         }
     }
 
+    /// The ID of the partition named `name`.
     fn id_by_name(&self, name: &str) -> Result<u32, PartitionError> {
         self.partitions()
             .find(|partition| partition.name == name)
@@ -244,6 +255,8 @@ impl DomainState {
             .ok_or_else(|| PartitionError::NameNotInUse(name.to_string()))
     }
 
+    /// The lowest unused ID at or after the allocation cursor, moving the cursor
+    /// past it.
     fn allocate_id(&mut self) -> u32 {
         while self.partitions.contains_key(&self.next_id) {
             self.next_id += 1;
@@ -296,6 +309,7 @@ mod tests {
         DomainState::new(GPUS, None)
     }
 
+    /// Creation allocates free IDs and rejects conflicting names, IDs and GPUs.
     #[test]
     fn create_validates_its_request() {
         scenarios!(run = |(name, uids, requested): (&str, Vec<u64>, Option<u32>)| {
@@ -328,6 +342,7 @@ mod tests {
         );
     }
 
+    /// Adding and removing GPUs require an existing target and GPUs the domain owns.
     #[test]
     fn membership_changes_validate_their_target_and_gpus() {
         scenarios!(run = |(op, target, uids): (&str, PartitionRef, Vec<u64>)| {
@@ -363,6 +378,7 @@ mod tests {
         );
     }
 
+    /// A non-zero ID identifies the partition even when a name is also given.
     #[test]
     fn partition_ref_prefers_a_nonzero_id() {
         scenarios!(run = |(id, name): (Option<u32>, &str)| PartitionRef::new(id, name);

@@ -283,6 +283,7 @@ impl DeviceHandle {
         ))
     }
 
+    /// A host handle for control-router tests, backed by `host_info`.
     #[cfg(test)]
     pub(crate) fn for_control_test_host(
         host_info: HostMachineInfo,
@@ -295,6 +296,7 @@ impl DeviceHandle {
         ))
     }
 
+    /// A switch handle for control-router tests with an optional NVOS lease.
     #[cfg(test)]
     pub(crate) fn for_control_test_switch(
         host_info: HostMachineInfo,
@@ -308,6 +310,7 @@ impl DeviceHandle {
         ))
     }
 
+    /// Sets the simulated NVOS lease of a switch handle; other devices have none.
     #[cfg(test)]
     pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
         match &self.0 {

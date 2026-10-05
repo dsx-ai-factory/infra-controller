@@ -66,10 +66,12 @@ fn rack(key: &str, domain_uuid: Uuid, nvos_ip: &str, first_uid: u64) -> SimDomai
     }
 }
 
+/// Rack A: NVOS address 10.0.0.1, GPU UIDs from 0xa0.
 fn rack_a() -> SimDomain {
     rack("rack-a", RACK_A_UUID, "10.0.0.1", 0xa0)
 }
 
+/// Rack B: NVOS address 10.0.0.2, GPU UIDs from 0xb0.
 fn rack_b() -> SimDomain {
     rack("rack-b", RACK_B_UUID, "10.0.0.2", 0xb0)
 }
@@ -116,6 +118,7 @@ async fn client_addressing(
     NmxControllerClient::new(channel)
 }
 
+/// A partition list request with no filters, which returns every partition.
 fn list_all() -> nmx::GetPartitionInfoListRequest {
     nmx::GetPartitionInfoListRequest {
         context: None,
@@ -125,10 +128,12 @@ fn list_all() -> nmx::GetPartitionInfoListRequest {
     }
 }
 
+/// Wraps `id` as an optional proto partition ID.
 fn partition_id(id: u32) -> Option<nmx::PartitionId> {
     Some(nmx::PartitionId { partition_id: id })
 }
 
+/// A create request for `name` holding `uids`.
 fn create(name: &str, uids: &[u64]) -> nmx::CreatePartitionRequest {
     nmx::CreatePartitionRequest {
         context: None,
@@ -148,6 +153,7 @@ fn create(name: &str, uids: &[u64]) -> nmx::CreatePartitionRequest {
     }
 }
 
+/// A delete request for partition `id`.
 fn delete(id: u32) -> nmx::DeletePartitionRequest {
     nmx::DeletePartitionRequest {
         context: None,
@@ -157,6 +163,7 @@ fn delete(id: u32) -> nmx::DeletePartitionRequest {
     }
 }
 
+/// A membership update request for partition `id` naming `uids`.
 fn update(id: u32, uids: &[u64]) -> nmx::UpdatePartitionRequest {
     nmx::UpdatePartitionRequest {
         context: None,
@@ -169,6 +176,8 @@ fn update(id: u32, uids: &[u64]) -> nmx::UpdatePartitionRequest {
     }
 }
 
+/// An unmodified `libnmxc` client's `Hello` returns the domain UUID and the
+/// mock's version string.
 #[tokio::test]
 async fn hello_reports_the_domain_uuid_to_an_unmodified_client() {
     let url = serve(vec![rack_a()]).await;
@@ -264,6 +273,20 @@ async fn partition_lifecycle_through_nicos_client() {
         [(0xa0, None), (0xa1, Some(1)), (0xa2, Some(1)), (0xa3, None)]
     );
 
+    let unknown = client
+        .get_gpu_info_list(nmx::GetGpuInfoListRequest {
+            attr: nmx::GpuAttr::NmxGpuAttrAll as i32,
+            gateway_id: NMX_C_GATEWAY_ID.into(),
+            partition_id: partition_id(id + 1),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(
+        unknown.unwrap_err().nmx_return_code(),
+        Some(nmx::StReturnCode::NmxStPartitionIdNotInUse as i32),
+        "listing GPUs of a partition that is not provisioned is an error, not an empty list"
+    );
+
     client.delete_partition(delete(id)).await.unwrap();
     let remaining = client.get_partition_info_list(list_all()).await.unwrap();
     assert!(remaining.partition_info_list.is_empty());
@@ -324,6 +347,8 @@ async fn domains_are_selected_by_authority() {
     assert_eq!(status.code(), tonic::Code::NotFound);
 }
 
+/// Methods outside the mock's scope return `Unimplemented` from the handler,
+/// not from a missing route.
 #[tokio::test]
 async fn out_of_scope_methods_report_unimplemented() {
     // A missing route would surface as a router 404, which tonic reports as

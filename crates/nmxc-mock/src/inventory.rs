@@ -99,12 +99,14 @@ pub struct SimGpu {
 pub struct StaticInventory(Arc<[SimDomain]>);
 
 impl StaticInventory {
+    /// An inventory over a fixed set of domains.
     pub fn new(domains: Arc<[SimDomain]>) -> Self {
         Self(domains)
     }
 }
 
 impl NmxcInventory for StaticInventory {
+    /// The fixed domains, shared by reference.
     fn domains(&self) -> Arc<[SimDomain]> {
         Arc::clone(&self.0)
     }

@@ -139,6 +139,8 @@ impl ControlState {
             .ok_or_else(|| eyre::eyre!("no simulated device has BMC MAC {bmc_mac}"))
     }
 
+    /// Builds the control state over `simulators`, collecting each device's initial
+    /// status.
     pub fn new(
         simulators: SimulatorRegistry,
         status_config: DeviceStatusConfig,
@@ -378,6 +380,8 @@ impl ControlState {
 /// since the last request (see `NmxcSnapshot`); nothing else in it can
 /// change, so a cached snapshot is never stale.
 impl NmxcInventory for ControlState {
+    /// One NVLink domain per simulated rack, rebuilt only when a switch NVOS lease
+    /// changed since the last snapshot.
     fn domains(&self) -> Arc<[SimDomain]> {
         let mut cached = self
             .nmxc_snapshot
@@ -733,6 +737,8 @@ mod tests {
         rack_control_state_for(vec![handle], vec![rack_registration("rack-001", "test")])
     }
 
+    /// A one-tray GB200 rack registration for `rack_id` whose tray is configured by
+    /// `machine_config_section`.
     fn rack_registration(rack_id: &str, machine_config_section: &str) -> RackRegistration {
         partial_rack_registration(
             rack_id,
@@ -816,6 +822,8 @@ mod tests {
         assert!(Arc::ptr_eq(&third, &state.nodes()));
     }
 
+    /// Domains carry the GPUs, compute nodes and switch NVOS addresses that the
+    /// rack's devices report through discovery.
     #[test]
     fn nmxc_inventory_reports_one_domain_per_rack_from_discovery() {
         let tray_info = rack_member_info(HardwareType::WiwynnGB200Nvl, 11, 0x11);
@@ -885,6 +893,7 @@ mod tests {
         assert_eq!(rebuilt[0].nvos_ips, [IpAddr::from([10, 0, 0, 6])]);
     }
 
+    /// A rack whose trays report no NVLink GPUs yields no domain.
     #[test]
     fn nmxc_inventory_skips_racks_without_nvlink_gpus() {
         let handle = DeviceHandle::for_control_test(Vec::new(), None);

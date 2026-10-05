@@ -37,6 +37,7 @@ pub struct NmxcMockConfig {
 }
 
 impl Default for NmxcMockConfig {
+    /// The mock's own version string and a factory default partition on every domain.
     fn default() -> Self {
         Self {
             version_string: concat!("machine-a-tron-nmxc-mock/", env!("CARGO_PKG_VERSION")).into(),
