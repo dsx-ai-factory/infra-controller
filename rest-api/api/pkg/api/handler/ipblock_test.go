@@ -155,8 +155,7 @@ func testIPBlockBuildIPBlock(t *testing.T, dbSession *cdb.Session, name string, 
 }
 
 // testIPBlockBuildTenantSitePrefix creates a private Tenant SitePrefix. The
-// combination of TenantID and SitePrefixID keeps it out of generic IPBlock
-// handlers.
+// unmanaged classification keeps it out of generic IPBlock handlers.
 func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, ip *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, prefix string, prefixLength int, status string, user *cdbm.User) *cdbm.IPBlock {
 	t.Helper()
 	sitePrefixID := uuid.New()
@@ -166,6 +165,7 @@ func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             &sitePrefixID,
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   prefix,
 		PrefixLength:             prefixLength,
