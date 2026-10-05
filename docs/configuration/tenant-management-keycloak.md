@@ -306,15 +306,16 @@ which are Kustomize dev values.
 `login`. Only `--client-secret`, `--username`, and `--password` belong to the subcommand.
 Putting a global flag after `login` fails with `flag provided but not defined`.
 
-Put the client secret in the config file rather than in `--client-secret`, which would
+Put the client secret in a config file rather than in `--client-secret`, which would
 record it in shell history and expose it in the process list. `nicocli` reads
-`auth.oidc.client_secret` when the flag is absent, and `~/.nico/config.yaml` is the file
-`nicocli` already keeps the resulting token in:
+`auth.oidc.client_secret` when the flag is absent and keeps the resulting token in the
+same file. Give the Tenant a file of its own rather than reusing `~/.nico/config.yaml`,
+for the reasons in [Pointing nicocli at the Tenant org](#pointing-nicocli-at-the-tenant-org):
 
 ```bash
 mkdir -p ~/.nico
-install -m 600 /dev/null ~/.nico/config.yaml
-cat > ~/.nico/config.yaml <<'EOF'
+install -m 600 /dev/null ~/.nico/acme-corp.yaml
+cat > ~/.nico/acme-corp.yaml <<'EOF'
 api:
   base: http://localhost:8388
   org: acme-corp
@@ -328,7 +329,7 @@ EOF
 `nicocli login` prompts for the password, so it never needs `--password` either:
 
 ```bash
-nicocli \
+nicocli --config ~/.nico/acme-corp.yaml \
   --keycloak-url http://keycloak.nico-rest:8082 \
   --keycloak-realm nico \
   --client-id nico-rest \
@@ -431,12 +432,11 @@ print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
 With the realm role in place, the remaining steps are the standard flow in
 [Tenant Management](tenant_management.md). Two points are specific to this path.
 
-**The Tenant must call `nicocli tenant current` before accepting an invitation.** A
-Provider can invite an org before that org has a Tenant, which leaves the account's
-`tenantId` empty, and creating the Tenant is what fills it in. Accepting beforehand fails
-either with `404 Org does not have tenant` when the org has no Tenant at all, or with
-`400 TenantAccount is not linked to a Tenant yet` when it has one the invitation predates.
-Accepting does not set `tenantId` itself, so neither error clears on a retry.
+**The Tenant must call `nicocli tenant current` before accepting an invitation.** That
+call creates the org's Tenant if it does not exist yet, and accepting fails with
+`404 Org does not have tenant` until it does. A Provider can invite an org before that org
+has a Tenant, which leaves the account's `tenantId` empty. Accepting fills it in with the
+org's Tenant, so an invitation that predates the Tenant needs no extra step.
 
 **A Tenant should not call `nicocli service-account current`.** In a deployment with
 `serviceAccount: true`, that endpoint creates an Infrastructure Provider, a Tenant, and
@@ -462,34 +462,49 @@ independent things select the Tenant, and `nicocli login` changes only one of th
 
 The token decides which orgs you may act in. Its orgs come from the `<orgName>:<ROLE>`
 realm roles held by the identity that requested it, so a Provider token can never accept
-a Tenant's invitation. Log in as the Tenant's own identity instead. A human user signs in
-as shown above, and a service-account client omits `--username`, which selects the client
+a Tenant's invitation. Log in as the Tenant's own identity, into a config file of its
+own. Sharing the Provider's file fails in one of two ways. `login` overwrites `auth.oidc`
+in the file it uses, so step 4 would then send the Tenant's token. And a Provider token
+kept in `auth.token`, which is where a token from `get-token.sh` usually goes, outranks
+`auth.oidc.token`, so the Tenant's login would change nothing that is sent.
+
+A human user signs in as shown above. A service-account client keeps its secret in its
+file the same way and leaves `username` unset, which makes `login` use the client
 credentials grant:
 
 ```bash
-nicocli \
+mkdir -p ~/.nico
+install -m 600 /dev/null ~/.nico/acme-corp.yaml
+cat > ~/.nico/acme-corp.yaml <<'EOF'
+api:
+  base: http://localhost:8388
+  org: acme-corp
+  name: nico
+auth:
+  oidc:
+    client_secret: REPLACE_ME
+EOF
+
+nicocli --config ~/.nico/acme-corp.yaml \
   --keycloak-url http://keycloak.nico-rest:8082 \
   --keycloak-realm nico \
   --client-id acme-corp-service \
-  login \
-  --client-secret "$(cat /path/to/client-secret)"
+  login
 ```
 
-The org in the request path is separate, and login does not touch it. It stays whatever
-`api.org` says, so the command after a successful login still runs as the Provider and
-fails with `403 Requested organization not found in token claims`. The message names
-neither the setting nor the flag, so it reads like a token problem when the token is
-fine. Pass the org per command instead:
+The org in the request path is the other half, and login does not touch it. With
+`api.org` set to `acme-corp` in the Tenant's file, steps 2 and 3 run as the Tenant:
 
 ```bash
-nicocli --org acme-corp tenant current
-nicocli --org acme-corp tenant-account update --data '{}' <account-id>
+nicocli --config ~/.nico/acme-corp.yaml tenant current
+nicocli --config ~/.nico/acme-corp.yaml tenant-account update --data '{}' <account-id>
 ```
 
-`--org` overrides `api.org` for that command only, which also keeps step 4 working as the
-Provider without editing anything back. Where the Tenant is a person rather than a
-script, giving them their own `nicocli --config <path>` file with `api.org` already set to
-`acme-corp` avoids the flag entirely.
+If `api.org` still names the Provider, the request fails with
+`403 Requested organization not found in token claims` even though login succeeded. The
+message names neither the setting nor the flag, so it reads like a token problem when
+the token is fine. `--org acme-corp` overrides `api.org` for a single command. Step 4
+then runs as before with the Provider's file, which the Tenant's login never touched.
 
 ## Granting the Privileged Tenant Capability
 
@@ -565,7 +580,7 @@ authentication inactive, so confirm Keycloak is ready first.
 | `403 User does not have any roles assigned` | No realm role parsed into an org. Usually a role name without exactly one colon | Check `realm_access.roles` in the decoded token |
 | `403 User does not have Tenant Admin role with org` | Role parsed, but it is not `TENANT_ADMIN` | Assign `acme-corp:TENANT_ADMIN` and retry after the one-minute cache expires |
 | `404 Org does not have tenant` when accepting | `nicocli tenant current` has not been run for the Tenant org | Run it, then accept |
-| `400 TenantAccount is not linked to a Tenant yet` when accepting | The invitation was created before the Tenant existed, so its `tenantId` is empty. The org has a Tenant now, but only Tenant creation fills that field in | Run `nicocli tenant current` as the Tenant org, confirm `tenantId` is set, then accept |
+| `400 Tenant in org does not match tenant in TenantAccount` when accepting | The request ran as an org other than the one invited, usually the Provider's own | Accept from the Tenant's config file, or pass `--org <tenantOrg>`. See [Pointing nicocli at the Tenant org](#pointing-nicocli-at-the-tenant-org) |
 | `400 Tenant Account status is not Invited` | The account is already `Ready` | No action needed, the invitation was already accepted |
 | A role added in Keycloak has no effect | Org data cached on the user record | Retry after one minute |
 | Realm edits to `realm-configmap.yaml` do not appear | `--import-realm` skips an existing realm | Apply with `kcadm.sh`, or re-import from clean |

@@ -182,7 +182,7 @@ Example tenant account detail (Ready, with active allocations):
 
 ### Accepting the Invitation (Tenant Side)
 
-This is a Tenant call, and two separate things have to name the tenant org: the token, and the org in the request path. Logging in as the tenant changes only the token, so add `--org <tenantOrg>` or the request still runs as the provider and returns `403 Requested organization not found in token claims`. On Keycloak deployments, [Pointing nicocli at the Tenant org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+This is a Tenant call, and two separate things have to name the tenant org: the token, and the org in the request path. Log in as the tenant into a config file of its own, passed with `--config`, and set `api.org` to the tenant org there. Logging in changes only the token, so a stale `api.org` still runs the request as the provider and returns `403 Requested organization not found in token claims`, and logging in to the provider's file overwrites the provider's credentials. On Keycloak deployments, [Pointing nicocli at the Tenant org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
 
 The tenant admin must accept the invitation to transition the account to `Ready`. The non-interactive form sends an empty PATCH body, note the flag-first ordering:
 

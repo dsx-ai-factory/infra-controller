@@ -478,6 +478,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	tnOrg3 := "test-tn-org-3"
 	tnOrg4 := "test-tn-org-4"
 	tnOrg5 := "test-tn-org-5"
+	tnOrg6 := "test-tn-org-6"
 
 	ipOrgRoles := []string{authz.ProviderAdminRole}
 	tnOrgRoles := []string{authz.TenantAdminRole}
@@ -508,15 +509,21 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 	ta3 := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, tn3, tnOrg3, cdbm.TenantAccountStatusReady, ipUser.ID, uuid.Nil)
 	assert.NotNil(t, ta3)
 
-	// The Provider can invite an org before that org's Tenant exists, which leaves
-	// tenantId empty. tnOrg5 has a Tenant so the org lookup succeeds and the request
-	// reaches the link check rather than stopping at the 404.
+	// An invitation created before its org had a Tenant keeps an empty tenantId when the
+	// Tenant is later created without the back-fill, as GET /service-account/current does.
+	// tn5 exists, so accepting taUnlinked has to link it. taForeign is unlinked too, but
+	// was issued to tnOrg6, so no other org may claim it.
 	tn5 := testTenantAccountBuildTenant(t, dbSession, tnOrg5, "Test Tenant Account 5", ipUser)
 	assert.NotNil(t, tn5)
 
 	taUnlinked := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, nil, tnOrg5, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
 	assert.NotNil(t, taUnlinked)
 	assert.Nil(t, taUnlinked.TenantID)
+	testTenantAccountBuildStatusDetail(t, dbSession, taUnlinked.ID, taUnlinked.Status)
+
+	taForeign := testTenantAccountBuildTenantAccount(t, dbSession, uuid.New().String(), ip, nil, tnOrg6, cdbm.TenantAccountStatusInvited, ipUser.ID, uuid.Nil)
+	assert.NotNil(t, taForeign)
+	assert.Nil(t, taForeign.TenantID)
 
 	errBody1, err := json.Marshal(model.APITenantAccountUpdateRequest{TenantContactID: cutil.GetPtr("non-uuid$!")})
 	assert.Nil(t, err)
@@ -544,10 +551,13 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 		ta             *cdbm.TenantAccount
 		expectedErr    bool
 		expectedStatus int
-		// expectedMessage is asserted where the status alone cannot tell two rejections
-		// apart, so re-merging the unlinked and mismatched checks fails here.
-		expectedMessage    string
-		verifyChildSpanner bool
+		// expectedMessage is asserted where the status alone cannot identify the rejection.
+		expectedMessage string
+		// checkPersistedTenantID reloads the account after the request and asserts its
+		// TenantID equals persistedTenantID, where nil means it must still be unlinked.
+		checkPersistedTenantID bool
+		persistedTenantID      *uuid.UUID
+		verifyChildSpanner     bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -628,16 +638,31 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 			expectedMessage: "Tenant in org does not match tenant in TenantAccount",
 		},
 		{
-			name:            "error when tenant account is not linked to a tenant yet",
-			reqOrgName:      tnOrg5,
-			reqBody:         string(okBody1),
-			user:            tnUser,
-			tnID:            tn5.ID.String(),
-			taID:            taUnlinked.ID.String(),
-			ta:              taUnlinked,
-			expectedErr:     true,
-			expectedStatus:  http.StatusBadRequest,
-			expectedMessage: "TenantAccount is not linked to a Tenant yet",
+			name:                   "error when unlinked tenant account was issued to another org",
+			reqOrgName:             tnOrg1,
+			reqBody:                string(okBody1),
+			user:                   tnUser,
+			tnID:                   tn1.ID.String(),
+			taID:                   taForeign.ID.String(),
+			ta:                     taForeign,
+			expectedErr:            true,
+			expectedStatus:         http.StatusBadRequest,
+			expectedMessage:        "Tenant in org does not match tenant in TenantAccount",
+			checkPersistedTenantID: true,
+			persistedTenantID:      nil,
+		},
+		{
+			name:                   "success case links unlinked tenant account to the org's tenant",
+			reqOrgName:             tnOrg5,
+			reqBody:                string(okBody1),
+			user:                   tnUser,
+			tnID:                   tn5.ID.String(),
+			taID:                   taUnlinked.ID.String(),
+			ta:                     taUnlinked,
+			expectedErr:            false,
+			expectedStatus:         http.StatusOK,
+			checkPersistedTenantID: true,
+			persistedTenantID:      &tn5.ID,
 		},
 		{
 			name:           "error when specified tenant account doesnt exist",
@@ -721,6 +746,12 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 
 			if tc.expectedMessage != "" {
 				assert.Contains(t, rec.Body.String(), tc.expectedMessage)
+			}
+
+			if tc.checkPersistedTenantID {
+				persisted, gerr := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, tc.ta.ID, nil)
+				require.NoError(t, gerr)
+				assert.Equal(t, tc.persistedTenantID, persisted.TenantID)
 			}
 
 			if !tc.expectedErr {

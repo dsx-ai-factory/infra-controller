@@ -36,16 +36,17 @@ TOKEN_URL="${KC_URL}/realms/${REALM}/protocol/openid-connect/token"
 
 command -v python3 >/dev/null || { echo "ERROR: python3 is required" >&2; exit 1; }
 
-# The secret goes to curl in a stdin config file rather than -d, so it stays out of the
-# pod spec, Kubernetes audit records, and shell history. Form-encoding it here keeps a
-# raw &, =, + or % in a Tenant's secret from changing the value Keycloak receives.
+# The secret reaches python through its environment and curl through a stdin config
+# file, so it never appears in a process argument list, the pod spec, Kubernetes audit
+# records, or shell history. Form-encoding it here keeps a raw &, =, + or % in a
+# Tenant's secret from changing the value Keycloak receives.
 _curl_config() {
-    python3 - "$@" <<'PY'
-import sys, urllib.parse
+    KC_CLIENT_ID="${CLIENT_ID}" KC_CLIENT_SECRET="${CLIENT_SECRET}" python3 - <<'PY'
+import os, urllib.parse
 print('data = "%s"' % urllib.parse.urlencode({
     "grant_type": "client_credentials",
-    "client_id": sys.argv[1],
-    "client_secret": sys.argv[2],
+    "client_id": os.environ["KC_CLIENT_ID"],
+    "client_secret": os.environ["KC_CLIENT_SECRET"],
 }))
 PY
 }
@@ -54,7 +55,7 @@ PY
 # This ensures JWT issuer matches the internal Keycloak URL.
 # Deliberately omits -f: on a bad client or secret Keycloak returns the reason in the
 # body, and -f would discard it and leave only a nonzero exit.
-RESPONSE="$(_curl_config "${CLIENT_ID}" "${CLIENT_SECRET}" \
+RESPONSE="$(_curl_config \
     | kubectl run -i --rm --restart=Never --image=curlimages/curl "curl-$$" \
         -n "${NS}" --quiet -- -s -K - "${TOKEN_URL}")" \
     || { echo "ERROR: could not reach Keycloak at ${TOKEN_URL}" >&2; exit 1; }
