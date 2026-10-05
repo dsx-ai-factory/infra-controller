@@ -126,6 +126,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use carbide_test_support::{Check, check_values};
     use opentelemetry::KeyValue;
     use prometheus::{Encoder, TextEncoder};
 
@@ -208,38 +209,101 @@ mod tests {
 
     #[test]
     fn admission_duration_histograms_use_seconds_buckets() {
-        let registry = prometheus::Registry::new();
-        let exporter = opentelemetry_prometheus::exporter()
-            .with_registry(registry.clone())
-            .without_scope_info()
-            .without_target_info()
-            .build()
-            .unwrap();
-        let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
-            .with_reader(exporter)
-            .with_view(admission_duration_histogram_view().unwrap())
-            .build();
-        provider
-            .meter("test")
-            .f64_histogram("carbide_api_admission_handler_execution_duration")
-            .with_unit("s")
-            .build()
-            .record(0.02, &[]);
+        let expected_buckets = [
+            (0.0, 0),
+            (0.005, 0),
+            (0.01, 0),
+            (0.025, 1),
+            (0.05, 1),
+            (0.075, 1),
+            (0.1, 1),
+            (0.25, 1),
+            (0.5, 1),
+            (0.75, 1),
+            (1.0, 1),
+            (2.5, 1),
+            (5.0, 1),
+            (7.5, 1),
+            (10.0, 1),
+            (f64::INFINITY, 1),
+        ];
+        check_values(
+            [
+                "carbide_api_admission_handler_execution_duration",
+                "carbide_api_admission_pending_wait_duration",
+            ]
+            .map(|name| Check {
+                scenario: name,
+                input: name,
+                expect: expected_buckets.to_vec(),
+            }),
+            |name| {
+                let registry = prometheus::Registry::new();
+                let exporter = opentelemetry_prometheus::exporter()
+                    .with_registry(registry.clone())
+                    .without_scope_info()
+                    .without_target_info()
+                    .build()
+                    .unwrap();
+                let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+                    .with_reader(exporter)
+                    .with_view(admission_duration_histogram_view().unwrap())
+                    .build();
+                provider
+                    .meter("test")
+                    .f64_histogram(name)
+                    .with_unit("s")
+                    .build()
+                    .record(0.020, &[]);
 
-        let mut buffer = vec![];
-        TextEncoder::new()
-            .encode(&registry.gather(), &mut buffer)
-            .unwrap();
-        let encoded = String::from_utf8(buffer).unwrap();
+                let families = registry.gather();
+                let exported_name = format!("{name}_seconds");
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == exported_name)
+                    .unwrap_or_else(|| panic!("{name}: missing {exported_name} histogram"));
+                assert_eq!(
+                    family.get_field_type(),
+                    prometheus::proto::MetricType::HISTOGRAM,
+                    "{name}: metric type"
+                );
+                assert_eq!(family.get_metric().len(), 1, "{name}: series count");
+                let histogram = family.get_metric()[0].get_histogram();
+                assert_eq!(histogram.get_sample_count(), 1, "{name}: sample count");
+                assert!(
+                    (histogram.get_sample_sum() - 0.020).abs() < 1e-12,
+                    "{name}: expected sum 0.020 seconds, got {}",
+                    histogram.get_sample_sum()
+                );
+                assert!(
+                    histogram
+                        .get_bucket()
+                        .iter()
+                        .all(|bucket| bucket.upper_bound() != 25.0),
+                    "{name}: unexpected finite 25-second bucket"
+                );
 
-        assert!(encoded.contains(
-            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"0.005\"} 0"
-        ));
-        assert!(encoded.contains(
-            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"0.025\"} 1"
-        ));
-        assert!(!encoded.contains(
-            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"25\"}"
-        ));
+                // The exporter gathers finite buckets; TextEncoder adds +Inf from the count.
+                let mut buffer = vec![];
+                TextEncoder::new().encode(&families, &mut buffer).unwrap();
+                let encoded = String::from_utf8(buffer).unwrap();
+                let infinity_sample = format!("{exported_name}_bucket{{le=\"+Inf\"}}");
+                let infinity_counts: Vec<u64> = encoded
+                    .lines()
+                    .filter_map(|line| {
+                        let (sample, value) = line.split_once(' ')?;
+                        (sample == infinity_sample).then(|| value.parse().unwrap())
+                    })
+                    .collect();
+                assert_eq!(infinity_counts.len(), 1, "{name}: +Inf bucket count");
+
+                histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                    .chain([(f64::INFINITY, infinity_counts[0])])
+                    .collect::<Vec<_>>()
+            },
+        );
     }
 }
