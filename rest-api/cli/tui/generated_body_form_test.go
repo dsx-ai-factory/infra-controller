@@ -251,7 +251,11 @@ func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T)
 	resolver := NewResolver(cache)
 	session := &Session{Cache: cache, Resolver: resolver}
 	resolver.RegisterFetcher("site", func(context.Context) ([]NamedItem, error) {
-		return []NamedItem{{Name: "site-one", ID: "site-1"}}, nil
+		return []NamedItem{{
+			Name:   "site-one",
+			ID:     "site-1",
+			Status: "Registered",
+		}}, nil
 	})
 	var siteScopeAtVPCFetch []string
 	resolver.RegisterFetcher("vpc", func(context.Context) ([]NamedItem, error) {
@@ -295,7 +299,7 @@ func TestGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/site":
-			_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-one"}]`)
+			_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-one","status":"Registered"}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/vpc":
 			vpcFetches++
 			if vpcFetches == 1 {

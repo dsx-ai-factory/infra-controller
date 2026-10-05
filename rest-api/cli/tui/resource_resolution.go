@@ -20,10 +20,11 @@ import (
 // resolved to a selectable API resource. FreeFormReason is set only for a
 // reviewed parameter that has no usable list surface.
 type GeneratedResourceDescriptor struct {
-	ResourceType    string
-	ParentParameter string
-	ScopeParameter  string
-	FreeFormReason  string
+	ResourceType       string
+	ParentParameter    string
+	ScopeParameter     string
+	FreeFormReason     string
+	RegisteredSiteOnly bool
 }
 
 // CanonicalGeneratedResourceType derives the resolver key for an OpenAPI
@@ -187,6 +188,10 @@ func (s *Session) GeneratedResourceItems(
 	descriptor GeneratedResourceDescriptor,
 	resolvedValues map[string]string,
 ) ([]NamedItem, bool, error) {
+	if descriptor.RegisteredSiteOnly {
+		items, err := registeredSiteItems(s, ctx)
+		return items, true, err
+	}
 	if descriptor.FreeFormReason != "" {
 		return nil, false, nil
 	}
