@@ -1070,7 +1070,33 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		instancetype *cdbm.InstanceType
 		request      *cam.APIInstanceCreateRequest
 		expectErr    bool
+		wantErr      error
 	}{
+		{
+			name:         "missing SpectrumX capabilities must not fall back to incompatible machines",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrSpectrumXMachineSelection,
+		},
+		{
+			name:         "SpectrumX request without available candidates preserves capacity error",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				MachineLabelSelector: map[string]string{"failure-domain": "missing"},
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrInstanceTypeMachineNotFound,
+		},
 		{
 			name:         "error when no Machine matches label selector",
 			instancetype: inst1,
@@ -1102,6 +1128,9 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
 			if err == nil {
 				require.NotNil(t, s)
 				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, s.ID, nil, false)

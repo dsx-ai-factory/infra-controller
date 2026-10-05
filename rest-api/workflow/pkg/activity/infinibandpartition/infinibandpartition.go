@@ -15,6 +15,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -218,7 +219,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 	ibpsToDelete := []*cdbm.InfiniBandPartition{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if ibpInventory.InventoryPage == nil || ibpInventory.InventoryPage.TotalPages == 0 || (ibpInventory.InventoryPage.CurrentPage == ibpInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(ibpInventory.GetInventoryPage()) {
 		for _, ibp := range existingIbpIDMap {
 			found := false
 

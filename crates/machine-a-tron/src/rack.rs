@@ -19,7 +19,8 @@ use bmc_mock::{HardwareType, RackPlacement, RackType};
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use model::expected_rack::derive_rack_profile_id;
 use model::expected_rack_group::{
-    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupProtocol,
+    RackGroupTopology,
 };
 use model::rack_type::RackCapabilityType;
 use serde::Serialize;
@@ -107,6 +108,7 @@ pub(crate) fn expected_rack_group(
     Ok(ExpectedRackGroup {
         rack_group_id: RackGroupId::new(format!("group-{rack_id}")),
         topology: RackGroupTopology::new(rack_group_topology(rack_type)),
+        protocol: Some(RackGroupProtocol::new(RACK_GROUP_PROTOCOL)),
         racks: vec![ExpectedRackGroupRack {
             rack_id: rack_id.clone(),
             members: group_members,
@@ -114,6 +116,11 @@ pub(crate) fn expected_rack_group(
         metadata: Default::default(),
     })
 }
+
+/// The rack-management protocol every simulated rack group declares. nico-api
+/// requires one, and derives the profile from the declared topology for any
+/// value but `NVLINK_V6`, which it maps to the VR profiles instead.
+const RACK_GROUP_PROTOCOL: &str = "NVLINK_V5";
 
 /// The NVLink topology an expected rack group declares for a rack design.
 /// nico-api uppercases it to form the first part of the derived profile ID,

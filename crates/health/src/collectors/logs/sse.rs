@@ -16,6 +16,8 @@
  */
 
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -444,6 +446,25 @@ fn record_to_log(
         attributes.push((
             Cow::Borrowed("redfish.oem"),
             oem.additional_properties.to_string(),
+        ));
+    }
+
+    // Without either optional identifier, an EventRecord URI can recur across
+    // payloads. Hash the occurrence fields before sink-specific projection;
+    // inventory enrichment must not change the identity of an exact replay.
+    if record.event_id.as_deref().is_none_or(str::is_empty)
+        && log_entry_id.as_deref().is_none_or(str::is_empty)
+    {
+        let timestamp = attributes
+            .iter()
+            .find_map(|(key, value)| (key == "event_timestamp").then_some(value.as_str()));
+
+        let mut hasher = DefaultHasher::new();
+        (body.as_str(), timestamp, record.message_args.as_deref()).hash(&mut hasher);
+
+        attributes.push((
+            Cow::Borrowed("event_record_fingerprint"),
+            hasher.finish().to_string(),
         ));
     }
 
@@ -898,6 +919,51 @@ mod tests {
             attribute(log_record(&event), "oem.nvidia.error_id"),
             Some("CPLD-PSEQ-FAULT")
         );
+    }
+
+    #[test]
+    fn fallback_occurrences_preserve_content_changes_and_exact_replays() {
+        use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
+
+        let payload = json!({
+            "@odata.id": "/redfish/v1/EventService/SSE#/Events/0", "MemberId": "0",
+            "EventType": "Alert", "MessageId": "Example.1.0.Event", "Message": "first",
+            "MessageArgs": ["resource", "detail"], "EventTimestamp": "2026-10-03T00:00:01Z"
+        });
+
+        let record = serde_json::from_value(payload.clone()).unwrap();
+        let event = record_to_log(&record, false, Vec::new());
+        let expected = OpenBmcEventMapper.queue_key("bmc", &log_record(&event).attributes);
+
+        for (field, value, same) in [
+            ("Message", json!("first"), true),
+            ("EventTimestamp", json!("2026-10-03T00:00:02Z"), false),
+            ("Message", json!("second"), false),
+            (
+                "MessageArgs",
+                json!(["resource", "changed later argument"]),
+                false,
+            ),
+        ] {
+            let mut changed = payload.clone();
+            changed[field] = value;
+
+            let record = serde_json::from_value(changed).unwrap();
+
+            let event = record_to_log(
+                &record,
+                false,
+                vec![(Cow::Borrowed("gpu_uuid"), "new enrichment".into())],
+            );
+
+            let record = log_record(&event);
+
+            assert_eq!(
+                OpenBmcEventMapper.queue_key("bmc", &record.attributes) == expected,
+                same,
+                "{field}"
+            );
+        }
     }
 
     #[test]

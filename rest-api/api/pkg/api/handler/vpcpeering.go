@@ -386,11 +386,20 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	// Best effort post-commit update: workflow completed, so mark peering as Ready.
 	// This is intentionally outside of the transaction so create does not fail if this update fails.
 	status := cdbm.VpcPeeringStatusConfiguring
-	uerr := vpcPeeringDAO.UpdateStatusByID(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusReady)
+	updated, uerr := vpcPeeringDAO.UpdateStatusByIDIfCurrent(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusConfiguring, cdbm.VpcPeeringStatusReady)
 	if uerr != nil {
 		logger.Warn().Err(uerr).Msg("best-effort update to Ready status failed after workflow completion")
-	} else {
+	} else if updated {
 		status = cdbm.VpcPeeringStatusReady
+	} else {
+		// A DELETE can commit after create releases its transaction. Keep its
+		// status in both the database and the create response.
+		current, rerr := vpcPeeringDAO.GetByID(ctx, nil, vpcPeering.ID, nil)
+		if rerr != nil {
+			logger.Warn().Err(rerr).Msg("best-effort reload of VPC Peering status failed after workflow completion")
+		} else {
+			status = current.Status
+		}
 	}
 
 	// Update API model with best-known status.
@@ -883,14 +892,14 @@ func NewDeleteVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *s
 
 // Handle godoc
 // @Summary Delete a VPC Peering
-// @Description Delete a VPC Peering by ID.
+// @Description Request VPC Peering deletion by ID. Poll GET until it returns 404 before deleting either VPC.
 // @Tags vpcpeering
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of VPC Peering"
-// @Success 204 "No Content"
+// @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [delete]
 func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "VpcPeering", c)
@@ -1043,11 +1052,18 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 		wferr := we.Get(workflowCtx, nil)
 		if wferr != nil {
 			var applicationErr *tp.ApplicationError
-			if errors.As(wferr, &applicationErr) && slices.Contains(swe.UnimplementedOrDeniedErrTypes(), applicationErr.Type()) {
-				logger.Error().Msg("feature not yet implemented on target Site")
-				return cutil.NewAPIError(http.StatusNotImplemented, fmt.Sprintf("Feature not yet implemented on target Site: %s", wferr), nil)
+			if errors.As(wferr, &applicationErr) {
+				if slices.Contains(swe.ObjectNotFoundErrTypes(), applicationErr.Type()) {
+					// A repeated request may arrive after Core finishes removal but
+					// before inventory removes the REST record.
+					wferr = nil
+				} else if slices.Contains(swe.UnimplementedOrDeniedErrTypes(), applicationErr.Type()) {
+					logger.Error().Msg("feature not yet implemented on target Site")
+					return cutil.NewAPIError(http.StatusNotImplemented, fmt.Sprintf("Feature not yet implemented on target Site: %s", wferr), nil)
+				}
 			}
-
+		}
+		if wferr != nil {
 			var timeoutErr *tp.TimeoutError
 			if errors.As(wferr, &timeoutErr) || wferr == context.DeadlineExceeded || workflowCtx.Err() != nil {
 				logger.Error().Err(wferr).Msg("failed to delete VPC Peering, timeout occurred executing workflow on Site.")
@@ -1059,6 +1075,10 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 			}
 
 			logger.Error().Err(wferr).Msg("failed to synchronously execute Temporal workflow to delete VPC Peering")
+			statusCode, _ := common.UnwrapWorkflowError(wferr)
+			if statusCode == http.StatusPreconditionFailed {
+				return cutil.NewAPIError(http.StatusPreconditionFailed, "Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.", nil)
+			}
 			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to delete VPC Peering on Site: %s", wferr), nil)
 		}
 
@@ -1078,14 +1098,9 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 		return timeoutResp()
 	}
 
-	// Best effort post-commit cleanup: remove VPC Peering from DB.
-	// This is intentionally outside of the transaction so delete does not fail if this cleanup fails.
-	derr := vpcPeeringDAO.Delete(ctx, nil, vpcPeering.ID)
-	if derr != nil {
-		logger.Warn().Err(derr).Msg("best-effort delete of VPC Peering from DB failed after workflow completion")
-	}
-
+	// Core accepts the request before DPUs finish removing peering permissions.
+	// Keep Deleting visible until inventory confirms the peering is gone.
 	logger.Info().Msg("finishing API handler")
 
-	return c.NoContent(http.StatusNoContent)
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

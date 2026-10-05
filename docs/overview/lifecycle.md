@@ -147,6 +147,14 @@ tenant-free state before any reuse:
 For the step-by-step operator view, refer to
 [Tenant Lifecycle Cleanup](../operations/tenant-lifecycle-cleanup.md#network-cleanup-between-tenants).
 
+### Hardware Decommissioning
+
+Decommission managed hosts, switches, and power shelves when hardware is
+leaving the site or should be ingested again from a clean pre-ingestion
+state. After `Decommissioning/Decommissioned`, force-delete the records from
+this site or move the hardware to a new site. Refer to
+[Decommission NICo-managed hardware](../decommissioning/index.md).
+
 ### Break-Fix
 
 NICo supports directed provisioning for break-fix workflows. These workflows

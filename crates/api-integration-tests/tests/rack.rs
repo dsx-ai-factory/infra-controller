@@ -338,15 +338,21 @@ async fn run_machine_a_tron_racks_test(
                 "rack {rack_id}"
             );
 
-            let (group_topology, group_rack_id): (String, String) = sqlx::query_as(
-                "SELECT topology, rack_group_id FROM expected_racks \
-                 JOIN expected_rack_groups USING (rack_group_id) WHERE rack_id = $1",
-            )
-            .bind(rack_id.as_str())
-            .fetch_one(&test_env.db_pool)
-            .await?;
+            let (group_topology, group_protocol, group_rack_id): (String, Option<String>, String) =
+                sqlx::query_as(
+                    "SELECT topology, protocol, rack_group_id FROM expected_racks \
+                     JOIN expected_rack_groups USING (rack_group_id) WHERE rack_id = $1",
+                )
+                .bind(rack_id.as_str())
+                .fetch_one(&test_env.db_pool)
+                .await?;
             assert_eq!(group_rack_id, format!("group-{rack_id}"), "rack {rack_id}");
             assert_eq!(group_topology, expected_topology, "rack {rack_id}");
+            assert_eq!(
+                group_protocol.as_deref(),
+                Some("NVLINK_V5"),
+                "rack {rack_id}"
+            );
 
             let rack_profile_id: String =
                 sqlx::query_scalar("SELECT rack_profile_id FROM expected_racks WHERE rack_id = $1")

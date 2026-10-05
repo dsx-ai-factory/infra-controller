@@ -27,6 +27,9 @@ pub(super) async fn delete(
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     api_client.0.delete_vpc_peering(args.id).await?;
-    println!("Deleted VPC peering {} successfully", args.id);
+    println!(
+        "Requested deletion of VPC peering {}. Wait until it disappears from vpc-peering show before deleting either VPC.",
+        args.id
+    );
     Ok(())
 }

@@ -231,6 +231,16 @@ navigation:
           path: operations/nico-mcp.md
         - page: Tenant Lifecycle Cleanup
           path: operations/tenant-lifecycle-cleanup.md
+        - section: Decommissioning
+          contents:
+            - page: Overview
+              path: decommissioning/index.md
+            - page: Decommission Managed Hosts and DPUs
+              path: decommissioning/hosts.md
+            - page: Decommission Managed Switches
+              path: decommissioning/switches.md
+            - page: Decommission Managed Power Shelves
+              path: decommissioning/power-shelves.md
         - page: Network Isolation
           path: manuals/network_isolation.md
         - page: Network Security Groups
@@ -389,6 +399,8 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: NICo mTLS and Authorization
+              path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev
               path: development/issuer_ca_recreate.md
             - page: Visual Studio Code Remote Development

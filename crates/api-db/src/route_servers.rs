@@ -67,7 +67,7 @@ pub async fn replace(
 // get returns all RouteServer entries, which include the
 // IP address and source_type of the entry.
 pub async fn get(txn: impl DbReader<'_>) -> DatabaseResult<Vec<RouteServer>> {
-    let query = r#"SELECT * FROM route_servers;"#;
+    let query = r#"SELECT address, source_type FROM route_servers;"#;
     sqlx::query_as(query)
         .fetch_all(txn)
         .await
@@ -80,7 +80,7 @@ pub async fn find_by_address(
     txn: impl DbReader<'_>,
     address: IpAddr,
 ) -> DatabaseResult<Option<RouteServer>> {
-    let query = r#"SELECT * FROM route_servers where address=$1;"#;
+    let query = r#"SELECT address, source_type FROM route_servers where address=$1;"#;
     sqlx::query_as(query)
         .bind(address)
         .fetch_optional(txn)
@@ -152,6 +152,8 @@ pub async fn remove(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use sqlx::Connection;
 
     use super::*;
 
@@ -604,6 +606,57 @@ mod tests {
         assert!(config_final.contains(&initial_config[0]));
         assert!(config_final.contains(&IpAddr::from_str("172.16.0.1")?));
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn route_server_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        let entries = [
+            ("192.0.2.78".parse()?, RouteServerSourceType::ConfigFile),
+            ("2001:db8::78".parse()?, RouteServerSourceType::AdminApi),
+        ];
+        let mut txn = api_connection.begin().await?;
+        for (address, source_type) in entries {
+            add(txn.as_mut(), &[address], source_type).await?;
+        }
+        txn.commit().await?;
+
+        assert_route_server_queries(&mut api_connection, &entries).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the prepared readers alive while an unrelated column is added.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE route_servers ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        assert_route_server_queries(&mut api_connection, &entries).await?;
+        Ok(())
+    }
+
+    async fn assert_route_server_queries(
+        connection: &mut PgConnection,
+        expected: &[(IpAddr, RouteServerSourceType)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let found = get(&mut *connection).await?;
+        assert_eq!(found.len(), expected.len());
+        for entry in found {
+            assert!(expected.contains(&(entry.address, entry.source_type)));
+        }
+        for (address, source_type) in expected {
+            let found = find_by_address(&mut *connection, *address)
+                .await?
+                .expect("the committed route server is found");
+            assert_eq!(found.address, *address);
+            assert_eq!(found.source_type, *source_type);
+        }
         Ok(())
     }
 }

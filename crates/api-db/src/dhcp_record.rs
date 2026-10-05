@@ -35,7 +35,9 @@ pub async fn find_by_mac_address(
     segment_id: &NetworkSegmentId,
     address_family: IpAddressFamily,
 ) -> Result<Option<DhcpRecord>, DatabaseError> {
-    let query = "SELECT * FROM machine_dhcp_records WHERE mac_address = $1::macaddr AND segment_id = $2::uuid AND family(address) = $3";
+    let query = "SELECT machine_id, segment_id, machine_interface_id, subdomain_id,
+        fqdn, mac_address, address, mtu, prefix, gateway, last_invalidation_time
+        FROM machine_dhcp_records WHERE mac_address = $1::macaddr AND segment_id = $2::uuid AND family(address) = $3";
     sqlx::query_as(query)
         .bind(mac_address)
         .bind(segment_id)

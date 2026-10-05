@@ -568,10 +568,11 @@ described under [Deploying a 250-Rack Site](#deploying-a-250-rack-site).
 machine-a-tron declares each rack's expected rack group before it registers
 the rack, since nico-api accepts an expected rack only once a group declares
 it and derives the rack profile from that group. A `wiwynn_gb200_nvl72` rack
-gets the group `group-<rack id>` with topology `gb200_nvl72r1_c2g4` and one
-member per tray, switch, and power shelf, which nico-api resolves to the
-shipped `GB200_NVL72R1_C2G4_WIWYNN` profile; a `lenovo_gb300_nvl72` rack
-resolves to `GB300_NVL72R1_C2G4_LENOVO`. No `rack_profile_id` is configured.
+gets the group `group-<rack id>` with topology `gb200_nvl72r1_c2g4`, protocol
+`NVLINK_V5`, and one member per tray, switch, and power shelf, which nico-api
+resolves to the shipped `GB200_NVL72R1_C2G4_WIWYNN` profile; a
+`lenovo_gb300_nvl72` rack resolves to `GB300_NVL72R1_C2G4_LENOVO`. No
+`rack_profile_id` is configured.
 A group that already exists with a different topology or member list fails
 startup; remove it with `nico-admin-cli expected-rack-group delete` and the
 stale expected rack with `nico-admin-cli expected-rack delete`.

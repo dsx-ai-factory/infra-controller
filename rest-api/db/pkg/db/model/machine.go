@@ -252,6 +252,7 @@ type MachineCreateInput struct {
 	Hostname                 *string
 	Status                   string
 	Labels                   map[string]string
+	Updated                  *time.Time
 }
 
 // MachineUpdateInput input parameters for Update method
@@ -279,6 +280,7 @@ type MachineUpdateInput struct {
 	Status                   *string
 	Labels                   map[string]string
 	IsMissingOnSite          *bool
+	Updated                  *time.Time
 }
 
 // MachineClearInput input parameters for Clear method
@@ -296,8 +298,9 @@ type MachineClearInput struct {
 	NetworkHealthMessage  bool
 	DefaultMacAddress     bool
 	Hostname              bool
-	// Deleted clears the soft-delete timestamp (undelete).
+	// Deleted clears the soft-delete timestamp (undelete)
 	Deleted bool
+	Updated *time.Time
 }
 
 // MachineFilterInput filtering options for GetAll method
@@ -367,10 +370,17 @@ var _ bun.BeforeAppendModelHook = (*Machine)(nil)
 func (m *Machine) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 	switch query.(type) {
 	case *bun.InsertQuery:
-		m.Created = db.GetCurTime()
-		m.Updated = db.GetCurTime()
+		// Honor caller supplied Updated timestamp
+		if m.Updated.IsZero() {
+			m.Updated = db.GetCurTime()
+		}
+		// Set Created timestamp to the same to avoid Updated value that predate Created
+		m.Created = m.Updated
 	case *bun.UpdateQuery:
-		m.Updated = db.GetCurTime()
+		// Honor caller supplied Updated tiemstamp
+		if m.Updated.IsZero() {
+			m.Updated = db.GetCurTime()
+		}
 	}
 	return nil
 }
@@ -465,6 +475,9 @@ func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCre
 		Status:                   input.Status,
 		Labels:                   input.Labels,
 		IsMissingOnSite:          false,
+	}
+	if input.Updated != nil {
+		m.Updated = *input.Updated
 	}
 
 	_, err := db.GetIDB(tx, msd.dbSession).NewInsert().Model(m).Exec(ctx)
@@ -850,6 +863,9 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 	m := &Machine{
 		ID: input.MachineID,
 	}
+	if input.Updated != nil {
+		m.Updated = *input.Updated
+	}
 
 	updatedFields := []string{}
 	if input.InstanceTypeID {
@@ -1000,6 +1016,9 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 	for idx, input := range inputs {
 		m := &Machine{
 			ID: input.MachineID,
+		}
+		if input.Updated != nil {
+			m.Updated = *input.Updated
 		}
 		columns := []string{}
 		addTrace := idx < traceItems

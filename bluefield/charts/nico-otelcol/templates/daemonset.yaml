@@ -105,6 +105,38 @@ spec:
             - name: config-fragments
               mountPath: /etc/otelcol-contrib/config-fragments
               readOnly: true
+            - name: punt-stats
+              mountPath: /var/run/punt-stats
+              readOnly: true
+        - name: punt-stats-helper
+          securityContext:
+            {{- toYaml .Values.puntStatsHelper.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/etc/otelcol-contrib/punt-stats-helper"]
+          {{- with toYaml .Values.puntStatsHelper.resources }}
+          resources:
+            limits:
+              {{- . | nindent 14 }}
+            requests:
+              {{- . | nindent 14 }}
+          {{- end }}
+          env:
+            - name: CONTAINER_RUNTIME_ENDPOINT
+              value: unix://{{ .Values.containerdSocket }}
+            - name: PUNT_STATS_CONTAINER_NAME
+              value: {{ .Values.puntStatsHelper.containerName }}
+            - name: PUNT_STATS_SRC_PATH
+              value: {{ .Values.puntStatsHelper.srcPath }}
+            - name: PUNT_STATS_DST_PATH
+              value: {{ .Values.puntStatsHelper.dstPath }}
+            - name: PUNT_STATS_INTERVAL_SECONDS
+              value: "{{ .Values.puntStatsHelper.intervalSeconds }}"
+          volumeMounts:
+            - name: containerd-socket
+              mountPath: {{ .Values.containerdSocket }}
+            - name: punt-stats
+              mountPath: /var/run/punt-stats
         - name: node-exporter
           image: "{{ .Values.nodeExporter.image.repository }}:{{ .Values.nodeExporter.image.tag }}"
           imagePullPolicy: {{ .Values.nodeExporter.image.pullPolicy }}
@@ -204,6 +236,12 @@ spec:
           hostPath:
             path: /etc/otelcol-contrib/config-fragments
             type: DirectoryOrCreate
+        - name: containerd-socket
+          hostPath:
+            path: {{ .Values.containerdSocket }}
+            type: Socket
+        - name: punt-stats
+          emptyDir: {}
         - name: host-proc
           hostPath:
             path: /proc

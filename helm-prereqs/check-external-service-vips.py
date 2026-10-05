@@ -88,13 +88,16 @@ def check_vips(stream, metallb_stream=None):
 
             families = None
             family_policy = None
-            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp") and name == "externalService":
+            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp", "unbound") and name == "externalService":
                 families = service.get("ipFamilies")
                 family_policy = service.get("ipFamilyPolicy")
                 if family_policy is None or family_policy == "":
                     family_policy = "SingleStack"
                 if families is not None and not isinstance(families, list):
                     raise ValueError(f"{component}.{name}.ipFamilies must be a list")
+                # Unbound renders an explicit IPv4 fallback rather than a cluster-selected family.
+                if component == "unbound" and not families:
+                    families = ["IPv4"]
                 if family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
                     raise ValueError(f"{component}.{name}.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
                 if families:
@@ -138,8 +141,8 @@ def check_vips(stream, metallb_stream=None):
                         if name == "v6ExternalService" and address.version != 6:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv6 address")
                             continue
-                        # These external Services explicitly render SingleStack IPv4.
-                        if name == "externalService" and component in ("nico-dhcp", "unbound") and address.version != 4:
+                        # The DHCPv4 external Service explicitly renders SingleStack IPv4.
+                        if name == "externalService" and component == "nico-dhcp" and address.version != 4:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv4 address")
                             continue
                         # These charts can select a family explicitly. Dual-stack policies

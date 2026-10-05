@@ -953,6 +953,29 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			},
 		},
 		{
+			// The Site sends the ID list on the last page alone, so a middle page gives Cloud
+			// no basis to mark anything missing even though 4 of the Site's 38 Machines have
+			// stopped being reported.
+			name: "test paged Machine inventory processing, middle page without item IDs",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:    context.Background(),
+				siteID: site3.ID,
+				machineInventory: &corev1.MachineInventory{
+					Machines:  pagedInvMInfos[10:20],
+					Timestamp: timestamppb.Now(),
+					InventoryPage: &corev1.InventoryPage{
+						CurrentPage: 2,
+						TotalPages:  4,
+						PageSize:    10,
+						TotalItems:  34,
+					},
+				},
+			},
+		},
+		{
 			name: "test paged Machine inventory processing, last page",
 			fields: fields{
 				dbSession: dbSession,
@@ -1331,6 +1354,19 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 					assert.Equal(t, 0, missingCount)
 				}
 
+				// A page that is not the last one carries no ID list, so the deletion sweep
+				// must not run: the 4 Machines the Site no longer reports stay untouched
+				// until the page that carries the complete list arrives.
+				if tt.args.machineInventory.InventoryPage.CurrentPage == 2 {
+					filterInput := cdbm.MachineFilterInput{
+						SiteIDs:  []uuid.UUID{tt.args.siteID},
+						Statuses: []string{cdbm.MachineStatusError},
+					}
+					_, missingCount, serr := mDAO.GetAll(tt.args.ctx, nil, filterInput, cdbp.PageInput{}, nil)
+					assert.Nil(t, serr)
+					assert.Equal(t, 0, missingCount)
+				}
+
 				if tt.args.machineInventory.InventoryPage.CurrentPage == tt.args.machineInventory.InventoryPage.TotalPages {
 					// Check that the last 4 Machines now have status `Ready`
 					filterInput := cdbm.MachineFilterInput{
@@ -1576,6 +1612,33 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		assert.Equal(t, statusDetailCountBefore, statusDetailCountAfter)
 		assert.NotContains(t, logOutput.String(), "failed to update missing on Site flag in DB")
 	})
+	t.Run("marks an unreported Machine missing without backdating an external write", func(t *testing.T) {
+		ctx := context.Background()
+		missingSite := testMachineBuildSite(t, dbSession, ip, "test-machine-missing-site", cdbm.SiteStatusRegistered)
+		machine := testMachineBuildMachine(t, dbSession, ip.ID, missingSite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+
+		// An external write just before the reconcile falls after its backdated stamp.
+		machineDAO := cdbm.NewMachineDAO(dbSession)
+		externalWrite, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+			MachineID:        machine.ID,
+			IsUsableByTenant: cutil.GetPtr(true),
+		})
+		require.NoError(t, err)
+
+		manager := ManageMachine{dbSession: dbSession, siteClientPool: tSiteClientPool}
+		err = manager.UpdateMachinesInDB(ctx, missingSite.ID.String(), &corev1.MachineInventory{
+			Machines:        []*corev1.MachineInfo{},
+			Timestamp:       timestamppb.Now(),
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		})
+		require.NoError(t, err)
+
+		got, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.MachineStatusError, got.Status)
+		assert.True(t, got.IsMissingOnSite)
+		assert.False(t, got.Updated.Before(externalWrite.Updated), "want the external write's staleness window kept")
+	})
 	t.Run("Ready inventory waits for REST assignment", func(t *testing.T) {
 		ctx := context.Background()
 		assignmentSite := testMachineBuildSite(t, dbSession, ip, "assignment-site", cdbm.SiteStatusRegistered)
@@ -1621,6 +1684,102 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 				assert.Equal(t, phase.historyCount, historyCount, "Core observations must not flip-flop the InUse history message")
 				if phase.assigned {
 					assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
+				}
+			})
+		}
+	})
+
+	t.Run("capability inventory", func(t *testing.T) {
+		const device = "NVIDIA ConnectX-8 SuperNIC"
+		genericNetwork := &corev1.MachineCapabilityAttributesNetwork{
+			Name:  device,
+			Count: 2,
+		}
+		cases := []struct {
+			name          string
+			capabilities  *corev1.MachineCapabilitiesSet
+			discoveryInfo *corev1.DiscoveryInfo
+			wantCounts    map[cdbm.MachineCapabilityDeviceType]int
+		}{
+			{
+				name: "reduces SpectrumX count without discovery info",
+				capabilities: &corev1.MachineCapabilitiesSet{Network: []*corev1.MachineCapabilityAttributesNetwork{
+					genericNetwork,
+					{
+						Name:       device,
+						Count:      1,
+						DeviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum(),
+					},
+				}},
+				wantCounts: map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 1},
+			},
+			{
+				name:         "removes SpectrumX while retaining the same-name generic capability",
+				capabilities: &corev1.MachineCapabilitiesSet{Network: []*corev1.MachineCapabilityAttributesNetwork{genericNetwork}},
+				wantCounts:   map[cdbm.MachineCapabilityDeviceType]int{"": 2},
+			},
+			{
+				name:          "preserves capabilities when the set is absent even with discovery info",
+				discoveryInfo: &corev1.DiscoveryInfo{},
+				wantCounts:    map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 4},
+			},
+			{
+				name:         "clears capabilities when Core reports an explicit empty set",
+				capabilities: &corev1.MachineCapabilitiesSet{},
+				wantCounts:   map[cdbm.MachineCapabilityDeviceType]int{},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				capabilitySite := testMachineBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered)
+				machine := testMachineBuildMachine(t, dbSession, ip.ID, capabilitySite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+				originalIDs := make(map[cdbm.MachineCapabilityDeviceType]uuid.UUID)
+				for deviceType, count := range map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 4} {
+					capability, createErr := mcDAO.Create(ctx, nil, cdbm.MachineCapabilityCreateInput{
+						MachineID:  &machine.ID,
+						Type:       cdbm.MachineCapabilityTypeNetwork,
+						Name:       device,
+						Count:      cutil.GetPtr(count),
+						DeviceType: cutil.GetPtr(deviceType),
+					})
+					require.NoError(t, createErr)
+					originalIDs[deviceType] = capability.ID
+				}
+
+				// Age only this fixture so inventory is not skipped as older than a local write.
+				_, updateErr := dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).
+					Set("updated = ?", time.Now().Add(-2*time.Duration(cutil.DefaultInventoryReceiptInterval))).
+					Where("id = ?", machine.ID).Exec(ctx)
+				require.NoError(t, updateErr)
+
+				inventory := &corev1.MachineInventory{
+					Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+						Id:    &corev1.MachineId{Id: machine.ID},
+						State: cdbm.ControllerMachineStateReady,
+						Status: &corev1.MachineStatus{
+							DiscoveryInfo: tc.discoveryInfo,
+							Capabilities:  tc.capabilities,
+						},
+					}}},
+					Timestamp:       timestamppb.Now(),
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				manager := NewManageMachine(dbSession, nil)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, capabilitySite.ID.String(), inventory))
+
+				capabilities, _, readErr := mcDAO.GetAll(ctx, nil, []string{machine.ID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+				require.NoError(t, readErr)
+				require.Len(t, capabilities, len(tc.wantCounts))
+				for _, capability := range capabilities {
+					require.NotNil(t, capability.DeviceType)
+					wantCount, found := tc.wantCounts[*capability.DeviceType]
+					require.True(t, found, "unexpected capability type %q", *capability.DeviceType)
+					require.NotNil(t, capability.Count)
+					assert.Equal(t, wantCount, *capability.Count)
+					assert.Equal(t, device, capability.Name)
+					assert.Equal(t, cdbm.MachineCapabilityTypeNetwork, capability.Type)
+					assert.Equal(t, originalIDs[*capability.DeviceType], capability.ID, "retain the row when updating a capability")
 				}
 			})
 		}
@@ -1678,6 +1837,78 @@ func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
 	assert.Equal(t, interfaceID, *machineInterfaces[0].ControllerInterfaceID)
 	assert.NotNil(t, machineInterfaces[0].IPAddresses)
 	assert.Empty(t, machineInterfaces[0].IPAddresses)
+}
+
+// A reconcile stamps every Machine it writes with one time, backdated from its start, and the
+// staleness guard reads that same column. Stamping each statement's own time instead left the
+// write less than one interval old when the next snapshot arrived, so the guard rejected the
+// reconciler's own write as an external change and the fleet reconciled on alternating cycles.
+func TestManageMachine_UpdateMachinesInDB_ReconcilesEveryCycle(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, "test-ip-org", "test-ip")
+	site := testMachineBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered)
+
+	machineIDs := []string{uuid.NewString(), uuid.NewString()}
+	inventoryReporting := func(vendor string) *corev1.MachineInventory {
+		machines := make([]*corev1.MachineInfo, 0, len(machineIDs))
+		for _, id := range machineIDs {
+			machines = append(machines, &corev1.MachineInfo{
+				Machine: &corev1.Machine{
+					Id:    &corev1.MachineId{Id: id},
+					State: cdbm.ControllerMachineStateReady,
+					Status: &corev1.MachineStatus{
+						DiscoveryInfo: &corev1.DiscoveryInfo{
+							DmiData: &corev1.DmiData{SysVendor: vendor},
+						},
+					},
+				},
+			})
+		}
+
+		return &corev1.MachineInventory{Machines: machines, Timestamp: timestamppb.Now()}
+	}
+
+	mDAO := cdbm.NewMachineDAO(dbSession)
+	readVendors := func() []string {
+		vendors := make([]string, 0, len(machineIDs))
+		for _, id := range machineIDs {
+			got, err := mDAO.GetByID(ctx, nil, id, nil, false)
+			require.NoError(t, err)
+			require.NotNil(t, got.Vendor)
+			vendors = append(vendors, *got.Vendor)
+		}
+
+		return vendors
+	}
+
+	mm := NewManageMachine(dbSession, nil)
+	require.NoError(t, mm.UpdateMachinesInDB(ctx, site.ID.String(), inventoryReporting("first-vendor")))
+	require.Equal(t, []string{"first-vendor", "first-vendor"}, readVendors())
+
+	// One reconcile anchors every Machine it writes to a single time, so the guard treats the
+	// whole cycle as one event rather than as a spread of per-statement writes.
+	firstPass, err := mDAO.GetByID(ctx, nil, machineIDs[0], nil, false)
+	require.NoError(t, err)
+	secondPass, err := mDAO.GetByID(ctx, nil, machineIDs[1], nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, firstPass.Updated, secondPass.Updated, "want one anchor for the whole reconcile")
+
+	// Age both Machines by a second less than one interval. Temporal schedules the next cron run
+	// from the previous run's start truncated to the second, so the next cycle can start up to a
+	// second sooner than one interval after this one.
+	_, err = dbSession.DB.NewUpdate().
+		Model((*cdbm.Machine)(nil)).
+		Set("updated = updated - ?::interval", (cutil.DefaultInventoryReceiptInterval - time.Second).String()).
+		Where("1 = 1").
+		Exec(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, mm.UpdateMachinesInDB(ctx, site.ID.String(), inventoryReporting("second-vendor")))
+	assert.Equal(t, []string{"second-vendor", "second-vendor"}, readVendors(), "want the next cycle applied, not skipped as externally modified")
 }
 
 func TestNewManageMachine(t *testing.T) {

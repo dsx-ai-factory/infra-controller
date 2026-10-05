@@ -8,6 +8,11 @@ returns networking to the admin side. NICo then runs cleanup and sanitization
 workflows, performs the configured trust checks, and validates the host. When
 the host is eligible for allocation again, NICo returns it to `Ready`.
 
+Tenant cleanup keeps the hardware owned by the same NICo installation. To
+remove a device from service or prepare it for a clean re-ingest, follow
+[Decommission NICo-managed hardware](../decommissioning/index.md) after tenant
+cleanup finishes.
+
 Refer to the following resources for more information:
 
 - [Managed Host State Diagrams](../architecture/state_machines/managedhost.md)

@@ -38,10 +38,12 @@ class _Response:
         return self._payload
 
 
-def _target(*, machine_id: str = "machine-id", label: str = "host") -> ResetTarget:
+def _target(
+    *, machine_id: str = "machine-id", label: str = "host", bmc_ip: str = "192.0.2.10"
+) -> ResetTarget:
     return ResetTarget(
         machine_id=machine_id,
-        bmc_ip="192.0.2.10",
+        bmc_ip=bmc_ip,
         credentials=_CREDENTIALS,
         label=label,
     )
@@ -59,7 +61,11 @@ def _fail_on_wait(call_number):
     return wait_for_redfish_endpoint
 
 
-def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch):
+@pytest.mark.parametrize(
+    ("bmc_ip", "url_host"),
+    [("192.0.2.10", "192.0.2.10"), ("2001:db8::10", "[2001:db8::10]")],
+)
+def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch, bmc_ip, url_host):
     events = []
 
     def patch(url, **kwargs):
@@ -89,13 +95,13 @@ def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch
     )
 
     bluefield.BlueFieldDpuResetDriver().reset_dpu(
-        _target(machine_id="dpu-id", label="DPU1")
+        _target(machine_id="dpu-id", label="DPU1", bmc_ip=bmc_ip)
     )
 
     assert events == [
         (
             "bios",
-            "https://192.0.2.10/redfish/v1/Systems/Bluefield/Bios/Settings",
+            f"https://{url_host}/redfish/v1/Systems/Bluefield/Bios/Settings",
             {
                 "json": {"Attributes": {"ResetEfiVars": True}},
                 "auth": ("operator", "secret"),
@@ -105,10 +111,10 @@ def test_bluefield_driver_preserves_bios_restart_factory_reset_order(monkeypatch
         ),
         ("restart-bmc", "dpu-id"),
         ("sleep", 5),
-        ("wait-redfish", {"hostname": "192.0.2.10"}),
-        ("factory-reset-bmc", "192.0.2.10", "operator", "secret"),
+        ("wait-redfish", {"hostname": bmc_ip}),
+        ("factory-reset-bmc", bmc_ip, "operator", "secret"),
         ("sleep", 5),
-        ("wait-redfish", {"hostname": "192.0.2.10", "sleep_time": 10}),
+        ("wait-redfish", {"hostname": bmc_ip, "sleep_time": 10}),
     ]
 
 
@@ -183,7 +189,11 @@ def test_bluefield_driver_translates_recovery_wait_failures(
     assert raised.value.set_maintenance is True
 
 
-def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch):
+@pytest.mark.parametrize(
+    ("bmc_ip", "url_host"),
+    [("192.0.2.10", "192.0.2.10"), ("2001:db8::10", "[2001:db8::10]")],
+)
+def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch, bmc_ip, url_host):
     events = []
     task_responses = iter(
         [
@@ -229,12 +239,12 @@ def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch):
         lambda seconds: events.append(("sleep", seconds)),
     )
 
-    lenovo.LenovoHostResetDriver().reset_host(_target())
+    lenovo.LenovoHostResetDriver().reset_host(_target(bmc_ip=bmc_ip))
 
     assert events == [
         (
             "reset-bios",
-            "https://192.0.2.10/redfish/v1/Systems/1/Bios/Actions/Bios.ResetBios",
+            f"https://{url_host}/redfish/v1/Systems/1/Bios/Actions/Bios.ResetBios",
             {
                 "json": {"ResetType": "default"},
                 "auth": ("operator", "secret"),
@@ -244,24 +254,24 @@ def test_lenovo_driver_waits_for_bios_task_before_later_steps(monkeypatch):
         ),
         (
             "poll-task",
-            "https://192.0.2.10/redfish/v1/TaskService/Tasks/task-1",
+            f"https://{url_host}/redfish/v1/TaskService/Tasks/task-1",
             {"auth": ("operator", "secret"), "verify": False, "timeout": 60},
             "Running",
         ),
         ("sleep", 10),
         (
             "poll-task",
-            "https://192.0.2.10/redfish/v1/TaskService/Tasks/task-1",
+            f"https://{url_host}/redfish/v1/TaskService/Tasks/task-1",
             {"auth": ("operator", "secret"), "verify": False, "timeout": 60},
             "Completed",
         ),
         ("clear-password", "machine-id"),
         ("restart-host", "machine-id"),
         ("sleep", 10),
-        ("wait-redfish", {"hostname": "192.0.2.10"}),
-        ("factory-reset-bmc", "192.0.2.10", "operator", "secret"),
+        ("wait-redfish", {"hostname": bmc_ip}),
+        ("factory-reset-bmc", bmc_ip, "operator", "secret"),
         ("sleep", 5),
-        ("wait-redfish", {"hostname": "192.0.2.10"}),
+        ("wait-redfish", {"hostname": bmc_ip}),
     ]
 
 

@@ -79,6 +79,7 @@ pub mod secrets;
 mod setup;
 mod site_prefix_controller;
 mod storage;
+mod vpc_peering_controller;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -100,11 +101,11 @@ pub use crate::admission::AdminAdmissionControl;
 pub use crate::api::{Api, DefaultCredential};
 pub use crate::auth::AuthContext;
 use crate::cfg::file::ToolLink;
-pub use crate::dynamic_settings::DynamicSettings;
 pub use crate::errors::CarbideError;
 pub use crate::handlers::redfish::NUM_REQUIRED_APPROVALS;
 pub use crate::listener::AdminUiRoutesBuilder;
 pub use crate::logging::stream::{LogLine, LogStream};
+pub use crate::setup::start_runtime;
 
 /// Process-global tool list rendered in the admin web UI's "Tools" sidebar.
 ///

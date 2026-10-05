@@ -1215,7 +1215,8 @@ enum CertificateEndpointLoadError {
 ///
 /// BMC MAC addresses identify persisted switches, but the certificate request
 /// does not read or submit BMC endpoint credentials. RMS accepts one host
-/// endpoint per switch, so zero or multiple usable NVOS endpoints are invalid.
+/// endpoint per switch. The database selects the same NVOS endpoint used by
+/// ingestion and V2 fabric configuration; a switch without a usable endpoint is invalid.
 /// An optional target limits validation and credential loading to one switch.
 async fn load_nmx_certificate_endpoints(
     db_pool: &sqlx::PgPool,
@@ -1255,13 +1256,6 @@ async fn load_nmx_certificate_endpoints(
                 first_row.switch_id
             )));
         };
-
-        if candidates.next().is_some() {
-            return Err(CertificateEndpointLoadError::Invalid(format!(
-                "switch {} has multiple usable NVOS endpoints for ConfigureSwitchCertificate",
-                first_row.switch_id
-            )));
-        }
 
         let nvos_credentials = credential_manager
             .get_credentials(&CredentialKey::SwitchNvosAdmin {

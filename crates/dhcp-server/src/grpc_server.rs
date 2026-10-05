@@ -82,6 +82,10 @@ impl TryFrom<proto::DhcpConfig> for ModelDhcpConfig {
                 .map(|s| s.parse())
                 .collect::<Result<Vec<_>, _>>()?,
             carbide_provisioning_server_ipv4: c.carbide_provisioning_server_ipv4.parse()?,
+            carbide_provisioning_server_ipv6: c
+                .carbide_provisioning_server_ipv6
+                .map(|address| address.parse())
+                .transpose()?,
             carbide_dhcp_server: c.carbide_dhcp_server.parse()?,
             carbide_nameservers_v6: c
                 .carbide_nameservers_v6
@@ -290,6 +294,29 @@ mod tests {
         ModelInterfaceInfo::try_from(interface)
             .map(|interface| (interface.address, interface.gateway, interface.prefix))
             .map_err(drop)
+    }
+
+    #[test]
+    fn provisioning_ipv6_requires_an_ipv6_address_when_present() {
+        scenarios!(run = |address: Option<&str>| {
+                ModelDhcpConfig::try_from(proto::DhcpConfig {
+                    carbide_provisioning_server_ipv4: "192.0.2.10".to_string(),
+                    carbide_dhcp_server: "192.0.2.1".to_string(),
+                    carbide_provisioning_server_ipv6: address.map(str::to_string),
+                    ..Default::default()
+                })
+                    .map(|config| config.carbide_provisioning_server_ipv6)
+                    .map_err(drop)
+            };
+            "optional IPv6 provisioning source" {
+                None => Yields(None),
+                Some("2001:db8::80") => Yields(Some("2001:db8::80".parse().unwrap())),
+            }
+            "invalid IPv6 provisioning source" {
+                Some("192.0.2.10") => Fails,
+                Some("") => Fails,
+            }
+        );
     }
 
     /// Verifies the control boundary accepts the complete Preference range,

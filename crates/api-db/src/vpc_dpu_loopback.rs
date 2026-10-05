@@ -25,12 +25,15 @@ use sqlx::PgConnection;
 use crate::resource_pool::ResourcePoolAllocationNotOwned;
 use crate::{ConditionalWrite, DatabaseError};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn persist(
     value: VpcDpuLoopback,
     txn: &mut PgConnection,
 ) -> Result<VpcDpuLoopback, DatabaseError> {
     let query = "INSERT INTO vpc_dpu_loopbacks (dpu_id, vpc_id, loopback_ip)
-                           VALUES ($1, $2, $3) RETURNING *";
+                           VALUES ($1, $2, $3) RETURNING dpu_id, vpc_id, loopback_ip";
     sqlx::query_as(query)
         .bind(value.dpu_id)
         .bind(value.vpc_id)
@@ -74,7 +77,7 @@ pub async fn delete_and_deallocate(
         }
     };
 
-    query.push("  RETURNING * ");
+    query.push("  RETURNING dpu_id, vpc_id, loopback_ip ");
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -117,7 +120,7 @@ pub async fn delete_and_deallocate_for_vpcs(
     query.push_bind(dpu_id);
     query.push(" AND vpc_id = ANY(");
     query.push_bind(vpc_ids);
-    query.push(") RETURNING *");
+    query.push(") RETURNING dpu_id, vpc_id, loopback_ip");
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -149,7 +152,8 @@ pub async fn find(
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<Option<VpcDpuLoopback>, DatabaseError> {
-    let query = "SELECT * from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2";
+    let query =
+        "SELECT dpu_id, vpc_id, loopback_ip from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2";
 
     sqlx::query_as(query)
         .bind(dpu_id)

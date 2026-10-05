@@ -54,6 +54,9 @@ admin_certificate_role = "swngc-nico-admins"
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = false
 
+## Path to the ipmitool executable.
+ipmitool_path = "ipmitool"
+
 ## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
 ## whether the existing session is stale or belongs to an active operator, so enabling this may
 ## disconnect someone using the console. Enable only when ssh-console has exclusive SOL ownership.

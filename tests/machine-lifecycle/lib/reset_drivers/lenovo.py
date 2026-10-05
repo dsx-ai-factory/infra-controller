@@ -32,9 +32,8 @@ class LenovoHostResetDriver:
 
     def reset_host(self, target: ResetTarget) -> None:
         print("Resetting BIOS settings on the Lenovo host")
-        url = (
-            f"https://{target.bmc_ip}/redfish/v1/Systems/1/Bios/Actions/"
-            "Bios.ResetBios"
+        url = network.redfish_url(
+            target.bmc_ip, "/redfish/v1/Systems/1/Bios/Actions/Bios.ResetBios"
         )
         data = {"ResetType": "default"}
         print(f"Executing redfish request. \nData: {data} \nURL: {url}")
@@ -64,8 +63,8 @@ class LenovoHostResetDriver:
                         "Redfish task did not complete in 5 minutes",
                         set_maintenance=True,
                     )
-                task_url = (
-                    f"https://{target.bmc_ip}/redfish/v1/TaskService/Tasks/{task_id}"
+                task_url = network.redfish_url(
+                    target.bmc_ip, f"/redfish/v1/TaskService/Tasks/{task_id}"
                 )
                 try:
                     response = requests.get(

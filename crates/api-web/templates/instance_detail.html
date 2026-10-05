@@ -52,6 +52,7 @@
 	<tr><th>Segment ID</th><td>{% if !interface.segment_id.is_empty() %}<a href="/admin/network-segment/{{ interface.segment_id }}">{{ interface.segment_id }}</a>{% endif %}</td></tr>
 	<tr><th>MAC Address</th><td>{{ interface.mac_address }}</td></tr>
 	<tr><th>IP Addresses</th><td>{{ interface.addresses }}</td></tr>
+	<tr><th>IP Prefixes</th><td>{{ interface.prefixes }}</td></tr>
 	<tr><th>Gateways</th><td>{{ interface.gateways }}</td></tr>
 	<tr><th>VPC Id</th><td><a href="/admin/vpc/{{ interface.vpc_id }}">{{ interface.vpc_id }}</a></td></tr>
 	<tr><th>VPC Name</th><td>{{ interface.vpc_name }}</td></tr>

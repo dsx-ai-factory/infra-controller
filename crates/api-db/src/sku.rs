@@ -35,6 +35,9 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
@@ -56,7 +59,9 @@ pub async fn find_matching_with_exclusion(
     sku: &Sku,
     excluded_sku_id: Option<&String>,
 ) -> Result<Option<Sku>, DatabaseError> {
-    let mut builder = sqlx::QueryBuilder::new("SELECT * FROM machine_skus");
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, description, created, components, schema_version, device_type FROM machine_skus",
+    );
     if let Some(excluded_sku_id) = excluded_sku_id {
         builder.push(" WHERE id != ");
         builder.push_bind(excluded_sku_id);
@@ -213,7 +218,7 @@ pub async fn find(
         return Ok(Vec::new());
     }
 
-    let query = "SELECT * FROM machine_skus WHERE id=ANY($1)";
+    let query = "SELECT id, description, created, components, schema_version, device_type FROM machine_skus WHERE id=ANY($1)";
 
     let skus: Vec<Sku> = sqlx::query_as(query)
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
