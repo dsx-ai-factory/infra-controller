@@ -10616,6 +10616,8 @@ paths:
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Delete an Operating System by ID
 
