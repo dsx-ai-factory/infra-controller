@@ -182,25 +182,33 @@ Example tenant account detail (Ready, with active allocations):
 
 ### Accepting the Invitation (Tenant Side)
 
-This is a Tenant call, and two separate things have to name the tenant org: the token, and the org in the request path. Log in as the tenant into a config file of its own, passed with `--config`, and set `api.org` to the tenant org there. Logging in changes only the token, so a stale `api.org` still runs the request as the provider and returns `403 Requested organization not found in token claims`, and logging in to the provider's file overwrites the provider's credentials. On Keycloak deployments, [Pointing nicocli at the Tenant org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+The tenant admin accepts the invitation, which moves the account to `Ready`.
 
-The tenant admin must accept the invitation to transition the account to `Ready`. The non-interactive form sends an empty PATCH body, note the flag-first ordering:
+Accepting is a tenant call, so `nicocli` has to act as the tenant. Two things decide who it acts as: the token it sends, and the org in the request path. Both have to name the tenant org.
+
+Give the tenant its own config file, and set `api.org` to the tenant org in it. Pass that file with `--config` to `nicocli login` and to every tenant command. The request then carries the tenant's token. If `api.org` names any other org, the request fails with `403 Requested organization not found in token claims`.
+
+Don't log in to the provider's config file. Login overwrites the provider's `auth.oidc` credentials there. A provider token in `auth.token` also outranks `auth.oidc.token`. In that case the tenant's login changes nothing that is sent.
+
+On Keycloak deployments, [Pointing nicocli at the Tenant org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+
+To accept, send an empty PATCH body. Flags go before the account ID:
 
 ```bash
-nicocli tenant-account update --data '{}' <account-id>
+nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 ```
 
-TUI:
+Or use the TUI:
 
 ```bash
-nicocli tui
+nicocli --config ~/.nico/<tenant-org>.yaml tui
 > tenant-account update
 ```
 
-Only accounts in `Invited` status can be accepted. Attempting to update a `Ready` account returns the verified error:
+Only an account in `Invited` status can be accepted. An account that is already `Ready` returns this error:
 
 ```bash
-$ nicocli tenant-account update --data '{}' <account-id>
+$ nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 Error: API error 400: Tenant Account status is not Invited
 ```
 

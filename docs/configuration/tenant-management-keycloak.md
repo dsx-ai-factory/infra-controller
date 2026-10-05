@@ -95,7 +95,7 @@ Five properties of this mapping matter when you create roles.
 - **Exactly one colon.** A role with none or with two is discarded without an error,
   which is why realm roles such as `admin` and `user` have no effect in NICo.
 - **Org names are lowercased.** Use a lowercase org name, and use the same value in the
-  `{org}` path segment of every request and in `api.org` in `~/.nico/config.yaml`.
+  `{org}` path segment of every request and in `api.org` in the `nicocli` config file.
 - **Both role spellings are accepted.** `TENANT_ADMIN` and the legacy prefixed forms
   `NICO_TENANT_ADMIN` and `FORGE_TENANT_ADMIN` all match. The bundled realm uses the
   prefixed form. Use the unprefixed form for new roles.
@@ -405,11 +405,12 @@ curl -sS "http://localhost:8388/v2/org/acme-corp/nico/user/current" \
   -H "Authorization: Bearer $TENANT_TOKEN"
 ```
 
-For an Option B user, `nicocli user get` calls that same endpoint with the token from
-`nicocli login`, so it answers the same question without a port-forward. Use the `curl`
-form when you want the raw response. `nicocli login` stores the access token at
-`auth.oidc.token` in `~/.nico/config.yaml`, which is where to read it from for
-`$TENANT_TOKEN`.
+For an Option B user, `nicocli --config ~/.nico/acme-corp.yaml user get` calls that same
+endpoint with the token from `nicocli login`, so it answers the same question without a
+port-forward. Without `--config` it reads the default file and checks whichever identity
+that holds. Use the `curl` form when you want the raw response. `nicocli login` stores
+the access token at `auth.oidc.token` in `~/.nico/acme-corp.yaml`, which is where to read
+it from for `$TENANT_TOKEN`.
 
 A `200` response means the issuer validated, a realm role parsed into org
 `acme-corp`, and the user record exists. Decode the token payload if it does not, then
