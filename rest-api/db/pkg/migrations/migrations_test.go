@@ -62,6 +62,7 @@ func TestMigrations(t *testing.T) {
 			migrator.Init(tt.args.ctx)
 			_, err := migrator.Migrate(tt.args.ctx)
 			assert.NoError(t, err)
+			assertExpectedMachineInterfacesColumn(t, dbSession.DB)
 		})
 	}
 }
