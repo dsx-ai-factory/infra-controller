@@ -88,6 +88,9 @@ carbide_machines_object_tasks_enqueued_total 1
 # HELP carbide_machines_object_tasks_requeued_total Number of object handling tasks requeued for objects of type carbide_machines
 # TYPE carbide_machines_object_tasks_requeued_total counter
 carbide_machines_object_tasks_requeued_total 1
+# HELP carbide_machines_object_tasks_running Number of object handling tasks currently running of type carbide_machines
+# TYPE carbide_machines_object_tasks_running gauge
+carbide_machines_object_tasks_running 0
 # HELP carbide_machines_per_state Number of carbide_machines in the system with a given state
 # TYPE carbide_machines_per_state gauge
 carbide_machines_per_state{fresh="true",state="deleting",substate="drainallocatedips"} 1
