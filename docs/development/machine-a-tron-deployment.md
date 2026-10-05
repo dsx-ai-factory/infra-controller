@@ -573,9 +573,13 @@ gets the group `group-<rack id>` with topology `gb200_nvl72r1_c2g4`, protocol
 resolves to the shipped `GB200_NVL72R1_C2G4_WIWYNN` profile; a
 `lenovo_gb300_nvl72` rack resolves to `GB300_NVL72R1_C2G4_LENOVO`. No
 `rack_profile_id` is configured.
-A group that already exists with a different topology or member list fails
-startup; remove it with `nico-admin-cli expected-rack-group delete` and the
-stale expected rack with `nico-admin-cli expected-rack delete`.
+When upgrading a deployment that predates this behaviour, remove the obsolete
+`rack_profile_id = "NVL72"` from each `[racks.<name>]` section before
+restarting machine-a-tron; a value other than the derived profile is rejected
+at startup with the expected profile in the message. A group that already
+exists with a different topology or member list fails startup too; remove it
+with `nico-admin-cli expected-rack-group delete` and the stale expected rack
+with `nico-admin-cli expected-rack delete`.
 
 ### Deploying a 250-Rack Site
 

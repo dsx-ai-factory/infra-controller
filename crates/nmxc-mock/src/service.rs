@@ -326,8 +326,9 @@ nmx_controller_impl! {
             Ok(Response::new(response))
         }
 
-        /// Removes the partition named by ID or name; an absent partition is not an
-        /// error, as on the real controller.
+        /// Removes the partition named by ID or name. Deleting an ID that is not
+        /// provisioned succeeds, as on the real controller; deleting by an unknown
+        /// name returns `NameNotInUse`, since the name is the caller's only handle.
         async fn delete_partition(
             &self,
             request: Request<nmx::DeletePartitionRequest>,
