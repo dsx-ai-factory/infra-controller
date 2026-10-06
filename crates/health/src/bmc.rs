@@ -38,7 +38,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse,
+    SessionCreateResponse, StreamEvent,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1216,6 +1216,32 @@ impl HttpClient for InstrumentedHttpClient {
         self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
+
+    async fn sse_events<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        url: Url,
+        credentials: &NvBmcCredentials,
+        custom_headers: &HeaderMap,
+        last_event_id: Option<&str>,
+    ) -> Result<BoxTryStream<StreamEvent<T>, Self::Error>, Self::Error> {
+        let request_url = url.clone();
+
+        // Exclude local redaction and metric recording from BMC latency.
+        let started = Instant::now();
+
+        let result = self
+            .inner
+            .sse_events::<T>(url, credentials, custom_headers, last_event_id)
+            .await;
+
+        let external_duration = started.elapsed();
+
+        let result = redact_request_credential(result, credentials);
+
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
+
+        result
+    }
 }
 
 fn bmc_server_address(addr: &BmcAddr) -> String {
@@ -1490,6 +1516,27 @@ impl Bmc for BmcClient {
             })
             .await;
         let stream = self.finish("stream", result)?;
+        Ok(Box::pin(stream.map_err(HealthError::from)))
+    }
+
+    async fn stream_events<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        uri: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<BoxTryStream<StreamEvent<T>, Self::Error>, Self::Error> {
+        // Preserve SSE IDs for vendor envelope repairs and resume cursors. Only
+        // establishment uses auth retry and the breaker; collectors own item failures.
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .stream_events(uri, last_event_id)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+
+        let stream = self.finish("stream", result)?;
+
         Ok(Box::pin(stream.map_err(HealthError::from)))
     }
 
@@ -3278,6 +3325,148 @@ mod tests {
             "missing BMC latency series with labels {labels:?}; metrics:
 {metrics}",
         );
+    }
+
+    #[tokio::test]
+    async fn stream_events_preserves_ids_across_auth_retry_and_records_handshakes() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use bmc_mock::test_support::serve_https;
+        use futures::StreamExt;
+        use serde_json::Value;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            struct RotatingProvider(AtomicUsize);
+
+            impl CredentialProvider for RotatingProvider {
+                fn fetch_credentials<'a>(
+                    &'a self,
+                    _endpoint: &'a BmcAddr,
+                ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+                    let token = if self.0.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                        "stale-token"
+                    } else {
+                        "fresh-token"
+                    };
+
+                    Box::pin(async move {
+                        Ok(BmcCredentials::SessionToken {
+                            token: token.into(),
+                        })
+                    })
+                }
+            }
+
+            let provider = Arc::new(RotatingProvider(AtomicUsize::new(0)));
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let captured_requests = Arc::clone(&requests);
+            let (registry, metrics) = bmc_latency_metrics("test_health");
+
+            let app = Router::new().route(
+                "/events",
+                get(move |headers: HeaderMap| {
+                    let token = headers.get("x-auth-token").cloned();
+                    let cursor = headers.get("last-event-id").cloned();
+                    captured_requests
+                        .lock()
+                        .unwrap()
+                        .push((token.clone(), cursor));
+
+                    async move {
+                        if token.as_ref().and_then(|value| value.to_str().ok())
+                            != Some("fresh-token")
+                        {
+                            return (StatusCode::UNAUTHORIZED, "stale-token rejected")
+                                .into_response();
+                        }
+
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "id: 42\ndata: {\"Message\":\"probe\"}\n\ndata: invalid-json\n\n",
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            let (mut server, base_url) = serve_https("health-sse-auth", app);
+
+            let client = test_bmc(
+                reqwest(),
+                test_addr(),
+                provider.clone(),
+                Some(base_url),
+                10,
+                Some(BmcLatencyInstrumentation::new(
+                    metrics,
+                    BmcLatencyEndpointLabels::new(None, None),
+                )),
+            )
+            .expect("client builds");
+
+            let mut stream = client
+                .stream_events::<Value>("/events", Some("41"))
+                .await
+                .expect("authentication retry opens stream");
+
+            let handshake_metrics = render_metrics(&registry);
+
+            let event = stream
+                .next()
+                .await
+                .expect("event exists")
+                .expect("event decodes");
+
+            let error = stream
+                .next()
+                .await
+                .expect("malformed frame exists")
+                .expect_err("malformed frame fails decoding");
+
+            assert_eq!(event.last_event_id.as_deref(), Some("42"));
+            assert_eq!(event.data["Message"], "probe");
+
+            assert!(matches!(
+                bmc_source_error(&error),
+                Some(BmcError::JsonError(_))
+            ));
+
+            assert_eq!(provider.0.load(AtomicOrdering::SeqCst), 2);
+
+            assert_eq!(
+                requests.lock().unwrap().as_slice(),
+                &[
+                    (
+                        Some("stale-token".parse().unwrap()),
+                        Some("41".parse().unwrap())
+                    ),
+                    (
+                        Some("fresh-token".parse().unwrap()),
+                        Some("41".parse().unwrap())
+                    ),
+                ]
+            );
+
+            assert_eq!(render_metrics(&registry), handshake_metrics);
+            assert!(!client.circuit_tripped.load(Ordering::Acquire));
+
+            for status in ["401", "200"] {
+                assert_bmc_latency_series(
+                    &handshake_metrics,
+                    &[
+                        &format!("http_response_status_code=\"{status}\""),
+                        "http_request_method=\"GET\"",
+                        "http_path=\"/events\"",
+                    ],
+                );
+            }
+
+            drop(stream);
+            server.stop().await.expect("server stops");
+        })
+        .await
+        .expect("SSE adapter test completes within its deadline");
     }
 
     #[tokio::test]
