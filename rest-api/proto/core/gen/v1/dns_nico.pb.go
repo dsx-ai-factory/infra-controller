@@ -903,9 +903,10 @@ type CreateDomainRequest struct {
 	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
 	// surrounding whitespace, and trailing dots. Forward names must be lowercase.
 	// Live names are unique across all owners, with case and trailing dots ignored
-	// when checking uniqueness. A deleted domain's name may be reused, and parent
-	// and child domains may coexist.
-	// Duplicate live names are rejected with INVALID_ARGUMENT.
+	// when checking uniqueness. A deleted domain's name may be reused. Legacy
+	// domains may nest each other, but cannot be an ancestor or descendant of a
+	// reserved domain; reserved domains reject every live ancestor or descendant.
+	// Name conflicts are rejected with INVALID_ARGUMENT.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Default record TTL in seconds, 30 to 86400 inclusive; values outside that
 	// range are rejected with INVALID_ARGUMENT. Absent means the site default
@@ -916,8 +917,10 @@ type CreateDomainRequest struct {
 	// live domain; another is rejected with INVALID_ARGUMENT. The owning VPC
 	// cannot be deleted while this domain is live.
 	VpcId *VpcId `protobuf:"bytes,3,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
-	// Internal REST ownership-index retry: reserve this ID durably before creating
-	// the zone. Omit for legacy callers; never accept an unowned tenant ID.
+	// Internal REST ownership-index retry, accepted only from the exclusive
+	// site-agent identity; other callers receive PERMISSION_DENIED. Omit for
+	// legacy callers. A cancelled ID or a replay whose name, VPC, or TTL differs
+	// from its original request is rejected with FAILED_PRECONDITION.
 	ReservedId    *DomainId `protobuf:"bytes,4,opt,name=reserved_id,json=reservedId,proto3" json:"reserved_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1085,9 +1088,11 @@ func (x *DomainSearchQuery) GetName() string {
 type DomainDeletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// Internal SiteAgent-only cancellation of an owned, durably reserved ID.
+	// Internal cancellation of an owned, durably reserved ID, accepted only from
+	// the exclusive site-agent identity; other callers receive PERMISSION_DENIED.
 	// On an absent ID this records a terminal tombstone so a delayed CreateDomain
-	// cannot resurrect the zone. Omit for legacy/admin CLI deletes.
+	// cannot resurrect the zone. A live ID not created through reserved_id is
+	// rejected with FAILED_PRECONDITION. Omit for legacy/admin CLI deletes.
 	CancelReservedId bool `protobuf:"varint,2,opt,name=cancel_reserved_id,json=cancelReservedId,proto3" json:"cancel_reserved_id,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
