@@ -386,13 +386,13 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 	if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusRejecting && domain.Status != cdbm.DomainStatusError && domain.Status != cdbm.DomainStatusDeleting {
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
 	}
-	changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
+	reservedAt, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (*time.Time, error) {
 		return domainDAO.ReserveDeletionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, domain.Status, 90*time.Second)
 	})
 	if transitionErr != nil {
 		return common.HandleTxError(c, logger, transitionErr, "Failed to reserve Domain deletion, DB transaction error")
 	}
-	if !changed {
+	if reservedAt == nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain changed while reserving deletion", nil)
 	}
 	restoreOnRefusal := domain.Status == cdbm.DomainStatusReady
@@ -407,14 +407,17 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 		if apiErr.Code == http.StatusPreconditionFailed {
 			// Core definitively refused deletion while the Domain is referenced.
 			// Only this request's fresh Ready->Deleting reservation can be
-			// restored. A retried/older deletion may still have an RPC in flight.
+			// restored. Another deletion or a recovery worker may have taken over.
 			if restoreOnRefusal {
 				restored, restoreErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
-					return domainDAO.RestoreRejectedDeletion(ctx, tx, domain.ID, *domain.ControllerDomainID)
+					return domainDAO.RestoreRejectedDeletion(ctx, tx, domain.ID, *domain.ControllerDomainID, *reservedAt)
 				})
-				if restoreErr != nil || !restored {
-					logger.Error().Err(restoreErr).Bool("restored", restored).Str("domainID", domain.ID.String()).Msg("could not restore Domain after referenced-delete rejection")
+				if restoreErr != nil {
+					logger.Error().Err(restoreErr).Str("domainID", domain.ID.String()).Msg("could not restore Domain after referenced-delete rejection")
 					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to restore Domain after deletion was rejected", nil)
+				}
+				if !restored {
+					logger.Info().Str("domainID", domain.ID.String()).Msg("newer Domain deletion owner fenced rejected-delete restoration")
 				}
 			}
 			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)

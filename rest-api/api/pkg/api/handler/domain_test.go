@@ -540,6 +540,32 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 		})
 	}
 
+	t.Run("newer retry fences rejected restore and preserves Core response", func(t *testing.T) {
+		fixture := newDomainHandlerFixture(t, nil)
+		controllerDomainID := uuid.New()
+		domain := fixture.createDomainWithControllerID(t, "concurrent-delete.example.com", &fixture.tenant.ID, &fixture.site.ID, controllerDomainID)
+		var retryReservedAt *time.Time
+		fixture.expectCoreWithCallback(t, corev1.Forge_DeleteDomain_FullMethodName, nil,
+			tp.NewNonRetryableApplicationError("Domain is in use", swe.ErrTypeNICoFailedPrecondition, errors.New("Domain is in use")),
+			func() {
+				var err error
+				retryReservedAt, err = cdb.WithTxResult(context.Background(), fixture.dbSession, func(tx *cdb.Tx) (*time.Time, error) {
+					return cdbm.NewDomainDAO(fixture.dbSession).ReserveDeletionOwned(context.Background(), tx,
+						domain.ID, controllerDomainID, cdbm.DomainStatusDeleting, 90*time.Second)
+				})
+				require.NoError(t, err)
+				require.NotNil(t, retryReservedAt)
+			}, nil)
+
+		recorder := fixture.request(t, NewDeleteDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodDelete, "/", domain.ID.String(), nil)
+		require.Equal(t, http.StatusPreconditionFailed, recorder.Code, recorder.Body.String())
+		require.NotNil(t, retryReservedAt)
+		persisted, err := cdbm.NewDomainDAO(fixture.dbSession).GetByID(context.Background(), nil, domain.ID, nil)
+		require.NoError(t, err)
+		require.Equal(t, cdbm.DomainStatusDeleting, persisted.Status)
+		require.Equal(t, *retryReservedAt, persisted.Updated)
+	})
+
 	t.Run("local Subnet reference", runDeleteDomainHandlerRejectsLocalSubnetReference)
 
 	t.Run("projection transaction failure rolls back", func(t *testing.T) {

@@ -131,8 +131,8 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 type DomainDAO interface {
 	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
 	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
-	ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (bool, error)
-	RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID) (bool, error)
+	ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (*time.Time, error)
+	RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, reservedAt time.Time) (bool, error)
 	StageRejectedOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID) (bool, error)
 	ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error)
 	CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error)
@@ -270,34 +270,39 @@ func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, core
 // ReserveDeletionOwned commits or refreshes a handler-owned Deleting intent.
 // Delaying recovery beyond the Site RPC timeout prevents a recovery worker from
 // dispatching a concurrent cancellation. An active worker claim is never stolen.
-func (dsd DomainSQLDAO) ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (bool, error) {
+func (dsd DomainSQLDAO) ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (*time.Time, error) {
 	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || delay < 90*time.Second || delay > 5*time.Minute ||
 		(from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusReady && from != DomainStatusError && from != DomainStatusDeleting) {
-		return false, fmt.Errorf("invalid owned Domain deletion reservation")
+		return nil, fmt.Errorf("invalid owned Domain deletion reservation")
 	}
-	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
-		Set("status = ?", DomainStatusDeleting).Set("updated = current_timestamp").
+	var reservedAt time.Time
+	err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusDeleting).
+		Set("updated = GREATEST(current_timestamp, updated + interval '1 microsecond')").
 		Set("recovery_next_at = current_timestamp + (? * interval '1 second')", delay.Seconds()).
 		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, from).
-		Exec(ctx)
-	if err != nil {
-		return false, err
+		Returning("updated").Scan(ctx, &reservedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	count, err := result.RowsAffected()
-	return count == 1, err
+	if err != nil {
+		return nil, err
+	}
+	return &reservedAt, nil
 }
 
 // RestoreRejectedDeletion returns a freshly reserved Ready Domain to service
-// only when no recovery worker has claimed it. Callers must separately prove
-// that this request changed Ready to Deleting before invoking this CAS.
-func (dsd DomainSQLDAO) RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID) (bool, error) {
-	if tx == nil || id == uuid.Nil || coreID == uuid.Nil {
+// only when neither a newer handler reservation nor a recovery worker claim has
+// taken ownership. The timestamp fences a newer handler reservation; the token
+// predicate fences a recovery worker claim.
+func (dsd DomainSQLDAO) RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, reservedAt time.Time) (bool, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || reservedAt.IsZero() {
 		return false, fmt.Errorf("invalid rejected Domain deletion restoration")
 	}
 	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
-		Set("status = ?", DomainStatusReady).Set("updated = current_timestamp").
+		Set("status = ?", DomainStatusReady).Set("updated = GREATEST(current_timestamp, updated + interval '1 microsecond')").
 		Set("recovery_next_at = NULL").
-		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, DomainStatusDeleting).
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND updated = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, DomainStatusDeleting, reservedAt).
 		Exec(ctx)
 	if err != nil {
 		return false, err
