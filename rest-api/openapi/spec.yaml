@@ -4492,6 +4492,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     get:
@@ -4604,6 +4607,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4630,6 +4636,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
@@ -4876,6 +4885,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4899,6 +4911,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/batch':
@@ -4969,6 +4984,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     patch:
@@ -5036,6 +5054,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+        '409':
+          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-power-shelf':
@@ -5085,6 +5106,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     get:
@@ -5198,6 +5222,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5224,6 +5251,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId}':
@@ -5317,6 +5347,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5340,6 +5373,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-rack':
@@ -5396,6 +5432,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     get:
@@ -5530,6 +5569,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/all':
@@ -5571,6 +5613,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5599,6 +5644,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/{id}':
@@ -5695,6 +5743,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5717,6 +5768,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack-group':
@@ -5776,6 +5830,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     get:
@@ -5923,6 +5980,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/all':
@@ -5964,6 +6024,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5992,6 +6055,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/{id}':
@@ -6092,6 +6158,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -6114,6 +6183,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-switch':
@@ -6167,6 +6239,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     get:
@@ -6280,6 +6355,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6306,6 +6384,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/expected-switch/{expectedSwitchId}':
@@ -6403,6 +6484,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6426,6 +6510,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/sku':
@@ -34791,6 +34878,18 @@ components:
               value:
                 source: nico
                 message: Error handling API request
+                data: null
+    ConflictError:
+      description: Error response when the request conflicts with an existing resource or operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Expected Inventory for this Site is being updated; retry the request
                 data: null
     GatewayTimeoutError:
       description: |-
