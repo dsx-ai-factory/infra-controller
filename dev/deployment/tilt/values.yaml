@@ -187,10 +187,10 @@ nico-ssh-console-rs:
   enabled: true
   configFiles:
     config: |
-      listen_address = "[::]:22"
-      api_listen_address = "[::]:1079"
+      listen_address = "*:22"
+      api_listen_address = "*:1079"
       api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
-      metrics_address = "[::]:9009"
+      metrics_address = "*:9009"
       carbide_url = "https://nico-api.nico-system.svc.cluster.local:1079"
       forge_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
       client_cert_path = "/var/run/secrets/spiffe.io/tls.crt"
