@@ -25,7 +25,9 @@ use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
 use serde::de::DeserializeOwned;
 
-use super::file::{CarbideConfig, InitialObjectsConfig, VpcPeeringPolicy};
+use super::file::{
+    CarbideConfig, InitialObjectsConfig, SupernicFirmwareProfileDiagnostic, VpcPeeringPolicy,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UnknownConfigurationField {
@@ -51,6 +53,8 @@ pub struct ConfigurationDiagnostics {
     deny_unknown_fields: bool,
     unknown_fields: Vec<UnknownConfigurationField>,
     deprecated_fields: Vec<DeprecatedConfigurationField>,
+    invalid_host_vendor_labels: Vec<String>,
+    supernic_firmware_profile_diagnostics: Vec<SupernicFirmwareProfileDiagnostic>,
 }
 
 impl ConfigurationDiagnostics {
@@ -83,6 +87,14 @@ impl ConfigurationDiagnostics {
                     "Ignoring deprecated configuration key"
                 );
             }
+        }
+
+        for label in self.invalid_host_vendor_labels {
+            tracing::error!(%label, "Host firmware configuration has invalid vendor");
+        }
+
+        for diagnostic in self.supernic_firmware_profile_diagnostics {
+            diagnostic.emit();
         }
     }
 }
@@ -337,17 +349,16 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
         deny_unknown_fields: config.deny_unknown_fields,
         unknown_fields,
         deprecated_fields,
+        invalid_host_vendor_labels: config
+            .host_models
+            .iter()
+            .filter(|(_, host)| host.vendor == bmc_vendor::BMCVendor::Unknown)
+            .map(|(label, _)| label.clone())
+            .collect(),
+        supernic_firmware_profile_diagnostics: config.supernic_firmware_profile_diagnostics(),
     };
 
     config.config_ctx = Some(merged_config);
-
-    for (label, _) in config
-        .host_models
-        .iter()
-        .filter(|(_, host)| host.vendor == bmc_vendor::BMCVendor::Unknown)
-    {
-        tracing::error!(label = %label, "Host firmware configuration has invalid vendor");
-    }
 
     // If the carbide config does not say whether to allow dynamically changing the bmc_proxy or
     // not, the API handler for changing the bmc_proxy setting will reject changes to it for safety
@@ -407,10 +418,6 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Publish the deployment-wide host naming policy so the DB layer can read it
     // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
     db::host_naming::configure(config.host_naming_strategy);
-
-    // Validate that the firmware profile config keys match their inner
-    // part_number and psid values. Mismatches are logged as warnings.
-    config.validate_supernic_firmware_profiles();
 
     if let Some(manager_config) = &config.component_manager {
         component_manager::rms::validate_rms_backend_rack_profiles(
@@ -617,7 +624,7 @@ mod tests {
     /// for the production subscriber installed immediately afterward.
     #[test]
     #[allow(clippy::result_large_err)]
-    fn deferred_configuration_diagnostics_emit_unknown_and_legacy_warnings() {
+    fn deferred_configuration_diagnostics_emit_after_logging_starts() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -632,14 +639,43 @@ mod tests {
 
                 [table]
                 site_fabric_prefixes = ["10.0.0.0/8"]
+
+                [host_models.invalid-vendor]
+                vendor = "Acme"
+                model = "test"
+                components = {}
+
+                [supernic_firmware_profiles.config-part-number.config-psid]
+                part_number = "profile-part-number"
+                psid = "profile-psid"
+                version = "1.0"
+                firmware_url = "https://example.com/fw.bin"
                 "#,
             )?;
 
-            // Match production ordering: parse first, then install logging and
-            // emit the diagnostics retained by the parse.
-            let (config, diagnostics) =
+            let parse_stream = LogStream::new(16, 64 * 1024);
+            let mut parse_logs = parse_stream.subscribe();
+            let parse_subscriber =
+                tracing_subscriber::registry().with(LogStreamLayer::new(parse_stream));
+            let parsed = tracing::subscriber::with_default(parse_subscriber, || {
                 parse_carbide_config_with_deferred_diagnostics(Path::new("config.toml"), None)
-                    .expect("warn-mode configuration must load");
+            });
+            let parse_lines = std::iter::from_fn(|| parse_logs.try_recv().ok()).collect::<Vec<_>>();
+            let deferred_messages = [
+                "Using configuration unknown-field policy",
+                "Ignoring unknown configuration key",
+                "Ignoring deprecated configuration key",
+                "Host firmware configuration has invalid vendor",
+                "firmware profile part_number does not match config key",
+                "firmware profile psid does not match config key",
+            ];
+            assert!(
+                parse_lines
+                    .iter()
+                    .all(|line| { !deferred_messages.contains(&line.message.as_str()) })
+            );
+
+            let (config, diagnostics) = parsed.expect("warn-mode configuration must load");
             assert!(config.site_fabric_prefixes.is_empty());
             assert_eq!(config.deprecated_force_dpu_nic_mode, Some(false));
             assert_eq!(
@@ -647,6 +683,8 @@ mod tests {
                 Some(true)
             );
 
+            // Match production ordering by emitting the retained diagnostics
+            // only after the process subscriber is available.
             let stream = LogStream::new(16, 64 * 1024);
             let mut logs = stream.subscribe();
             let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
@@ -697,6 +735,78 @@ mod tests {
                     && line.fields.get("replacement").map(String::as_str)
                         == Some("site_explorer.dpu_policy")
             }));
+
+            let invalid_vendor_errors = lines
+                .iter()
+                .filter(|line| line.message == "Host firmware configuration has invalid vendor")
+                .collect::<Vec<_>>();
+            assert_eq!(invalid_vendor_errors.len(), 1);
+            assert_eq!(invalid_vendor_errors[0].level, "ERROR");
+            assert_eq!(
+                invalid_vendor_errors[0]
+                    .fields
+                    .get("label")
+                    .map(String::as_str),
+                Some("invalid-vendor")
+            );
+
+            let part_number_warnings = lines
+                .iter()
+                .filter(|line| {
+                    line.message == "firmware profile part_number does not match config key"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(part_number_warnings.len(), 1);
+            assert_eq!(part_number_warnings[0].level, "WARN");
+            assert_eq!(
+                part_number_warnings[0]
+                    .fields
+                    .get("config_key_part_number")
+                    .map(String::as_str),
+                Some("config-part-number")
+            );
+            assert_eq!(
+                part_number_warnings[0]
+                    .fields
+                    .get("profile_part_number")
+                    .map(String::as_str),
+                Some("profile-part-number")
+            );
+            assert_eq!(
+                part_number_warnings[0]
+                    .fields
+                    .get("psid")
+                    .map(String::as_str),
+                Some("config-psid")
+            );
+
+            let psid_warnings = lines
+                .iter()
+                .filter(|line| line.message == "firmware profile psid does not match config key")
+                .collect::<Vec<_>>();
+            assert_eq!(psid_warnings.len(), 1);
+            assert_eq!(psid_warnings[0].level, "WARN");
+            assert_eq!(
+                psid_warnings[0]
+                    .fields
+                    .get("part_number")
+                    .map(String::as_str),
+                Some("config-part-number")
+            );
+            assert_eq!(
+                psid_warnings[0]
+                    .fields
+                    .get("config_key_psid")
+                    .map(String::as_str),
+                Some("config-psid")
+            );
+            assert_eq!(
+                psid_warnings[0]
+                    .fields
+                    .get("profile_psid")
+                    .map(String::as_str),
+                Some("profile-psid")
+            );
             Ok(())
         })
     }
