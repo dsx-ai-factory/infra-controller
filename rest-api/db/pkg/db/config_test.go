@@ -53,6 +53,10 @@ func TestConfig_BuildDSN(t *testing.T) {
 			require.NoError(t, err)
 
 			wantQuery := url.Values{"sslmode": {"prefer"}}
+			if strings.HasPrefix(tt.host, "/") {
+				wantQuery.Set("host", tt.host)
+				wantQuery.Set("port", "6432")
+			}
 			if tt.caCertificatePath != "" {
 				wantQuery.Set("sslrootcert", tt.caCertificatePath)
 			}

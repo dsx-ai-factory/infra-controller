@@ -36,31 +36,31 @@ func getTestDBParams() TestDBConfig {
 	}
 
 	if os.Getenv("CI") == "true" {
-		dbcfg.Host = "postgres"
-		dbcfg.Port = 5432
+		tdbcfg.Host = "postgres"
+		tdbcfg.Port = 5432
 	}
 
 	host, ok := os.LookupEnv("PGHOST")
 	if ok {
-		dbcfg.Host = host
+		tdbcfg.Host = host
 	}
 
 	port, ok := os.LookupEnv("PGPORT")
 	if ok {
 		portv, err := strconv.Atoi(port)
 		if err == nil {
-			dbcfg.Port = portv
+			tdbcfg.Port = portv
 		}
 	}
 
 	user, ok := os.LookupEnv("PGUSER")
 	if ok {
-		dbcfg.User = user
+		tdbcfg.User = user
 	}
 
 	password, ok := os.LookupEnv("PGPASSWORD")
 	if ok {
-		dbcfg.Password = password
+		tdbcfg.Password = password
 	}
 
 	return tdbcfg
