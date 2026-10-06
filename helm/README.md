@@ -334,10 +334,11 @@ separate, and sharing never collapses replicas.
 
 [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml)
 is an overlay for your site values that fits the external Services into eight
-IPs with every port at its default. Apply it after your site values:
+IPs with every port at its default. Apply it after your site values, from the
+repository root:
 
 ```bash
-helm upgrade --install nico ./helm -n nico-system -f my-site-values.yaml -f examples/values-shared-external-ips.yaml
+helm upgrade --install nico ./helm -n nico-system -f my-site-values.yaml -f helm/examples/values-shared-external-ips.yaml
 ```
 
 | Service, replica | Protocol and port | Shared IP group | Traffic policy and restriction |

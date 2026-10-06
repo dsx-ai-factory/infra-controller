@@ -86,3 +86,12 @@ tests:
       - equal:
           path: metadata.name
           value: nico-pxe-external
+
+  - it: rejects identical primary and alternate ports
+    set:
+      externalService:
+        enabled: true
+        port: 80
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.port and externalService.alternatePort are both 80'

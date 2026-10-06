@@ -1,5 +1,9 @@
 {{- if .Values.externalService.enabled }}
 {{- $annotations := include "nico-pxe.externalAnnotations" . | fromYaml }}
+{{- $alternatePort := int .Values.externalService.alternatePort }}
+{{- if and $alternatePort (eq $alternatePort (int (.Values.externalService.port | default 8080))) }}
+{{- fail (printf "nico-pxe: externalService.port and externalService.alternatePort are both %d; use different ports or set alternatePort to 0" $alternatePort) }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -32,7 +36,7 @@ spec:
       targetPort: 8080
       name: http
       protocol: TCP
-{{- if .Values.externalService.alternatePort }}
+{{- if $alternatePort }}
 ---
 apiVersion: v1
 kind: Service
@@ -62,7 +66,7 @@ spec:
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:
-    - port: {{ .Values.externalService.alternatePort }}
+    - port: {{ $alternatePort }}
       targetPort: 8080
       name: http
       protocol: TCP

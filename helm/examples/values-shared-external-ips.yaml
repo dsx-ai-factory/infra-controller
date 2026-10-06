@@ -6,9 +6,9 @@
 ## port. Apply it on top of your site values, for example values-full.yaml.
 ## Every port stays at its default, so clients need no changes.
 ##
-## Install with:
+## Install from the repository root with:
 ##   helm install nico ./helm -n nico-system --create-namespace \
-##     -f values-full.yaml -f values-shared-external-ips.yaml
+##     -f helm/examples/values-full.yaml -f helm/examples/values-shared-external-ips.yaml
 ##
 ## The IP plan, the sharing rules behind it, what the count excludes, and the
 ## controller assumptions are documented in README.md under "Sharing External
