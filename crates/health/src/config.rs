@@ -591,7 +591,10 @@ pub struct TracingSinkConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PrometheusSinkConfig {}
+pub struct PrometheusSinkConfig {
+    /// Export current per-source component state from structured health reports.
+    pub component_health_state: bool,
+}
 
 /// Configuration for the JSONL log file sink.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3277,6 +3280,34 @@ mod tests {
         } else {
             panic!("nvue config should be enabled in example config");
         }
+    }
+
+    #[test]
+    fn component_health_state_export_is_opt_in() {
+        let default_config: Config = Figment::new().extract().expect("default config");
+        assert!(
+            !default_config
+                .sinks
+                .prometheus
+                .as_option()
+                .expect("Prometheus enabled by default")
+                .component_health_state
+        );
+
+        let enabled: Config = Figment::new()
+            .merge(Toml::string(
+                "[sinks.prometheus]\ncomponent_health_state = true\n",
+            ))
+            .extract()
+            .expect("Prometheus component state config should parse");
+        assert!(
+            enabled
+                .sinks
+                .prometheus
+                .as_option()
+                .expect("Prometheus remains enabled")
+                .component_health_state
+        );
     }
 
     #[test]

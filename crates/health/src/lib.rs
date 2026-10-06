@@ -230,14 +230,22 @@ fn build_data_sink(
         sinks.push(Arc::new(TracingSink::new(sink_cfg)));
     }
 
-    if let Configurable::Enabled(_) = &config.sinks.prometheus {
-        sinks.push(Arc::new(PrometheusSink::new(
+    let export_component_health_state = config
+        .sinks
+        .prometheus
+        .as_option()
+        .is_some_and(|sink| sink.component_health_state);
+
+    if let Configurable::Enabled(sink_cfg) = &config.sinks.prometheus {
+        sinks.push(Arc::new(PrometheusSink::new_with_component_health_state(
             metrics_manager.clone(),
             &config.metrics.prefix,
+            sink_cfg.component_health_state,
         )?));
     }
 
-    if config.sinks.tracing.is_enabled()
+    if export_component_health_state
+        || config.sinks.tracing.is_enabled()
         || config.sinks.health_report.is_enabled()
         || config.sinks.power_shelf_health_report.is_enabled()
         || config.sinks.switch_health_report.is_enabled()

@@ -20,8 +20,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use prometheus::{GaugeVec, Opts};
 
-use super::{CollectorEvent, DataSink, EventContext, MetricSample};
+use super::{
+    Classification, CollectorEvent, DataSink, EventContext, HealthReport, HealthReportTarget,
+    MetricSample,
+};
 use crate::HealthError;
 use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManager};
 
@@ -34,6 +38,158 @@ use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManag
 pub struct PrometheusSink {
     collector_registry: Arc<CollectorRegistry>,
     stream_metrics: DashMap<String, DashMap<&'static str, Arc<GaugeMetrics>>>,
+    component_health_state: Option<ComponentHealthState>,
+}
+
+const COMPONENT_HEALTH_LABELS: [&str; 4] = [
+    "rack_id",
+    "component_type",
+    "component_uid",
+    "report_source",
+];
+
+struct ComponentHealthState {
+    state: GaugeVec,
+    observed_time_seconds: GaugeVec,
+    series_by_stream: DashMap<String, HashSet<ComponentHealthSeries>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ComponentHealthSeries {
+    rack_id: String,
+    component_type: &'static str,
+    component_uid: String,
+    report_source: &'static str,
+}
+
+impl ComponentHealthSeries {
+    fn from_report(context: &EventContext, report: &HealthReport) -> Option<Self> {
+        if report.target != context.health_report_target() {
+            return None;
+        }
+
+        let component_uid = match report.target? {
+            HealthReportTarget::Machine => context.machine_id()?.to_string(),
+            HealthReportTarget::Switch => context
+                .switch_id()
+                .map(|id| id.to_string())
+                .or_else(|| context.switch_serial().map(str::to_string))?,
+            HealthReportTarget::PowerShelf => context
+                .power_shelf_id()
+                .map(|id| id.to_string())
+                .or_else(|| context.serial_number().map(str::to_string))?,
+            HealthReportTarget::NvLinkDomain | HealthReportTarget::Rack => return None,
+        };
+
+        Some(Self {
+            rack_id: context.rack_id()?.to_string(),
+            component_type: context.component_type()?,
+            component_uid,
+            report_source: report.source.as_str(),
+        })
+    }
+
+    fn labels(&self) -> [&str; COMPONENT_HEALTH_LABELS.len()] {
+        [
+            &self.rack_id,
+            self.component_type,
+            &self.component_uid,
+            self.report_source,
+        ]
+    }
+}
+
+impl ComponentHealthState {
+    fn stream_key(context: &EventContext) -> String {
+        format!("{}::{}", context.endpoint_key(), context.collector_type)
+    }
+
+    fn new(registry: &prometheus::Registry, prefix: &str) -> Result<Self, prometheus::Error> {
+        let state = GaugeVec::new(
+            Opts::new(
+                format!("{prefix}_component_health_state"),
+                "Current component health reported by a structured report source: 1 healthy, 2 warning, 3 degraded, 4 critical.",
+            ),
+            &COMPONENT_HEALTH_LABELS,
+        )?;
+        registry.register(Box::new(state.clone()))?;
+
+        let observed_time_seconds = GaugeVec::new(
+            Opts::new(
+                format!("{prefix}_component_health_observed_time_seconds"),
+                "Unix timestamp of the structured report observation represented by component health state.",
+            ),
+            &COMPONENT_HEALTH_LABELS,
+        )?;
+        registry.register(Box::new(observed_time_seconds.clone()))?;
+
+        Ok(Self {
+            state,
+            observed_time_seconds,
+            series_by_stream: DashMap::new(),
+        })
+    }
+
+    fn report_state(report: &HealthReport) -> Option<u8> {
+        if report.is_empty() {
+            return None;
+        }
+
+        let mut state = u8::from(!report.successes.is_empty());
+        for alert in &report.alerts {
+            let alert_state = alert
+                .classifications
+                .iter()
+                .copied()
+                .map(|classification| match classification {
+                    Classification::SensorOk => 1,
+                    Classification::SensorWarning => 2,
+                    Classification::SensorFailure | Classification::LeakDetector => 3,
+                    Classification::SensorCritical
+                    | Classification::SensorFatal
+                    | Classification::PreventAllocations
+                    | Classification::Leak => 4,
+                })
+                .max()
+                .unwrap_or(3);
+            state = state.max(alert_state);
+        }
+        Some(state)
+    }
+
+    fn record(&self, context: &EventContext, report: &HealthReport) {
+        let Some(state) = Self::report_state(report) else {
+            return;
+        };
+        let Some(observed_at) = report.observed_at else {
+            return;
+        };
+        let Some(series) = ComponentHealthSeries::from_report(context, report) else {
+            return;
+        };
+
+        let labels = series.labels();
+        self.state.with_label_values(&labels).set(f64::from(state));
+        self.observed_time_seconds
+            .with_label_values(&labels)
+            .set(observed_at.timestamp_millis() as f64 / 1_000.0);
+        self.series_by_stream
+            .entry(Self::stream_key(context))
+            .or_default()
+            .insert(series);
+    }
+
+    fn remove(&self, context: &EventContext) {
+        let Some((_, series)) = self.series_by_stream.remove(&Self::stream_key(context)) else {
+            return;
+        };
+
+        for series in series {
+            let labels = series.labels();
+            let _ = self.state.remove_label_values(&labels);
+            let _ = self.observed_time_seconds.remove_label_values(&labels);
+        }
+    }
 }
 
 impl PrometheusSink {
@@ -41,6 +197,17 @@ impl PrometheusSink {
         metrics_manager: Arc<MetricsManager>,
         metrics_prefix: &str,
     ) -> Result<Self, HealthError> {
+        Self::new_with_component_health_state(metrics_manager, metrics_prefix, false)
+    }
+
+    pub fn new_with_component_health_state(
+        metrics_manager: Arc<MetricsManager>,
+        metrics_prefix: &str,
+        export_component_health_state: bool,
+    ) -> Result<Self, HealthError> {
+        let component_health_state = export_component_health_state
+            .then(|| ComponentHealthState::new(metrics_manager.global_registry(), metrics_prefix))
+            .transpose()?;
         let collector_registry = Arc::new(metrics_manager.create_telemetry_collector_registry(
             "sink_prometheus_collector".to_string(),
             metrics_prefix,
@@ -48,6 +215,7 @@ impl PrometheusSink {
         Ok(Self {
             collector_registry,
             stream_metrics: DashMap::new(),
+            component_health_state,
         })
     }
 
@@ -427,10 +595,18 @@ impl DataSink for PrometheusSink {
                     metrics.sweep_stale();
                 }
             }
-            CollectorEvent::CollectorRemoved => return self.remove_collector_metrics(context),
-            CollectorEvent::Log(_)
-            | CollectorEvent::Firmware(_)
-            | CollectorEvent::HealthReport(_) => {}
+            CollectorEvent::CollectorRemoved => {
+                if let Some(component_health_state) = &self.component_health_state {
+                    component_health_state.remove(context);
+                }
+                return self.remove_collector_metrics(context);
+            }
+            CollectorEvent::HealthReport(report) => {
+                if let Some(component_health_state) = &self.component_health_state {
+                    component_health_state.record(context, report);
+                }
+            }
+            CollectorEvent::Log(_) | CollectorEvent::Firmware(_) => {}
         }
 
         Ok(())
@@ -441,17 +617,21 @@ impl DataSink for PrometheusSink {
 mod tests {
     use std::str::FromStr;
 
+    use carbide_uuid::machine::MachineId;
     use carbide_uuid::nvlink::NvLinkDomainId;
     use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+    use chrono::TimeZone;
     use mac_address::MacAddress;
 
     use super::*;
     use crate::endpoint::{
         BmcAddr, EndpointMetadata, MachineData, PowerShelfData, SwitchData, SwitchEndpointRole,
     };
-    use crate::sink::CompositeDataSink;
+    use crate::sink::{
+        CompositeDataSink, HealthReportAlert, HealthReportSuccess, Probe, ReportSource,
+    };
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
@@ -950,5 +1130,119 @@ mod tests {
 
         assert_eq!(exposition.matches("interface_name=\"live\"").count(), 1);
         assert!(exposition.contains("interface_name=\"other\""));
+    }
+
+    fn component_health_context() -> EventContext {
+        EventContext {
+            endpoint_key: "42:9e:b1:bd:9d:dd".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().expect("valid IP"),
+                port: Some(443),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid MAC")),
+            },
+            collector_type: "sensor_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::Machine(MachineData {
+                machine_id: Some(
+                    MachineId::from_str(
+                        "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",
+                    )
+                    .expect("valid machine ID"),
+                ),
+                machine_serial: None,
+                system_uuid: None.into(),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid: None,
+                driver_version: None,
+            })),
+            rack_id: Some(RackId::new("RACK_1")),
+        }
+    }
+
+    fn component_health_report(classifications: Vec<Classification>) -> HealthReport {
+        let alerts = (!classifications.is_empty())
+            .then(|| HealthReportAlert {
+                probe_id: Probe::Sensor,
+                target: Some("temperature".to_string()),
+                message: "sensor alert".to_string(),
+                classifications,
+                attribution: None,
+            })
+            .into_iter()
+            .collect();
+
+        HealthReport {
+            source: ReportSource::BmcSensors,
+            target: Some(HealthReportTarget::Machine),
+            observed_at: Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 10, 4, 12, 0, 0)
+                    .single()
+                    .expect("valid observation time"),
+            ),
+            successes: vec![HealthReportSuccess {
+                probe_id: Probe::Sensor,
+                target: Some("temperature".to_string()),
+                attribution: None,
+            }],
+            alerts,
+        }
+    }
+
+    #[test]
+    fn component_health_state_is_opt_in() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let sink = PrometheusSink::new(manager.clone(), "test").expect("sink");
+
+        sink.handle_event(
+            &component_health_context(),
+            &CollectorEvent::HealthReport(Arc::new(component_health_report(vec![]))),
+        );
+
+        assert!(
+            !manager
+                .export_metrics()
+                .expect("metrics")
+                .contains("test_component_health_state")
+        );
+    }
+
+    #[test]
+    fn component_health_state_exports_latest_report_and_removes_collector_series() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let sink = PrometheusSink::new_with_component_health_state(manager.clone(), "test", true)
+            .expect("sink");
+        let context = component_health_context();
+
+        sink.handle_event(
+            &context,
+            &CollectorEvent::HealthReport(Arc::new(component_health_report(vec![]))),
+        );
+        sink.handle_event(
+            &context,
+            &CollectorEvent::HealthReport(Arc::new(component_health_report(vec![
+                Classification::SensorWarning,
+                Classification::SensorCritical,
+            ]))),
+        );
+
+        let exposition = manager.export_metrics().expect("metrics");
+        assert!(exposition.contains("test_component_health_state{"));
+        assert!(exposition.contains("component_type=\"compute_node\""));
+        assert!(exposition.contains("rack_id=\"RACK_1\""));
+        assert!(exposition.contains("report_source=\"bmc-sensors\""));
+        assert!(exposition.lines().any(|line| {
+            line.starts_with("test_component_health_state{") && line.ends_with(" 4")
+        }));
+        assert!(exposition.contains("test_component_health_observed_time_seconds{"));
+
+        sink.handle_event(&context, &CollectorEvent::CollectorRemoved);
+        assert!(
+            !manager
+                .export_metrics()
+                .expect("metrics")
+                .contains("test_component_health_state{")
+        );
     }
 }
