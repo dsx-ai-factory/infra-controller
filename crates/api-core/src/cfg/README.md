@@ -1118,6 +1118,11 @@ omit the peer's prefix permissions; FNN also omits its VNI import. Inventory and
 overlap admission still include the peering. Repeated deletion requests resume
 the same wait without requesting another network update.
 
+If a receiver changes or disappears during the initial network update,
+`DeleteVpcPeering` returns `FailedPrecondition` naming the host and asking the
+caller to retry. The request rolls back every tentative host update and leaves
+the peering active. Retry the deletion request.
+
 `DeleteVpc` returns `FailedPrecondition` while any peering remains, including a
 deleting peering. Delete the peerings and wait for them to disappear from
 inventory before deleting either VPC. The VPC retains its VNI allocation until
@@ -1128,14 +1133,24 @@ does not replace them.
 An unavailable DPU can keep a peering deleting indefinitely. The controller logs
 the host and expected network version and stores the wait reason in
 `vpc_peerings.controller_state_outcome`. Restore the DPU and let it acknowledge
-the configuration; ordinary deletion never treats a missing receipt as success.
+the configuration; `DeleteVpcPeering` never treats a missing receipt as success.
 
-Stop and drain API processes that hard-delete peerings before starting this
-controller. Those binaries do not honor the deletion marker and cannot safely
-share peering mutations with the controller or serve as an application rollback.
-No intermediate release is required. The additive migration can run while the
-outgoing API is live, with the existing possibility of cached wildcard-query
-errors until that process exits.
+Before starting an API with this deletion controller, stop every API process
+without the peering deletion behavior added in
+[#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917) and drain its
+requests. Scale the API deployment to zero and wait for the old pods to exit
+before starting the new version. The shipped Helm chart and
+Kustomize manifests use `RollingUpdate`, which does not enforce this ordering,
+even with one replica. An old API can return a new network version while still
+including a deleting peering's permissions. Its DPU acknowledgement can then
+let the controller remove the peering too early.
+
+Those old binaries also hard-delete peerings, so they are not a safe application
+rollback. No intermediate release is required. The additive migration can run
+while the outgoing API is live, with the existing possibility of cached
+wildcard-query errors until its connections or process are replaced. The
+stop-and-drain requirement applies before the new controller starts; stopping
+the old API before migrations also avoids that additional error window.
 
 ### Stored Prefix Scope
 
@@ -1255,10 +1270,34 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
-| `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA subnet. |
-| `subnet_mask` | `i32` | `0` | CIDR prefix length for the DPA subnet. |
+| `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
+| `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
+| `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |
 | `monitor_run_interval` | `Duration` | `60s` | The interval at which the DPA monitor runs. |
 | `svpc` | `SvpcConfig` | *(defaults)* | SVPC MQTT connection settings (see [SvpcConfig](#svpcconfig)). |
+
+### `AstraConfig`
+
+Configure these fields under `[ewethers_config.astra]`. Astra underlay provisioning supports IPv4.
+Route prefixes must be less than 32, and the sum of `underlay_ip_rail_id_bit_len` and
+`underlay_ip_software_plane_id_bit_len` must be less than 32 to leave host bits.
+
+Route prefixes are written when NICo creates an Astra `DPUDevice` CR or backfills
+a CR whose `spec.values` is absent. Existing values are not automatically updated.
+Changing these prefixes at the site level requires updating or recreating the
+existing `DPUDevice` values and reprovisioning the affected DPUs to apply the new
+routes to netplan. Restarting NICo or reprovisioning only the `DPU` CR preserves
+the existing `DPUDevice` values and does not apply the new prefixes.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `underlay_rail_route_prefix_len` | `u8` | `16` | Optional override for IPv4 route prefix length (0–31) for each rail in Astra DPUDevice values. |
+| `underlay_software_plane_route_prefix_len` | `u8` | `13` | Optional override for IPv4 route prefix length (0–31) for each software plane in Astra DPUDevice values. |
+| `underlay_ip_rail_id_bit_len` | `u8` | `4` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
+| `underlay_ip_software_plane_id_bit_len` | `u8` | `8` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+
+Configuration loading rejects route prefix lengths of 32 or greater and a combined
+rail/software-plane identifier bit length of 32 or greater for IPv4.
 
 ### `SvpcConfig`
 

@@ -21,6 +21,7 @@ async fn create_domain(env: &TestEnv, name: &str) -> DomainId {
         .create_domain(Request::new(CreateDomainRequest {
             name: name.to_string(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         }))
         .await
@@ -176,6 +177,7 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .create_domain(Request::new(CreateDomainRequest {
             name: domain_name.clone(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         }))
         .await

@@ -128,7 +128,9 @@ func (mvp ManageVpcPeering) UpdateVpcPeeringsInDB(
 		// still reports Ready. Core-initiated deletion uses the same REST state.
 		status, message := reportedPeeringStatus(controllerVpcPeering)
 		if vpcPeering.Status != cdbm.VpcPeeringStatusDeleting && vpcPeering.Status != status {
-			err = mvp.updateVpcPeeringStatusInDB(ctx, nil, vpcPeering.ID, &status, &message)
+			err = cdb.WithTx(ctx, mvp.dbSession, func(tx *cdb.Tx) error {
+				return mvp.updateVpcPeeringStatusInDB(ctx, tx, vpcPeering.ID, &vpcPeering.Status, &status, &message)
+			})
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to update VPC Peering status detail in DB")
 			}
@@ -300,7 +302,7 @@ func (mvp ManageVpcPeering) createOrUpdateVpcPeeringFromSite(
 			}
 
 			status, statusMessage := reportedPeeringStatus(controllerVpcPeering)
-			statusErr := mvp.updateVpcPeeringStatusInDB(ctx, tx, restored.ID, &status, &statusMessage)
+			statusErr := mvp.updateVpcPeeringStatusInDB(ctx, tx, restored.ID, nil, &status, &statusMessage)
 			if statusErr != nil {
 				return nil, fmt.Errorf("unable to create VPC Peering found on Site: failed to update VPC Peering status after undelete, DB error: %w", statusErr)
 			}
@@ -355,11 +357,21 @@ func reportedPeeringStatus(peering *corev1.VpcPeering) (string, string) {
 }
 
 // updateVpcPeeringStatusInDB is helper function to write VpcPeering updates to DB
-func (mvp ManageVpcPeering) updateVpcPeeringStatusInDB(ctx context.Context, tx *cdb.Tx, vpcPeeringID uuid.UUID, status *string, statusMessage *string) error {
+func (mvp ManageVpcPeering) updateVpcPeeringStatusInDB(ctx context.Context, tx *cdb.Tx, vpcPeeringID uuid.UUID, currentStatus *string, status *string, statusMessage *string) error {
 	if status != nil {
-		VpcPeeringDAO := cdbm.NewVpcPeeringDAO(mvp.dbSession)
-
-		err := VpcPeeringDAO.UpdateStatusByID(ctx, tx, vpcPeeringID, *status)
+		vpcPeeringDAO := cdbm.NewVpcPeeringDAO(mvp.dbSession)
+		var err error
+		if currentStatus != nil {
+			var updated bool
+			updated, err = vpcPeeringDAO.UpdateStatusByIDIfCurrent(ctx, tx, vpcPeeringID, *currentStatus, *status)
+			if err == nil && !updated {
+				return nil
+			}
+		} else {
+			// Explicit undelete restores the state reported by Core, including
+			// `Ready` when the soft-deleted row still has `Deleting` status.
+			err = vpcPeeringDAO.UpdateStatusByID(ctx, tx, vpcPeeringID, *status)
+		}
 		if err != nil {
 			return err
 		}

@@ -22,7 +22,8 @@
 //!
 //! - `ingress`: accepts connections over TLS. The proxy's own identity and
 //!   trusted CAs are reloaded from disk on the first connection after five
-//!   minutes. A client certificate is optional here.
+//!   minutes. Failed reloads retain the previous configuration and retry after
+//!   thirty seconds. A client certificate is optional here.
 //! - `guard`: identifies the caller from its certificate, then checks the
 //!   principal allow-list and the per-principal ACL.
 //! - `target`: resolves the BMC the `Forwarded` header names to its IP.

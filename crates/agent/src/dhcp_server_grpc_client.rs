@@ -51,6 +51,9 @@ impl From<ModelDhcpConfig> for proto::DhcpConfig {
                 .map(|ip| ip.to_string())
                 .collect(),
             carbide_provisioning_server_ipv4: c.carbide_provisioning_server_ipv4.to_string(),
+            carbide_provisioning_server_ipv6: c
+                .carbide_provisioning_server_ipv6
+                .map(|address| address.to_string()),
             carbide_dhcp_server: c.carbide_dhcp_server.to_string(),
             carbide_nameservers_v6: c
                 .carbide_nameservers_v6
@@ -205,7 +208,26 @@ pub(super) async fn update_and_reload(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
+    use carbide_test_support::value_scenarios;
+
     use super::*;
+
+    #[test]
+    fn provisioning_ipv6_preserves_presence_in_control_request() {
+        value_scenarios!(run = |address: Option<Ipv6Addr>| {
+                proto::DhcpConfig::from(ModelDhcpConfig {
+                    carbide_provisioning_server_ipv6: address,
+                    ..Default::default()
+                }).carbide_provisioning_server_ipv6
+            };
+            "optional IPv6 provisioning source" {
+                None => None,
+                Some("2001:db8::80".parse().unwrap()) => Some("2001:db8::80".to_string()),
+            }
+        );
+    }
 
     /// Verifies the agent preserves both explicit zero and omission because
     /// they have different DHCPv6 protocol semantics during rolling upgrades.

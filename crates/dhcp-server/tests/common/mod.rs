@@ -85,7 +85,14 @@ pub(super) fn dpu_config(interface: &str, ipv6: InterfaceInfoV6) -> Config {
 pub(super) fn dpu_config_with_bindings(
     host_ip_addresses: BTreeMap<String, InterfaceInfo>,
 ) -> Config {
-    // Keep server-wide identity and options fixed so callers vary only binding selection.
+    dpu_config_with_options(host_ip_addresses, base_dhcp_config(None))
+}
+
+/// Build DPU configuration with caller-selected bindings and DHCP options.
+pub(super) fn dpu_config_with_options(
+    host_ip_addresses: BTreeMap<String, InterfaceInfo>,
+    dhcp_config: DhcpConfig,
+) -> Config {
     let host_config = HostConfig {
         host_interface_id: "0fd6e9a3-06fc-4a22-ad29-aca299677b00"
             .parse()
@@ -93,12 +100,7 @@ pub(super) fn dpu_config_with_bindings(
         host_ip_addresses,
     };
 
-    Config::new(
-        base_dhcp_config(None),
-        Some(host_config),
-        67,
-        forge_config(),
-    )
+    Config::new(dhcp_config, Some(host_config), 67, forge_config())
 }
 
 /// Build controller configuration pointing at the supplied mock Forge API.
@@ -119,7 +121,7 @@ pub(super) fn controller_config_with_lifetimes(
 }
 
 /// Build the dual-stack option and lifetime settings shared by v6 packet tests.
-fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
+pub(super) fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
     DhcpConfig {
         carbide_api_url: api_url,
         carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],

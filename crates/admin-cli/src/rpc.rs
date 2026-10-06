@@ -832,21 +832,6 @@ impl ApiClient {
         Ok(self.0.find_domain(request).await?)
     }
 
-    pub(crate) async fn create_domain(
-        &self,
-        name: String,
-        default_ttl: Option<u32>,
-    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
-        self.0
-            .create_domain(::rpc::protos::dns::CreateDomainRequest {
-                name,
-                default_ttl,
-                reserved_id: None,
-            })
-            .await
-            .map_err(Into::into)
-    }
-
     pub(crate) async fn delete_domain(
         &self,
         id: ::carbide_uuid::domain::DomainId,
@@ -868,6 +853,21 @@ impl ApiClient {
             domain: Some(domain),
         };
         Ok(self.0.update_domain(request).await?)
+    }
+
+    pub(crate) async fn create_domain(
+        &self,
+        name: String,
+        vpc_id: Option<VpcId>,
+        default_ttl: Option<u32>,
+    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
+        let request = ::rpc::protos::dns::CreateDomainRequest {
+            name,
+            vpc_id,
+            default_ttl,
+            reserved_id: None,
+        };
+        Ok(self.0.create_domain(request).await?)
     }
 
     pub(crate) async fn machine_insert_health_report_override(

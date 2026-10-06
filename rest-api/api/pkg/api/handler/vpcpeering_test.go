@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -28,6 +29,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
@@ -60,6 +62,21 @@ func TestNewDeleteVpcPeeringHandler(t *testing.T) {
 	assert.Equal(t, scp, got.scp)
 	assert.Equal(t, cfg, got.cfg)
 }
+
+type vpcPeeringBeforeReadyHook struct {
+	beforeReady func()
+}
+
+func (hook *vpcPeeringBeforeReadyHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if hook.beforeReady != nil && strings.HasPrefix(event.Query, "UPDATE \"vpc_peering\"") && strings.Contains(event.Query, "status = 'Ready'") {
+		beforeReady := hook.beforeReady
+		hook.beforeReady = nil
+		beforeReady()
+	}
+	return ctx
+}
+
+func (*vpcPeeringBeforeReadyHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	ctx := context.Background()
@@ -214,16 +231,30 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		SiteID: st2.ID.String(),
 	}
 	dualRoleProviderBodyBytes, _ := json.Marshal(dualRoleProviderBody)
+	concurrentDeleteBody, err := json.Marshal(model.APIVpcPeeringCreateRequest{
+		Vpc1ID: vpc2.ID.String(),
+		Vpc2ID: vpc3.ID.String(),
+		SiteID: st1.ID.String(),
+	})
+	require.NoError(t, err)
+	removedBeforeReadyBody, err := json.Marshal(model.APIVpcPeeringCreateRequest{
+		Vpc1ID: vpc2.ID.String(),
+		Vpc2ID: vpc4.ID.String(),
+		SiteID: st1.ID.String(),
+	})
+	require.NoError(t, err)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		reqBody        string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
-		expectedVpcIDs []string
-		expectedSiteID string
+		name              string
+		reqOrgName        string
+		reqBody           string
+		user              *cdbm.User
+		expectedErr       bool
+		expectedStatus    int
+		expectedVpcIDs    []string
+		expectedSiteID    string
+		deleteBeforeReady bool
+		removeBeforeReady bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -353,10 +384,50 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			expectedVpcIDs: []string{vpc7.ID.String(), vpc8.ID.String()},
 			expectedSiteID: st2.ID.String(),
 		},
+		{
+			name:              "post-create Ready update preserves a committed deletion",
+			reqOrgName:        tnOrg1,
+			reqBody:           string(concurrentDeleteBody),
+			user:              tnu1,
+			expectedStatus:    http.StatusCreated,
+			expectedVpcIDs:    []string{vpc2.ID.String(), vpc3.ID.String()},
+			expectedSiteID:    st1.ID.String(),
+			deleteBeforeReady: true,
+		},
+		{
+			name:              "failed post-create status reload preserves successful creation",
+			reqOrgName:        ipOrg,
+			reqBody:           string(removedBeforeReadyBody),
+			user:              ipu,
+			expectedStatus:    http.StatusCreated,
+			expectedVpcIDs:    []string{vpc2.ID.String(), vpc4.ID.String()},
+			expectedSiteID:    st1.ID.String(),
+			removeBeforeReady: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var deletedPeeringID uuid.UUID
+			if tt.deleteBeforeReady || tt.removeBeforeReady {
+				// The create transaction has committed before this query. Commit
+				// deletion or removal before letting the Ready writer proceed.
+				dbSession.DB.AddQueryHook(&vpcPeeringBeforeReadyHook{beforeReady: func() {
+					peering := &cdbm.VpcPeering{}
+					err := dbSession.DB.NewSelect().Model(peering).
+						Where("(vpc1_id = ? AND vpc2_id = ?) OR (vpc1_id = ? AND vpc2_id = ?)", tt.expectedVpcIDs[0], tt.expectedVpcIDs[1], tt.expectedVpcIDs[1], tt.expectedVpcIDs[0]).
+						Scan(ctx)
+					require.NoError(t, err)
+					require.Equal(t, cdbm.VpcPeeringStatusConfiguring, peering.Status)
+					deletedPeeringID = peering.ID
+					dao := cdbm.NewVpcPeeringDAO(dbSession)
+					if tt.removeBeforeReady {
+						require.NoError(t, dao.Delete(ctx, nil, peering.ID))
+					} else {
+						require.NoError(t, dao.UpdateStatusByID(ctx, nil, peering.ID, cdbm.VpcPeeringStatusDeleting))
+					}
+				}})
+			}
 			cvph := CreateVpcPeeringHandler{
 				dbSession: dbSession,
 				tc:        mockTC,
@@ -389,7 +460,22 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 						(apiVpcPeering.Vpc1ID == tt.expectedVpcIDs[1] && apiVpcPeering.Vpc2ID == tt.expectedVpcIDs[0]),
 					"expected vpc1Id and vpc2Id should match the list of expected VPC IDs")
 				assert.True(t, apiVpcPeering.SiteID == tt.expectedSiteID, "expected siteId should match the expected site ID")
-				assert.Equal(t, cdbm.VpcPeeringStatusReady, apiVpcPeering.Status, "expected status should be Ready")
+				expectedPeeringStatus := cdbm.VpcPeeringStatusReady
+				if tt.removeBeforeReady {
+					require.NotEqual(t, uuid.Nil, deletedPeeringID, "post-create Ready query must run")
+					expectedPeeringStatus = cdbm.VpcPeeringStatusConfiguring
+					_, err := cdbm.NewVpcPeeringDAO(dbSession).GetByID(ctx, nil, deletedPeeringID, nil)
+					assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				}
+				if tt.deleteBeforeReady {
+					require.NotEqual(t, uuid.Nil, deletedPeeringID, "post-create Ready query must run")
+					expectedPeeringStatus = cdbm.VpcPeeringStatusDeleting
+					peering, err := cdbm.NewVpcPeeringDAO(dbSession).GetByID(ctx, nil, deletedPeeringID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, expectedPeeringStatus, peering.Status)
+					assert.Nil(t, peering.Deleted)
+				}
+				assert.Equal(t, expectedPeeringStatus, apiVpcPeering.Status)
 			}
 		})
 	}

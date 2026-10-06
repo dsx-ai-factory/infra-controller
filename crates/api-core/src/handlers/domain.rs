@@ -124,6 +124,7 @@ pub(crate) async fn create(
         req.name
     };
     let new_domain = NewDomain {
+        vpc_id: req.vpc_id,
         default_ttl: zone_ttl_argument(req.default_ttl)?,
         ..NewDomain::new(name)
     };
@@ -145,6 +146,7 @@ pub(crate) async fn create(
             if existing.deleted.is_some()
                 || !reserved
                 || existing.name != new_domain.name
+                || existing.vpc_id != new_domain.vpc_id
                 || created_ttl != new_domain.default_ttl
             {
                 return Err(CarbideError::FailedPrecondition(format!(
@@ -190,6 +192,13 @@ pub(crate) async fn update(
             id: uuid.to_string(),
         })?;
 
+    if domain_proto.vpc_id.is_some() && domain_proto.vpc_id != domain.vpc_id {
+        return Err(CarbideError::InvalidArgument(format!(
+            "changing the VPC ownership of domain {} is not supported; delete it and create a new domain under the other VPC",
+            domain.name
+        ))
+        .into());
+    }
     // Renaming a domain is not supported. The name may be omitted or sent
     // back unchanged so a caller updating another field need not read the
     // row first.
@@ -341,6 +350,7 @@ pub(crate) async fn create_legacy_compat(
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
         default_ttl: None,
+        vpc_id: None,
         reserved_id: None,
     };
 
@@ -380,6 +390,7 @@ pub(crate) async fn update_legacy_compat(
             metadata: None, // Legacy doesn't have metadata
             soa: None,      // Legacy doesn't have SOA
             default_ttl: None,
+            vpc_id: None,
         }),
     };
 

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bmc_mock::HostMachineInfo;
@@ -29,7 +30,7 @@ use crate::config::MachineATronContext;
 use crate::device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
-use crate::expected_inventory::{CONCURRENCY, ExpectedInventorySummary, register_all};
+use crate::expected_inventory::{CONCURRENCY, ExpectedInventorySummary, register_all, with_retry};
 use crate::host_machine::HostMachine;
 use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
@@ -259,15 +260,21 @@ impl MachineATron {
         };
 
         if self.app_context.app_config.register_expected_machines {
+            let api_client = self.app_context.api_client();
+            // A group that already declares a rack is used as is.
+            let declared_rack_groups = if resolved_configs.racks.is_empty() {
+                BTreeMap::new()
+            } else {
+                with_retry("expected rack group lookup", || {
+                    api_client.declared_rack_groups()
+                })
+                .await?
+            };
             let racks = resolved_configs
                 .racks
                 .iter()
-                .map(|rack| ExpectedRecord::Rack {
-                    rack_id: rack.rack_id.clone(),
-                    rack_profile_id: rack.rack_profile_id.clone(),
-                })
-                .collect();
-            let api_client = self.app_context.api_client();
+                .map(|rack| rack.expected_record(declared_rack_groups.get(&rack.rack_id)))
+                .collect::<eyre::Result<Vec<_>>>()?;
             let failed = register_all(racks, CONCURRENCY, |record| {
                 let api_client = api_client.clone();
                 async move { api_client.add_expected_record(record).await }

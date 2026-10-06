@@ -35,6 +35,7 @@ const DEFAULT_CREDENTIALS_FILE_PATH: &str = "secrets.yaml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum StaticCredentialWatcherOperation {
     PrimaryWatch,
+    PrimaryWatchSetup,
     PollWatch,
     Reload,
 }
@@ -59,6 +60,18 @@ enum StaticCredentialWatcherFailed {
     PrimaryWatch {
         #[context]
         error: String,
+    },
+
+    #[event(
+        labels(operation = StaticCredentialWatcherOperation::PrimaryWatchSetup),
+        log = warn,
+        message = "primary static credential watcher unavailable; relying on polling"
+    )]
+    PrimaryWatchSetup {
+        #[context]
+        error: String,
+        #[context]
+        poll_interval_secs: f64,
     },
 
     #[event(
@@ -87,12 +100,8 @@ enum WatchEventDelivery {
     Poll,
 }
 
-fn forward_watch_event(
-    delivery: WatchEventDelivery,
-    tx: &mpsc::Sender<notify::Result<notify::Event>>,
-    result: notify::Result<notify::Event>,
-) {
-    if let Err(err) = tx.blocking_send(result) {
+fn forward_watch_event(delivery: WatchEventDelivery, tx: &WatchEventSender, event: notify::Event) {
+    if let Err(err) = tx.blocking_send(event) {
         // A closed receiver means this watcher is tearing down, not that file
         // observation or credential reload failed. Keep this as a plain WARN
         // so shutdown cannot increment the live-failure counter.
@@ -147,14 +156,57 @@ impl FileCredentialsConfig {
     }
 }
 
+/// Carries file events to the reload task. Watcher errors never travel on it:
+/// each callback reports them where they occur, because `PollWatcher::watch`
+/// reports a missing path by calling its handler synchronously on the calling
+/// thread, where blocking on the channel is not allowed.
+type WatchEventSender = mpsc::Sender<notify::Event>;
+
+/// Arms the kernel-backed watcher that forwards create and modify events for
+/// `path` to `tx` as they happen.
+fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<RecommendedWatcher> {
+    let mut primary = RecommendedWatcher::new(
+        move |res: notify::Result<notify::Event>| match res {
+            Ok(event) if event.kind.is_create() || event.kind.is_modify() => {
+                forward_watch_event(WatchEventDelivery::Primary, &tx, event);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                emit(StaticCredentialWatcherFailed::PrimaryWatch {
+                    error: err.to_string(),
+                });
+            }
+        },
+        notify::Config::default(),
+    )?;
+    primary.watch(path, RecursiveMode::NonRecursive)?;
+    Ok(primary)
+}
+
 pub struct FileCredentialsWatcher {
     credentials: Arc<ArcSwap<CredentialSnapshot>>,
-    _primary_watcher: RecommendedWatcher,
+    /// `None` when the kernel-backed watcher could not be armed at startup;
+    /// the poll watcher then detects every change on its own.
+    _primary_watcher: Option<RecommendedWatcher>,
     _secondary_watcher: PollWatcher,
 }
 
 impl FileCredentialsWatcher {
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
+        Self::new_with_primary_watcher(config, start_primary_watcher).await
+    }
+
+    /// `start_primary` arms the kernel-backed watcher. Its failure is not
+    /// fatal: the poll watcher re-reads the file every `poll_interval` and
+    /// compares contents, so it detects every change on its own. A node that
+    /// cannot provide another inotify instance therefore degrades to polling
+    /// instead of refusing to start. The degradation is only reported once
+    /// the initial load succeeds, so a missing or malformed file still fails
+    /// startup with its own error rather than a polling warning.
+    async fn new_with_primary_watcher(
+        config: FileCredentialsConfig,
+        start_primary: impl FnOnce(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+    ) -> Result<Self, SecretsError> {
         let path = config.path();
         let poll_interval = config.poll_interval();
         if poll_interval.is_zero() {
@@ -164,30 +216,14 @@ impl FileCredentialsWatcher {
         }
         let (tx, mut rx) = mpsc::channel(4);
 
-        let tx_clone = tx.clone();
-        let mut primary = RecommendedWatcher::new(
-            move |res: notify::Result<notify::Event>| match res {
-                Ok(ref event) if event.kind.is_create() || event.kind.is_modify() => {
-                    forward_watch_event(WatchEventDelivery::Primary, &tx_clone, res);
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    emit(StaticCredentialWatcherFailed::PrimaryWatch {
-                        error: err.to_string(),
-                    });
-                }
-            },
-            notify::Config::default(),
-        )
-        .map_err(|err| SecretsError::GenericError(err.into()))?;
-
-        primary
-            .watch(&path, RecursiveMode::NonRecursive)
-            .map_err(|err| SecretsError::GenericError(err.into()))?;
+        let primary = start_primary(&path, tx.clone());
 
         let mut secondary = PollWatcher::new(
-            move |res| {
-                forward_watch_event(WatchEventDelivery::Poll, &tx, res);
+            move |res: notify::Result<notify::Event>| match res {
+                Ok(event) => forward_watch_event(WatchEventDelivery::Poll, &tx, event),
+                Err(err) => emit(StaticCredentialWatcherFailed::PollWatch {
+                    error: err.to_string(),
+                }),
             },
             notify::Config::default()
                 .with_poll_interval(poll_interval)
@@ -199,7 +235,7 @@ impl FileCredentialsWatcher {
             .watch(&path, RecursiveMode::NonRecursive)
             .map_err(|err| SecretsError::GenericError(err.into()))?;
 
-        // Arm both watchers before reading the initial snapshot. Otherwise a
+        // Arm the watchers before reading the initial snapshot. Otherwise a
         // replacement between the read and watcher registration could remain
         // invisible until the file changes again. Events received while this
         // read is in flight remain queued for the reload task below.
@@ -212,34 +248,35 @@ impl FileCredentialsWatcher {
                 return Err(error);
             }
         };
+        let primary = match primary {
+            Ok(primary) => Some(primary),
+            Err(err) => {
+                emit(StaticCredentialWatcherFailed::PrimaryWatchSetup {
+                    error: err.to_string(),
+                    poll_interval_secs: poll_interval.as_secs_f64(),
+                });
+                None
+            }
+        };
         let credentials = Arc::new(ArcSwap::from_pointee(initial));
         let watched_path = path.clone();
         let credentials_clone = credentials.clone();
         tokio::spawn(async move {
-            while let Some(event_result) = rx.recv().await {
-                match event_result {
-                    Ok(event) => {
-                        if !event
-                            .paths
-                            .iter()
-                            .any(|event_path| event_path.file_name() == watched_path.file_name())
-                        {
-                            continue;
-                        }
+            while let Some(event) = rx.recv().await {
+                if !event
+                    .paths
+                    .iter()
+                    .any(|event_path| event_path.file_name() == watched_path.file_name())
+                {
+                    continue;
+                }
 
-                        match Self::load_file(&watched_path).await {
-                            Ok(updated) => {
-                                credentials_clone.store(Arc::new(updated));
-                            }
-                            Err(err) => {
-                                emit(StaticCredentialWatcherFailed::Reload {
-                                    error: err.to_string(),
-                                });
-                            }
-                        }
+                match Self::load_file(&watched_path).await {
+                    Ok(updated) => {
+                        credentials_clone.store(Arc::new(updated));
                     }
                     Err(err) => {
-                        emit(StaticCredentialWatcherFailed::PollWatch {
+                        emit(StaticCredentialWatcherFailed::Reload {
                             error: err.to_string(),
                         });
                     }
@@ -291,7 +328,7 @@ impl CredentialReader for FileCredentialsWatcher {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use tempfile::tempdir;
 
@@ -426,8 +463,150 @@ mod tests {
         .expect("watcher must reload atomically replaced UFM credentials");
     }
 
+    fn primary_watcher_unavailable(
+        _path: &Path,
+        _tx: WatchEventSender,
+    ) -> notify::Result<RecommendedWatcher> {
+        // EMFILE: what `inotify_init1` returns once the per-user instance
+        // limit `fs.inotify.max_user_instances` is exhausted.
+        Err(notify::Error::io(std::io::Error::from_raw_os_error(24)))
+    }
+
+    #[derive(Clone, Copy)]
+    struct PrimaryWatcherCase {
+        scenario: &'static str,
+        start_primary: fn(&Path, WatchEventSender) -> notify::Result<RecommendedWatcher>,
+        /// Substring of the single fallback warning's `error` field, or
+        /// `None` when the healthy path must stay silent.
+        expect_fallback_error: Option<&'static str>,
+    }
+
+    const FALLBACK_MESSAGE: &str =
+        "primary static credential watcher unavailable; relying on polling";
+
+    #[tokio::test]
+    async fn primary_watcher_failure_falls_back_to_polling() {
+        let metrics = MetricsCapture::start();
+        let key = CredentialKey::DpuUefi {
+            credential_type: CredentialType::SiteDefault,
+        };
+        let cases = [
+            PrimaryWatcherCase {
+                scenario: "kernel watcher armed",
+                start_primary: start_primary_watcher,
+                expect_fallback_error: None,
+            },
+            PrimaryWatcherCase {
+                scenario: "kernel watcher unavailable",
+                start_primary: primary_watcher_unavailable,
+                expect_fallback_error: Some("os error 24"),
+            },
+        ];
+        for case in cases {
+            let scenario = case.scenario;
+            let dir = tempdir().expect("create temp dir");
+            let file_path = dir.path().join("credentials.yaml");
+            tokio::fs::write(
+                &file_path,
+                "dpu_uefi_site_default:\n  username: root\n  password: before\n",
+            )
+            .await
+            .expect("write initial credentials file");
+
+            let fallback_label = [("operation", "primary_watch_setup")];
+            let counted_before = metrics.counter_delta(WATCHER_FAILURE_METRIC, &fallback_label);
+            let (provider, logs) =
+                capture_logs_async(FileCredentialsWatcher::new_with_primary_watcher(
+                    FileCredentialsConfig {
+                        path: Some(file_path.clone()),
+                        poll_interval: Some(Duration::from_millis(50)),
+                        ..Default::default()
+                    },
+                    case.start_primary,
+                ))
+                .await;
+            let provider = provider
+                .unwrap_or_else(|err| panic!("{scenario}: construction must succeed: {err}"));
+            let counted =
+                metrics.counter_delta(WATCHER_FAILURE_METRIC, &fallback_label) - counted_before;
+            let fallback_logs = logs
+                .iter()
+                .filter(|log| log.message == FALLBACK_MESSAGE)
+                .collect::<Vec<_>>();
+            match case.expect_fallback_error {
+                None => {
+                    assert!(fallback_logs.is_empty(), "{scenario}: must not warn");
+                    assert_eq!(counted, 0.0, "{scenario}: must not count a failure");
+                }
+                Some(expected_error) => {
+                    assert_eq!(fallback_logs.len(), 1, "{scenario}: warns exactly once");
+                    let log = fallback_logs[0];
+                    assert_eq!(log.level, tracing::Level::WARN, "{scenario}");
+                    assert_eq!(
+                        log.field("operation"),
+                        Some("primary_watch_setup"),
+                        "{scenario}"
+                    );
+                    assert_eq!(log.field("poll_interval_secs"), Some("0.05"), "{scenario}");
+                    assert!(
+                        log.field("error")
+                            .is_some_and(|error| error.contains(expected_error)),
+                        "{scenario}: error field names the OS error, got {:?}",
+                        log.field("error")
+                    );
+                    assert_eq!(counted, 1.0, "{scenario}: counts one failure");
+                }
+            }
+
+            assert_eq!(
+                provider
+                    .get_credentials(&key)
+                    .await
+                    .expect("read initial credentials"),
+                Some(Credentials::UsernamePassword {
+                    username: "root".to_string(),
+                    password: "before".to_string(),
+                }),
+                "{scenario}: initial snapshot loads"
+            );
+
+            let replacement_path = dir.path().join("credentials.next.yaml");
+            tokio::fs::write(
+                &replacement_path,
+                "dpu_uefi_site_default:\n  username: root\n  password: after\n",
+            )
+            .await
+            .expect("write replacement credentials file");
+            tokio::fs::rename(&replacement_path, &file_path)
+                .await
+                .expect("atomically replace credentials file");
+            let expected = Some(Credentials::UsernamePassword {
+                username: "root".to_string(),
+                password: "after".to_string(),
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if provider
+                        .get_credentials(&key)
+                        .await
+                        .expect("read reloaded credentials")
+                        == expected
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: watcher must reload the replaced file"));
+        }
+    }
+
     #[tokio::test]
     async fn missing_file_returns_error() {
+        // The poll watcher reports the missing path, so hold the metrics
+        // window to keep that count out of the metric-asserting tests.
+        let _metrics = MetricsCapture::start();
         let dir = tempdir().expect("create temp dir");
         let file_path = dir.path().join("does-not-exist.yaml");
         let result = FileCredentialsWatcher::new(FileCredentialsConfig {
@@ -596,12 +775,15 @@ mod tests {
     }
 
     fn watcher_failure_delta(metrics: &MetricsCapture) -> f64 {
-        ["primary_watch", "poll_watch", "reload"]
-            .iter()
-            .map(|operation| {
-                metrics.counter_delta(WATCHER_FAILURE_METRIC, &[("operation", operation)])
-            })
-            .sum()
+        [
+            "primary_watch",
+            "primary_watch_setup",
+            "poll_watch",
+            "reload",
+        ]
+        .iter()
+        .map(|operation| metrics.counter_delta(WATCHER_FAILURE_METRIC, &[("operation", operation)]))
+        .sum()
     }
 
     #[test]
@@ -626,6 +808,24 @@ mod tests {
                         metric_name: Some(WATCHER_FAILURE_METRIC.to_string()),
                         operation: Some("primary_watch".to_string()),
                         error: Some("inotify queue overflow".to_string()),
+                    },
+                },
+                Check {
+                    scenario: "primary watcher cannot be armed",
+                    input: WatcherFailureCase {
+                        operation: StaticCredentialWatcherOperation::PrimaryWatchSetup,
+                        operation_label: "primary_watch_setup",
+                        error: "Too many open files (os error 24)",
+                    },
+                    expect: WatcherFailureObservation {
+                        counter_delta: 1.0,
+                        level: tracing::Level::WARN,
+                        metadata_name: "static_credential_watcher_failed".to_string(),
+                        message: FALLBACK_MESSAGE.to_string(),
+                        event_name: Some("static_credential_watcher_failed".to_string()),
+                        metric_name: Some(WATCHER_FAILURE_METRIC.to_string()),
+                        operation: Some("primary_watch_setup".to_string()),
+                        error: Some("Too many open files (os error 24)".to_string()),
                     },
                 },
                 Check {
@@ -671,6 +871,12 @@ mod tests {
                     emit(match case.operation {
                         StaticCredentialWatcherOperation::PrimaryWatch => {
                             StaticCredentialWatcherFailed::PrimaryWatch { error }
+                        }
+                        StaticCredentialWatcherOperation::PrimaryWatchSetup => {
+                            StaticCredentialWatcherFailed::PrimaryWatchSetup {
+                                error,
+                                poll_interval_secs: 60.0,
+                            }
                         }
                         StaticCredentialWatcherOperation::PollWatch => {
                             StaticCredentialWatcherFailed::PollWatch { error }
@@ -758,11 +964,7 @@ mod tests {
                 let (tx, rx) = mpsc::channel(1);
                 drop(rx);
                 let logs = capture_logs(|| {
-                    forward_watch_event(
-                        case.delivery,
-                        &tx,
-                        Err(notify::Error::generic("watch failed")),
-                    );
+                    forward_watch_event(case.delivery, &tx, notify::Event::default());
                 });
                 let matching_logs = logs
                     .into_iter()

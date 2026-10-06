@@ -54,6 +54,14 @@ ipv6:
 externalService:
   enabled: false
   type: LoadBalancer
+  # Omitted, null, or empty settings keep SingleStack IPv4. Use SingleStack
+  # with [IPv6] for IPv6 only, or RequireDualStack with [IPv4, IPv6] for both.
+  # PreferDualStack allows fallback on a single-stack cluster. The first family
+  # is primary and cannot be changed on an existing Service.
+  # Configure the image's matching DNS listeners and localConfig access rules.
+  # These Service settings are independent of the internal ipv6.enabled option.
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   externalTrafficPolicy: ""
   annotations: {}
 

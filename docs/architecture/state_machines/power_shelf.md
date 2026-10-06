@@ -2,7 +2,7 @@
 
 This document describes the Finite State Machine (FSM) for Power Shelves in
 NICo: lifecycle from creation through initialization, ready, the OnDemand
-maintenance operations (PowerOn / PowerOff), and deletion. It also covers the
+maintenance operations (PowerOn / PowerOff), decommissioning, and deletion. It also covers the
 operator-facing interfaces (CLI / gRPC) used to drive the OnDemand operations.
 
 ## High-Level Overview
@@ -15,6 +15,8 @@ stateDiagram-v2
     state "FetchingData" as FetchingData
     state "Configuring" as Configuring
     state "Ready" as Ready
+    state "Decommissioning" as Decommissioning
+    state "Decommissioned (terminal)" as Decommissioned
     state "Maintenance (PowerOn / PowerOff)" as Maintenance
     state "Error" as Error
     state "Deleting" as Deleting
@@ -26,6 +28,7 @@ stateDiagram-v2
     Configuring --> Ready : configuration complete
 
     Ready --> Deleting : marked for deletion
+    Ready --> Decommissioning : decommission requested
     Ready --> Maintenance : OnDemand maintenance requested (PowerOn / PowerOff)
 
     Maintenance --> Ready : operation complete; maintenance request cleared
@@ -34,6 +37,7 @@ stateDiagram-v2
     Error --> Deleting : marked for deletion
     Error --> Maintenance : OnDemand maintenance requested (PowerOn / PowerOff)
 
+    Decommissioning --> Decommissioned : BMC reset and credential deletion complete
     Deleting --> [*] : final delete
 ```
 
@@ -45,6 +49,7 @@ stateDiagram-v2
 | **FetchingData** | Controller is fetching power shelf data from the BMC / PMC. |
 | **Configuring** | Power shelf is being configured (credentials, monitoring, etc.). |
 | **Ready** | Power shelf is ready. From here it can be deleted or driven into `Maintenance` by an OnDemand request. |
+| **Decommissioning** | Power shelf is being removed from managed service. NICo suppresses discovery and DHCP, factory-resets the BMC or PMC, and deletes its managed credential. Ends in terminal sub-state `Decommissioned`. |
 | **Maintenance** | Power shelf is executing an operator-requested maintenance operation. Sub-states (carried in the state variant as `operation`): `PowerOn`, `PowerOff`. |
 | **Error** | Power shelf is in error (e.g. maintenance operation failed). Can transition to `Deleting` if marked for deletion, or to `Maintenance` if an OnDemand maintenance request is posted; otherwise waits for manual intervention. |
 | **Deleting** | Power shelf is being removed; ends in final delete (terminal). |
@@ -58,6 +63,7 @@ stateDiagram-v2
 | FetchingData | Configuring | Data fetch complete |
 | Configuring | Ready | Configuration complete |
 | Ready | Deleting | `deleted` set (marked for deletion) |
+| Ready | Decommissioning (`SuppressingSiteExplorer`) | `decommission_requested` is set |
 | Ready | Maintenance `{ PowerOn }` | `power_shelf_maintenance_requested.operation == PowerOn` |
 | Ready | Maintenance `{ PowerOff }` | `power_shelf_maintenance_requested.operation == PowerOff` |
 | Maintenance `{ PowerOn \| PowerOff }` | Ready | BMC operation complete; controller clears `power_shelf_maintenance_requested` |
@@ -65,7 +71,19 @@ stateDiagram-v2
 | Error | Deleting | `deleted` set (marked for deletion) |
 | Error | Maintenance `{ PowerOn }` | `power_shelf_maintenance_requested.operation == PowerOn` |
 | Error | Maintenance `{ PowerOff }` | `power_shelf_maintenance_requested.operation == PowerOff` |
+| Decommissioning (`SuppressingSiteExplorer`) | Decommissioning (`SuppressingBmcDhcp`) | Site Explorer acknowledges the BMC suppression |
+| Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
+| Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | DHCP acknowledges the BMC suppression |
+| Decommissioning (`DeletingManagedCredentials`) | Decommissioning (`Decommissioned`) | Managed BMC credential and convergence record are deleted |
 | Deleting | *(end)* | Final delete committed |
+
+## Decommissioning
+
+Power-shelf decommissioning starts only from `Ready`. It resets management
+state but does not explicitly change rack power output. Refer to
+[Decommission Managed Power Shelves](../../decommissioning/power-shelves.md) for the
+operator procedure and intended post-reset state.
 
 ## OnDemand Maintenance Operations
 
@@ -204,6 +222,7 @@ classDiagram
         Configuring
         Ready
         Maintenance(operation)
+        Decommissioning(decommissioning_state)
         Error(cause)
         Deleting
     }
@@ -228,7 +247,7 @@ classDiagram
 
 The `power_shelves.power_shelf_maintenance_requested` column is a nullable
 `JSONB`; the API sets it on `SetPowerShelfMaintenance` and the state
-controller clears it when the operation finishes 
+controller clears it when the operation finishes.
 
 ## Notes / Status
 

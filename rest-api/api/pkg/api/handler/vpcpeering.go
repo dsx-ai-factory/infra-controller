@@ -386,11 +386,20 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	// Best effort post-commit update: workflow completed, so mark peering as Ready.
 	// This is intentionally outside of the transaction so create does not fail if this update fails.
 	status := cdbm.VpcPeeringStatusConfiguring
-	uerr := vpcPeeringDAO.UpdateStatusByID(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusReady)
+	updated, uerr := vpcPeeringDAO.UpdateStatusByIDIfCurrent(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusConfiguring, cdbm.VpcPeeringStatusReady)
 	if uerr != nil {
 		logger.Warn().Err(uerr).Msg("best-effort update to Ready status failed after workflow completion")
-	} else {
+	} else if updated {
 		status = cdbm.VpcPeeringStatusReady
+	} else {
+		// A DELETE can commit after create releases its transaction. Keep its
+		// status in both the database and the create response.
+		current, rerr := vpcPeeringDAO.GetByID(ctx, nil, vpcPeering.ID, nil)
+		if rerr != nil {
+			logger.Warn().Err(rerr).Msg("best-effort reload of VPC Peering status failed after workflow completion")
+		} else {
+			status = current.Status
+		}
 	}
 
 	// Update API model with best-known status.

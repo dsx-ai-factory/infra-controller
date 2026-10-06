@@ -547,11 +547,11 @@ impl InternalRBACRules {
         x.perm("GetMachineValidationRuns", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "FindMachineValidationRunItemIds",
-            vec![ForgeAdminCLI, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent, Scout],
         );
         x.perm(
             "FindMachineValidationRunItemsByIds",
-            vec![ForgeAdminCLI, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent, Scout],
         );
         x.perm(
             "GetMachineValidationAttempt",
@@ -672,6 +672,11 @@ impl InternalRBACRules {
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("CreateNicFirmwareProfile", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareProfileIds", vec![ForgeAdminCLI]);
+        x.perm("FindNicFirmwareProfilesByIds", vec![ForgeAdminCLI]);
+        x.perm("UpdateNicFirmwareProfile", vec![ForgeAdminCLI]);
+        x.perm("DeleteNicFirmwareProfile", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
         x.perm("AssignSkuToMachine", vec![ForgeAdminCLI]);
@@ -1296,6 +1301,43 @@ mod rbac_rule_tests {
         }
     }
 
+    #[test]
+    fn nic_firmware_profile_operator_permissions() {
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+                false,
+            ),
+            (Principal::SpiffeMachineIdentifier("host".into()), false),
+        ] {
+            for method in [
+                "CreateNicFirmwareProfile",
+                "FindNicFirmwareProfileIds",
+                "FindNicFirmwareProfilesByIds",
+                "UpdateNicFirmwareProfile",
+                "DeleteNicFirmwareProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal)
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier()
+                );
+            }
+        }
+    }
+
     /// The probe's service identity can call exactly its two read RPCs, and a
     /// write RPC stays denied — so dropping SiteHealthProbe from the read
     /// vectors or pasting it onto a write RPC fails here.
@@ -1475,6 +1517,22 @@ mod rbac_rule_tests {
                 "elektra-site-agent".to_string()
             )]
         ));
+
+        for method in [
+            "FindMachineValidationRunItemIds",
+            "FindMachineValidationRunItemsByIds",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(
+                    method,
+                    &[
+                        Principal::SpiffeMachineIdentifier("fm100htest".to_string()),
+                        Principal::TrustedCertificate
+                    ]
+                ),
+                "{method} should allow a machine"
+            );
+        }
         assert!(InternalRBACRules::allowed_from_static(
             "FindNetworkSegmentsByIds",
             &[

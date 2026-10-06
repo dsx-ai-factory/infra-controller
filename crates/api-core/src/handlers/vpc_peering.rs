@@ -339,10 +339,10 @@ pub(crate) async fn delete(
             )
             .await?
             {
-                return Err(CarbideError::ConcurrentModificationError(
-                    "machine network configuration",
-                    host.host_snapshot.network_config.version.to_string(),
-                )
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "could not update network configuration for host {} at version {}; the host changed or was removed; retry the peering deletion request",
+                    host.host_snapshot.id, host.host_snapshot.network_config.version,
+                ))
                 .into());
             }
         }

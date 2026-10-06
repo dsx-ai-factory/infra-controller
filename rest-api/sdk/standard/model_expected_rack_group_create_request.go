@@ -30,6 +30,8 @@ type ExpectedRackGroupCreateRequest struct {
 	RackGroupId string `json:"rackGroupId"`
 	// External group-level NVLink topology identifier, non-blank and at most 128 characters.
 	Topology string `json:"topology"`
+	// Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+	Protocol string `json:"protocol"`
 	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
 	// ASCII human-readable name, at most 256 characters. An empty string is allowed.
@@ -46,11 +48,12 @@ type _ExpectedRackGroupCreateRequest ExpectedRackGroupCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedRackGroupCreateRequest(siteId string, rackGroupId string, topology string) *ExpectedRackGroupCreateRequest {
+func NewExpectedRackGroupCreateRequest(siteId string, rackGroupId string, topology string, protocol string) *ExpectedRackGroupCreateRequest {
 	this := ExpectedRackGroupCreateRequest{}
 	this.SiteId = siteId
 	this.RackGroupId = rackGroupId
 	this.Topology = topology
+	this.Protocol = protocol
 	return &this
 }
 
@@ -132,6 +135,30 @@ func (o *ExpectedRackGroupCreateRequest) GetTopologyOk() (*string, bool) {
 // SetTopology sets field value
 func (o *ExpectedRackGroupCreateRequest) SetTopology(v string) {
 	o.Topology = v
+}
+
+// GetProtocol returns the Protocol field value
+func (o *ExpectedRackGroupCreateRequest) GetProtocol() string {
+	if o == nil {
+		var ret string
+		return ret
+	}
+
+	return o.Protocol
+}
+
+// GetProtocolOk returns a tuple with the Protocol field value
+// and a boolean to check if the value has been set.
+func (o *ExpectedRackGroupCreateRequest) GetProtocolOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.Protocol, true
+}
+
+// SetProtocol sets field value
+func (o *ExpectedRackGroupCreateRequest) SetProtocol(v string) {
+	o.Protocol = v
 }
 
 // GetRacks returns the Racks field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -297,6 +324,7 @@ func (o ExpectedRackGroupCreateRequest) ToMap() (map[string]interface{}, error) 
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["rackGroupId"] = o.RackGroupId
 	toSerialize["topology"] = o.Topology
+	toSerialize["protocol"] = o.Protocol
 	if o.Racks != nil {
 		toSerialize["racks"] = o.Racks
 	}
@@ -320,6 +348,7 @@ func (o *ExpectedRackGroupCreateRequest) UnmarshalJSON(data []byte) (err error) 
 		"siteId",
 		"rackGroupId",
 		"topology",
+		"protocol",
 	}
 
 	allProperties := make(map[string]interface{})

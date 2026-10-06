@@ -28,6 +28,7 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
         .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
             name: "joined-conflict.example.com".into(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         }))
         .await

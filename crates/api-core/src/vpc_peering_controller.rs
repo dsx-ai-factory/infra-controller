@@ -31,15 +31,19 @@ use state_controller::state_handler::{
     StateHandlerOutcome,
 };
 
+/// Keeps a peering reserved until its receivers acknowledge permission removal.
 #[derive(Debug, Default)]
 pub(crate) struct VpcPeeringDeletion;
 
+/// The deletion request records the only phase; completion removes the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeeringDeletionState {
     WaitingForDpus,
 }
 
 impl VpcPeeringDeletion {
+    /// Checks current host versions, since a later network update can supersede
+    /// the initial deletion request before every DPU has acknowledged it.
     async fn wait_for_receivers(
         txn: &mut PgConnection,
         peering: &VpcPeering,
@@ -180,7 +184,9 @@ impl StateHandler for VpcPeeringDeletion {
         if let Some(wait) = Self::wait_for_receivers(&mut txn, state).await? {
             return Ok(wait.with_txn(txn));
         }
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        // `Deleting` peerings are already absent from DPU responses. Sharing
+        // the routing lock keeps writers out without blocking those reads.
+        db::tenant_prefix_overlap::lock_config(&mut txn).await?;
         let Some(current) = db::vpc_peering::find_by_id_for_update(&mut txn, *object_id).await?
         else {
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));

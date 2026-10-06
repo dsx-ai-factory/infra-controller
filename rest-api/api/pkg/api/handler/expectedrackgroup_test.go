@@ -64,7 +64,7 @@ func TestReplaceAllExpectedRackGroupsHandler_Handle(t *testing.T) {
 func TestCreateExpectedRackGroupHandler_Handle(t *testing.T) {
 	testRackGroupMutation(t, "CreateExpectedRackGroup")
 	ctx, rec := rackGroupValidationContext(http.MethodPost,
-		`{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","name":"机架"}`)
+		`{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","protocol":"NVLINK_V6","name":"机架"}`)
 	require.NoError(t, NewCreateExpectedRackGroupHandler(nil, nil, nil).Handle(ctx))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "name")
@@ -224,7 +224,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				user.OrgData = cdbm.OrgData{"other": cdbm.Org{Name: "other", Roles: []string{"FORGE_PROVIDER_ADMIN"}}}
 				_, _, _ = testExpectedRackSetupTestData(t, session, "other")
 			}
-			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
+			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","protocol":"NVLINK_V6","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
 			status := http.StatusCreated
 			var handle func(echo.Context) error
 			switch workflowName {
@@ -376,7 +376,7 @@ func testRackGroupRead(t *testing.T, list bool) {
 	require.NoError(t, err)
 	racks := []cdbm.ExpectedRackGroupRack{{RackID: "rack-01", Members: []cdbm.ExpectedRackGroupMember{{Type: cdbm.ExpectedRackGroupMemberTypeNVSwitch, Manufacturer: "NVIDIA", ID: "switch-01"}}}}
 	dao := cdbm.NewExpectedRackGroupDAO(session)
-	first, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "topology", Racks: racks, CreatedBy: user.ID})
+	first, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "topology", Protocol: cutil.GetPtr("NVLINK_V6"), Racks: racks, CreatedBy: user.ID})
 	require.NoError(t, err)
 	_, err = dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-b", Topology: "topology", CreatedBy: user.ID})
 	require.NoError(t, err)
@@ -426,11 +426,13 @@ func testRackGroupRead(t *testing.T, list bool) {
 					return
 				}
 				require.Equal(t, "group-a", rows[0].RackGroupID)
+				require.Equal(t, cutil.GetPtr("NVLINK_V6"), rows[0].Protocol)
 				require.Equal(t, apim.NewAPIExpectedRackGroup(first).Racks, rows[0].Racks)
 			} else {
 				var row apim.APIExpectedRackGroup
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
 				require.Equal(t, "group-a", row.RackGroupID)
+				require.Equal(t, cutil.GetPtr("NVLINK_V6"), row.Protocol)
 				require.Equal(t, apim.NewAPIExpectedRackGroup(first).Racks, row.Racks)
 			}
 		})

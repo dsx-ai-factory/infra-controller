@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,11 +23,12 @@ use std::time::Duration;
 use carbide_dhcp_server::modes::dpu::Dpu;
 use carbide_dhcp_server::packet_handler_v6::process_packet;
 use carbide_dhcp_server::util::get_socket_v6;
-use carbide_rpc_utils::dhcp::InterfaceInfoV6;
+use carbide_rpc_utils::dhcp::{InterfaceInfo, InterfaceInfoV6};
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use dhcproto::v6::{
-    DhcpOption, IANA, MessageType, NtpSuboption, OptionCode, Status, UnknownOption,
+    Architecture, DhcpOption, IANA, MessageType, NtpSuboption, ORO, OptionCode, Status,
+    UnknownOption, VendorClass,
 };
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -34,11 +36,413 @@ use tokio::time::timeout;
 mod common;
 
 use common::{
-    DUID_LL, IAID, SERVER_IDENTIFIER, assert_ia_na_failure, client_message, decode_message,
-    decode_response, dpu_config, encode, machine_cache, response_ia_na, response_status,
+    DUID_LL, IAID, SERVER_IDENTIFIER, assert_ia_na_failure, base_dhcp_config, client_message,
+    decode_message, decode_response, dpu_config, dpu_config_with_options, encode, machine_cache,
+    response_ia_na, response_status,
 };
 
 const INTERFACE: &str = "eth0";
+
+#[tokio::test]
+async fn boot_options_follow_configuration_and_client_requests() {
+    const BOOT_URL: &str = "http://[2001:db8::10]/bootx64.efi";
+    const HTTPS_URL: &str = "https://[2001:db8::10]/bootx64.efi";
+    const TFTP_URL: &str = "tftp://[2001:db8::10]/bootx64.efi";
+    const HOSTNAME_URL: &str = "http://boot.example/bootx64.efi";
+    const IPV4_URL: &str = "http://192.0.2.10/bootx64.efi";
+    const DEFAULT_X64_URL: &str =
+        "http://[2001:db8::10]:8080/public/blobs/internal/x86_64/ipxe.efi";
+    const DEFAULT_ARM64_URL: &str =
+        "http://[2001:db8::10]:8080/public/blobs/internal/aarch64/ipxe.efi";
+    const HTTP_CLIENT: &str = "HTTPClient:Arch:00016:UNDI:003016";
+
+    let boot_options = || Some(vec![OptionCode::VendorClass, OptionCode::OptBootfileUrl]);
+    let expected_url = || Some(BOOT_URL.as_bytes().to_vec());
+    let expected_vendor = |num| {
+        Some(VendorClass {
+            num,
+            data: vec![b"HTTPClient".to_vec()],
+        })
+    };
+
+    struct Input {
+        message_type: MessageType,
+        boot_url: Option<&'static str>,
+        requested_options: Option<Vec<OptionCode>>,
+        vendor_classes: &'static [(u32, &'static [&'static str])],
+        has_ipv6_dns: bool,
+        provisioning_address: Option<&'static str>,
+        architectures: &'static [Architecture],
+        has_address: bool,
+    }
+
+    impl Default for Input {
+        fn default() -> Self {
+            Self {
+                message_type: MessageType::Solicit,
+                boot_url: None,
+                requested_options: Some(vec![OptionCode::VendorClass, OptionCode::OptBootfileUrl]),
+                vendor_classes: &[(343, &[HTTP_CLIENT])],
+                has_ipv6_dns: false,
+                provisioning_address: Some("2001:db8::10"),
+                architectures: &[Architecture::X64_Http],
+                has_address: true,
+            }
+        }
+    }
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "explicit URL works without default URL prerequisites",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &["Other", HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    architectures: &[],
+                    provisioning_address: None,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), expected_vendor(343), None)),
+            },
+            Case {
+                scenario: "stateful reply preserves enterprise number for bare HTTPClient",
+                input: Input {
+                    message_type: MessageType::Request,
+                    boot_url: Some(HTTPS_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(5703, &["HTTPClient"])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((
+                    Some(HTTPS_URL.as_bytes().to_vec()),
+                    expected_vendor(5703),
+                    None,
+                )),
+            },
+            Case {
+                scenario: "stateless reply identifies HTTP boot",
+                input: Input {
+                    message_type: MessageType::InformationRequest,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), expected_vendor(343), None)),
+            },
+            Case {
+                scenario: "generate default x86_64 URL when no override is configured",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: None,
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    architectures: &[Architecture::X64_Http, Architecture::Arm64_Http],
+                    ..Input::default()
+                },
+                expect: Yields((
+                    Some(DEFAULT_X64_URL.as_bytes().to_vec()),
+                    expected_vendor(343),
+                    Some(vec![Architecture::X64_Http]),
+                )),
+            },
+            Case {
+                scenario: "choose first supported architecture in client preference order",
+                input: Input {
+                    architectures: &[
+                        Architecture::X64,
+                        Architecture::Arm64_Http,
+                        Architecture::X64_Http,
+                    ],
+                    ..Input::default()
+                },
+                expect: Yields((
+                    Some(DEFAULT_ARM64_URL.as_bytes().to_vec()),
+                    expected_vendor(343),
+                    Some(vec![Architecture::Arm64_Http]),
+                )),
+            },
+            Case {
+                scenario: "stateless request receives default boot URL",
+                input: Input {
+                    message_type: MessageType::InformationRequest,
+                    ..Input::default()
+                },
+                expect: Yields((
+                    Some(DEFAULT_X64_URL.as_bytes().to_vec()),
+                    expected_vendor(343),
+                    Some(vec![Architecture::X64_Http]),
+                )),
+            },
+            Case {
+                scenario: "legacy config without IPv6 provisioning address",
+                input: Input {
+                    provisioning_address: None,
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "vendor string architecture cannot replace the architecture option",
+                input: Input {
+                    architectures: &[],
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "no supported HTTP boot architecture",
+                input: Input {
+                    architectures: &[Architecture::X64],
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "default URL requires HTTPClient vendor class",
+                input: Input {
+                    vendor_classes: &[(343, &["HTTPClientOther"])],
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "no address available does not advertise default boot URL",
+                input: Input {
+                    has_address: false,
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "empty configured URL",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(""),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "no option request",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: None,
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "vendor class requested without boot URL",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::VendorClass]),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((None, None, None)),
+            },
+            Case {
+                scenario: "boot URL requested without vendor class",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: Some(vec![OptionCode::OptBootfileUrl]),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), None, None)),
+            },
+            Case {
+                scenario: "client has no vendor class",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), None, None)),
+            },
+            Case {
+                scenario: "lookalike vendor class is not HTTPClient",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &["HTTPClientOther"])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), None, None)),
+            },
+            Case {
+                scenario: "HTTPClient follows another enterprise's vendor class",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(BOOT_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(5703, &["Other"]), (343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((expected_url(), expected_vendor(343), None)),
+            },
+            Case {
+                scenario: "hostname URL without IPv6 DNS leaves HTTP boot identification unchanged",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(HOSTNAME_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((Some(HOSTNAME_URL.as_bytes().to_vec()), None, None)),
+            },
+            Case {
+                scenario: "hostname URL with IPv6 DNS identifies HTTP boot",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(HOSTNAME_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: true,
+                    ..Input::default()
+                },
+                expect: Yields((
+                    Some(HOSTNAME_URL.as_bytes().to_vec()),
+                    expected_vendor(343),
+                    None,
+                )),
+            },
+            Case {
+                scenario: "non-HTTP URL is not identified as HTTP boot even with IPv6 DNS",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(TFTP_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: true,
+                    ..Input::default()
+                },
+                expect: Yields((Some(TFTP_URL.as_bytes().to_vec()), None, None)),
+            },
+            Case {
+                scenario: "IPv4 URL does not qualify as an IPv6 literal without DNS",
+                input: Input {
+                    message_type: MessageType::Solicit,
+                    boot_url: Some(IPV4_URL),
+                    requested_options: boot_options(),
+                    vendor_classes: &[(343, &[HTTP_CLIENT])],
+                    has_ipv6_dns: false,
+                    ..Input::default()
+                },
+                expect: Yields((Some(IPV4_URL.as_bytes().to_vec()), None, None)),
+            },
+        ],
+        |input| async move {
+            let mut dhcp_config = base_dhcp_config(None);
+            dhcp_config.carbide_provisioning_server_ipv6 = input
+                .provisioning_address
+                .map(|address| address.parse().unwrap());
+            if !input.has_ipv6_dns {
+                dhcp_config.carbide_nameservers_v6.clear();
+            }
+            let config = dpu_config_with_options(
+                BTreeMap::from([(
+                    INTERFACE.to_string(),
+                    InterfaceInfo {
+                        address: Some("192.0.2.20".parse().unwrap()),
+                        gateway: Some("192.0.2.1".parse().unwrap()),
+                        prefix: Some("192.0.2.0/24".to_string()),
+                        fqdn: "host.example.com".to_string(),
+                        booturl: input.boot_url.map(str::to_owned),
+                        mtu: Some(9000),
+                        ipv6: Some(InterfaceInfoV6 {
+                            address: (input.has_address
+                                && input.message_type != MessageType::InformationRequest)
+                                .then(|| "2001:db8::20".parse().unwrap()),
+                            prefix: "2001:db8::/64".to_string(),
+                        }),
+                    },
+                )]),
+                dhcp_config,
+            );
+            let server_id =
+                (input.message_type == MessageType::Request).then(|| SERVER_IDENTIFIER.to_vec());
+            let mut request = client_message(input.message_type, DUID_LL, None, server_id);
+            if !input.architectures.is_empty() {
+                request
+                    .opts_mut()
+                    .insert(DhcpOption::ClientArchType(input.architectures.to_vec()));
+            }
+            if let Some(opts) = input.requested_options {
+                request.opts_mut().insert(DhcpOption::ORO(ORO { opts }));
+            }
+            for (enterprise, classes) in input.vendor_classes.iter().rev() {
+                // dhcproto 0.15's typed VendorClass encoder writes an incorrect option length.
+                let mut data = enterprise.to_be_bytes().to_vec();
+                for class in *classes {
+                    data.extend_from_slice(&u16::try_from(class.len()).unwrap().to_be_bytes());
+                    data.extend_from_slice(class.as_bytes());
+                }
+                request
+                    .opts_mut()
+                    .insert(DhcpOption::Unknown(UnknownOption::new(
+                        OptionCode::VendorClass,
+                        data,
+                    )));
+            }
+            let mut cache = machine_cache();
+            let packet = process_packet(
+                &encode(&request),
+                "fe80::20".parse().unwrap(),
+                &config,
+                INTERFACE,
+                &Dpu {},
+                &mut cache,
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected a DHCPv6 response".to_string())?;
+            let response = decode_response(&packet);
+            let boot_url = match response.opts().get(OptionCode::OptBootfileUrl) {
+                Some(DhcpOption::Unknown(option)) => Some(option.data().to_vec()),
+                None => None,
+                other => panic!("expected raw boot-file URL option, got {other:?}"),
+            };
+            let vendor_class = match response.opts().get(OptionCode::VendorClass) {
+                Some(DhcpOption::VendorClass(vendor)) => Some(vendor.clone()),
+                None => None,
+                other => panic!("expected decoded vendor-class option, got {other:?}"),
+            };
+            let architecture = match response.opts().get(OptionCode::ClientArchType) {
+                Some(DhcpOption::ClientArchType(architectures)) => Some(architectures.clone()),
+                None => None,
+                other => panic!("expected architecture option, got {other:?}"),
+            };
+            Ok::<_, String>((boot_url, vendor_class, architecture))
+        },
+    )
+    .await;
+}
 
 /// Verifies a stateful SOLICIT preserves IAID and returns the configured address and server ID.
 #[tokio::test]

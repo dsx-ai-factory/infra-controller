@@ -20,7 +20,7 @@ import (
 // checks if the ExpectedRackGroupUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedRackGroupUpdateRequest{}
 
-// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.  Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.  The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
+// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.  Provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all seven fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.  The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackGroupUpdateRequest struct {
 	// Unique identifier (UUID) of the Expected Rack Group to update. Can be omitted or set to `null`. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 	Id NullableString `json:"id,omitempty"`
@@ -28,13 +28,15 @@ type ExpectedRackGroupUpdateRequest struct {
 	RackGroupId NullableString `json:"rackGroupId,omitempty"`
 	// Optional replacement topology identifier, non-blank and at most 128 characters.
 	Topology NullableString `json:"topology,omitempty"`
+	// Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
 	// ASCII human-readable name, at most 256 characters. An empty string is allowed.
 	Name NullableString `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
 	// Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
 	Description NullableString `json:"description,omitempty"`
-	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
+	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -182,6 +184,49 @@ func (o *ExpectedRackGroupUpdateRequest) SetTopologyNil() {
 // UnsetTopology ensures that no value is present for Topology, not even an explicit nil
 func (o *ExpectedRackGroupUpdateRequest) UnsetTopology() {
 	o.Topology.Unset()
+}
+
+// GetProtocol returns the Protocol field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedRackGroupUpdateRequest) GetProtocol() string {
+	if o == nil || IsNil(o.Protocol.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Protocol.Get()
+}
+
+// GetProtocolOk returns a tuple with the Protocol field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedRackGroupUpdateRequest) GetProtocolOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Protocol.Get(), o.Protocol.IsSet()
+}
+
+// HasProtocol returns a boolean if a field has been set.
+func (o *ExpectedRackGroupUpdateRequest) HasProtocol() bool {
+	if o != nil && o.Protocol.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetProtocol gets a reference to the given NullableString and assigns it to the Protocol field.
+func (o *ExpectedRackGroupUpdateRequest) SetProtocol(v string) {
+	o.Protocol.Set(&v)
+}
+
+// SetProtocolNil sets the value for Protocol to be an explicit nil
+func (o *ExpectedRackGroupUpdateRequest) SetProtocolNil() {
+	o.Protocol.Set(nil)
+}
+
+// UnsetProtocol ensures that no value is present for Protocol, not even an explicit nil
+func (o *ExpectedRackGroupUpdateRequest) UnsetProtocol() {
+	o.Protocol.Unset()
 }
 
 // GetRacks returns the Racks field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -352,6 +397,9 @@ func (o ExpectedRackGroupUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.Topology.IsSet() {
 		toSerialize["topology"] = o.Topology.Get()
+	}
+	if o.Protocol.IsSet() {
+		toSerialize["protocol"] = o.Protocol.Get()
 	}
 	if o.Racks != nil {
 		toSerialize["racks"] = o.Racks

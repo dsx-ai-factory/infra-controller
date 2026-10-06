@@ -49,6 +49,7 @@ use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 mod deletion;
 
+/// Builds the production deletion handler for explicitly driven iterations.
 pub(super) fn deletion_controller(
     env: &TestEnv,
 ) -> state_controller::controller::StateController<crate::vpc_peering_controller::VpcPeeringDeletion>
@@ -64,6 +65,7 @@ pub(super) fn deletion_controller(
         .unwrap()
 }
 
+/// Simulates every receiver DPU applying its current network configuration.
 async fn acknowledge_peering_receivers(env: &TestEnv, id: VpcPeeringId) {
     let mut txn = env.pool.begin().await.unwrap();
     let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
@@ -1203,6 +1205,7 @@ async fn test_vpc_peering_network_config_exclusive_etv(
     Ok(())
 }
 
+/// ETV permission removal must be acknowledged before its peer VPC releases a VNI.
 #[crate::sqlx_test]
 async fn etv_peering_removal_must_finish_before_vpc_deletion(
     pool: sqlx::PgPool,
@@ -1273,6 +1276,7 @@ async fn etv_peering_removal_must_finish_before_vpc_deletion(
         vpc_peering_list.vpc_peerings[0].state(),
         rpc::forge::VpcPeeringState::Deleting
     );
+    deletion::stored_wait(&env, peering_id).await;
 
     let response = env
         .api

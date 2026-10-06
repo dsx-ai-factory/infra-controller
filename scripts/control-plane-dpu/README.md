@@ -131,7 +131,9 @@ fnn:
   # Keep this key INSIDE the fnn block, indented like the keys above. At the top
   # level of the file it is rejected by the build ("Unsupported field in site
   # config (top level)") and would not be rendered.
-  # Each key is the full numeric target <asn>:<n>; nothing is substituted.
+  # A map, one `<asn>:<n>: {}` entry per target, not a list: the build rejects
+  # a list or a non-numeric key. Keys are full numeric targets; nothing is
+  # substituted.
   # routeTargetsToImport:
   #   4266030000:101: {}   # Jumphosts
   #   4266030000:1002: {}  # UFM
@@ -186,7 +188,9 @@ What the build does with each value:
   `50400`); the second is also the export number.
 - `fnn.routeTargetsToImport` — additional full route targets (`<asn>:<n>`) to import, for jump
   hosts, rack devices, storage management and the tenant profiles' common tags. Never the site
-  controllers' own out-of-band segment (`:901`) or a tenant's native target.
+  controllers' own out-of-band segment (`:901`) or a tenant's native target. It is a map keyed
+  by the target (`<asn>:<n>: {}`); the build rejects a list or a key that is not numeric
+  `<asn>:<n>`, because the template renders the keys and a list would render as `0: {}`.
 - `fnn.vpcVrfLoopbackPrefix` (optional) — a loopback inside the control-plane VRF for testing the
   overlay from the DPU; must not overlap the managed-host per-VPC loopback pool.
 

@@ -83,6 +83,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         }))
         .await
@@ -100,6 +101,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
             .create_domain(Request::new(CreateDomainRequest {
                 name: name.to_string(),
                 default_ttl: None,
+                vpc_id: None,
                 reserved_id: None,
             }))
             .await
@@ -138,6 +140,58 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
     );
 }
 
+// Older clients and the legacy adapter omit vpc_id, so updates must keep the
+// stored owner. Supplying a different owner must fail.
+#[sqlx_test]
+async fn test_update_domain_preserves_vpc_ownership(pool: PgPool) {
+    use rpc::dns::{CreateDomainRequest, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let vpc_id = env.network_controller().create_vpc("dns-owner").await;
+    let api = env.api();
+    let created = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: "owned.example".to_string(),
+            vpc_id: Some(vpc_id),
+            default_ttl: None,
+            reserved_id: None,
+        }))
+        .await
+        .expect("create VPC-owned domain")
+        .into_inner();
+    assert_eq!(created.vpc_id, Some(vpc_id));
+
+    let updated = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::dns::Domain {
+                vpc_id: None,
+                default_ttl: Some(600),
+                ..created
+            }),
+        }))
+        .await
+        .expect("update without changing the owner")
+        .into_inner();
+    assert_eq!(updated.vpc_id, Some(vpc_id));
+
+    let other_vpc = env.network_controller().create_vpc("dns-other").await;
+    let error = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::dns::Domain {
+                vpc_id: Some(other_vpc),
+                ..updated
+            }),
+        }))
+        .await
+        .expect_err("ownership cannot be reassigned");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(
+        error.message().contains("VPC ownership"),
+        "expected the ownership rejection, got: {}",
+        error.message()
+    );
+}
+
 // UpdateDomain treats an empty or unchanged name and an absent default_ttl as
 // "keep the stored value", and both Create and Update reject a TTL outside
 // 30..=86400 with INVALID_ARGUMENT before anything is written.
@@ -151,6 +205,7 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
             default_ttl: Some(600),
+            vpc_id: None,
             reserved_id: None,
         }))
         .await
@@ -186,6 +241,7 @@ async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
         .create_domain(Request::new(CreateDomainRequest {
             name: "short-ttl.example".to_string(),
             default_ttl: Some(5),
+            vpc_id: None,
             reserved_id: None,
         }))
         .await
@@ -249,6 +305,7 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
     let payload = || CreateDomainRequest {
         name: "owned.example".to_string(),
         default_ttl: Some(600),
+        vpc_id: None,
         reserved_id: Some(id),
     };
     // A site-agent service cannot drop the reserved-ID fence and obtain a
@@ -257,6 +314,7 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         .create_domain(site_request(CreateDomainRequest {
             name: "unreserved-site.example".into(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         }))
         .await
@@ -318,6 +376,7 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         CreateDomainRequest {
             name: "operator-owned.example".into(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: None,
         },
         vec![external_user(), Principal::TrustedCertificate],
@@ -531,6 +590,7 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         api.create_domain(site_request(CreateDomainRequest {
             name: "late.example".to_string(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: Some(missing),
         }))
         .await
@@ -578,6 +638,7 @@ async fn test_reserved_create_delete_concurrent_and_name_collision(pool: PgPool)
     let create = site_request(CreateDomainRequest {
         name: "race.example".into(),
         default_ttl: None,
+        vpc_id: None,
         reserved_id: Some(id),
     });
     let cancel = site_request(DomainDeletionRequest {
@@ -594,6 +655,7 @@ async fn test_reserved_create_delete_concurrent_and_name_collision(pool: PgPool)
         api.create_domain(site_request(CreateDomainRequest {
             name: "race.example".into(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: Some(id),
         }))
         .await
@@ -612,6 +674,7 @@ async fn test_reserved_create_delete_concurrent_and_name_collision(pool: PgPool)
         site_request(CreateDomainRequest {
             name: "same-intent.example".into(),
             default_ttl: Some(720),
+            vpc_id: None,
             reserved_id: Some(replay_id),
         })
     };
@@ -634,6 +697,7 @@ async fn test_reserved_create_delete_concurrent_and_name_collision(pool: PgPool)
         site_request(CreateDomainRequest {
             name: "same.example".into(),
             default_ttl: None,
+            vpc_id: None,
             reserved_id: Some(id),
         })
     };

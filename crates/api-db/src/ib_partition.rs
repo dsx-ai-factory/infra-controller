@@ -33,6 +33,9 @@ use crate::{
     FilterableQueryBuilder, ObjectColumnFilter, Transaction,
 };
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Copy, Clone)]
 pub struct IdColumn;
 impl ColumnInfo<'_> for IdColumn {
@@ -74,7 +77,9 @@ pub async fn create(
                 status)
             SELECT $1, $2, $3::json, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14
             WHERE (SELECT COUNT(*) FROM ib_partitions WHERE organization_id = $6) < $13
-            RETURNING *";
+            RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                      service_level, config_version, controller_state_version, controller_state,
+                      controller_state_outcome, status, deleted";
     let segment: IBPartition = sqlx::query_as(query)
         .bind(value.id)
         .bind(&value.metadata.name)
@@ -117,7 +122,10 @@ pub async fn for_tenant(
     tenant_organization_id: String,
 ) -> Result<Vec<IBPartition>, DatabaseError> {
     let results: Vec<IBPartition> = {
-        let query = "SELECT * FROM ib_partitions WHERE organization_id=$1";
+        let query = "SELECT id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                            service_level, config_version, controller_state_version, controller_state,
+                            controller_state_outcome, status, deleted
+                     FROM ib_partitions WHERE organization_id=$1";
         sqlx::query_as(query)
             .bind(tenant_organization_id)
             .fetch_all(txn)
@@ -162,7 +170,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = IBPartition>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<IBPartition>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM ib_partitions").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                service_level, config_version, controller_state_version, controller_state,
+                controller_state_outcome, status, deleted
+         FROM ib_partitions",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()
@@ -242,7 +256,10 @@ pub async fn mark_as_deleted(
     value: &IBPartition,
     txn: &mut PgConnection,
 ) -> DatabaseResult<IBPartition> {
-    let query = "UPDATE ib_partitions SET updated=NOW(), deleted=NOW() WHERE id=$1 RETURNING *";
+    let query = "UPDATE ib_partitions SET updated=NOW(), deleted=NOW() WHERE id=$1
+                 RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                           service_level, config_version, controller_state_version, controller_state,
+                           controller_state_outcome, status, deleted";
     let segment: IBPartition = sqlx::query_as(query)
         .bind(value.id)
         .fetch_one(txn)
@@ -368,7 +385,10 @@ pub async fn update_metadata(
     })?;
 
     let query = "UPDATE ib_partitions SET name=$1, labels=$2::json, description=$3, config_version=$4, updated=NOW()
-                 WHERE id=$5::uuid AND config_version=$6 RETURNING *";
+                 WHERE id=$5::uuid AND config_version=$6
+                 RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                           service_level, config_version, controller_state_version, controller_state,
+                           controller_state_outcome, status, deleted";
 
     let partition: Option<IBPartition> = sqlx::query_as(query)
         .bind(&metadata.name)
@@ -396,7 +416,10 @@ pub async fn update_status(
     txn: &mut PgConnection,
 ) -> Result<IBPartition, DatabaseError> {
     let query = "UPDATE ib_partitions SET status=$1::json, updated=NOW()
-                 WHERE id=$2::uuid RETURNING *";
+                 WHERE id=$2::uuid
+                 RETURNING id, name, labels, description, pkey, organization_id, mtu, rate_limit,
+                           service_level, config_version, controller_state_version, controller_state,
+                           controller_state_outcome, status, deleted";
 
     sqlx::query_as(query)
         .bind(sqlx::types::Json(status))

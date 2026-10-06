@@ -69,6 +69,28 @@ additional_issuer_cns = []
 "spiffe-service-id/dpf" = ["/redfish/v1/**"]
 ```
 
+### Inbound TLS
+
+The certificate, key and main client CA file must load successfully at startup.
+An unreadable admin CA file (`admin_root_cafile_path`) is skipped; if readable,
+PEM parse errors fail startup or reload. The configuration reloads on the first
+connection after five minutes, using the same loading rules. A failed reload
+retains the previous configuration and retries on the first connection at least
+30 seconds later. Retention has no age limit: removed trust roots remain trusted
+until a successful reload or restart. Failures increment
+`carbide_bmc_proxy_tls_reload_failures_total`; connections served with the retained
+configuration do not increment the connection-failure counter.
+Retries reuse an unfinished reload task instead of starting another.
+
+Accepted connections have 10 seconds to complete TLS, including any reload wait.
+Timeouts close the connection and increment
+`carbide_bmc_proxy_tls_connection_fail_total{reason="tls_connection_failure"}`.
+Established HTTP connections have no fixed lifetime. Shutdown closes active
+connections immediately and joins connection and reload tasks. A blocking TLS
+file read that has already started cannot be cancelled; shutdown waits for it
+to finish. TCP accept errors retry after one second; shutdown interrupts that
+wait. These timers do not limit connection concurrency.
+
 ### `redirects.mode`
 
 `follow_same_origin` follows up to five redirects within the original scheme, host, and effective
@@ -314,7 +336,28 @@ curl --http2 \
   https://bmc-proxy.example/redfish/v1/Systems/Bluefield
 ```
 
-The client chooses the BMC by IP. The proxy performs authentication, credential lookup, and backend authentication.
+Supply one BMC target in `Forwarded`: `host=<ip>`, `mac=<mac>`, or
+`serial=<serial>`. MAC/serial resolve through nico-api; names are case-insensitive.
+The first recognized target in header order is used; later targets are ignored,
+with no fallback after errors.
+
+Values may be unquoted or double-quoted (e.g. `serial="FOO,BAR-123"`).
+Outer whitespace is ignored; quoted contents, including whitespace, commas and
+semicolons, are preserved. Backslashes inside quotes escape the next character.
+Unquoted commas/semicolons separate elements/parameters
+([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239.html#section-4)); quoted values follow
+[HTTP quoted-string syntax](https://www.rfc-editor.org/rfc/rfc7230.html#section-3.2.6).
+
+MACs accept 12 hex digits or six byte pairs separated by colons or hyphens
+(mixed separators and either case allowed); dotted notation is unsupported.
+Serials pass unchanged after quote decoding and match discovered product,
+board or chassis serials exactly.
+
+Missing, malformed or unmatched targets return `400`; nico-api lookup failures
+return `502`. Malformed quoting reports `malformed quoted value in forwarded header`.
+Non-text header values are skipped.
+
+The proxy performs authentication, credential lookup, and backend authentication.
 
 ## Why?
 

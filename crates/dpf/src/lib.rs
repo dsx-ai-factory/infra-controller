@@ -83,10 +83,10 @@ pub use sdk::{
 pub use service_vpc_slot::ServiceVpcSlots;
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
 pub use types::{
-    BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType, DEFAULT_DPU_NUM_OF_VFS,
-    DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_ENABLED_NODE_LABEL,
-    DetachedDpuServiceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
-    DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
+    AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
+    DEFAULT_DPU_NUM_OF_VFS, DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
+    DPU_ENABLED_NODE_LABEL, DetachedDpuServiceDefinition, DetachedDpuServiceSecurity,
+    DetachedHelmChart, DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
     DetachedServiceDaemonSetUpdateStrategy, DpfInterceptBridge, DpfInterceptBridging,
     DpfInterfaceIdentity, DpuDeploymentType, DpuDeviceInfo, DpuErrorEvent, DpuEvent, DpuMismatch,
     DpuNodeInfo, DpuPhase, DpuReadyEvent, DpuServiceDaemonSetObservation,

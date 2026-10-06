@@ -18,6 +18,7 @@ spec:
         {{- include "nico-flow.labels" . | nindent 8 }}
         app: flow
       annotations:
+        {{- include "nico-flow.podAnnotations" . | nindent 8 }}
         kubectl.kubernetes.io/default-container: flow
         checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
@@ -34,6 +35,8 @@ spec:
         - name: flow
           image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args:
+            - "--metrics-port={{ .Values.ports.metrics }}"
           env:
             ## flow's GetDeploymentEnv (carbide-rest/flow/internal/service/config.go)
             ## requires FLOW_ENV ∈ {development, staging, production}; empty/unset
@@ -81,6 +84,8 @@ spec:
           ports:
             - name: grpc
               containerPort: {{ .Values.ports.flow }}
+            - name: metrics
+              containerPort: {{ .Values.ports.metrics }}
           resources:
             {{- toYaml .Values.resources.flow | nindent 12 }}
           volumeMounts:

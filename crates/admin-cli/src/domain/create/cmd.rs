@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use rpc::admin_cli::OutputFormat;
+use ::rpc::admin_cli::OutputFormat;
 
 use super::args::Args;
 use crate::domain::show::cmd::convert_domain_to_nice_format;
@@ -27,12 +27,14 @@ pub(super) async fn create(
     output_format: OutputFormat,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
-    let created = api_client
-        .create_domain(args.name, args.default_ttl)
+    let domain = api_client
+        .create_domain(args.name, args.vpc_id, args.default_ttl)
         .await?;
+
     match output_format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&created)?),
-        _ => println!("{}", convert_domain_to_nice_format(&created)?),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&domain)?),
+        _ => println!("{}", convert_domain_to_nice_format(&domain)?),
     }
+
     Ok(())
 }

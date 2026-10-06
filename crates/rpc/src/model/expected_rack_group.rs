@@ -6,7 +6,8 @@
 use std::collections::HashSet;
 
 use model::expected_rack_group::{
-    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupProtocol,
+    RackGroupTopology,
 };
 use model::metadata::Metadata;
 
@@ -30,76 +31,113 @@ impl From<ExpectedRackGroup> for rpc::forge::ExpectedRackGroup {
         Self {
             rack_group_id: Some(group.rack_group_id),
             topology: group.topology.to_string(),
+            protocol: group
+                .protocol
+                .map(|protocol| protocol.to_string())
+                .unwrap_or_default(),
             racks: group.racks.into_iter().map(Into::into).collect(),
             metadata: Some(group.metadata.into()),
         }
     }
 }
 
+/// Whether a declaration must carry a protocol. Add and Update require one;
+/// groups stored before the protocol column are read back without it.
+#[derive(Clone, Copy)]
+enum Protocol {
+    Required,
+    Optional,
+}
+
 impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
     type Error = RpcDataConversionError;
 
     fn try_from(value: rpc::forge::ExpectedRackGroup) -> Result<Self, Self::Error> {
-        let invalid = |message: &str| RpcDataConversionError::InvalidArgument(message.to_string());
-        let rack_group_id = value
-            .rack_group_id
-            .ok_or(RpcDataConversionError::MissingArgument("rack_group_id"))?;
-        validate_rack_group_id(&rack_group_id)?;
-        if value.topology.trim().is_empty() || value.topology.chars().count() > 128 {
+        convert(value, Protocol::Required)
+    }
+}
+
+/// Convert a group read back from nico-api. An empty protocol means the
+/// group was stored before protocols were recorded, not an invalid value.
+pub fn stored_expected_rack_group(
+    value: rpc::forge::ExpectedRackGroup,
+) -> Result<ExpectedRackGroup, RpcDataConversionError> {
+    convert(value, Protocol::Optional)
+}
+
+fn convert(
+    value: rpc::forge::ExpectedRackGroup,
+    protocol: Protocol,
+) -> Result<ExpectedRackGroup, RpcDataConversionError> {
+    let invalid = |message: &str| RpcDataConversionError::InvalidArgument(message.to_string());
+    let rack_group_id = value
+        .rack_group_id
+        .ok_or(RpcDataConversionError::MissingArgument("rack_group_id"))?;
+    validate_rack_group_id(&rack_group_id)?;
+    if value.topology.trim().is_empty() || value.topology.chars().count() > 128 {
+        return Err(invalid(
+            "topology must contain 1 to 128 characters and not be blank",
+        ));
+    }
+    let protocol = match protocol {
+        Protocol::Optional if value.protocol.trim().is_empty() => None,
+        _ if value.protocol.trim().is_empty() || value.protocol.chars().count() > 128 => {
             return Err(invalid(
-                "topology must contain 1 to 128 characters and not be blank",
+                "protocol must contain 1 to 128 characters and not be blank",
             ));
         }
-        let mut rack_ids = HashSet::new();
-        let mut members = HashSet::new();
-        let mut racks = Vec::with_capacity(value.racks.len());
-        for rack in value.racks {
-            let rack_id = rack
-                .rack_id
-                .ok_or(RpcDataConversionError::MissingArgument("racks.rack_id"))?;
-            if rack_id.as_str().trim().is_empty() || !rack_ids.insert(rack_id.clone()) {
-                return Err(invalid(
-                    "racks must contain non-blank, unique rack identifiers",
-                ));
+        _ => Some(RackGroupProtocol::new(value.protocol)),
+    };
+    let mut rack_ids = HashSet::new();
+    let mut members = HashSet::new();
+    let mut racks = Vec::with_capacity(value.racks.len());
+    for rack in value.racks {
+        let rack_id = rack
+            .rack_id
+            .ok_or(RpcDataConversionError::MissingArgument("racks.rack_id"))?;
+        if rack_id.as_str().trim().is_empty() || !rack_ids.insert(rack_id.clone()) {
+            return Err(invalid(
+                "racks must contain non-blank, unique rack identifiers",
+            ));
+        }
+        let mut devices = Vec::with_capacity(rack.members.len());
+        for member in rack.members {
+            if member.manufacturer.trim().is_empty() || member.id.trim().is_empty() {
+                return Err(invalid("member manufacturer and id must not be blank"));
             }
-            let mut devices = Vec::with_capacity(rack.members.len());
-            for member in rack.members {
-                if member.manufacturer.trim().is_empty() || member.id.trim().is_empty() {
-                    return Err(invalid("member manufacturer and id must not be blank"));
-                }
-                let device_type = member
-                    .r#type
-                    .parse()
-                    .map_err(|_| invalid("member type must be Compute, Switch or PowerShelf"))?;
-                if !members.insert((
-                    member.r#type.clone(),
-                    member.manufacturer.clone(),
-                    member.id.clone(),
-                )) {
-                    return Err(invalid("duplicate device member across racks"));
-                }
-                devices.push(ExpectedRackGroupMember {
-                    device_type,
-                    manufacturer: member.manufacturer,
-                    id: member.id,
-                });
+            let device_type = member
+                .r#type
+                .parse()
+                .map_err(|_| invalid("member type must be Compute, Switch or PowerShelf"))?;
+            if !members.insert((
+                member.r#type.clone(),
+                member.manufacturer.clone(),
+                member.id.clone(),
+            )) {
+                return Err(invalid("duplicate device member across racks"));
             }
-            racks.push(ExpectedRackGroupRack {
-                rack_id,
-                members: devices,
+            devices.push(ExpectedRackGroupMember {
+                device_type,
+                manufacturer: member.manufacturer,
+                id: member.id,
             });
         }
-        let metadata = Metadata::try_from(value.metadata.unwrap_or_default())?;
-        metadata
-            .validate(false)
-            .map_err(|e| invalid(&e.to_string()))?;
-        Ok(Self {
-            rack_group_id,
-            topology: RackGroupTopology::new(value.topology),
-            racks,
-            metadata,
-        })
+        racks.push(ExpectedRackGroupRack {
+            rack_id,
+            members: devices,
+        });
     }
+    let metadata = Metadata::try_from(value.metadata.unwrap_or_default())?;
+    metadata
+        .validate(false)
+        .map_err(|e| invalid(&e.to_string()))?;
+    Ok(ExpectedRackGroup {
+        rack_group_id,
+        topology: RackGroupTopology::new(value.topology),
+        protocol,
+        racks,
+        metadata,
+    })
 }
 
 impl From<ExpectedRackGroupRack> for rpc::forge::ExpectedRackGroupRack {
@@ -129,6 +167,7 @@ mod tests {
         rpc::forge::ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new("54f74aea-76eb-4f0a-aab2-b607136f4d35")),
             topology: "gb200_nvl72r1_c2g4".to_string(),
+            protocol: "NVLINK_V6".to_string(),
             racks: vec![
                 rpc::forge::ExpectedRackGroupRack {
                     rack_id: Some(RackId::new("rack-02")),
@@ -158,6 +197,7 @@ mod tests {
         let cases: &[(&str, Mutation)] = &[
             ("missing identity", |v| v.rack_group_id = None),
             ("blank topology", |v| v.topology = " ".to_string()),
+            ("blank protocol", |v| v.protocol = " ".to_string()),
             ("duplicate rack", |v| v.racks.push(v.racks[0].clone())),
             ("duplicate device across racks", |v| {
                 let m = v.racks[0].members[0].clone();
@@ -185,6 +225,22 @@ mod tests {
         let mut empty = wire();
         empty.racks.clear();
         assert!(ExpectedRackGroup::try_from(empty).is_ok());
+    }
+
+    /// Groups stored before the protocol column come back with an empty
+    /// protocol; the read path keeps them, the declaration path rejects them.
+    #[test]
+    fn stored_group_may_lack_a_protocol() {
+        let mut legacy = wire();
+        legacy.protocol.clear();
+        assert!(ExpectedRackGroup::try_from(legacy.clone()).is_err());
+        let stored = stored_expected_rack_group(legacy).unwrap();
+        assert_eq!(stored.protocol, None);
+        let current = stored_expected_rack_group(wire()).unwrap();
+        assert_eq!(current.protocol, Some(RackGroupProtocol::new("NVLINK_V6")));
+        let mut blank = wire();
+        blank.protocol = "x".repeat(129);
+        assert!(stored_expected_rack_group(blank).is_err());
     }
 
     #[test]

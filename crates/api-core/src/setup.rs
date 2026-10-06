@@ -97,7 +97,9 @@ use tokio_util::sync::CancellationToken;
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
-use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
+use crate::cfg::file::{
+    CarbideConfig, DpfExtraService, InitialObjectsConfig, ListenMode, VmaasConfig,
+};
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
 use crate::handlers::machine_validation::apply_config_on_startup;
@@ -959,6 +961,22 @@ async fn initialize_dpf_sdk(
             let services = carbide_config
                 .dpf
                 .resolved_services_for(deployment, deployment_type);
+            // Warn when an Astra deployment has Weave services but no ewethers config.
+            if deployment_type == DpuDeploymentType::Bf4Astra
+                && carbide_config.ewethers_config.is_none()
+                && services.extra.keys().any(|service| {
+                    matches!(
+                        service,
+                        DpfExtraService::DocaWeaveDhcpAgent
+                            | DpfExtraService::DocaWeaveFlowController
+                    )
+                })
+            {
+                tracing::warn!(
+                    deployment = %deployment.deployment_name,
+                    "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+                );
+            }
             let interfaces = match deployment_type {
                 DpuDeploymentType::Bf4Astra => &astra_interfaces,
                 DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => &bf3_interfaces,
@@ -983,6 +1001,7 @@ async fn initialize_dpf_sdk(
                     interfaces,
                     service_vpc_slots,
                     &carbide_config.node_auth,
+                    carbide_config.ewethers_config.as_ref(),
                 ))
                 .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
                 .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
@@ -1102,8 +1121,19 @@ async fn initialize_dpf_sdk(
         tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
     }
 
+    // Get astra config route prefixes for dpu device registration.
+    let astra_config = carbide_config
+        .ewethers_config
+        .as_ref()
+        .map(|config| config.astra.clone())
+        .unwrap_or_default();
+
     Ok(Some(Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
+        carbide_dpf::AstraRoutePrefixes {
+            rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
+            software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
+        },
         db_pool,
         join_set,
     )?)))

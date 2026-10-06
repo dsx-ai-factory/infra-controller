@@ -15,26 +15,42 @@
  * limitations under the License.
  */
 
+use carbide_uuid::vpc::VpcId;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Create a forward DNS domain using the site default TTL:
-    $ nico-admin-cli domain create example.com
+Create an infrastructure domain using the site default TTL:
+    $ nico-admin-cli domain create mysite.example.com
 
-Create a domain with a ten-minute default record TTL:
+Create a domain owned by a VPC:
+    $ nico-admin-cli domain create compute.customer.example \
+    --vpc-id 12345678-1234-5678-90ab-cdef01234567
+
+Create an infrastructure domain with a ten-minute default record TTL:
     $ nico-admin-cli domain create example.com --default-ttl 600
 
 ")]
 pub(crate) struct Args {
-    #[clap(value_name = "NAME", help = "Lowercase forward DNS domain name")]
+    #[clap(
+        value_name = "NAME",
+        help = "Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live names are rejected"
+    )]
     pub(super) name: String,
+
+    #[clap(
+        long,
+        value_name = "VpcId",
+        help = "VPC that owns the domain. A VPC owns at most one live domain"
+    )]
+    pub(super) vpc_id: Option<VpcId>,
+
     #[clap(
         long,
         value_name = "SECONDS",
-        help = "Default record TTL, 30 to 86400 seconds"
+        help = "Default TTL for the zone's records, 30 to 86400 seconds. Omit for the site default"
     )]
     pub(super) default_ttl: Option<u32>,
 }

@@ -963,15 +963,15 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::VpcDeletionResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
-
     // TODO: This needs to validate that nothing references the VPC anymore
     // (like NetworkSegments)
     let vpc_id: VpcId = request
         .into_inner()
         .id
         .ok_or(CarbideError::MissingArgument("id"))?;
+
+    let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),

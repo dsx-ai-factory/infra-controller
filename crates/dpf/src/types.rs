@@ -29,6 +29,13 @@ use crate::crds::dpus_generated::{
     DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
 
+/// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
+#[derive(Debug, Clone, Copy)]
+pub struct AstraRoutePrefixes {
+    pub rail_route_prefix_len: u8,
+    pub software_plane_route_prefix_len: u8,
+}
+
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
 /// a vault or credential manager). Return

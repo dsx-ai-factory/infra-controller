@@ -15,6 +15,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/clients/temporal"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/config"
+	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	cmconfig "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/config"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
@@ -69,6 +70,8 @@ type Config struct {
 	FlowConfig       config.Config
 	CMConfig         cmconfig.Config
 	ProviderRegistry *providerapi.ProviderRegistry
+	// Metrics records completed gRPC requests. Nil disables request metrics.
+	Metrics *flowmetrics.RPCServerMetrics
 	// DataCipher protects optional firmware authentication data. When nil,
 	// operations without authentication data remain available.
 	DataCipher *secret.Cipher
