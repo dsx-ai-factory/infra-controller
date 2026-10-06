@@ -2076,6 +2076,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "hex",
+ "mockito",
  "regex",
  "reqwest 0.13.4",
  "reqwest-middleware",
