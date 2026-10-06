@@ -209,7 +209,7 @@ impl InternalRBACRules {
         // confident no clients are still calling the old names.
         x.perm(
             "ListHealthReportOverrides",
-            vec![ForgeAdminCLI, Health, Ssh, SshRs],
+            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs],
         );
         x.perm(
             "InsertHealthReportOverride",
@@ -1385,12 +1385,13 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn site_agent_can_list_health_reports_for_rest() {
+    fn site_agent_can_list_health_reports() {
         for method in [
             "ListMachineHealthReports",
             "ListRackHealthReports",
             "ListSwitchHealthReports",
             "ListPowerShelfHealthReports",
+            "ListHealthReportOverrides",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
