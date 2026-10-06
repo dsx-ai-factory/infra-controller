@@ -1627,8 +1627,8 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
 }
 
 /// An instance allocated before any monitor pass has GPUs in no NMX-C
-/// partition. The ones its NVLink config omits must end up in the tray default
-/// partition, not stay unpartitioned.
+/// partition. The ones its NVLink config omits, or lists without a logical
+/// partition, must end up in the tray default partition, not stay unpartitioned.
 #[crate::sqlx_test]
 async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();
@@ -1677,12 +1677,15 @@ async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sql
     };
 
     // No monitor pass before allocation: every GPU starts outside any partition.
+    // GPUs 0 and 1 go to the tenant partition, GPU 2 carries an explicit config
+    // with no logical partition, and GPU 3 is omitted from the config entirely.
     let nvl_config = rpc::forge::InstanceNvLinkConfig {
-        gpu_configs: gpus[..2]
+        gpu_configs: gpus[..3]
             .iter()
-            .map(|gpu| rpc::forge::InstanceNvLinkGpuConfig {
+            .enumerate()
+            .map(|(index, gpu)| rpc::forge::InstanceNvLinkGpuConfig {
                 device_instance: gpu.platform_info.as_ref().unwrap().module_id - 1,
-                logical_partition_id: Some(logical_partition_id),
+                logical_partition_id: (index < 2).then_some(logical_partition_id),
             })
             .collect(),
     };
@@ -1800,54 +1803,62 @@ async fn test_subset_nvl_config_preserves_unconfigured_gpus_in_tray_partition(po
         .expect("tray default partition should exist before instance allocation");
     assert_eq!(tray_partition.gpu_uid_list.len(), 4);
 
+    // GPUs 0 and 1 go to the tenant partition, GPU 2 carries an explicit config
+    // with no logical partition, and GPU 3 is omitted from the config entirely.
     let nvl_config = rpc::forge::InstanceNvLinkConfig {
-        gpu_configs: gpus[..2]
+        gpu_configs: gpus[..3]
             .iter()
-            .map(|gpu| rpc::forge::InstanceNvLinkGpuConfig {
+            .enumerate()
+            .map(|(index, gpu)| rpc::forge::InstanceNvLinkGpuConfig {
                 device_instance: gpu.platform_info.as_ref().unwrap().module_id - 1,
-                logical_partition_id: Some(logical_partition_id),
+                logical_partition_id: (index < 2).then_some(logical_partition_id),
             })
             .collect(),
     };
     create_instance_with_nvlink_config(&env, &mh, nvl_config, segment_id).await;
 
-    // Run additional passes after instance allocation to verify omitted GPUs remain accounted for
-    // after reconciliation converges.
-    env.run_nvl_partition_monitor_iteration().await;
-    env.run_nvl_partition_monitor_iteration().await;
+    // Check after every pass, not only once converged: a GPU wrongly evicted from
+    // the tray partition on the first pass would be parked there again on the
+    // next one, hiding the eviction from a final-state check.
+    for pass in 1..=2 {
+        env.run_nvl_partition_monitor_iteration().await;
 
-    let partitions = nmxc_client
-        .get_partition_info_list(GetPartitionInfoListRequest {
-            context: None,
-            partition_id_list: vec![],
-            partition_name_list: vec![],
-            gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
-        })
-        .await
-        .unwrap()
-        .partition_info_list;
-    assert_eq!(partitions.len(), 2);
+        let partitions = nmxc_client
+            .get_partition_info_list(GetPartitionInfoListRequest {
+                context: None,
+                partition_id_list: vec![],
+                partition_name_list: vec![],
+                gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+            })
+            .await
+            .unwrap()
+            .partition_info_list;
+        assert_eq!(partitions.len(), 2, "pass {pass}");
 
-    let tray_partition = partitions
-        .iter()
-        .find(|partition| partition.name == "tray_partition_0")
-        .expect("tray default partition should be preserved");
-    let tenant_partition = partitions
-        .iter()
-        .find(|partition| partition.name != "tray_partition_0")
-        .expect("tenant partition should be created");
+        let tray_partition = partitions
+            .iter()
+            .find(|partition| partition.name == "tray_partition_0")
+            .unwrap_or_else(|| panic!("pass {pass}: tray default partition should be preserved"));
+        let tenant_partition = partitions
+            .iter()
+            .find(|partition| partition.name != "tray_partition_0")
+            .unwrap_or_else(|| panic!("pass {pass}: tenant partition should be created"));
 
-    let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
-    let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
-    expected_tenant_uids.sort_unstable();
-    actual_tenant_uids.sort_unstable();
-    assert_eq!(actual_tenant_uids, expected_tenant_uids);
+        let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
+        let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
+        expected_tenant_uids.sort_unstable();
+        actual_tenant_uids.sort_unstable();
+        assert_eq!(actual_tenant_uids, expected_tenant_uids, "pass {pass}");
 
-    let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
-    let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
-    expected_tray_uids.sort_unstable();
-    actual_tray_uids.sort_unstable();
-    assert_eq!(actual_tray_uids, expected_tray_uids);
+        let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
+        let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
+        expected_tray_uids.sort_unstable();
+        actual_tray_uids.sort_unstable();
+        assert_eq!(
+            actual_tray_uids, expected_tray_uids,
+            "pass {pass}: explicit-None and omitted GPUs stay in the tray partition"
+        );
+    }
 }
 
 #[crate::sqlx_test]
