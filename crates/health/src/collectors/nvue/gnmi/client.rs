@@ -353,43 +353,6 @@ impl GnmiClient {
         Ok(TonicGnmiClient::new(channel))
     }
 
-    /// open a gNMI SAMPLE streaming subscription
-    pub(super) async fn subscribe_sample(
-        &self,
-        paths: &[Path],
-        sample_interval_nanos: u64,
-    ) -> Result<GnmiSubscription, HealthError> {
-        let subscribe_request = build_sample_subscribe_request(paths, sample_interval_nanos);
-        let response = self.subscribe_request(subscribe_request).await?;
-
-        tracing::debug!(
-            switch_id = %self.switch_id,
-            sample_interval_nanoseconds = sample_interval_nanos,
-            rack_id = self.rack_id.as_ref().map(tracing::field::display),
-            "gNMI SAMPLE stream opened"
-        );
-
-        Ok(response)
-    }
-
-    /// open a gNMI ON_CHANGE streaming subscription
-    pub(super) async fn subscribe_on_change(
-        &self,
-        prefix: &Path,
-        paths: &[Path],
-    ) -> Result<GnmiSubscription, HealthError> {
-        let subscribe_request = build_on_change_subscribe_request(prefix, paths);
-        let response = self.subscribe_request(subscribe_request).await?;
-
-        tracing::debug!(
-            switch_id = %self.switch_id,
-            rack_id = self.rack_id.as_ref().map(tracing::field::display),
-            "gNMI ON_CHANGE stream opened"
-        );
-
-        Ok(response)
-    }
-
     /// Opens a streaming Subscribe RPC whose lifetime belongs to the returned subscription.
     pub(super) async fn subscribe_request(
         &self,
@@ -433,7 +396,8 @@ pub(crate) fn system_events_subscribe_path() -> Vec<Path> {
     vec![Path::default()]
 }
 
-fn build_on_change_subscribe_request(prefix: &Path, paths: &[Path]) -> SubscribeRequest {
+/// Builds the updates-only request used by built-in system-event collection.
+pub(super) fn build_on_change_subscribe_request(prefix: &Path, paths: &[Path]) -> SubscribeRequest {
     let subscription_list = SubscriptionList {
         prefix: Some(prefix.clone()),
         subscription: paths
@@ -458,7 +422,11 @@ fn build_on_change_subscribe_request(prefix: &Path, paths: &[Path]) -> Subscribe
     }
 }
 
-fn build_sample_subscribe_request(paths: &[Path], sample_interval_nanos: u64) -> SubscribeRequest {
+/// Builds the built-in SAMPLE request with the configured paths and cadence.
+pub(super) fn build_sample_subscribe_request(
+    paths: &[Path],
+    sample_interval_nanos: u64,
+) -> SubscribeRequest {
     let subscription_list = SubscriptionList {
         prefix: Some(Path {
             target: "nvos".to_string(),
@@ -1164,7 +1132,10 @@ mod tests {
         };
 
         let mut broad = client
-            .subscribe_sample(&nvue_subscribe_paths(&broad_config), 1_000_000)
+            .subscribe_request(build_sample_subscribe_request(
+                &nvue_subscribe_paths(&broad_config),
+                1_000_000,
+            ))
             .await
             .expect("open broad interface subscription");
 
@@ -1211,7 +1182,7 @@ mod tests {
         let selective_paths = nvue_interface_subscribe_paths(&selective_config);
 
         let mut subscription = client
-            .subscribe_sample(&selective_paths, 1_000_000)
+            .subscribe_request(build_sample_subscribe_request(&selective_paths, 1_000_000))
             .await
             .expect("open selected interface subscription");
 
@@ -1586,8 +1557,16 @@ mod tests {
         for mode in 0..3 {
             for _retry in 0..3 {
                 let mut subscription = match mode {
-                    0 => client.subscribe_sample(&paths, 1_000_000).await,
-                    1 => client.subscribe_on_change(&prefix, &paths).await,
+                    0 => {
+                        client
+                            .subscribe_request(build_sample_subscribe_request(&paths, 1_000_000))
+                            .await
+                    }
+                    1 => {
+                        client
+                            .subscribe_request(build_on_change_subscribe_request(&prefix, &paths))
+                            .await
+                    }
                     _ => client.subscribe_request(extended_request.clone()).await,
                 }
                 .expect("open subscription");
@@ -1608,8 +1587,16 @@ mod tests {
 
         for mode in 0..3 {
             let mut subscription = match mode {
-                0 => client.subscribe_sample(&paths, 1_000_000).await,
-                1 => client.subscribe_on_change(&prefix, &paths).await,
+                0 => {
+                    client
+                        .subscribe_request(build_sample_subscribe_request(&paths, 1_000_000))
+                        .await
+                }
+                1 => {
+                    client
+                        .subscribe_request(build_on_change_subscribe_request(&prefix, &paths))
+                        .await
+                }
                 _ => client.subscribe_request(extended_request.clone()).await,
             }
             .expect("open healthy subscription");
