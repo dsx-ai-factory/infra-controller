@@ -15,21 +15,37 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use arc_swap::ArcSwap;
+use axum::Router;
+use axum::middleware::{Next, from_fn};
+use bmc_mock::injection::{Action, Rule, Selector};
+use bmc_mock::test_support::{TEST_MAC_POOL, TestCallbacks, serve_https};
+use bmc_mock::{BmcState, DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_site_explorer::MachineCreator;
-use carbide_site_explorer::config::SiteExplorerConfig;
+use carbide_redfish::libredfish::new_pool_with_credential_ops;
+use carbide_redfish::nv_redfish::NvRedfishClientPool;
+use carbide_secrets::credentials::Credentials;
+use carbide_secrets::memory_credentials::MemoryCredentialStore;
+use carbide_site_explorer::config::{SiteExplorerConfig, SiteExplorerExploreMode};
 use carbide_site_explorer::errors::SiteExplorerError;
+use carbide_site_explorer::test_support::MockEndpointExplorer;
+use carbide_site_explorer::{
+    AuthenticatedBmcClient, BmcAccess, BmcEndpointExplorer, EndpointExplorationService,
+    EndpointExplorer, MachineCreator, SiteExplorationMetrics, SiteExplorer,
+};
 use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
+use model::expected_entity::ExpectedEntity;
 use model::hardware_info::HardwareInfo;
-use model::machine::ManagedHostStateSnapshot;
+use model::machine::{MachineInterfaceSnapshot, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
     Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredDpu, ExploredManagedHost,
@@ -38,6 +54,7 @@ use model::site_explorer::{
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
+use serde_json::json;
 use sqlx::PgPool;
 use tonic::Request;
 
@@ -52,6 +69,128 @@ use crate::tests::common::api_fixtures::network_segment::{
 };
 use crate::tests::common::api_fixtures::site_explorer::MockExploredHost;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
+
+struct GpuPositionEndpointExplorer {
+    host_bmc_ip: IpAddr,
+    bmc_address: SocketAddr,
+    builder: BmcEndpointExplorer,
+    host_explorations: AtomicUsize,
+    other_endpoints: MockEndpointExplorer,
+}
+
+#[async_trait::async_trait]
+impl EndpointExplorer for GpuPositionEndpointExplorer {
+    async fn explore_endpoint(
+        &self,
+        address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        expected: Option<&ExpectedEntity>,
+        last_exploration_error: Option<&EndpointExplorationError>,
+        boot_interface: Option<&BootInterfaceTarget>,
+    ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
+        if address.ip() != self.host_bmc_ip {
+            return self
+                .other_endpoints
+                .explore_endpoint(
+                    address,
+                    interface,
+                    expected,
+                    last_exploration_error,
+                    boot_interface,
+                )
+                .await;
+        }
+
+        self.host_explorations.fetch_add(1, Ordering::Relaxed);
+
+        self.builder
+            .generate_exploration_report(
+                self.bmc_address,
+                BmcAccess::Direct(Credentials::new("root", "0")),
+                boot_interface,
+                None,
+            )
+            .await
+    }
+
+    async fn check_preconditions(
+        &self,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> Result<(), EndpointExplorationError> {
+        self.other_endpoints.check_preconditions(metrics).await
+    }
+}
+
+fn gpu_position_router(host_config: &ManagedHostConfig) -> (Router, BmcState<TestCallbacks>) {
+    let host_info = {
+        let mut mac_pool = TEST_MAC_POOL.lock().unwrap();
+        let hw_mac_addr_pool = mac_pool.allocate_range_config().unwrap();
+
+        let dpus = host_config
+            .dpus
+            .iter()
+            .map(|dpu| DpuMachineInfo {
+                hw_type: HardwareType::NvidiaDgxVr,
+                bmc_mac_address: dpu.bmc_mac_address,
+                host_mac_address: dpu.host_mac_address,
+                oob_mac_address: dpu.oob_mac_address,
+                serial: dpu.serial.clone(),
+                settings: DpuSettings::default(),
+            })
+            .collect();
+
+        let mut info = HostMachineInfo::new(
+            HardwareType::NvidiaDgxVr,
+            dpus,
+            &mut mac_pool,
+            hw_mac_addr_pool,
+        );
+
+        info.serial = host_config.serial.clone();
+        info.bmc_mac_address = host_config.bmc_mac_address;
+
+        info
+    };
+
+    bmc_mock::machine_router(
+        &MachineInfo::Host(host_info),
+        Arc::new(TestCallbacks::default()),
+        "gpu-position".into(),
+        false,
+        Default::default(),
+    )
+}
+
+fn gpu_position_explorers() -> [BmcEndpointExplorer; 2] {
+    let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
+
+    let credentials = Arc::new(MemoryCredentialStore::default());
+
+    let (_, credential_ops) = new_pool_with_credential_ops(
+        credentials.clone(),
+        libredfish::RedfishClientPool::builder()
+            .danger_accept_invalid_certs()
+            .build()
+            .unwrap(),
+        proxy_address.clone(),
+    );
+
+    let client = Arc::new(AuthenticatedBmcClient::new(
+        credential_ops,
+        Arc::new(NvRedfishClientPool::new(proxy_address)),
+        None,
+        carbide_ipmi::test_support(),
+        credentials,
+    ));
+
+    [
+        SiteExplorerExploreMode::LibRedfish,
+        SiteExplorerExploreMode::NvRedfish,
+    ]
+    .map(|mode| {
+        BmcEndpointExplorer::new(client.clone(), Arc::new(AtomicBool::new(false)), mode, None)
+    })
+}
 
 // Test that discover_machines will reject request of machine that was not created by site-explorer when create_machines = true
 #[sqlx_test]
@@ -644,6 +783,134 @@ async fn test_delete_explored_endpoint(pool: PgPool) -> Result<(), Box<dyn std::
     let dpu_endpoints = db::explored_endpoints::find_all_by_ip(*dpu_ip, &mut txn).await?;
     assert_eq!(dpu_endpoints.len(), 1);
     txn.commit().await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_periodic_gpu_position_discovery_persists_and_clears(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = api_fixtures::create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = api_fixtures::create_managed_host_with_config(&env, host_config.clone()).await;
+    let bmc_ip = host_bmc_ip(&env, &mh).await?;
+    let host_id = mh.host().id;
+    let initial = explored_endpoint(&env, bmc_ip).await?;
+
+    assert!(!initial.exploration_requested);
+
+    let (router, state) = gpu_position_router(&host_config);
+    let (server, _) = serve_https("gpu-position", router);
+    let [_, builder] = gpu_position_explorers();
+
+    let explorer = Arc::new(GpuPositionEndpointExplorer {
+        host_bmc_ip: bmc_ip,
+        bmc_address: server.address,
+        builder,
+        host_explorations: AtomicUsize::new(0),
+        other_endpoints: env.endpoint_explorer.clone(),
+    });
+
+    let service = Arc::new(EndpointExplorationService::new(
+        env.pool.clone(),
+        explorer.clone(),
+        Arc::new(env.config.get_firmware_config()),
+    ));
+
+    let config = SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        concurrent_explorations: 1,
+        explorations_per_run: 100,
+        create_machines: Arc::new(false.into()),
+        ..env.config.site_explorer.clone()
+    };
+
+    let site_explorer = SiteExplorer::new(
+        env.pool.clone(),
+        config,
+        env.test_meter.meter(),
+        service,
+        env.api.bmc_client.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+        env.config.rack_profiles.clone(),
+        None,
+        env.test_credential_manager.clone(),
+        false,
+    );
+
+    let injection = &state.injection;
+
+    let mut previous_version = initial.report_version.version_nr();
+
+    for (iteration, (scenario, expected_slot, expected_tray)) in [
+        ("initial discovery", Some(26), Some(16)),
+        ("rebuilt discovery", Some(26), Some(16)),
+        ("topology removed", None, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if expected_slot.is_none() {
+            injection.upsert(Rule {
+                id: "remove-gpu-topology".into(),
+                selector: Selector::Path {
+                    method: Some("GET".into()),
+                    glob: "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0".into(),
+                },
+                action: Action::JsonMerge(json!({
+                    "Oem": {"Nvidia": {"MNNVLinkTopology": null}}
+                })),
+                remaining: None,
+            });
+        }
+
+        site_explorer.run_single_iteration().await?;
+
+        let persisted = explored_endpoint(&env, bmc_ip).await?;
+        let report = &persisted.report;
+        let version = persisted.report_version.version_nr();
+
+        assert!(!persisted.exploration_requested, "{scenario}");
+        assert!(version > previous_version, "{scenario}");
+
+        assert!(report.last_exploration_error.is_none(), "{scenario}");
+
+        assert_eq!(
+            (report.physical_slot_number, report.compute_tray_index),
+            (expected_slot, expected_tray),
+            "{scenario}"
+        );
+
+        assert_eq!(
+            explorer.host_explorations.load(Ordering::Relaxed),
+            iteration + 1,
+            "{scenario}"
+        );
+
+        let response = env
+            .api
+            .get_machine_position_info(Request::new(rpc::forge::MachinePositionQuery {
+                machine_ids: vec![host_id.into()],
+            }))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.machine_position_info.len(), 1, "{scenario}");
+
+        let info = &response.machine_position_info[0];
+
+        assert_eq!(info.machine_id, Some(host_id.into()), "{scenario}");
+
+        assert_eq!(
+            (info.physical_slot_number, info.compute_tray_index),
+            (expected_slot, expected_tray),
+            "{scenario}"
+        );
+
+        previous_version = version;
+    }
 
     Ok(())
 }
@@ -1447,4 +1714,96 @@ async fn test_retained_boot_interface_sweep_removes_only_expired_records(
     txn.rollback().await?;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn both_builders_observe_gpu_position_and_preserve_valid_cbc_partner() {
+    let host_config = ManagedHostConfig::default().with_serial("2102326000001".into());
+    let (router, state) = gpu_position_router(&host_config);
+
+    let gpu_reads = Arc::new(AtomicUsize::new(0));
+    let counter = gpu_reads.clone();
+
+    let router = router.layer(from_fn(
+        move |request: axum::extract::Request, next: Next| {
+            let counter = counter.clone();
+
+            async move {
+                if request.uri().path().contains("/Processors") {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+
+                next.run(request).await
+            }
+        },
+    ));
+    let (server, _) = serve_https("gpu-position", router);
+    let explorers = gpu_position_explorers();
+
+    let access = BmcAccess::Direct(Credentials::new("root", "0"));
+
+    for (scenario, cbc_slot, cbc_tray, expected_slot, expected_tray) in [
+        ("GPU-only supplied VR observation", None, None, 26, 16),
+        (
+            "overflowing CBC slot with valid tray zero",
+            Some(2147483648_i64),
+            Some(0),
+            26,
+            0,
+        ),
+        ("complete CBC precedes GPU", Some(5), Some(0), 5, 0),
+    ] {
+        state.injection.put(vec![Rule {
+            id: "cbc-position".into(),
+            selector: Selector::Path {
+                method: Some("GET".into()),
+                glob: "/redfish/v1/Chassis/Chassis_0".into(),
+            },
+            action: Action::JsonMerge(json!({
+                "Oem": {"Nvidia": {
+                    "@odata.type": "#NvidiaChassis.v1_2_0.NvidiaCBC",
+                    "ChassisPhysicalSlotNumber": cbc_slot,
+                    "ComputeTrayIndex": cbc_tray
+                }}
+            })),
+            remaining: None,
+        }]);
+
+        let reads_before = gpu_reads.load(Ordering::Relaxed);
+
+        for explorer in &explorers {
+            let report = explorer
+                .generate_exploration_report(server.address, access.clone(), None, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                (report.physical_slot_number, report.compute_tray_index),
+                (Some(expected_slot), Some(expected_tray)),
+                "{scenario}"
+            );
+
+            assert_eq!(report.systems[0].id, "System_0", "{scenario}");
+
+            assert_eq!(
+                report
+                    .chassis
+                    .iter()
+                    .find(|chassis| chassis.id == "Chassis_0")
+                    .unwrap()
+                    .serial_number
+                    .as_deref(),
+                Some("2102326000001"),
+                "{scenario}"
+            );
+        }
+
+        if cbc_slot == Some(5) {
+            assert_eq!(
+                gpu_reads.load(Ordering::Relaxed),
+                reads_before,
+                "{scenario}"
+            );
+        }
+    }
 }

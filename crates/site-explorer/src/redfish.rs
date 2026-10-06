@@ -21,6 +21,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_explorer::position::{
+    GPU_POSITION_TIMEOUT, Position, ProcessorResource as PositionProcessor,
+    Resource as PositionResource, is_compute_tray_system,
+};
 use carbide_network::deserialize_input_mac_to_address;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
@@ -45,6 +49,7 @@ use model::site_explorer::{
     UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
+use serde::Deserialize;
 
 const NOT_FOUND: u16 = 404;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
@@ -468,7 +473,7 @@ impl RedfishClient {
             service_root.product.as_deref(),
         );
 
-        Ok(EndpointExplorationReport {
+        let mut report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -493,7 +498,32 @@ impl RedfishClient {
             topology_id: None,
             revision_id: None,
             remediation_error,
-        })
+        };
+
+        report.parse_position_info();
+        if is_host
+            && matches!(
+                redfish_vendor,
+                Some(RedfishVendor::NvidiaGBx00 | RedfishVendor::VeraRubin)
+            )
+            && (report.physical_slot_number.is_none() || report.compute_tray_index.is_none())
+        {
+            match tokio::time::timeout(
+                GPU_POSITION_TIMEOUT,
+                fetch_gpu_position(client.as_ref(), &linked_chassis_ids, &report),
+            )
+            .await
+            {
+                Ok(Some(position)) => {
+                    report.physical_slot_number = report.physical_slot_number.or(position.slot);
+                    report.compute_tray_index = report.compute_tray_index.or(position.tray);
+                }
+                Ok(None) => {}
+                Err(_) => tracing::warn!("GPU position discovery timed out"),
+            }
+        }
+
+        Ok(report)
     }
 
     /// Picks the nv-redfish pool and credentials for one report fetch.
@@ -1349,8 +1379,11 @@ async fn fetch_chassis(
     let mut chassis: Vec<Chassis> = Vec::new();
 
     let chassis_list = client.get_chassis_all().await?;
+
     for chassis_id in &chassis_list {
-        let Ok(desc) = client.get_chassis(chassis_id).await else {
+        let Some((desc, position, topology_id, revision_id)) =
+            fetch_position_chassis(client, chassis_id).await
+        else {
             continue;
         };
 
@@ -1424,7 +1457,6 @@ async fn fetch_chassis(
             desc.serial_number
         };
 
-        let nvidia_oem = desc.oem.as_ref().and_then(|x| x.nvidia.as_ref());
         chassis.push(Chassis {
             id: chassis_id.to_string(),
             manufacturer: desc.manufacturer,
@@ -1432,14 +1464,195 @@ async fn fetch_chassis(
             part_number: desc.part_number,
             serial_number,
             network_adapters: net_adapters,
-            physical_slot_number: nvidia_oem.and_then(|x| x.chassis_physical_slot_number),
-            compute_tray_index: nvidia_oem.and_then(|x| x.compute_tray_index),
-            topology_id: nvidia_oem.and_then(|x| x.topology_id),
-            revision_id: nvidia_oem.and_then(|x| x.revision_id),
+            physical_slot_number: position.slot,
+            compute_tray_index: position.tray,
+            topology_id,
+            revision_id,
         });
     }
 
     Ok(FetchedChassis { chassis })
+}
+
+// libredfish's i32 OEM fields can reject the entire chassis when one position
+// field is malformed. Recover inventory and the valid partner from a raw resource read.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PositionChassis {
+    manufacturer: Option<String>,
+    model: Option<String>,
+    part_number: Option<String>,
+    serial_number: Option<String>,
+    network_adapters: Option<ODataId>,
+    oem: Option<PositionChassisOem>,
+}
+
+#[derive(Deserialize)]
+struct PositionChassisOem {
+    #[serde(rename = "Nvidia")]
+    nvidia: Option<PositionChassisNvidia>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PositionChassisNvidia {
+    #[serde(flatten)]
+    position: Position,
+    topology_id: Option<Box<serde_json::value::RawValue>>,
+    revision_id: Option<Box<serde_json::value::RawValue>>,
+}
+
+async fn fetch_position_chassis(
+    client: &dyn Redfish,
+    chassis_id: &str,
+) -> Option<(
+    libredfish::model::chassis::Chassis,
+    Position,
+    Option<i32>,
+    Option<i32>,
+)> {
+    match client.get_chassis(chassis_id).await {
+        Ok(desc) => {
+            let nvidia = desc.oem.as_ref().and_then(|oem| oem.nvidia.as_ref());
+
+            let position = Position {
+                slot: nvidia
+                    .and_then(|oem| oem.chassis_physical_slot_number)
+                    .filter(|value| *value >= 0),
+                tray: nvidia
+                    .and_then(|oem| oem.compute_tray_index)
+                    .filter(|value| *value >= 0),
+            };
+
+            let topology_id = nvidia.and_then(|oem| oem.topology_id);
+            let revision_id = nvidia.and_then(|oem| oem.revision_id);
+
+            Some((desc, position, topology_id, revision_id))
+        }
+        Err(RedfishError::JsonDeserializeError { .. }) => {
+            let path = format!("/redfish/v1/Chassis/{chassis_id}");
+
+            let resource = client.get_resource(ODataId::from(path)).await.ok()?;
+
+            let raw: PositionChassis = match serde_json::from_str(resource.raw.get()) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(%chassis_id, category = ?error.classify(), line = error.line(), column = error.column(), "Failed to decode chassis position");
+
+                    return None;
+                }
+            };
+
+            let nvidia = raw.oem.and_then(|oem| oem.nvidia);
+            let position = nvidia.as_ref().map(|oem| oem.position).unwrap_or_default();
+
+            let topology_id = nvidia
+                .as_ref()
+                .and_then(|oem| oem.topology_id.as_ref())
+                .and_then(|value| serde_json::from_str(value.get()).ok());
+
+            let revision_id = nvidia
+                .as_ref()
+                .and_then(|oem| oem.revision_id.as_ref())
+                .and_then(|value| serde_json::from_str(value.get()).ok());
+
+            let desc = libredfish::model::chassis::Chassis {
+                manufacturer: raw.manufacturer,
+                model: raw.model,
+                part_number: raw.part_number,
+                serial_number: raw.serial_number,
+                network_adapters: raw.network_adapters,
+                ..Default::default()
+            };
+
+            Some((desc, position, topology_id, revision_id))
+        }
+        Err(_) => None,
+    }
+}
+
+async fn fetch_position_resource<T: serde::de::DeserializeOwned>(
+    client: &dyn Redfish,
+    id: &str,
+) -> Option<T> {
+    let resource = client.get_resource(ODataId::from(id)).await.ok()?;
+
+    serde_json::from_str(resource.raw.get())
+        .inspect_err(|error| {
+            tracing::warn!(resource_id = id, category = ?error.classify(), line = error.line(), column = error.column(), "Failed to decode GPU position resource");
+        })
+        .ok()
+}
+
+async fn fetch_gpu_position(
+    client: &dyn Redfish,
+    linked_chassis_ids: &[String],
+    report: &EndpointExplorationReport,
+) -> Option<Position> {
+    let host_chassis_ids: Vec<_> = linked_chassis_ids
+        .iter()
+        .map(|id| format!("/redfish/v1/Chassis/{id}").into())
+        .collect();
+
+    let mut systems = client.get_systems().await.ok()?;
+
+    systems.sort();
+
+    for system_id in systems {
+        let system_path = format!("/redfish/v1/Systems/{system_id}");
+
+        let Some(system) = fetch_position_resource::<PositionResource>(client, &system_path).await
+        else {
+            continue;
+        };
+
+        if !is_compute_tray_system(
+            &system_id,
+            system.links.chassis.iter().map(|link| &link.odata_id),
+            &host_chassis_ids,
+        ) {
+            continue;
+        }
+
+        let Some(processors) = system.processors else {
+            continue;
+        };
+
+        let Some(mut collection) =
+            fetch_position_resource::<PositionResource>(client, &processors.odata_id.to_string())
+                .await
+        else {
+            continue;
+        };
+
+        collection
+            .members
+            .sort_by(|left, right| left.odata_id.cmp(&right.odata_id));
+
+        for link in collection.members {
+            let Some(processor) =
+                fetch_position_resource::<PositionProcessor>(client, &link.odata_id.to_string())
+                    .await
+            else {
+                continue;
+            };
+
+            if processor.processor_type.as_deref() != Some("GPU") {
+                continue;
+            }
+
+            let position = processor.oem.nvidia.mnnv_link_topology.unwrap_or_default();
+            if (report.physical_slot_number.is_none() && position.slot.is_some())
+                || (report.compute_tray_index.is_none() && position.tray.is_some())
+            {
+                tracing::debug!(%system_id, processor_id = %link.odata_id, "Selected GPU position source");
+
+                return Some(position);
+            }
+        }
+    }
+
+    None
 }
 
 async fn get_base_mac_from_bf4_ndf0(client: &dyn Redfish) -> Option<MacAddress> {

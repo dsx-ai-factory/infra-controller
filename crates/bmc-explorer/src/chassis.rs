@@ -446,6 +446,24 @@ impl<B: Bmc> ExploredChassis<B> {
             .map(|s| s.trim().to_string());
 
         let nvidia_oem = self.chassis.oem_nvidia_cbc().ok().and_then(identity);
+        let raw = self.chassis.raw();
+
+        let cbc_position = raw
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .and_then(|oem| oem.get("Nvidia"))
+            .map(|oem| serde_json::from_value::<crate::position::Position>(oem.clone()))
+            .transpose();
+
+        let position = match cbc_position {
+            Ok(position) => position.unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%chassis_id, category = ?error.classify(), line = error.line(), column = error.column(), "Failed to decode CBC position.");
+                crate::position::Position::default()
+            }
+        };
+
         Chassis {
             id: chassis_id,
             manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
@@ -453,14 +471,8 @@ impl<B: Bmc> ExploredChassis<B> {
             part_number: hw_id.part_number.map(|v| v.to_string()),
             serial_number,
             network_adapters,
-            physical_slot_number: nvidia_oem
-                .as_ref()
-                .and_then(|x| x.chassis_physical_slot_number())
-                .map(|v| v.into_inner() as i32),
-            compute_tray_index: nvidia_oem
-                .as_ref()
-                .and_then(|x| x.compute_tray_index())
-                .map(|v| v.into_inner() as i32),
+            physical_slot_number: position.slot,
+            compute_tray_index: position.tray,
             topology_id: nvidia_oem
                 .as_ref()
                 .and_then(|x| x.topology_id())

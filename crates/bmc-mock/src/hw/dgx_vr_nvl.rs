@@ -113,7 +113,7 @@ impl DgxVrNvl<'_> {
                     bios_mode: redfish::computer_system::BiosMode::Generic,
                     boot_options: None,
                     boot_order_mode: redfish::computer_system::BootOrderMode::Generic,
-                    chassis: vec!["HGX_Chassis_0".into()],
+                    chassis: vec!["HGX_SMM_0".into()],
                     eth_interfaces: None,
                     id: "HGX_Baseboard_0".into(),
                     log_services: None,
@@ -126,7 +126,20 @@ impl DgxVrNvl<'_> {
                     secure_boot_available: false,
                     serial_number: None,
                     storage: None,
-                    processors: None,
+                    // Position values come from the supplied VR payload.
+                    processors: Some(vec![
+                        redfish::processor::gpu(
+                            "HGX_Baseboard_0",
+                            "GPU_0",
+                            "/redfish/v1/Chassis/HGX_GPU_0/Sensors/Voltage_1",
+                            &redfish::processor::GpuIdentity {
+                                uuid: "beea8cdf-7b7d-035c-ed07-360e311fcbe1",
+                                serial_number: "1655023015625",
+                                model: "NVIDIA Rubin",
+                            },
+                        )
+                        .with_position(26, 16),
+                    ]),
                     memory: None,
                 },
                 redfish::computer_system::SingleSystemConfig {
@@ -170,11 +183,11 @@ impl DgxVrNvl<'_> {
                 },
                 self.bluefield_chassis_config(),
                 redfish::chassis::SingleChassisConfig {
-                    id: "HGX_Chassis_0".into(),
+                    id: "HGX_SMM_0".into(),
                     chassis_type: "Zone".into(),
                     manufacturer: Some("NVIDIA".into()),
                     part_number: None,
-                    model: Some("VR NVL144".into()),
+                    model: Some("VR NVL72".into()),
                     serial_number: None,
                     sensors: None,
                     leak_detectors: None,

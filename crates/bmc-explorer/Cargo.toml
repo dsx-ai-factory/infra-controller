@@ -51,6 +51,7 @@ nv-redfish = { workspace = true, features = [
   "network-adapters",
   "network-device-functions",
   "pcie-devices",
+  "processors",
   "ports",
   "power-supplies",
   "update-service",
@@ -85,7 +86,7 @@ bmc-mock = { path = "../bmc-mock" }
 # helpers; applies only to test/bench targets, never the production library.
 bmc-explorer = { path = ".", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

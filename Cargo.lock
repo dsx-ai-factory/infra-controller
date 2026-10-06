@@ -1152,6 +1152,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-mock",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",

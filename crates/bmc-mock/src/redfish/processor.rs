@@ -61,6 +61,21 @@ pub(crate) struct Processor {
 }
 
 impl Processor {
+    /// Adds the supplied VR GPU position and owning chassis relationship.
+    pub(crate) fn with_position(mut self, slot: i32, tray: i32) -> Self {
+        self.resource = self.resource.patch(json!({
+            "Links": { "Chassis": {
+                "@odata.id": format!("/redfish/v1/Chassis/HGX_{}", self.id)
+            } },
+            "Oem": { "Nvidia": { "MNNVLinkTopology": {
+                "TraySlotNumber": slot,
+                "TraySlotIndex": tray
+            } } }
+        }));
+
+        self
+    }
+
     pub(crate) fn to_json(&self) -> serde_json::Value {
         self.resource.clone()
     }

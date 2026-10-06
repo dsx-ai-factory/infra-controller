@@ -207,6 +207,7 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }

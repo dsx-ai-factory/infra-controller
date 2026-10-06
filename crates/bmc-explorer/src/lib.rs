@@ -23,6 +23,7 @@ pub mod hw;
 mod inventories;
 mod manager;
 mod network_adapter;
+pub mod position;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 use std::collections::HashMap;
@@ -156,15 +157,21 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         root = root.as_ref().clone().restrict_expand().into();
     }
 
-    let mut systems_iter = root
+    let systems = root
         .systems()
         .await
         .map_err(Error::nv_redfish("systems"))?
         .ok_or_else(Error::bmc_not_provided("systems"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("systems members"))?
-        .into_iter();
+        .map_err(Error::nv_redfish("systems members"))?;
+
+    let retained_systems = systems
+        .iter()
+        .map(|system| system.raw())
+        .collect::<Vec<_>>();
+
+    let mut systems_iter = systems.into_iter();
 
     let first_system = systems_iter
         .next()
@@ -328,7 +335,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let service = explored_inventories.to_model(hw_type);
     let hardware_class = hardware_class(&root, &system);
 
-    Ok(EndpointExplorationReport {
+    let mut report = EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
         last_exploration_error: None,
         last_exploration_latency: None,
@@ -353,7 +360,104 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         topology_id: None,
         revision_id: None,
         remediation_error: None,
-    })
+    };
+
+    report.parse_position_info();
+
+    if matches!(
+        hw_type,
+        Some(hw::HwType::Gb200 | hw::HwType::DgxGb300 | hw::HwType::VeraRubin)
+    ) && (report.physical_slot_number.is_none() || report.compute_tray_index.is_none())
+    {
+        let scan = explore_gpu_position(
+            bmc,
+            &retained_systems,
+            &linked_chassis_ids,
+            report.physical_slot_number.is_none(),
+            report.compute_tray_index.is_none(),
+        );
+
+        match tokio::time::timeout(position::GPU_POSITION_TIMEOUT, scan).await {
+            Ok(Some(position)) => {
+                report.physical_slot_number = report.physical_slot_number.or(position.slot);
+                report.compute_tray_index = report.compute_tray_index.or(position.tray);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "GPU position discovery timed out."),
+        }
+    }
+
+    Ok(report)
+}
+
+/// Reads optional GPU position lazily from systems belonging to the compute tray.
+async fn explore_gpu_position<B: Bmc>(
+    bmc: &B,
+    systems: &[Arc<nv_redfish::schema::computer_system::ComputerSystem>],
+    host_chassis_ids: &[ODataId],
+    need_slot: bool,
+    need_tray: bool,
+) -> Option<position::Position> {
+    use nv_redfish::core::{BmcError as _, EntityTypeRef};
+
+    let mut systems = systems
+        .iter()
+        .filter(|system| {
+            position::is_compute_tray_system(
+                &system.id,
+                system
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.chassis.as_ref())
+                    .into_iter()
+                    .flatten()
+                    .map(|chassis| chassis.id()),
+                host_chassis_ids,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    systems.sort_by(|a, b| a.odata_id().cmp(b.odata_id()));
+
+    for system in systems {
+        let Some(processors) = system.processors.as_ref() else {
+            continue;
+        };
+
+        let collection = match bmc.get::<position::Resource>(processors.id()).await {
+            Ok(collection) => collection,
+            Err(error) => {
+                tracing::warn!(system_id = %system.id, error_class = ?error.error_class(), "Failed to fetch the optional processor collection.");
+                continue;
+            }
+        };
+
+        let mut processors = collection.members.iter().collect::<Vec<_>>();
+        processors.sort_by(|a, b| a.odata_id.cmp(&b.odata_id));
+
+        for link in processors {
+            let processor = match bmc.get::<position::ProcessorResource>(&link.odata_id).await {
+                Ok(processor) => processor,
+                Err(error) => {
+                    tracing::warn!(system_id = %system.id, processor_id = %link.odata_id, error_class = ?error.error_class(), "Failed to fetch optional GPU position.");
+                    continue;
+                }
+            };
+
+            if processor.processor_type.as_deref() != Some("GPU") {
+                continue;
+            }
+
+            let position = processor.oem.nvidia.mnnv_link_topology.unwrap_or_default();
+
+            if (need_slot && position.slot.is_some()) || (need_tray && position.tray.is_some()) {
+                tracing::debug!(system_id = %system.id, processor_id = %link.odata_id, "Selected GPU position source.");
+                return Some(position);
+            }
+        }
+    }
+
+    None
 }
 
 /// `should_use_network_adapter_port_fallback` limits supplemental host MAC
