@@ -75,6 +75,7 @@ use trace_propagation::set_span_parent_from_headers;
 use tracing::Instrument;
 
 use crate::class::RequestClass;
+use crate::config::Trip;
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
 use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
@@ -454,6 +455,7 @@ async fn proxy_request_inner(
         sensitive_values,
     } = upstream_response;
     let status = response.status();
+    report(&mut slot, class, Trip::Status(status));
     let headers = response.headers().clone();
     let origins = BmcOrigins::new(response.url().clone(), target_ip);
     let body = prepare_response_body(
@@ -480,26 +482,42 @@ async fn proxy_request_inner(
     .map(|body| slot.hold_until_sent(body)))
 }
 
-/// The caller's answer to an attempt that got no answer. Reports to the
-/// BMC's breaker, through `slot`, an attempt the BMC failed: one the proxy
-/// could not connect for, or one the BMC did not answer within at least half
-/// its class's budget. A shorter attempt was cut short by the wait for its
-/// slot, and a timed-out upload, `streamed`, may have been the caller's.
+/// The caller's answer to an attempt that got no answer. Reports an attempt
+/// the BMC failed: one the proxy could not connect for, or one the BMC did
+/// not answer within at least half its class's budget. A shorter attempt was
+/// cut short by the wait for its slot, and a timed-out upload, `streamed`,
+/// may have been the caller's.
 fn answer_failed_attempt(
     slot: &mut Slot,
     failed: AttemptFailed,
     class: &RequestClass,
     streamed: bool,
 ) -> Response<Body> {
-    let bmc_failed = match failed.by_bmc {
-        Some(BmcFailure::Unreachable) => true,
-        Some(BmcFailure::TimedOut { budget }) => !streamed && budget >= class.upstream_timeout / 2,
-        None => false,
+    let ended = match failed.by_bmc {
+        Some(BmcFailure::Unreachable) => Some(Trip::Unreachable),
+        Some(BmcFailure::TimedOut { budget })
+            if !streamed && budget >= class.upstream_timeout / 2 =>
+        {
+            Some(Trip::Timeout)
+        }
+        _ => None,
     };
-    if bmc_failed {
-        slot.bmc_failed();
+    if let Some(ended) = ended {
+        report(slot, class, ended);
     }
     failed.response
+}
+
+/// Counts an exchange that ended as `ended` against `class`'s breaker at the
+/// BMC, through `slot`, when the class's `trip_on` names it.
+fn report(slot: &mut Slot, class: &RequestClass, ended: Trip) {
+    if class
+        .breaker
+        .as_ref()
+        .is_some_and(|breaker| breaker.trips_on(ended))
+    {
+        slot.bmc_failed();
+    }
 }
 
 fn error_response(error: ProxyError) -> Response<Body> {

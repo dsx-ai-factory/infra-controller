@@ -229,6 +229,9 @@ upstream_timeout = "90s"
   together on their way to free slots do not count. Optional, 16 by default.
   Each BMC in use costs the proxy memory in proportion to the `max_queued` of
   every class that takes slots.
+- `breaker`: a table of settings for the class's circuit breaker at each BMC,
+  over those of `[admission.breaker]`; see
+  [`admission.breaker`](#admissionbreaker). Optional.
 
 The budget covers looking up the BMC's credentials in nico-api and any wait
 for a slot at the BMC (see [`admission`](#admission)), then runs from
@@ -281,15 +284,16 @@ max_in_flight = 2
 - `max_in_flight_per_bmc`: how many requests one proxy replica sends to one
   BMC at a time, across all classes, at least 1. Optional; unlimited by
   default. A class's own `max_in_flight` applies within it.
-- `breaker`: a circuit breaker per BMC; see
-  [`admission.breaker`](#admissionbreaker). Optional; off by default.
+- `breaker`: the settings of every class's circuit breaker at each BMC; see
+  [`admission.breaker`](#admissionbreaker). Optional; without it, only
+  classes with a `breaker` table of their own have a breaker.
 
 An `[admission]` table with a key not listed here stops the proxy from
 starting.
 
 A request takes a slot at its BMC before the proxy sends it when its class
-sets `max_in_flight`, `max_in_flight_per_bmc` is set, or `[admission.breaker]`
-is present; otherwise it is sent at once. The proxy looks up the BMC's
+sets `max_in_flight` or has a breaker, or `max_in_flight_per_bmc` is set;
+otherwise it is sent at once. The proxy looks up the BMC's
 credentials first, so a request for an address nico-api has no BMC
 credentials for gets `502` without taking a slot or a place in a queue. A
 request holds its slot until the proxy has passed the whole response on to
@@ -306,20 +310,20 @@ that BMC. A freed slot goes to the highest-priority class that has a request
 waiting and is under its own `max_in_flight`; classes of equal priority take
 turns, and each class's requests go in the order they came. A class gets no
 slot while a higher-priority class has a request waiting that its
-`max_in_flight` lets through, and its requests are refused when their budget
-runs out. A request whose caller disconnects gives up its place, except a
-streamed upload over HTTP/1, whose caller the proxy finds gone only once it
-starts sending the upload.
+`max_in_flight` and breaker let through, and its requests are refused when
+their budget runs out. A request whose caller disconnects gives up its place,
+except a streamed upload over HTTP/1, whose caller the proxy finds gone only
+once it starts sending the upload.
 
 Waiting spends the request's budget, and a request that waited has only the
 rest of it for its first exchange with the BMC; a streamed upload keeps its
 own. The proxy refuses a request with a plain-text body giving the reason:
 with `429 Too Many Requests` when its class's queue at the BMC is full of
-requests still waiting, or when no slot frees within its budget, and with
-`503 Service Unavailable` when the proxy already tracks 100,000 BMCs, when the
-BMC's breaker is open, or when it is shutting down. A refused request never
-reached the BMC, so even a write can be sent again; the refusal carries no
-`Retry-After`. It counts refusals in
+requests still waiting, or when no slot frees within its budget, and with `503
+Service Unavailable` when the proxy already tracks 100,000 BMCs, when the
+request's class's breaker at the BMC is open, or when it is shutting down. A
+refused request never reached the BMC, so even a write can be sent again; the
+refusal carries no `Retry-After`. It counts refusals in
 `carbide_bmc_proxy_admission_refused_total`, by `class` and `reason`
 (`queue_full`, `timeout`, `too_many_bmcs`, `breaker_open`, or
 `shutting_down`), and records the waits of requests that got a slot in
@@ -333,8 +337,12 @@ slots for the others.
 
 #### `admission.breaker`
 
-With a breaker, the proxy stops sending requests to a BMC that keeps failing
-them, instead of letting each caller wait out its budget:
+With a breaker, the proxy stops sending a class's requests to a BMC that
+keeps failing them, instead of letting each caller wait out its budget. Each
+class has a breaker of its own at each BMC, so a BMC that fails one kind of
+request keeps serving the others. Here, every class's breaker opens when the
+BMC cannot be reached or does not answer, and DPS's also when the BMC answers
+with a 5xx status:
 
 ```toml
 [admission.breaker]
@@ -342,42 +350,72 @@ failure_threshold = 0.5
 window = 32
 min_samples = 5
 cool_down = "10s"
+trip_on = ["unreachable", "timeout"]
+
+[[class]]
+name = "dps"
+principals = ["spiffe-service-id/nv-dps"]
+match = ["/redfish/v1/**"]
+
+[class.breaker]
+trip_on = ["unreachable", "timeout", "5xx"]
 ```
 
-- `failure_threshold`: the fraction of the BMC's recent exchanges that must
-  have failed to open its breaker, above 0 and at most 1. Optional, 0.5 by
-  default.
-- `window`: how many of the BMC's most recent exchanges count, from
-  `min_samples` to 1024. Optional, 32 by default.
-- `min_samples`: how many exchanges the BMC must have had before its breaker
-  can open, at least 1. Optional, 5 by default.
+`[admission.breaker]` gives every class a breaker, and a class's own `breaker`
+table gives that class one, unless the `trip_on` the class ends up with is
+empty. A class's breaker takes each setting from its own `breaker`, then from
+`[admission.breaker]`, then the default:
+
+- `failure_threshold`: the fraction of the class's recent exchanges with the
+  BMC that must have failed to open the breaker, above 0 and at most 1. 0.5
+  by default.
+- `window`: how many of the class's most recent exchanges with the BMC count,
+  from `min_samples` to 1024. 32 by default.
+- `min_samples`: how many exchanges the class must have had with the BMC
+  before the breaker can open, at least 1. 5 by default.
 - `cool_down`: how long an open breaker stays open, as a duration string such
-  as `"10s"`, above zero and at most 10 minutes. Optional, 10 seconds by
-  default.
+  as `"10s"`, above zero and at most 10 minutes. 10 seconds by default.
+- `trip_on`: an array of the ways an exchange fails: `"unreachable"`, the
+  proxy cannot connect to the BMC; `"timeout"`, the BMC does not answer in
+  time; `"5xx"`, the BMC answers with any 5xx status; or a status from 400 to
+  599, written as a string such as `"503"` or `"429"`, the BMC answers with
+  it. `["unreachable", "timeout"]` by default. An empty array turns the
+  class's breaker off. Most 4xx statuses, such as `400` or `404`, answer the
+  caller's own mistakes: naming one lets one caller's bad requests open the
+  breaker for every caller of the class.
 
-An empty `[admission.breaker]` table turns breakers on with these defaults,
-and every request then takes a slot, whatever its class.
+A breaker table with a key or a `trip_on` value not listed here stops the
+proxy from starting, as do settings out of bounds: in `[admission.breaker]`,
+alone or with the defaults, or in a class, alone or with what it takes from
+`[admission.breaker]`. Every request of a class with a breaker takes a slot.
 
-An exchange fails when the proxy cannot connect to the BMC, or when the BMC
-does not answer an attempt that had at least half its class's budget. A
-shorter attempt was cut short by its wait for a slot, and a streamed upload
-that times out may have been slowed by its caller, so neither counts. An
-answer of any status, a body that stalls after the answer, and a failure of
-the proxy's own, such as a credential lookup, do not count either. Every
-other freed slot counts as a success, including one whose request stopped
-waiting, or got its slot too late to use it: such requests dilute the
-failures, and one can be the request that closes the breaker.
+A BMC that refuses the connection, or has not completed it and its TLS
+handshake within 5 seconds, is `"unreachable"`. An attempt the BMC does not
+answer within its budget is a `"timeout"`, including one whose budget, under 5
+seconds, ran out while it was connecting, but only when it had at least half
+its class's budget: a shorter attempt was cut short by its wait for a slot,
+and a streamed upload that times out may have been slowed by its caller, so
+neither counts. A status counts as the BMC's answer to the last attempt, after
+any replay with fresh credentials. A connection the BMC closes without
+answering, a body that stalls after the answer, and a failure of the proxy's
+own, such as a credential lookup, never count. Every other freed slot counts
+as a success, including one whose request stopped waiting, or got its slot too
+late to use it: such requests dilute the failures, and one can be the request
+that closes the breaker.
 
-Once `min_samples` exchanges were recorded and `failure_threshold` of the
-last `window` of them failed, the breaker opens, and its record starts over.
-For `cool_down`, the proxy refuses the BMC's new requests at once with `503`,
-reason `breaker_open`; requests already waiting stay queued. Then, once the
-BMC's earlier exchanges ended, the breaker lets one request through and
-refuses the others until it ends: if it succeeds, the breaker closes, and if
-it fails, the breaker opens for another `cool_down`. An open breaker keeps
-the BMC's state while the BMC is idle. Each replica, and each BMC, has its
-own breaker. The proxy counts each opening in
-`carbide_bmc_proxy_breaker_opened_total`, and logs it with the BMC's address.
+Once `min_samples` exchanges were recorded and `failure_threshold` of the last
+`window` of them failed, the breaker opens, and its record starts over. For
+`cool_down`, the proxy refuses the class's new requests to the BMC at once
+with `503`, reason `breaker_open`; requests already waiting stay queued, and
+other classes' requests go on. Then, once the class's earlier exchanges with
+the BMC ended, the breaker lets one request through and refuses the others
+until it ends: if it succeeds, the breaker closes, and if it fails, the
+breaker opens for another `cool_down`. The proxy keeps an idle BMC's breakers
+through their cool-down; after it, a BMC left idle for a minute or more drops
+them, and its next request finds them closed. Each replica has breakers of its
+own. The proxy counts each opening in
+`carbide_bmc_proxy_breaker_opened_total`, by `class`, and logs it with the
+BMC's address.
 
 ## Example Request
 

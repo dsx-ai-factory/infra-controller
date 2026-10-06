@@ -40,6 +40,7 @@ use opentelemetry::StringValue;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer};
 
+use crate::config::{BreakerConfig, BreakerConfigError, BreakerSettings};
 use crate::pattern::RequestPattern;
 
 /// The implicit class for requests no configured class matches.
@@ -128,6 +129,9 @@ struct ClassDefinition {
     /// How many of this class's requests may wait for one BMC at a time.
     #[serde(default = "default_max_queued")]
     max_queued: NonZeroUsize,
+    /// The class's breaker settings, over `[admission.breaker]`'s.
+    #[serde(default)]
+    breaker: Option<BreakerSettings>,
 }
 
 fn default_upstream_timeout() -> Duration {
@@ -160,6 +164,11 @@ pub(crate) struct RequestClass {
     pub(crate) max_in_flight: Option<NonZeroU32>,
     /// Requests of this class that may wait for one BMC at a time.
     pub(crate) max_queued: NonZeroUsize,
+    /// The class's own breaker settings, as written.
+    breaker_settings: Option<BreakerSettings>,
+    /// The class's breaker at each BMC, once
+    /// [`ClassTable::resolve_breakers`] has settled it; `None` without one.
+    pub(crate) breaker: Option<BreakerConfig>,
 }
 
 impl RequestClass {
@@ -172,6 +181,8 @@ impl RequestClass {
             priority: 0,
             max_in_flight: None,
             max_queued: DEFAULT_MAX_QUEUED,
+            breaker_settings: None,
+            breaker: None,
         }
     }
 
@@ -212,7 +223,7 @@ impl<'de> Deserialize<'de> for ClassTable {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum ClassTableError {
+pub(crate) enum ClassTableError {
     #[error(
         "class name {0:?} must be lowercase snake_case of at most {MAX_CLASS_NAME_LEN} characters"
     )]
@@ -239,6 +250,8 @@ enum ClassTableError {
     TimeoutTooLarge(String),
     #[error("class {0:?} max_queued exceeds the {MAX_QUEUED} maximum")]
     QueueTooLong(String),
+    #[error("class {0:?} {1}")]
+    Breaker(String, BreakerConfigError),
 }
 
 impl ClassTable {
@@ -297,6 +310,8 @@ impl ClassTable {
                 priority: definition.priority,
                 max_in_flight: definition.max_in_flight,
                 max_queued: definition.max_queued,
+                breaker_settings: definition.breaker,
+                breaker: None,
             };
             if is_default {
                 table.default = class;
@@ -332,6 +347,19 @@ impl ClassTable {
     /// Every class, the default class last.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &RequestClass> {
         self.classes.iter().chain([&self.default])
+    }
+
+    /// Settles every class's breaker from its own settings over `inherited`,
+    /// those of `[admission.breaker]`.
+    pub(crate) fn resolve_breakers(
+        &mut self,
+        inherited: Option<&BreakerSettings>,
+    ) -> Result<(), ClassTableError> {
+        for class in self.classes.iter_mut().chain([&mut self.default]) {
+            class.breaker = BreakerConfig::resolve(class.breaker_settings.as_ref(), inherited)
+                .map_err(|error| ClassTableError::Breaker(class.name.to_string(), error))?;
+        }
+        Ok(())
     }
 }
 

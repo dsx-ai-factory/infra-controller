@@ -1340,15 +1340,22 @@ async fn a_replay_keeps_its_slot() {
     );
 }
 
-/// A BMC's breaker that opens on the second failure in a row, but not on a
-/// failure after a success, and stays open past any of these tests.
-const BREAKER: &str = r#"
-    [admission.breaker]
-    failure_threshold = 0.75
-    window = 4
-    min_samples = 2
-    cool_down = "10m"
-"#;
+/// Breakers that open on the second failure in a row, but not on a failure
+/// after a success, and stay open past any of these tests; failing as
+/// `trip_on` says, when set.
+fn breaker(trip_on: Option<&str>) -> String {
+    let trip_on = trip_on.map_or(String::new(), |trip_on| format!("trip_on = {trip_on}"));
+    format!(
+        r#"
+        [admission.breaker]
+        failure_threshold = 0.75
+        window = 4
+        min_samples = 2
+        cool_down = "10m"
+        {trip_on}
+        "#
+    )
+}
 
 /// What happens to the requests in [`what_trips_a_bmcs_breaker`].
 #[derive(Clone, Copy)]
@@ -1364,9 +1371,12 @@ enum BreakerScenario {
     ProxyCannotUseTheCredential,
 }
 
-/// The statuses three requests get from a proxy with [`BREAKER`] and
-/// [`QUICK_CLASS`], in `scenario`.
-async fn three_requests(metrics: &MetricsCapture, scenario: BreakerScenario) -> Vec<u16> {
+/// The statuses three requests get from a proxy with a [`breaker`] failing on
+/// `trip_on`, and [`QUICK_CLASS`], in `scenario`.
+async fn three_requests(
+    metrics: &MetricsCapture,
+    (scenario, trip_on): (BreakerScenario, Option<&str>),
+) -> Vec<u16> {
     let (addr, _bmc) = spawn_fake_bmc();
     let (_held, refusing) = refusing_port();
     let (port, path) = match scenario {
@@ -1385,7 +1395,7 @@ async fn three_requests(metrics: &MetricsCapture, scenario: BreakerScenario) -> 
     let mut state = proxy_configured(
         &format!(":{port}"),
         r#"["/**"]"#,
-        &format!("{QUICK_CLASS}{BREAKER}"),
+        &format!("{QUICK_CLASS}{}", breaker(trip_on)),
         credentials,
         "follow_same_origin",
     )
@@ -1401,45 +1411,65 @@ async fn three_requests(metrics: &MetricsCapture, scenario: BreakerScenario) -> 
     statuses
 }
 
-/// A BMC that refuses connections or does not answer within the budget
-/// fails its exchanges, and after two failures its breaker refuses the next
-/// request with 503. A BMC that answers, even with an error, fails nothing,
-/// and neither does the proxy failing on its own.
+/// A BMC fails an exchange in the ways `trip_on` names: by default, when it
+/// refuses connections or does not answer within the budget, and with `5xx`,
+/// when it answers with one. After two failures, its breaker refuses the
+/// next request with 503. The proxy failing on its own never counts.
 #[tokio::test]
 async fn what_trips_a_bmcs_breaker() {
+    const WITH_5XX: Option<&str> = Some(r#"["unreachable", "timeout", "5xx"]"#);
     let metrics = MetricsCapture::start();
     let metrics_window = &metrics;
     check_cases_async(
         [
             Case {
                 scenario: "the BMC refuses connections",
-                input: BreakerScenario::BmcRefusesConnections,
+                input: (BreakerScenario::BmcRefusesConnections, None),
                 expect: Yields(vec![502, 502, 503]),
+            },
+            Case {
+                scenario: "the BMC refuses connections, not on trip_on",
+                input: (
+                    BreakerScenario::BmcRefusesConnections,
+                    Some(r#"["timeout", "5xx"]"#),
+                ),
+                expect: Yields(vec![502, 502, 502]),
             },
             Case {
                 scenario: "the BMC answers after the budget",
-                input: BreakerScenario::BmcAnswersAfterTheBudget,
+                input: (BreakerScenario::BmcAnswersAfterTheBudget, None),
                 expect: Yields(vec![502, 502, 503]),
             },
             Case {
+                scenario: "the BMC answers after the budget, not on trip_on",
+                input: (
+                    BreakerScenario::BmcAnswersAfterTheBudget,
+                    Some(r#"["unreachable", "5xx"]"#),
+                ),
+                expect: Yields(vec![502, 502, 502]),
+            },
+            Case {
                 scenario: "the BMC answers the replay after the budget",
-                input: BreakerScenario::BmcAnswersTheReplayAfterTheBudget,
+                input: (BreakerScenario::BmcAnswersTheReplayAfterTheBudget, None),
                 expect: Yields(vec![502, 502, 503]),
             },
             Case {
                 scenario: "the BMC answers with an error",
-                input: BreakerScenario::BmcAnswersWithAnError,
+                input: (BreakerScenario::BmcAnswersWithAnError, None),
                 expect: Yields(vec![500, 500, 500]),
             },
             Case {
+                scenario: "the BMC answers with an error, on trip_on",
+                input: (BreakerScenario::BmcAnswersWithAnError, WITH_5XX),
+                expect: Yields(vec![500, 500, 503]),
+            },
+            Case {
                 scenario: "the proxy cannot use the BMC's credential",
-                input: BreakerScenario::ProxyCannotUseTheCredential,
+                input: (BreakerScenario::ProxyCannotUseTheCredential, WITH_5XX),
                 expect: Yields(vec![502, 502, 502]),
             },
         ],
-        |scenario| async move {
-            Ok::<_, Infallible>(three_requests(metrics_window, scenario).await)
-        },
+        |input| async move { Ok::<_, Infallible>(three_requests(metrics_window, input).await) },
     )
     .await;
 }
@@ -1482,4 +1512,32 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let next = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await;
     assert_eq!((first.status, waiting.status, next.status), (200, 502, 200));
+}
+
+/// Only the BMC's answer to a request's last attempt counts: the 401 that
+/// rejects a cached credential, before the replay with a fresh one, does
+/// not, even for a breaker that opens on one 401.
+#[tokio::test]
+async fn only_the_last_attempts_answer_counts() {
+    let metrics = MetricsCapture::start();
+    let (addr, _bmc) = spawn_fake_bmc();
+    let mut state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        r#"
+        [admission.breaker]
+        window = 1
+        min_samples = 1
+        cool_down = "10m"
+        trip_on = ["401"]
+        "#,
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    state.api_client = fake_nico_api().await;
+    let replayed = exchange(&metrics, &state, get(ROTATED_PATH)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let next = exchange(&metrics, &state, get(ROTATED_PATH)).await;
+    assert_eq!((replayed.status, next.status), (200, 200));
 }
