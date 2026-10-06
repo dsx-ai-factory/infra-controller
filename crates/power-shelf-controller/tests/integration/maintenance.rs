@@ -132,7 +132,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
                 request_power_shelf_maintenance_via_cm(
                     &env,
                     &shelf_id,
-                    PowerShelfMaintenanceOperation::PowerOff,
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                 )
                 .await;
                 release.send(()).unwrap();
@@ -151,7 +151,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
         assert_ne!(original, replacement);
         assert_eq!(
             replacement.operation,
-            PowerShelfMaintenanceOperation::PowerOff
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true }
         );
 
         env.run_controller_iteration().await;
@@ -259,7 +259,12 @@ async fn legacy_maintenance_failure_repeats_pending_request_only_once(pool: PgPo
 fn cm_power_action(operation: PowerShelfMaintenanceOperation) -> SystemPowerControl {
     match operation {
         PowerShelfMaintenanceOperation::PowerOn => SystemPowerControl::On,
-        PowerShelfMaintenanceOperation::PowerOff => SystemPowerControl::ForceOff,
+        PowerShelfMaintenanceOperation::PowerOff { graceful: true } => {
+            SystemPowerControl::GracefulShutdown
+        }
+        PowerShelfMaintenanceOperation::PowerOff { graceful: false } => {
+            SystemPowerControl::ForceOff
+        }
     }
 }
 
@@ -459,7 +464,7 @@ async fn ready_transitions_to_maintenance_when_request_is_set_via_component_powe
     request_power_shelf_maintenance_via_cm(
         &env,
         &power_shelf_id,
-        PowerShelfMaintenanceOperation::PowerOff,
+        PowerShelfMaintenanceOperation::PowerOff { graceful: false },
     )
     .await;
 
@@ -484,7 +489,7 @@ async fn ready_transitions_to_maintenance_when_request_is_set_via_component_powe
         outcome,
         StateHandlerOutcome::Transition {
             next_state: PowerShelfControllerState::Maintenance {
-                operation: PowerShelfMaintenanceOperation::PowerOff,
+                operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
                 ..
             },
             ..
@@ -702,7 +707,7 @@ async fn power_off_transitions_to_error_when_component_manager_missing(
         enter_maintenance(
             txn.as_mut(),
             &power_shelf_id,
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await;
     }
@@ -746,7 +751,7 @@ async fn power_off_transitions_to_error_when_rack_id_missing(
         enter_maintenance(
             txn.as_mut(),
             &power_shelf_id,
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await;
     }
@@ -791,7 +796,7 @@ async fn power_off_transitions_to_error_when_bmc_mac_missing(
         enter_maintenance(
             txn.as_mut(),
             &power_shelf_id,
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await;
     }

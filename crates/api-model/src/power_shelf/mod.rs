@@ -210,8 +210,18 @@ impl PowerShelf {
 pub enum PowerShelfMaintenanceOperation {
     /// Power on the PowerShelf.
     PowerOn,
-    /// Power off the PowerShelf.
-    PowerOff,
+    /// Power off the PowerShelf. `graceful` selects an OS-ordered shutdown
+    /// (`PowerAction::GracefulShutdown`) when true, or an immediate forced
+    /// power-off (`PowerAction::ForceOff`) when false. Forced is the default and
+    /// is omitted from serialized JSON, so records written before this flag
+    /// existed deserialize as a forced off.
+    PowerOff {
+        #[serde(
+            default = "crate::default_power_off_graceful",
+            skip_serializing_if = "crate::power_off_is_forced"
+        )]
+        graceful: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,15 +479,29 @@ mod tests {
                 )),
             }
 
-            "maintenance power-off" {
+            "maintenance power-off (forced, default)" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
                     request: None,
                 } => Yields((
                     r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
-                        operation: PowerShelfMaintenanceOperation::PowerOff,
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                        request: None,
+                    },
+                )),
+            }
+
+            "maintenance graceful power-off" {
+                PowerShelfControllerState::Maintenance {
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
+                    request: None,
+                } => Yields((
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":true}}"#
+                        .to_string(),
+                    PowerShelfControllerState::Maintenance {
+                        operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                         request: None,
                     },
                 )),
@@ -593,10 +617,17 @@ mod tests {
                 )),
             }
 
-            "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields((
+            "power off (forced, default)" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: false } => Yields((
                     r#"{"operation":"poweroff"}"#.to_string(),
-                    PowerShelfMaintenanceOperation::PowerOff,
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+                )),
+            }
+
+            "graceful power off" {
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields((
+                    r#"{"operation":"poweroff","graceful":true}"#.to_string(),
+                    PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                 )),
             }
         );
@@ -624,7 +655,7 @@ mod tests {
             }
 
             "power off" {
-                PowerShelfMaintenanceOperation::PowerOff => Yields(request(PowerShelfMaintenanceOperation::PowerOff)),
+                PowerShelfMaintenanceOperation::PowerOff { graceful: true } => Yields(request(PowerShelfMaintenanceOperation::PowerOff { graceful: true })),
             }
         );
     }
@@ -636,7 +667,7 @@ mod tests {
             request: None,
         };
         let off = PowerShelfControllerState::Maintenance {
-            operation: PowerShelfMaintenanceOperation::PowerOff,
+            operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
             request: None,
         };
         assert_ne!(on, off);
@@ -702,7 +733,7 @@ mod tests {
 
             "maintenance power-off" {
                 r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"# => Yields(PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
                     request: None,
                 }),
             }
@@ -755,8 +786,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(PowerShelfMaintenanceOperation::PowerOn),
             }
 
-            "poweroff tag" {
-                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff),
+            "poweroff tag defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "poweroff tag with explicit graceful" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(PowerShelfMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "unknown operation is rejected" {
@@ -930,7 +965,7 @@ mod tests {
 
             "maintenance power-off has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
-                    operation: PowerShelfMaintenanceOperation::PowerOff,
+                    operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                     request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }

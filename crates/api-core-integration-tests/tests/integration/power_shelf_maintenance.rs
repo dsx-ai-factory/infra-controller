@@ -81,7 +81,10 @@ async fn test_set_power_shelf_maintenance_power_off_persists_request_with_refere
     let req = shelf
         .power_shelf_maintenance_requested
         .expect("maintenance request should be persisted");
-    assert_eq!(req.operation, ModelPowerShelfMaintenanceOperation::PowerOff);
+    assert_eq!(
+        req.operation,
+        ModelPowerShelfMaintenanceOperation::PowerOff { graceful: false }
+    );
     assert_eq!(req.initiator, "https://issues.example.com/TICKET-42");
 
     Ok(())
@@ -253,7 +256,10 @@ async fn test_set_power_shelf_maintenance_overwrites_previous_request(
     let req = shelf
         .power_shelf_maintenance_requested
         .expect("expected the second maintenance request to be persisted");
-    assert_eq!(req.operation, ModelPowerShelfMaintenanceOperation::PowerOff);
+    assert_eq!(
+        req.operation,
+        ModelPowerShelfMaintenanceOperation::PowerOff { graceful: false }
+    );
     assert_eq!(req.initiator, "second");
 
     Ok(())

@@ -52,8 +52,8 @@ pub(super) async fn handle_maintenance(
         MachineMaintenanceOperation::PowerOn => {
             handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
         }
-        MachineMaintenanceOperation::PowerOff => {
-            handle_power_off(host_machine_id, mh_snapshot, request, ctx).await
+        MachineMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(host_machine_id, mh_snapshot, request, ctx, *graceful).await
         }
         MachineMaintenanceOperation::Reset => {
             handle_reset(host_machine_id, mh_snapshot, request, ctx).await
@@ -87,14 +87,20 @@ async fn handle_power_off(
     mh_snapshot: &ManagedHostStateSnapshot,
     request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    tracing::info!(machine_id = %host_machine_id, "Machine maintenance: PowerOff");
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
+    tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: PowerOff");
     invoke_power_operation(
         host_machine_id,
         mh_snapshot,
         request,
         ctx,
-        PowerAction::ForceOff,
+        action,
         "PowerOff",
     )
     .await

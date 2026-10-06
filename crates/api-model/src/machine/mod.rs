@@ -2806,8 +2806,18 @@ pub struct ReprovisionRequest {
 pub enum MachineMaintenanceOperation {
     /// Power on the host.
     PowerOn,
-    /// Power off the host.
-    PowerOff,
+    /// Power off the host. `graceful` selects an OS-ordered shutdown
+    /// (`PowerAction::GracefulShutdown`) when true, or an immediate forced
+    /// power-off (`PowerAction::ForceOff`) when false. Forced is the default and
+    /// is omitted from serialized JSON, so records written before this flag
+    /// existed deserialize as a forced off.
+    PowerOff {
+        #[serde(
+            default = "crate::default_power_off_graceful",
+            skip_serializing_if = "crate::power_off_is_forced"
+        )]
+        graceful: bool,
+    },
     /// Reset the host (restart / AC power cycle).
     Reset,
     /// Reset the identified Redfish chassis through the host BMC.

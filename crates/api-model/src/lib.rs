@@ -33,6 +33,26 @@ use instance::config::network::InterfaceFunctionId;
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
+/// Serde default for the `graceful` flag on power-off maintenance operations.
+/// Absence in persisted JSON — older records written before the flag existed,
+/// or the default case — means a forced power-off. A forced off is the expected
+/// default when an operator initiates a power action, and older records predate
+/// the flag but were always dispatched as a forced off, so defaulting absent
+/// records to forced both matches the intended default and preserves the
+/// historical behavior.
+pub(crate) fn default_power_off_graceful() -> bool {
+    false
+}
+
+/// Serde `skip_serializing_if` helper for the `graceful` flag: a forced
+/// power-off is the default, so it is omitted from serialized output and only
+/// the graceful case (`graceful = true`) carries an explicit field. This keeps
+/// the serialized form of a forced power-off identical to records written
+/// before the flag was introduced.
+pub(crate) fn power_off_is_forced(graceful: &bool) -> bool {
+    !*graceful
+}
+
 pub mod address_selection_strategy;
 pub mod allocation_type;
 pub mod attestation;

@@ -363,7 +363,11 @@ pub(crate) async fn set_power_shelf_maintenance(
             model::power_shelf::PowerShelfMaintenanceOperation::PowerOn
         }
         rpc::PowerShelfMaintenanceOperation::PowerOff => {
-            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff
+            // The direct admin power-shelf maintenance RPC does not expose a
+            // force flag. A power-off defaults to forced, matching the default
+            // for operator-initiated power actions and the behavior before the
+            // force flag existed.
+            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff { graceful: false }
         }
         rpc::PowerShelfMaintenanceOperation::Unspecified => {
             return Err(CarbideError::InvalidArgument(
