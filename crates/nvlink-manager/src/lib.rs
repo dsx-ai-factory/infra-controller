@@ -2148,6 +2148,24 @@ impl NvlPartitionMonitor {
                                 gpu_action = GpuAction::AddToPartition;
                                 gpu_ctx.logical_partition_id = Some(logical_partition_id);
                             } else {
+                                // Neither a tenant partition nor a holding partition claims
+                                // this GPU, so park it in its tray default partition rather
+                                // than leave it outside every partition.
+                                if let Err(error) = partition_ctx
+                                    .ensure_gpu_enqueued_into_tray_partition(
+                                        &mh.host_snapshot.id,
+                                        info.domain_uuid,
+                                        nvlink_gpu,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        gpu_guid = nvlink_gpu.guid,
+                                        machine_id = %instance.machine_id,
+                                        instance_id = %instance.id,
+                                        error = %error,
+                                        "Failed to enqueue unpartitioned instance GPU into its tray default partition",
+                                    );
+                                }
                                 gpu_action = GpuAction::NoOp;
                             }
                         }
