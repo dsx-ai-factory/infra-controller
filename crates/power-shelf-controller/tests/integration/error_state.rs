@@ -146,7 +146,7 @@ async fn error_with_power_off_maintenance_request_transitions_to_maintenance(
             txn.as_mut(),
             power_shelf_id,
             "test-initiator",
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await?;
     }
@@ -160,7 +160,7 @@ async fn error_with_power_off_maintenance_request_transitions_to_maintenance(
         matches!(
             transition,
             PowerShelfControllerState::Maintenance {
-                operation: PowerShelfMaintenanceOperation::PowerOff,
+                operation: PowerShelfMaintenanceOperation::PowerOff { graceful: true },
                 ..
             }
         ),
@@ -215,7 +215,7 @@ async fn error_with_deletion_takes_precedence_over_maintenance(
             txn.as_mut(),
             power_shelf_id,
             "test-initiator",
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await?;
         mark_power_shelf_as_deleted(txn.as_mut(), &power_shelf_id).await?;

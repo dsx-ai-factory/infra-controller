@@ -363,7 +363,12 @@ pub(crate) async fn set_power_shelf_maintenance(
             model::power_shelf::PowerShelfMaintenanceOperation::PowerOn
         }
         rpc::PowerShelfMaintenanceOperation::PowerOff => {
-            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff
+            // `graceful` is opt-in: an absent flag (or an older client that
+            // predates it) defaults to a forced power-off, matching the default
+            // for operator-initiated power actions.
+            model::power_shelf::PowerShelfMaintenanceOperation::PowerOff {
+                graceful: req.graceful.unwrap_or(false),
+            }
         }
         rpc::PowerShelfMaintenanceOperation::Unspecified => {
             return Err(CarbideError::InvalidArgument(

@@ -2780,6 +2780,11 @@ message PowerShelfMaintenanceRequest {
   // URL of a ticket / issue tracking this maintenance request. Used as the
   // request initiator in audit logs.
   optional string reference = 3;
+  // Only meaningful for POWER_OFF: when true, request a graceful OS-ordered
+  // shutdown; when false or omitted, request a forced power-off. Forced is the
+  // default so omission preserves the behavior of clients that predate this
+  // field.
+  optional bool graceful = 4;
 }
 
 message PowerShelfStateHistoriesRequest {

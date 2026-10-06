@@ -1335,7 +1335,7 @@ mod tests {
             &mut txn,
             shelf.id,
             "admin-cli",
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: false },
         )
         .await?;
 
@@ -1345,8 +1345,8 @@ mod tests {
             .expect("expected a maintenance request to be persisted");
         assert_eq!(
             request.operation,
-            PowerShelfMaintenanceOperation::PowerOff,
-            "operation should round-trip as PowerOff"
+            PowerShelfMaintenanceOperation::PowerOff { graceful: false },
+            "operation should round-trip as PowerOff, including the forced flag"
         );
         assert_eq!(request.initiator, "admin-cli");
 
@@ -1374,7 +1374,7 @@ mod tests {
             &mut txn,
             shelf.id,
             "second",
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         )
         .await?;
 
@@ -1382,7 +1382,10 @@ mod tests {
         let request = reloaded
             .power_shelf_maintenance_requested
             .expect("expected the second maintenance request to be persisted");
-        assert_eq!(request.operation, PowerShelfMaintenanceOperation::PowerOff);
+        assert_eq!(
+            request.operation,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true }
+        );
         assert_eq!(request.initiator, "second");
 
         Ok(())
@@ -1398,7 +1401,7 @@ mod tests {
         // Test clearing both flavors of operation.
         for operation in [
             PowerShelfMaintenanceOperation::PowerOn,
-            PowerShelfMaintenanceOperation::PowerOff,
+            PowerShelfMaintenanceOperation::PowerOff { graceful: true },
         ] {
             set_power_shelf_maintenance_requested(&mut txn, shelf.id, "operator", operation)
                 .await?;
