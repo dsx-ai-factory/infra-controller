@@ -1271,16 +1271,54 @@ impl PreingestionManagerStatic {
                 }
             };
         } else if upgrade_type.is_uefi() {
-            tracing::info!(
-                bmc_ip_address = %endpoint.address,
-                "Firmware upgrade task complete; initiating required reboot"
-            );
+            // UEFI firmware activates on the next host boot. A host that
+            // pre-ingestion found powered off refuses `ForceRestart` (there is
+            // nothing running to restart), so an Off host is powered on
+            // instead. Every other answer, including a failed read, keeps the
+            // `ForceRestart` this step has always issued.
+            let (operation, control, step) = match redfish_client.get_power_state().await {
+                Ok(PowerState::Off) => {
+                    tracing::info!(
+                        bmc_ip_address = %endpoint.address,
+                        "Firmware upgrade task complete; host is off, powering on to activate the new firmware"
+                    );
+                    (
+                        PowerOperation::On,
+                        SystemPowerControl::On,
+                        PowerControlStep::PowerOn,
+                    )
+                }
+                Ok(power_state) => {
+                    tracing::info!(
+                        bmc_ip_address = %endpoint.address,
+                        %power_state,
+                        "Firmware upgrade task complete; initiating required reboot"
+                    );
+                    (
+                        PowerOperation::ForceRestart,
+                        SystemPowerControl::ForceRestart,
+                        PowerControlStep::UefiReboot,
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        error = %e,
+                        "Failed to get power state before activating the new firmware; initiating required reboot"
+                    );
+                    (
+                        PowerOperation::ForceRestart,
+                        SystemPowerControl::ForceRestart,
+                        PowerControlStep::UefiReboot,
+                    )
+                }
+            };
             if instrument_power_op(
-                PowerOperation::ForceRestart,
-                redfish_client.power(SystemPowerControl::ForceRestart),
+                operation,
+                redfish_client.power(control),
                 PowerControlLog::Step {
                     bmc_ip_address: endpoint.address,
-                    step: PowerControlStep::UefiReboot,
+                    step,
                 },
             )
             .await

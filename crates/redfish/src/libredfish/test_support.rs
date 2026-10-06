@@ -413,6 +413,18 @@ impl RedfishSim {
         self.state.lock().unwrap().next_lockdown_status_error = Some(error);
     }
 
+    /// Set one simulated host's power state, as a BMC would report it; the
+    /// host entry is created if no client has touched it yet.
+    pub fn set_power_state(&self, host: &str, power: PowerState) {
+        self.state
+            .lock()
+            .unwrap()
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .power = power;
+    }
+
     /// Inject a transient error into the next power-state read only.
     pub fn fail_next_power_state_read(&self, error: &str) {
         self.state.lock().unwrap().next_power_state_error = Some(error.to_string());
