@@ -6142,10 +6142,16 @@ async fn trigger_reboot_if_needed_with_policy(
             })
         }
     } else {
-        let h = (current_time - entered_state_at).num_hours();
-        Err(StateHandlerError::ManualInterventionRequired(format!(
-            "Machine has not responded after {h} hours."
-        )))
+        let message = match retry_count {
+            Some(retry_count) => {
+                format!("machine has not responded after {retry_count} reboot attempts")
+            }
+            None => format!(
+                "machine has not responded after {} minutes",
+                time_elapsed_since_state_change
+            ),
+        };
+        Err(StateHandlerError::ManualInterventionRequired(message))
     }
 }
 
