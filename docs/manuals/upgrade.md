@@ -28,7 +28,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 ### What is preserved across upgrades
 
 - **Vault cluster**: init state, unseal keys, PKI chain, AppRole credentials, all secrets. Vault is never re-initialized on an upgrade run.
-- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are also preserved, on `nico-pg-cluster` or, for a Site that still uses it, on the deprecated standalone `postgres` StatefulSet in the same namespace (phase 7c). An upgrade does not move them between the two. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
+- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are preserved too. They stay on `nico-pg-cluster`, or on the deprecated standalone `postgres` StatefulSet in the same namespace for a Site that still uses it. An upgrade never moves them from one to the other. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
 - **MetalLB site config**: `IPAddressPool`, `BGPPeer`, `BGPAdvertisement`, and `L2Advertisement` instances. These are re-applied on every run so any manual changes outside `setup.sh` are reconciled back to the values in `values/metallb-config.yaml`.
 - **SSH host key**: the cluster SSH identity is preserved so BMC consoles do not require known-host updates.
 - **Site UUID**: the REST site identity and site-agent registration are preserved — as long as `NICO_SITE_UUID` is unset or identical to the initial install; a different value deletes and re-creates the `site-registration` Secret.
@@ -92,7 +92,7 @@ This file contains the plaintext KEK. Anyone holding it together with a database
 
 ### Back up the databases
 
-Take the backup **before** the upgrade. Once the new version's migrations run, the prior image tags alone are no longer a working rollback. Dump every PostgreSQL instance in the `postgres` namespace. A Site that still runs the deprecated standalone `postgres` StatefulSet has **two**:
+Take the backup **before** the upgrade. Once the new version's migrations run, the prior image tags alone are no longer a working rollback. Dump every PostgreSQL instance in the `postgres` namespace. There are **two** on a Site that still runs the deprecated standalone `postgres` StatefulSet:
 
 ```bash
 umask 077
@@ -102,7 +102,7 @@ kubectl exec -n postgres \
     "$(kubectl get pods -n postgres -l application=spilo,spilo-role=master -o jsonpath='{.items[0].metadata.name}')" \
     -- su postgres -c "pg_dumpall" > nico_pg_pre_upgrade.sql
 
-# standalone `postgres` StatefulSet, only if the Site still runs it: temporal, temporal_visibility, keycloak
+# standalone `postgres` StatefulSet (skip if the Site doesn't run it): temporal, temporal_visibility, keycloak
 kubectl exec -n postgres postgres-0 -- pg_dumpall -U postgres > nico_rest_pg_pre_upgrade.sql
 ```
 
@@ -370,12 +370,12 @@ Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade c
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>
-The standalone `postgres` StatefulSet that holds the Temporal and Keycloak databases is deprecated, and support for it will be removed in a future release. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, the HA cluster that already holds the NICo Core and REST databases, by following the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data).
+The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in a future release. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
 </Warning>
 
-`temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` now default to `auto` instead of `false`. A new Site keeps both databases on `nico-pg-cluster` and never gets the StatefulSet. An existing Site needs no changes for the upgrade, because `auto` keeps a deployed Temporal or Keycloak on the database it already uses. While either stays on the StatefulSet, preflight warns about the deprecation and `setup.sh` repeats the warning at the end of the run.
+Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site never gets the StatefulSet. While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
 
-Unless the value is `false`, the `nico-prereqs` chart now provisions the `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster`. So an existing Site on `auto` gets empty databases to migrate into, which nothing uses until the migration. To migrate, set the value to `true`, since `auto` does not move a deployed workload. A values file carried over from an earlier release may still set `false`. That keeps the StatefulSet and provisions nothing on `nico-pg-cluster`.
+On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set the value to `true`, because `auto` never moves an existing database. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`.
 
 ### 2.2 → 2.3: Core components are mandatory
 
@@ -495,7 +495,7 @@ Downgrades are **not a supported version move**. The [release policy](../../RELE
 
 For NICo Core and REST, the Helm release is rolled back in-place, and the database migration Jobs for the prior version run on startup. NICo's database migrations are designed to be forward-compatible; rolling back does not guarantee schema compatibility if the new version added non-nullable columns. This is why a pre-upgrade database backup is essential.
 
-The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment. `temporal`, `temporal_visibility`, and `keycloak` are on `nico-pg-cluster` too, or on the standalone `postgres` StatefulSet for a Site that still uses it. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
+The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment. The `temporal`, `temporal_visibility`, and `keycloak` databases are there too, unless the Site still runs the standalone `postgres` StatefulSet. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
 
 Re-running `setup.sh` with the prior image tags alone is **not** a complete rollback if the new version's migrations already ran. Restore the database dumps first, then deploy the prior version.
 

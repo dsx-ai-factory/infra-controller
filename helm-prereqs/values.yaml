@@ -227,16 +227,16 @@ flow:
   namespace: flow
 
 ## ---------------------------------------------------------------------------
-## temporal / keycloak: which PostgreSQL holds each database.
+## temporal / keycloak: where each database lives.
 ##
-##   auto   (default) A new Site uses nico-pg-cluster, the shared HA cluster.
-##          An existing Site keeps the database its deployed Temporal or
-##          Keycloak already uses, so an upgrade never moves its data.
-##   true   nico-pg-cluster.
-##   false  The standalone postgres.postgres StatefulSet. DEPRECATED: support
-##          for it will be removed in a future release.
+##   auto   (default) The database is created in nico-pg-cluster, the shared
+##          HA cluster, but its location is left unchanged for an existing
+##          Site.
+##   true   The database lives in nico-pg-cluster.
+##   false  The database lives on the standalone postgres.postgres
+##          StatefulSet. It's deprecated, and support for it will be removed
+##          in a future release.
 ##
-## The nico-pg-cluster database is provisioned unless the value is false.
 ## Sites still on the StatefulSet are highly encouraged to migrate. Refer to
 ## "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
 ## ---------------------------------------------------------------------------
