@@ -477,7 +477,11 @@ async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::P
         .await
         .unwrap()
         .partition_info_list;
-    assert_eq!(nmxc_partitions.len(), 0);
+    // The tenant partition is gone and the released GPUs are parked in the
+    // tray default partition rather than left outside every partition.
+    assert_eq!(nmxc_partitions.len(), 1);
+    assert_eq!(nmxc_partitions[0].name, "tray_partition_0");
+    assert_eq!(nmxc_partitions[0].gpu_uid_list.len(), gpus.len());
 
     // delete logical partition. As no physical partitions are present, we expect logical partition to be
     // fully deleted after we run one iteration of monitor
@@ -645,9 +649,11 @@ async fn test_nvl_partition_monitor_adds_successful_partitions_when_some_creates
         nvlink_config.enabled = true;
     }
 
-    // Fail after one create succeeds.
+    // Allow two creates: the first parks the instance's initially unpartitioned
+    // GPUs in the tray default partition, the second is the first tenant
+    // partition. The second tenant partition create then fails.
     let mut overrides = TestEnvOverrides::with_config(config);
-    overrides.nmxc_fail_after_n_creates = Some(1);
+    overrides.nmxc_fail_after_n_creates = Some(2);
 
     let env = common::api_fixtures::create_test_env_with_overrides(pool.clone(), overrides).await;
 
