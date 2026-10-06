@@ -8498,7 +8498,7 @@ mod tests {
 
         let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
+        assert_eq!(calls[0].operation, rms::PowerOperation::ForceOff as i32);
     }
 
     #[carbide_macros::sqlx_test]

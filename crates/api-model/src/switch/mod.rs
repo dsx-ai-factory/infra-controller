@@ -72,16 +72,9 @@ pub struct SwitchStatus {
 pub enum SwitchMaintenanceOperation {
     /// Power on the switch.
     PowerOn,
-    /// Power off the switch. `graceful` selects an OS-ordered shutdown
-    /// (`PowerAction::GracefulShutdown`) when true, or an immediate forced
-    /// power-off (`PowerAction::ForceOff`) when false. Forced is the default and
-    /// is omitted from serialized JSON, so records written before this flag
-    /// existed deserialize as a forced off.
+    /// Power off the switch.
     PowerOff {
-        #[serde(
-            default = "crate::default_power_off_graceful",
-            skip_serializing_if = "crate::power_off_is_forced"
-        )]
+        #[serde(default)]
         graceful: bool,
     },
     /// Reset the switch (restart / AC power cycle).
@@ -789,7 +782,7 @@ mod tests {
                     request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                 ),
             }
@@ -966,7 +959,7 @@ mod tests {
             }
 
             "power off (forced, default)" {
-                SwitchMaintenanceOperation::PowerOff { graceful: false } => Yields(r#"{"operation":"poweroff"}"#.to_string()),
+                SwitchMaintenanceOperation::PowerOff { graceful: false } => Yields(r#"{"operation":"poweroff","graceful":false}"#.to_string()),
             }
 
             "graceful power off" {
