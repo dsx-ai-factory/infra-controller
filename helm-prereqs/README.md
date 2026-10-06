@@ -545,9 +545,11 @@ values in `helm-prereqs/values.yaml`:
 | `false` | The deprecated standalone StatefulSet. |
 
 `preflight.sh` resolves `auto` on every `setup.sh` run from the deployed
-Temporal release and Keycloak Deployment. When one isn't deployed yet, a Site
-that still runs the `postgres` StatefulSet in the `postgres` namespace stays on
-it, so its data is never orphaned. Otherwise it gets `nico-pg-cluster`. Phase 7c
+Temporal release and Keycloak Deployment. A deployed workload on any other
+database host fails preflight, so set the value explicitly for it. When one
+isn't deployed yet, a Site that still has the `postgres` StatefulSet or its
+`postgres-data-postgres-0` volume in the `postgres` namespace stays on it, so
+its data is never orphaned. Otherwise it gets `nico-pg-cluster`. Phase 7c
 applies the StatefulSet only while either value resolves to `false`, so a new
 Site never gets it. While a Site stays on it, preflight warns about the
 deprecation and `setup.sh` repeats the warning at the end of the run.
