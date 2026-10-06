@@ -309,6 +309,24 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _disarm_group "${_KEYCLOAK_NS}"
 fi
 
+# The receipt preflight requires before setup.sh moves a workload onto
+# nico-pg-cluster. Keep the name in sync with _DB_RECORD_CONFIGMAP in
+# preflight.sh.
+DB_RECORD_CONFIGMAP="nico-workload-databases"
+_record_migration() {
+    local _component="$1"
+    kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
+    _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"${_component}-migrated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}"
+}
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _record_migration temporal
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _record_migration keycloak
+fi
+
 echo ""
 echo "=== Migration complete ==="
 echo "Migrated workloads are left at zero replicas — they stay stopped until"
@@ -322,4 +340,5 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     echo "  - Set keycloak.useHaPostgres: true in ${PREREQS_DIR}/values.yaml (auto keeps Keycloak on postgres.postgres)"
 fi
 echo "  - Re-run setup.sh so phases 7d/7f point Temporal/Keycloak at nico-pg-cluster and scale workloads back up"
+echo "  - Don't scale the workloads up before that. Preflight would treat this copy as stale and ask for a new migration"
 echo "  - Once verified, the legacy temporal/temporal_visibility/keycloak databases on postgres.postgres can be dropped"

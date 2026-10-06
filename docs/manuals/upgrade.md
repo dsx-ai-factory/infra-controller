@@ -257,7 +257,7 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors — with `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you.
+`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is moving the Temporal or Keycloak database off the standalone `postgres` StatefulSet before it's migrated, which stops setup even with `-y`.
 </Warning>
 
 </Steps>
@@ -375,7 +375,7 @@ The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is
 
 Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site never gets the StatefulSet. While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
 
-On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set the value to `true`, because `auto` never moves an existing database. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`.
+On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set the value to `true`, because `auto` never moves an existing database. Then follow the migration guide: `setup.sh` won't move a database off the StatefulSet until the migration script has copied it. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`.
 
 ### 2.2 → 2.3: Core components are mandatory
 

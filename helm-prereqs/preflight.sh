@@ -110,6 +110,8 @@ fi
 
 ERRORS=()
 WARNINGS=()
+# Errors that neither -y nor answering y at the prompt can skip.
+BLOCKING_ERRORS=()
 
 _CORE_VALUES_CFG="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
 _CORE_VALUES_LABEL="${CORE_VALUES:-values/nico-core.yaml}"
@@ -690,6 +692,12 @@ _yaml_toplevel_value() {
     ' "${_file}"
 }
 
+# Prints the namespace Keycloak deploys into: KEYCLOAK_NS, else keycloak.namespace.
+_keycloak_ns() {
+    local _ns="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)}"
+    printf '%s\n' "${_ns:-nico-rest}"
+}
+
 # Prints the PostgreSQL host the deployed Temporal or Keycloak connects to, or
 # nothing when it isn't deployed. Fails when the cluster can't be read, or when
 # a deployed Keycloak doesn't set KC_DB_URL as a literal value.
@@ -704,8 +712,7 @@ _deployed_db_host() {
             jq -r '.server.config.persistence.default.sql.host // "postgres.postgres"' <<< "${_values}"
             ;;
         keycloak)
-            _kc_ns="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)}"
-            _kc_ns="${_kc_ns:-nico-rest}"
+            _kc_ns="$(_keycloak_ns)"
             _kc_deployment="$(kubectl get deployment keycloak -n "${_kc_ns}" --ignore-not-found -o name)" \
                 || return 1
             [[ -n "${_kc_deployment}" ]] || return 0
@@ -719,15 +726,71 @@ _deployed_db_host() {
     esac
 }
 
+# setup.sh records each workload's database location here after deploying it,
+# and migrate-temporal-keycloak-db.sh leaves its receipt here. It lives with the
+# databases, so deleting the postgres namespace removes it too.
+_DB_RECORD_CONFIGMAP="nico-workload-databases"
+
+# Sets _DB_LOCATION to where the component's database is now: nico-pg-cluster,
+# standalone, new, or other. The deployed workload decides first, then the
+# location setup.sh recorded, then whether the standalone StatefulSet or its
+# volume is still there. Phase 7c reattaches a retained volume. Sets
+# _DB_LOCATION_ERROR for other, and leaves _DB_LOCATION empty with an error
+# when the cluster can't be read.
+_db_location() {
+    local _component="$1" _db_host _recorded _standalone
+    _DB_LOCATION=""
+    _DB_LOCATION_ERROR=""
+    if ! _db_host="$(_deployed_db_host "${_component}" 2>/dev/null)" \
+        || ! _recorded="$(kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres \
+            --ignore-not-found -o jsonpath="{.data.${_component}}" 2>/dev/null)" \
+        || ! _standalone="$(kubectl get statefulset/postgres \
+            persistentvolumeclaim/postgres-data-postgres-0 -n postgres \
+            --ignore-not-found -o name 2>/dev/null)"; then
+        _DB_LOCATION_ERROR="could not tell which PostgreSQL the deployed ${_component} uses"
+        return 0
+    fi
+    case "${_db_host}" in
+        nico-pg-cluster.postgres|nico-pg-cluster.postgres.*)
+            _DB_LOCATION=nico-pg-cluster
+            return 0
+            ;;
+        postgres.postgres|postgres.postgres.*)
+            _DB_LOCATION=standalone
+            return 0
+            ;;
+        ?*)
+            _DB_LOCATION=other
+            _DB_LOCATION_ERROR="doesn't recognize ${_db_host}, the PostgreSQL host the deployed ${_component} uses"
+            return 0
+            ;;
+    esac
+    case "${_recorded}" in
+        nico-pg-cluster|standalone)
+            _DB_LOCATION="${_recorded}"
+            ;;
+        "")
+            if [[ -n "${_standalone}" ]]; then
+                _DB_LOCATION=standalone
+            else
+                _DB_LOCATION=new
+            fi
+            ;;
+        *)
+            _DB_LOCATION=other
+            _DB_LOCATION_ERROR="doesn't recognize ${_recorded}, the location recorded for ${_component} in the ${_DB_RECORD_CONFIGMAP} ConfigMap"
+            ;;
+    esac
+    return 0
+}
+
 # Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
-# _USE_HA_POSTGRES as true or false. `auto` keeps a deployed workload on the
-# database it already uses, and keeps a Site that still has the standalone
-# postgres StatefulSet or its data volume on it, so an upgrade never points a
-# Site at an empty database. Only a new Site gets nico-pg-cluster. Records an
-# error and leaves _USE_HA_POSTGRES empty when it can't decide, including when
-# the deployed workload uses a host that is neither of the two.
+# _USE_HA_POSTGRES as true or false. `auto` keeps the database where
+# _db_location finds it, so it never moves an existing database, and a new Site
+# gets nico-pg-cluster. Records an error and leaves _USE_HA_POSTGRES empty when
+# it can't decide.
 _resolve_use_ha_postgres() {
-    local _component="$1" _value _db_host _standalone
+    local _component="$1" _value
     _USE_HA_POSTGRES=""
     _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
     case "${_value}" in
@@ -742,32 +805,70 @@ _resolve_use_ha_postgres() {
             ;;
     esac
 
-    # The PVC outlives a deleted StatefulSet, and phase 7c reattaches it.
-    if ! _db_host="$(_deployed_db_host "${_component}" 2>/dev/null)" \
-        || ! _standalone="$(kubectl get statefulset/postgres \
-            persistentvolumeclaim/postgres-data-postgres-0 -n postgres \
-            --ignore-not-found -o name 2>/dev/null)"; then
-        ERRORS+=("${_component}.useHaPostgres: auto could not tell which PostgreSQL the deployed ${_component} uses. Set it to true or false")
-        return 0
-    fi
-    case "${_db_host}" in
-        nico-pg-cluster.postgres|nico-pg-cluster.postgres.*)
+    _db_location "${_component}"
+    case "${_DB_LOCATION}" in
+        nico-pg-cluster|new)
             _USE_HA_POSTGRES=true
             ;;
-        postgres.postgres|postgres.postgres.*)
+        standalone)
             _USE_HA_POSTGRES=false
             ;;
-        "")
-            if [[ -n "${_standalone}" ]]; then
-                _USE_HA_POSTGRES=false
-            else
-                _USE_HA_POSTGRES=true
-            fi
-            ;;
         *)
-            ERRORS+=("${_component}.useHaPostgres: auto doesn't recognize ${_db_host}, the PostgreSQL host the deployed ${_component} uses. Set it to true or false")
+            ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Set it to true or false")
             ;;
     esac
+    return 0
+}
+
+# Records a blocking error unless an explicit true can safely move the
+# component's database onto nico-pg-cluster. Moving it off the standalone
+# StatefulSet needs the receipt migrate-temporal-keycloak-db.sh leaves after a
+# complete copy. The workload also has to have stayed scaled to zero since, or
+# the standalone database may have taken writes the copy doesn't have.
+_check_db_cutover() {
+    local _component="$1" _ns _receipt _replicas _dep _hint
+    local -a _deployments
+    _hint="helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db ${_component}"
+    _db_location "${_component}"
+    case "${_DB_LOCATION}" in
+        standalone) ;;
+        "")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}, so it can't rule out moving ${_component} off the standalone postgres.postgres StatefulSet. Check cluster access and re-run")
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+
+    case "${_component}" in
+        temporal)
+            _ns=temporal
+            _deployments=(temporal-frontend temporal-history temporal-matching temporal-worker)
+            ;;
+        keycloak)
+            _ns="$(_keycloak_ns)"
+            _deployments=(keycloak)
+            ;;
+    esac
+    if ! _receipt="$(kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres \
+        --ignore-not-found -o jsonpath="{.data.${_component}-migrated}" 2>/dev/null)"; then
+        BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read the migration receipt in the ${_DB_RECORD_CONFIGMAP} ConfigMap. Check cluster access and re-run")
+        return 0
+    fi
+    if [[ -z "${_receipt}" ]]; then
+        BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
+        return 0
+    fi
+    for _dep in "${_deployments[@]}"; do
+        if ! _replicas="$(kubectl get deployment "${_dep}" -n "${_ns}" --ignore-not-found \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null)"; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read the replica count of ${_ns}/${_dep}. Check cluster access and re-run")
+            return 0
+        fi
+        if [[ -n "${_replicas}" && "${_replicas}" != "0" ]]; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: ${_ns}/${_dep} has run since the migration at ${_receipt}, so the standalone database may have newer data. Run '${_hint}' again")
+            return 0
+        fi
+    done
     return 0
 }
 
@@ -1128,9 +1229,9 @@ EOF
     # 8. Temporal/Keycloak database. Resolves temporal.useHaPostgres and
     # keycloak.useHaPostgres for setup.sh phases 7c/7d/7f, and warns while
     # either stays on the deprecated standalone postgres.postgres StatefulSet.
-    # Fails closed rather than let setup.sh redirect a Site with un-migrated
-    # legacy data onto an empty or incomplete database. See "Consolidating
-    # Temporal/Keycloak onto nico-pg-cluster" in README.md.
+    # Stops setup before it moves a database off the StatefulSet without a
+    # complete migration. See "Consolidating Temporal/Keycloak onto
+    # nico-pg-cluster" in README.md.
     # -----------------------------------------------------------------------
     _resolve_use_ha_postgres temporal
     _TEMPORAL_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
@@ -1146,95 +1247,16 @@ EOF
         WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in a future release. Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\"")
     fi
 
-    if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" || "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
-        _LEGACY_PG_POD="$(kubectl get pods -n postgres -l app=postgres \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        _NICO_PG_POD="$(kubectl get pods -n postgres \
-            -l cluster-name=nico-pg-cluster,spilo-role=master \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-
-        # Fails closed: an unreadable legacy count, a missing target database,
-        # or an unreadable target count are all treated as "cannot rule out
-        # data loss" and raise an ERROR — not silently skipped as "nothing to
-        # migrate". In particular, flipping the toggle and running setup.sh
-        # directly (skipping the documented `helmfile sync -l name=nico-prereqs`
-        # step) means the target database genuinely doesn't exist yet at this
-        # point — that's exactly the case this check exists to catch, not a
-        # reason to wave it through.
-        _check_db_migration_needed() {
-            local _label="$1" _db="$2" _count_query="$3" _script_hint="$4"
-
-            # No legacy pod at all: genuinely nothing to protect (fresh
-            # cluster, postgres.postgres was never deployed). But a legacy
-            # pod WITH no nico-pg-cluster pod is exactly the direct
-            # opt-in-then-run-setup.sh-without-syncing-first case this check
-            # exists to catch — fail closed here too, not just skip.
-            [[ -n "${_LEGACY_PG_POD}" ]] || return 0
-            if [[ -z "${_NICO_PG_POD}" ]]; then
-                ERRORS+=("${_label}: nico-pg-cluster is not reachable, so this can't confirm postgres.postgres/${_db} has already been migrated — ensure postgresql.enabled=true and the nico-prereqs release has synced ('helmfile sync -l name=nico-prereqs') before proceeding")
-                return 0
-            fi
-
-            local _legacy_count
-            if ! _legacy_count="$(kubectl exec -n postgres "${_LEGACY_PG_POD}" -- \
-                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
-                || [[ ! "${_legacy_count}" =~ ^[0-9]+$ ]]; then
-                ERRORS+=("${_label}: could not read a row count from postgres.postgres/${_db} — cannot verify whether ${_db} needs to be migrated before proceeding")
-                return 0
-            fi
-            # Legacy is genuinely empty — nothing to lose, safe to proceed.
-            [[ "${_legacy_count}" -gt 0 ]] || return 0
-
-            if ! kubectl exec -n postgres "${_NICO_PG_POD}" -- \
-                psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null \
-                | grep -q 1; then
-                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but the nico-pg-cluster '${_db}' database doesn't exist yet — run 'helmfile sync -l name=nico-prereqs' to provision it, then '${_script_hint}', before re-running setup.sh")
-                return 0
-            fi
-
-            local _nico_count
-            if ! _nico_count="$(kubectl exec -n postgres "${_NICO_PG_POD}" -- \
-                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
-                || [[ ! "${_nico_count}" =~ ^[0-9]+$ ]]; then
-                ERRORS+=("${_label}: could not read a row count from nico-pg-cluster/${_db} — cannot verify the migration completed")
-                return 0
-            fi
-
-            # A dump/restore of the same table should leave equal counts.
-            # Fewer means an incomplete/partial migration; more means the
-            # target has diverged from what was actually dumped (e.g. a
-            # stale prior migration attempt) — either way it's not the clean
-            # 1:1 restore this check exists to confirm. (Nothing else writes
-            # to nico-pg-cluster/${_db} before setup.sh cuts the workload
-            # over to it.)
-            if [[ "${_nico_count}" -ne "${_legacy_count}" ]]; then
-                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but nico-pg-cluster/${_db} has ${_nico_count} — migration looks incomplete or stale. Run '${_script_hint}' before proceeding, or this data will be orphaned")
-            fi
-            # This function communicates findings via ERRORS, not its own
-            # exit code — without this, a false `-eq 0` above (the "all
-            # good" case) would make the function return 1, and since
-            # preflight.sh is sourced into setup.sh's `set -e` shell, a bare
-            # call to this function would silently abort setup.sh entirely.
-            return 0
-        }
-
-        if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" ]]; then
-            _check_db_migration_needed \
-                "temporal.useHaPostgres" "temporal" "SELECT count(*) FROM namespaces" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
-            # temporal_visibility has its own tables (no namespaces table) —
-            # use schema presence (any tables at all) as the migrated-or-not
-            # signal, so a partial migration (temporal restored,
-            # temporal_visibility not) is caught too.
-            _check_db_migration_needed \
-                "temporal.useHaPostgres" "temporal_visibility" \
-                "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
+    # auto never moves a deployed database, so only an explicit true can. These
+    # errors stop setup even under -y. Nothing moves when phase 7 is skipped,
+    # and phase 7d doesn't deploy a Keycloak that nico-rest.yaml disables.
+    if [[ "${SKIP_REST:-false}" != "true" ]]; then
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" temporal useHaPostgres)" == "true" ]]; then
+            _check_db_cutover temporal
         fi
-        if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
-            _check_db_migration_needed \
-                "keycloak.useHaPostgres" "keycloak" "SELECT count(*) FROM realm" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db keycloak"
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak useHaPostgres)" == "true" \
+            && "$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)" == "true" ]]; then
+            _check_db_cutover keycloak
         fi
     fi
 
@@ -1301,6 +1323,10 @@ fi
 # ---------------------------------------------------------------------------
 _print_separator() { echo "---------------------------------------------------------------------"; }
 
+if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+    ERRORS+=("${BLOCKING_ERRORS[@]}")
+fi
+
 if [[ ${#ERRORS[@]} -eq 0 && ${#WARNINGS[@]} -eq 0 ]]; then
     if ${_NICO_REST_ENABLED}; then
         echo "Pre-flight OK  (NICo REST source: ${NICO_REST_DIR}, charts: ${NICO_REST_HELM_DIR})"
@@ -1351,6 +1377,10 @@ if [[ ${#ERRORS[@]} -eq 0 ]]; then
 fi
 
 # Hard errors — default abort
+if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+    echo "  The database errors above stop setup, even with -y. Fix them and re-run setup.sh."
+    if ${_SOURCED}; then return 1; else exit 1; fi
+fi
 if [[ "${AUTO_YES:-false}" == "true" ]]; then
     echo "  Errors above noted — continuing (-y flag set). Things may fail."
     if ${_SOURCED}; then return 0; else exit 0; fi

@@ -2077,6 +2077,18 @@ else
     echo "NICo REST postgres ready"
 fi
 
+# Records where a workload's database lives, so preflight can still tell after
+# the workload is deleted. Every deploy also clears the migration receipt: the
+# workload now runs on nico-pg-cluster, or the copy is stale.
+_record_db_location() {
+    local _component="$1" _location=standalone
+    [[ "$2" != "true" ]] || _location=nico-pg-cluster
+    kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || kubectl create configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null
+    kubectl patch configmap "${_DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"${_component}\":\"${_location}\",\"${_component}-migrated\":null}}" >/dev/null
+}
+
 # --- 7d. Keycloak (conditional) -----------------------------------------------
 # Only deploy Keycloak if nico-rest.yaml has keycloak.enabled: true.
 # If using external OAuth2/OIDC (Option B in nico-rest.yaml), skip this step.
@@ -2138,6 +2150,7 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
     fi
 
     "${SCRIPT_DIR}/keycloak/setup.sh"
+    _record_db_location keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     echo "Keycloak ready"
 else
     echo "=== [7d/7] Keycloak — skipped (keycloak.enabled is not true in nico-rest.yaml) ==="
@@ -2232,6 +2245,7 @@ EOF
 fi
 
 "${TEMPORAL_CMD[@]}"
+_record_db_location temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 echo "Temporal ready"
 
 # Create the Temporal namespaces required by NICo REST workers (requires mTLS)
