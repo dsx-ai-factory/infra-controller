@@ -224,7 +224,7 @@ Created Services have:
 ### Switch NVOS Services
 
 A device with `device_kind: switch` and an `nvos_ip` in status additionally
-gets a `mat-nvos-<id>` Service labelled `mat-machine-type: nvos` and annotated
+gets a `mat-nvos-<id>` Service labeled `mat-machine-type: nvos` and annotated
 `nvidia-infra-controller/mat-nvos-ip`, with the NVOS IP published as
 `externalIPs` and an apiserver-allocated clusterIP, exactly like the BMC
 Service. Its single port, `nmxc` (TCP 9370), targets the same bmc-mock listen

@@ -7,7 +7,8 @@ partition removal, tray holding partitions, and tenant partition membership.
 This page covers what the mock serves, how NICo reaches it, and what it does
 not do. Refer to the
 [crate README](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/nmxc-mock/README.md)
-for the partition rules and a `grpcurl` recipe, and to
+for how the mock picks the rack that answers a request and for the
+`[nmxc_mock]` keys that set its version string and factory partition, and to
 [NVLink Partitioning](../manuals/nvlink_partitioning.md) for the settings that
 make NICo call NMX-C in the first place.
 

@@ -627,6 +627,12 @@ pods:
   # mat-2 to mat-9 follow the same pattern
 ```
 
+Earlier versions of this example set `rack_profile_id: NVL72` on each rack
+group. Drop it from a copied values file before upgrading: machine-a-tron now
+derives the profile from the rack type and refuses to start when the key
+names a different one, with an error of the form
+`racks.<section>.rack_profile_id = "NVL72" does not match ..., the profile nico-api derives for a wiwynn_gb200_nvl72 rack; remove the key`.
+
 Install with both files. Check first that the render carries no machine
 group, so the count prints 0:
 
@@ -651,8 +657,10 @@ The `resources` block comes from the multipod profile, which sizes 2Gi of
 memory for 300 BMCs per pod. Raise it for 1,775 BMCs per pod.
 `machine-a-tron-scale-4500.yaml` allots 8Gi to pods of up to 8,100 BMCs.
 
-The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service. The
-shipped `[rack_profiles.NVL72]` profile covers these racks. Refer to
+The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service.
+nico-api derives the `GB200_NVL72R1_C2G4_WIWYNN` profile for these racks from
+the rack groups machine-a-tron declares, as described under
+[Installing a Scale Profile](#installing-a-scale-profile). Refer to
 [Machine-a-tron RMS Mock](machine-a-tron-rms-mock.md#pointing-nico-at-it) and
 to [RMS Configuration](../configuration/rms.md). 250 racks need 17,750 BMC
 addresses, more than the shipped `simulated-oob` prefix holds. Refer to
