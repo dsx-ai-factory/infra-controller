@@ -64,13 +64,15 @@ The following binaries build an OTLP span exporter:
 - **nico-dhcp-server** (`crates/dhcp-server/src/main.rs`) - the Rust DHCP server the BlueField
   DaemonSet runs. One span per packet, configured the same way (see
   [nico-dhcp tracing](#nico-dhcp-tracing)).
+- **nico-ssh-console-rs** (`crates/ssh-console/src/main.rs`) - one span per console operation, off by
+  default unless an OTLP endpoint is configured (see
+  [nico-ssh-console-rs tracing](#nico-ssh-console-rs-tracing)).
 - **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
   variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
   [REST service tracing](#7-nico-rest-api-service-tracing)).
 
-The other binaries (nico-hardware-health, nico-ssh-console-rs, and nico-dsx-exchange-consumer)
-carry the OpenTelemetry crates in the workspace but do not build a span exporter, so they do not
-emit traces.
+The other binaries (nico-hardware-health and nico-dsx-exchange-consumer) carry the
+OpenTelemetry crates in the workspace but do not build a span exporter, so they do not emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
 nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
@@ -325,6 +327,39 @@ Two separate programs serve DHCP, and both use the shared setup in
 - **Shutdown.** The hook sends its last batch when Kea unloads it. nico-dhcp-server sends its last
   batch only after its serving loop returns to `main`. It does not handle SIGTERM, so spans still buffered when
   the pod is terminated are lost.
+
+### nico-ssh-console-rs tracing
+
+`nico-ssh-console-rs` traces each console operation it serves. It uses the shared setup in
+`carbide_instrument::otlp_tracing`, enabled by that crate's `otlp-tracing` feature.
+
+- **Off by default.** It exports spans only when an OTLP endpoint is configured. There is no
+  separate enabled flag and no runtime toggle.
+- **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (`otlpEndpoint` Helm value) or
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, which also applies to metrics and logs. The traces-specific
+  variable takes precedence when both are set. If the exporter rejects the endpoint, the service
+  logs a warning and continues without span export.
+- **Span level, separate from the log level.** `NICO_TRACES_SPAN_LEVEL` sets the most verbose span
+  level exported, defaulting to `info`, and accepts `off`, `error`, `warn`, `info`, `debug`,
+  `trace`, or `0`-`5`. It is independent of `RUST_LOG` and of the `--debug` flag.
+- **One span per operation, not per session.** The spans are
+  `ssh_console_auth_certificate`, `ssh_console_auth_publickey`, `ssh_console_channel_open`,
+  `ssh_console_shell_request` and `ssh_console_exec_request`, all in
+  `crates/ssh-console/src/frontend.rs`. Console sessions stay open for hours, so a span covering a
+  whole session would not export until the session ended and its duration would mostly measure idle
+  time. Terminal traffic on `data` and `extended_data` is not traced, because each keystroke would
+  produce a span.
+- **Trace roots.** An SSH client cannot send a `traceparent` header, so each operation span starts a
+  new trace.
+- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+  with `TraceInjectService` and sends the trace context on every request, so tenant public key
+  validation and instance ID lookups appear in the same trace as the operation that triggered them.
+- **Resource / tracer:** `service.name = nico-ssh-console-rs`, tracer name
+  `nico-ssh-console-rs`.
+- **Span fields:** `peer_address` on every operation, plus `machine` on the auth, channel-open and
+  shell-request spans.
+- **Sampling.** The standard `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` variables apply.
+- **Shutdown.** The service sends the last batch of spans after its listener task stops.
 
 ### W3C trace-context propagation
 

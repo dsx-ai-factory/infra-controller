@@ -27,7 +27,7 @@ use tracing::metadata::LevelFilter;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    setup_logging(&cli);
+    let tracing = setup_logging(&cli);
 
     match cli.command {
         Command::Run(run_command) => {
@@ -38,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // shutdown handle.
             let (_drop_guard, join_handle) = spawn_handle.into_parts();
             join_handle.await.expect("ssh-console task panicked");
+            // Flush spans that the exporter has not sent yet.
+            tracing.shutdown().await;
         }
         Command::DefaultRunConfig => {
             print!("{}", Config::default().into_annotated_config_file())
@@ -233,7 +235,7 @@ enum CliError {
     Config(#[from] ConfigError),
 }
 
-fn setup_logging(cli: &Cli) {
+fn setup_logging(cli: &Cli) -> carbide_instrument::otlp_tracing::Tracing {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -244,13 +246,22 @@ fn setup_logging(cli: &Cli) {
         None
     };
 
+    let log_filter = EnvFilter::builder()
+        .with_default_directive(level.map(Into::into).unwrap_or(LevelFilter::INFO.into()))
+        .from_env_lossy();
+
+    let (span_layer, tracing) = carbide_instrument::otlp_tracing::setup(
+        carbide_instrument::otlp_tracing::Config::new("nico-ssh-console-rs"),
+    );
+
+    // The filter sits on the log layer, so RUST_LOG does not limit span export.
     if let Err(e) = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::Layer::default().compact())
         .with(
-            EnvFilter::builder()
-                .with_default_directive(level.map(Into::into).unwrap_or(LevelFilter::INFO.into()))
-                .from_env_lossy(),
+            tracing_subscriber::fmt::Layer::default()
+                .compact()
+                .with_filter(log_filter),
         )
+        .with(span_layer)
         .try_init()
     {
         panic!(
@@ -258,4 +269,8 @@ fn setup_logging(cli: &Cli) {
             code path has already set a global default log subscriber: {e}"
         );
     }
+
+    tracing.report();
+
+    tracing
 }
