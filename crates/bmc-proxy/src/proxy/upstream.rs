@@ -86,6 +86,30 @@ pub(super) struct UpstreamResponse {
     pub(super) sensitive_values: Vec<String>,
 }
 
+/// An attempt that got no answer from the BMC: the caller's answer, and how
+/// the BMC failed it, if the proxy did not fail it first.
+pub(super) struct AttemptFailed {
+    pub(super) response: Response<Body>,
+    pub(super) by_bmc: Option<BmcFailure>,
+}
+
+/// How the BMC failed an attempt.
+pub(super) enum BmcFailure {
+    /// The proxy could not connect to it.
+    Unreachable,
+    /// It did not answer within the attempt's `budget`.
+    TimedOut { budget: Duration },
+}
+
+impl From<Response<Body>> for AttemptFailed {
+    fn from(response: Response<Body>) -> Self {
+        Self {
+            response,
+            by_bmc: None,
+        }
+    }
+}
+
 impl UpstreamBody {
     pub(super) async fn prepare(headers: &HeaderMap, body: Body) -> Result<Self, axum::Error> {
         let declared_length = headers
@@ -167,7 +191,7 @@ pub(super) async fn send_upstream(
     path_and_query: http::uri::PathAndQuery,
     upstream_body: &mut UpstreamBody,
     deadline: tokio::time::Instant,
-) -> Result<UpstreamResponse, Response<Body>> {
+) -> Result<UpstreamResponse, AttemptFailed> {
     let mut bmc_client_info = tokio::time::timeout_at(
         deadline,
         create_client(
@@ -209,11 +233,9 @@ pub(super) async fn send_upstream(
         .map_err(|e| {
             error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
         })?;
+    let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
     let upstream_request = upstream_body
-        .attach(
-            upstream_request,
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
+        .attach(upstream_request, budget)
         .map_err(error_response)?;
 
     let started = Instant::now();
@@ -228,7 +250,18 @@ pub(super) async fn send_upstream(
             response,
             sensitive_values,
         })
-        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
+        .map_err(|error| AttemptFailed {
+            by_bmc: match &error {
+                reqwest_middleware::Error::Reqwest(cause) if cause.is_connect() => {
+                    Some(BmcFailure::Unreachable)
+                }
+                reqwest_middleware::Error::Reqwest(cause) if cause.is_timeout() => {
+                    Some(BmcFailure::TimedOut { budget })
+                }
+                _ => None,
+            },
+            response: error_response((StatusCode::BAD_GATEWAY, error.to_string()).into()),
+        })
 }
 
 fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {

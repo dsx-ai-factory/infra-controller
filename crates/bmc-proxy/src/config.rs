@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::time::Duration;
 
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
 use carbide_instrument::LabelValue;
@@ -78,6 +79,98 @@ pub(crate) struct AdmissionConfig {
     /// Requests one replica sends to one BMC at a time. Absent is unlimited.
     #[serde(default)]
     pub(crate) max_in_flight_per_bmc: Option<NonZeroU32>,
+    /// Stops sending requests to a BMC whose recent exchanges keep failing.
+    /// Present turns a breaker on for every BMC; absent leaves them off.
+    #[serde(default)]
+    pub(crate) breaker: Option<BreakerConfig>,
+}
+
+/// Longest `cool_down` a breaker may set: a BMC back up is served again
+/// within this long.
+const MAX_BREAKER_COOL_DOWN: Duration = Duration::from_secs(10 * 60);
+
+/// Most exchanges a breaker remembers per BMC: each BMC in use keeps this
+/// many outcomes.
+const MAX_BREAKER_WINDOW: u32 = 1024;
+
+/// A BMC's circuit breaker: once at least `min_samples` of its last `window`
+/// exchanges were seen and at least `failure_threshold` of them failed, the
+/// proxy sends that BMC nothing for `cool_down`, then one request whose
+/// outcome decides whether to resume.
+#[derive(Deserialize)]
+#[serde(try_from = "BreakerDefinition")]
+pub(crate) struct BreakerConfig {
+    pub(crate) failure_threshold: f32,
+    pub(crate) window: u32,
+    pub(crate) min_samples: u32,
+    pub(crate) cool_down: Duration,
+}
+
+/// `[admission.breaker]` as written in the config file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BreakerDefinition {
+    #[serde(default = "default_failure_threshold")]
+    failure_threshold: f32,
+    #[serde(default = "default_window")]
+    window: u32,
+    #[serde(default = "default_min_samples")]
+    min_samples: u32,
+    #[serde(with = "humantime_serde", default = "default_cool_down")]
+    cool_down: Duration,
+}
+
+fn default_failure_threshold() -> f32 {
+    0.5
+}
+
+fn default_window() -> u32 {
+    32
+}
+
+fn default_min_samples() -> u32 {
+    5
+}
+
+fn default_cool_down() -> Duration {
+    Duration::from_secs(10)
+}
+
+#[derive(thiserror::Error, Debug)]
+enum BreakerConfigError {
+    #[error("breaker failure_threshold must be above 0 and at most 1")]
+    FailureThreshold,
+    #[error("breaker min_samples must be at least 1")]
+    MinSamples,
+    #[error("breaker window must be from min_samples to {MAX_BREAKER_WINDOW}")]
+    Window,
+    #[error("breaker cool_down must be above zero and at most {MAX_BREAKER_COOL_DOWN:?}")]
+    CoolDown,
+}
+
+impl TryFrom<BreakerDefinition> for BreakerConfig {
+    type Error = BreakerConfigError;
+
+    fn try_from(definition: BreakerDefinition) -> Result<Self, Self::Error> {
+        if !(definition.failure_threshold > 0.0 && definition.failure_threshold <= 1.0) {
+            return Err(BreakerConfigError::FailureThreshold);
+        }
+        if definition.min_samples == 0 {
+            return Err(BreakerConfigError::MinSamples);
+        }
+        if definition.window < definition.min_samples || definition.window > MAX_BREAKER_WINDOW {
+            return Err(BreakerConfigError::Window);
+        }
+        if definition.cool_down.is_zero() || definition.cool_down > MAX_BREAKER_COOL_DOWN {
+            return Err(BreakerConfigError::CoolDown);
+        }
+        Ok(Self {
+            failure_threshold: definition.failure_threshold,
+            window: definition.window,
+            min_samples: definition.min_samples,
+            cool_down: definition.cool_down,
+        })
+    }
 }
 
 /// How the proxy handles redirect responses from a BMC.
@@ -543,6 +636,50 @@ mod tests {
         assert!(message.contains("follow_anywhere"));
         assert!(message.contains("follow_same_origin"));
         assert!(message.contains("return_to_client"));
+    }
+
+    /// The breaker a config sets: (failure_threshold, window, min_samples,
+    /// cool_down in milliseconds), or `None` when it sets none.
+    fn breaker_of(admission: &str) -> Result<Option<(f32, u32, u32, u128)>, ()> {
+        Config::parse(&format!("{admission}\n{MINIMAL_TLS}"))
+            .map(|config| {
+                config.admission.breaker.map(|breaker| {
+                    (
+                        breaker.failure_threshold,
+                        breaker.window,
+                        breaker.min_samples,
+                        breaker.cool_down.as_millis(),
+                    )
+                })
+            })
+            .map_err(drop)
+    }
+
+    /// `[admission.breaker]` turns a breaker on, its settings defaulted when
+    /// left out; settings out of bounds, or unknown, do not load.
+    #[test]
+    fn breaker_settings_parse() {
+        scenarios!(
+            run = |admission: &str| breaker_of(admission);
+            "loaded" {
+                "" => Yields(None),
+                "[admission.breaker]" => Yields(Some((0.5, 32, 5, 10_000))),
+                "[admission.breaker]\nfailure_threshold = 1.0\nwindow = 1024\nmin_samples = 1\ncool_down = \"10m\"" => Yields(Some((1.0, 1024, 1, 600_000))),
+                "[admission.breaker]\nwindow = 5\nmin_samples = 5" => Yields(Some((0.5, 5, 5, 10_000))),
+            }
+
+            "rejected" {
+                "[admission.breaker]\nfailure_threshold = 0.0" => Fails,
+                "[admission.breaker]\nfailure_threshold = 1.5" => Fails,
+                "[admission.breaker]\nmin_samples = 0" => Fails,
+                "[admission.breaker]\nwindow = 4\nmin_samples = 5" => Fails,
+                "[admission.breaker]\nfailure_threshold = nan" => Fails,
+                "[admission.breaker]\nwindow = 1025" => Fails,
+                "[admission.breaker]\ncool_down = \"0s\"" => Fails,
+                "[admission.breaker]\ncool_down = \"11m\"" => Fails,
+                "[admission.breaker]\ncooldown = \"10s\"" => Fails,
+            }
+        );
     }
 
     /// `[admission]` sets the per-BMC limit; without it there is none. A

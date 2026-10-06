@@ -42,10 +42,11 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_authn_connection_attributes_missing_total</td><td>counter</td><td>Number of requests authentication could not inspect because connection attributes were missing</td></tr>
 <tr><td>carbide_available_ips_count</td><td>gauge</td><td>Number of available IPs per network segment</td></tr>
 <tr><td>carbide_bmc_credential_rotation_results_total</td><td>counter</td><td>Number of persisted BMC credential rotation results, by result</td></tr>
-<tr><td>carbide_bmc_proxy_admission_refused_total</td><td>counter</td><td>Number of requests the proxy refused without sending them, for want of a slot at their BMC, by request class and reason (queue_full, timeout, too_many_bmcs, shutting_down)</td></tr>
+<tr><td>carbide_bmc_proxy_admission_refused_total</td><td>counter</td><td>Number of requests the proxy refused without sending them, for want of a slot at their BMC or because its breaker was open, by request class and reason (queue_full, timeout, too_many_bmcs, breaker_open, shutting_down)</td></tr>
 <tr><td>carbide_bmc_proxy_admission_wait_milliseconds</td><td>histogram</td><td>Time requests that got a slot at their BMC waited for it, by request class; only classes that take slots are observed, and requests refused or abandoned while waiting are not</td></tr>
 <tr><td>carbide_bmc_proxy_authorization_denied_total</td><td>counter</td><td>Number of BMC proxy requests denied by authorization layer and HTTP method</td></tr>
 <tr><td>carbide_bmc_proxy_authorization_errors_total</td><td>counter</td><td>Number of BMC proxy authorization errors caused by missing authentication context, by authorization layer and HTTP method</td></tr>
+<tr><td>carbide_bmc_proxy_breaker_opened_total</td><td>counter</td><td>Number of times a BMC&#39;s circuit breaker opened: the BMC failed too many of its recent exchanges</td></tr>
 <tr><td>carbide_bmc_proxy_redirects_total</td><td>counter</td><td>Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_attempted_total</td><td>counter</td><td>Number of inbound TLS connection attempts</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_fail_total</td><td>counter</td><td>Number of failed inbound connections, by failure reason</td></tr>

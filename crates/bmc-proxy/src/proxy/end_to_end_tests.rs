@@ -1339,3 +1339,147 @@ async fn a_replay_keeps_its_slot() {
         (200, 429, 2)
     );
 }
+
+/// A BMC's breaker that opens on the second failure in a row, but not on a
+/// failure after a success, and stays open past any of these tests.
+const BREAKER: &str = r#"
+    [admission.breaker]
+    failure_threshold = 0.75
+    window = 4
+    min_samples = 2
+    cool_down = "10m"
+"#;
+
+/// What happens to the requests in [`what_trips_a_bmcs_breaker`].
+#[derive(Clone, Copy)]
+enum BreakerScenario {
+    BmcRefusesConnections,
+    BmcAnswersAfterTheBudget,
+    /// The BMC rejects the cached credential at once, and answers the replay
+    /// with a fresh one after the budget.
+    BmcAnswersTheReplayAfterTheBudget,
+    BmcAnswersWithAnError,
+    /// The BMC's cached credential is a session token no header can carry,
+    /// so the proxy fails every attempt before sending it.
+    ProxyCannotUseTheCredential,
+}
+
+/// The statuses three requests get from a proxy with [`BREAKER`] and
+/// [`QUICK_CLASS`], in `scenario`.
+async fn three_requests(metrics: &MetricsCapture, scenario: BreakerScenario) -> Vec<u16> {
+    let (addr, _bmc) = spawn_fake_bmc();
+    let (_held, refusing) = refusing_port();
+    let (port, path) = match scenario {
+        BreakerScenario::BmcRefusesConnections => (refusing, SYSTEM_PATH),
+        BreakerScenario::BmcAnswersAfterTheBudget => (addr.port(), SLOW_PATH),
+        BreakerScenario::BmcAnswersTheReplayAfterTheBudget => (addr.port(), SLOW_ROTATED_PATH),
+        BreakerScenario::BmcAnswersWithAnError => (addr.port(), LEAKY_PATH),
+        BreakerScenario::ProxyCannotUseTheCredential => (addr.port(), SYSTEM_PATH),
+    };
+    let credentials = match scenario {
+        BreakerScenario::ProxyCannotUseTheCredential => BmcCredentials::SessionToken {
+            token: "no\nheader".to_string(),
+        },
+        _ => root_password(),
+    };
+    let mut state = proxy_configured(
+        &format!(":{port}"),
+        r#"["/**"]"#,
+        &format!("{QUICK_CLASS}{BREAKER}"),
+        credentials,
+        "follow_same_origin",
+    )
+    .await;
+    state.api_client = fake_nico_api().await;
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        statuses.push(exchange(metrics, &state, get(path)).await.status);
+        // The BMC's runtime counts an exchange's outcome once it sees the
+        // exchange's slot freed.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    statuses
+}
+
+/// A BMC that refuses connections or does not answer within the budget
+/// fails its exchanges, and after two failures its breaker refuses the next
+/// request with 503. A BMC that answers, even with an error, fails nothing,
+/// and neither does the proxy failing on its own.
+#[tokio::test]
+async fn what_trips_a_bmcs_breaker() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    check_cases_async(
+        [
+            Case {
+                scenario: "the BMC refuses connections",
+                input: BreakerScenario::BmcRefusesConnections,
+                expect: Yields(vec![502, 502, 503]),
+            },
+            Case {
+                scenario: "the BMC answers after the budget",
+                input: BreakerScenario::BmcAnswersAfterTheBudget,
+                expect: Yields(vec![502, 502, 503]),
+            },
+            Case {
+                scenario: "the BMC answers the replay after the budget",
+                input: BreakerScenario::BmcAnswersTheReplayAfterTheBudget,
+                expect: Yields(vec![502, 502, 503]),
+            },
+            Case {
+                scenario: "the BMC answers with an error",
+                input: BreakerScenario::BmcAnswersWithAnError,
+                expect: Yields(vec![500, 500, 500]),
+            },
+            Case {
+                scenario: "the proxy cannot use the BMC's credential",
+                input: BreakerScenario::ProxyCannotUseTheCredential,
+                expect: Yields(vec![502, 502, 502]),
+            },
+        ],
+        |scenario| async move {
+            Ok::<_, Infallible>(three_requests(metrics_window, scenario).await)
+        },
+    )
+    .await;
+}
+
+/// A request cut short by its wait for a slot does not count against the
+/// BMC: the BMC answers in 2.5 seconds, a class of one at a time has 3, and
+/// the request that waited for the first one's slot runs out of time. With
+/// a breaker that opens on one failure, the next request is still served.
+#[tokio::test]
+async fn a_timeout_from_waiting_is_not_the_bmcs() {
+    let metrics = MetricsCapture::start();
+    let (addr, _bmc) = spawn_fake_bmc();
+    let state = proxy_configured(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        &format!(
+            r#"
+            [[class]]
+            name = "one_at_a_time"
+            match = ["GET {BRIEFLY_SLOW_PATH}"]
+            max_in_flight = 1
+            upstream_timeout = "3s"
+
+            [admission.breaker]
+            window = 1
+            min_samples = 1
+            cool_down = "10m"
+            "#
+        ),
+        root_password(),
+        "follow_same_origin",
+    )
+    .await;
+    let first = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
+    let waiting = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await
+    };
+    let (first, waiting) = tokio::join!(first, waiting);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let next = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await;
+    assert_eq!((first.status, waiting.status, next.status), (200, 502, 200));
+}

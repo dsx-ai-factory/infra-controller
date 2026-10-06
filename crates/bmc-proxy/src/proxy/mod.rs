@@ -74,8 +74,9 @@ use tokio_util::sync::CancellationToken;
 use trace_propagation::set_span_parent_from_headers;
 use tracing::Instrument;
 
+use crate::class::RequestClass;
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
-use crate::proxy::admission::Admission;
+use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
     CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
 };
@@ -86,7 +87,8 @@ use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
 use crate::proxy::upstream::{
-    UpstreamBody, UpstreamResponse, build_http_client, method_supports_body, send_upstream,
+    AttemptFailed, BmcFailure, UpstreamBody, UpstreamResponse, build_http_client,
+    method_supports_body, send_upstream,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -400,7 +402,8 @@ async fn proxy_request_inner(
         )
     })?
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
-    let slot = state
+    let streamed = !upstream_body.is_replayable();
+    let mut slot = state
         .admission
         .acquire(
             target_ip,
@@ -418,7 +421,8 @@ async fn proxy_request_inner(
         &mut upstream_body,
         deadline,
     )
-    .await?;
+    .await
+    .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
 
     // A BMC that rejects the credential the proxy cached (an expired Redfish
     // session, a rotated password) gets one replay with freshly resolved
@@ -441,7 +445,8 @@ async fn proxy_request_inner(
             &mut upstream_body,
             tokio::time::Instant::now() + class.upstream_timeout,
         )
-        .await?;
+        .await
+        .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
     }
 
     let UpstreamResponse {
@@ -473,6 +478,28 @@ async fn proxy_request_inner(
         &sensitive_values,
     )
     .map(|body| slot.hold_until_sent(body)))
+}
+
+/// The caller's answer to an attempt that got no answer. Reports to the
+/// BMC's breaker, through `slot`, an attempt the BMC failed: one the proxy
+/// could not connect for, or one the BMC did not answer within at least half
+/// its class's budget. A shorter attempt was cut short by the wait for its
+/// slot, and a timed-out upload, `streamed`, may have been the caller's.
+fn answer_failed_attempt(
+    slot: &mut Slot,
+    failed: AttemptFailed,
+    class: &RequestClass,
+    streamed: bool,
+) -> Response<Body> {
+    let bmc_failed = match failed.by_bmc {
+        Some(BmcFailure::Unreachable) => true,
+        Some(BmcFailure::TimedOut { budget }) => !streamed && budget >= class.upstream_timeout / 2,
+        None => false,
+    };
+    if bmc_failed {
+        slot.bmc_failed();
+    }
+    failed.response
 }
 
 fn error_response(error: ProxyError) -> Response<Body> {
