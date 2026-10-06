@@ -4057,12 +4057,18 @@ paths:
       responses:
         '202':
           description: Accepted
-        '204':
-          description: No Content
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The VPC Prefix's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific VPC Prefix by ID.
 
