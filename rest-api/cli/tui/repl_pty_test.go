@@ -210,6 +210,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "(required)")
 		terminal.waitFor(t, "iPXE script or URL")
+		terminal.send(t, "{}\r")
+		terminal.waitFor(t, "(enter a script starting with #!ipxe or an absolute HTTP(S) URL)")
+		terminal.waitFor(t, "iPXE script or URL")
 		terminal.send(t, "https://example.test/boot.ipxe?token=boot-token\r")
 		terminal.waitFor(t, "User data (optional)")
 		terminal.send(t, "#cloud-config password=cloud-secret\r")
@@ -236,11 +239,12 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		assert.NotContains(t, ethernetTranscript, "pending-subnet")
 		assert.NotContains(t, ethernetTranscript, "Allow override at instance creation?")
 		assert.Contains(t, ethernetTranscript, "--data")
+		assert.Contains(t, ethernetTranscript, "Boot data omitted; add an operating system or iPXE script before replaying this command.")
 		ethernetLogStart := strings.Index(ethernetTranscript, "INFO:")
 		require.NotEqual(t, -1, ethernetLogStart)
 		ethernetLog := ethernetTranscript[ethernetLogStart:]
-		assert.Contains(t, ethernetLog, `"ipxeScript":"\u003credacted\u003e"`)
-		assert.Contains(t, ethernetLog, `"userData":"\u003credacted\u003e"`)
+		assert.NotContains(t, ethernetLog, "ipxeScript")
+		assert.NotContains(t, ethernetLog, "userData")
 		assert.NotContains(t, ethernetLog, "boot-token")
 		assert.NotContains(t, ethernetLog, "cloud-secret")
 		assert.Contains(t, ethernetTranscript, `"interfaces":[{"isPhysical":true,"subnetId":"subnet-1"},{"isPhysical":false,"subnetId":"subnet-2","virtualFunctionId":7}]`)
@@ -354,7 +358,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		flatLogStart := strings.Index(flatTranscript, "INFO:")
 		require.NotEqual(t, -1, flatLogStart)
 		flatLog := flatTranscript[flatLogStart:]
-		assert.Contains(t, flatLog, `"ipxeScript":"\u003credacted\u003e"`)
+		assert.NotContains(t, flatLog, "ipxeScript")
 		assert.NotContains(t, flatLog, "script-token")
 		assert.NotContains(t, flatLog, "userData")
 

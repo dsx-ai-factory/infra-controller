@@ -388,11 +388,23 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 		input         string
 		wantScript    string
 		wantCancelled bool
+		wantInvalid   int
 	}{
 		{
-			name:       "required URL retries blank input and leaves next answer unread",
-			input:      "\nhttps://example.test/boot.ipxe?token=boot-token\nnext-answer\n",
-			wantScript: "https://example.test/boot.ipxe?token=boot-token",
+			name: "required URL retries blank and invalid input before reading next answer",
+			input: strings.Join([]string{
+				"", "{}", "boot.ipxe", "//example.test/boot.ipxe",
+				"ftp://example.test/boot.ipxe", "https:///boot.ipxe",
+				"https://example.test/%zz", "https://example.test:invalid/boot.ipxe",
+				"https://example.test/boot.ipxe?token=boot-token", "next-answer", "",
+			}, "\n"),
+			wantScript:  "https://example.test/boot.ipxe?token=boot-token",
+			wantInvalid: 7,
+		},
+		{
+			name:       "absolute HTTP URL is accepted",
+			input:      "http://example.test/boot.ipxe\nnext-answer\n",
+			wantScript: "http://example.test/boot.ipxe",
 		},
 		{
 			name:       "multiline script preserves whitespace and leaves next answer unread",
@@ -408,7 +420,7 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := map[string]interface{}{}
-			_, err := runSpecializedCommandWithInput(t, test.input, func() error {
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
 				promptErr := promptRawIPXEOperatingSystem(body)
 				if promptErr != nil {
 					return promptErr
@@ -426,6 +438,7 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, test.wantInvalid, strings.Count(output, "(enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
 			assert.Equal(t, map[string]interface{}{"ipxeScript": test.wantScript}, body)
 		})
 	}
@@ -433,16 +446,16 @@ func TestPromptRawIPXEOperatingSystem(t *testing.T) {
 
 func TestPromptOperatingSystemOptions(t *testing.T) {
 	tests := []struct {
-		name          string
-		promptContext string
-		input         string
-		expectedBody  map[string]interface{}
-		wantCancelled bool
+		name                 string
+		includeAllowOverride bool
+		input                string
+		expectedBody         map[string]interface{}
+		wantCancelled        bool
 	}{
 		{
-			name:          "OS context includes override permission",
-			promptContext: "os",
-			input:         "#cloud-config\nn\ny\n",
+			name:                 "OS context includes override permission",
+			includeAllowOverride: true,
+			input:                "#cloud-config\nn\ny\n",
 			expectedBody: map[string]interface{}{
 				"userData":         "#cloud-config",
 				"allowOverride":    false,
@@ -450,34 +463,34 @@ func TestPromptOperatingSystemOptions(t *testing.T) {
 			},
 		},
 		{
-			name:          "instance context skips override permission",
-			promptContext: "instance",
-			input:         " #cloud-config \ny\n",
+			name:                 "instance context skips override permission",
+			includeAllowOverride: false,
+			input:                " #cloud-config \ny\n",
 			expectedBody: map[string]interface{}{
 				"userData":         "#cloud-config",
 				"phoneHomeEnabled": true,
 			},
 		},
 		{
-			name:          "blank instance user data is omitted",
-			promptContext: "instance",
-			input:         "  \nn\n",
+			name:                 "blank instance user data is omitted",
+			includeAllowOverride: false,
+			input:                "  \nn\n",
 			expectedBody: map[string]interface{}{
 				"phoneHomeEnabled": false,
 			},
 		},
 		{
-			name:          "closed input at phone home cancels the prompt",
-			promptContext: "instance",
-			input:         "#cloud-config\n",
-			wantCancelled: true,
+			name:                 "closed input at phone home cancels the prompt",
+			includeAllowOverride: false,
+			input:                "#cloud-config\n",
+			wantCancelled:        true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := map[string]interface{}{}
 			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
-				return promptOperatingSystemOptions(body, test.promptContext)
+				return promptOperatingSystemOptions(body, test.includeAllowOverride)
 			})
 			if test.wantCancelled {
 				require.ErrorContains(t, err, "input cancelled")
@@ -487,7 +500,7 @@ func TestPromptOperatingSystemOptions(t *testing.T) {
 			assert.Equal(t, test.expectedBody, body)
 			assert.Contains(t, output, "User data (optional)")
 			assert.Contains(t, output, "Enable phone home?")
-			if test.promptContext != "os" {
+			if !test.includeAllowOverride {
 				assert.NotContains(t, output, "Allow override at instance creation?")
 			} else {
 				assert.Contains(t, output, "Allow override at instance creation?")

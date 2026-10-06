@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -1357,7 +1358,7 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	err = promptOperatingSystemOptions(body, "os")
+	err = promptOperatingSystemOptions(body, true)
 	if err != nil {
 		return err
 	}
@@ -1418,26 +1419,33 @@ func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) 
 
 func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
 	fmt.Println("Enter a URL on one line, or a script starting with #!ipxe; finish the script with a line containing only '.'")
-	ipxeScript, err := PromptText("iPXE script or URL", true)
-	if err != nil {
-		return err
-	}
-	if strings.HasPrefix(ipxeScript, "#!ipxe") {
-		lines := []string{ipxeScript}
-		for {
-			line, readErr := readPromptLine()
-			if readErr != nil {
-				return readErr
-			}
-			if line == "." {
-				break
-			}
-			lines = append(lines, line)
+	for {
+		ipxeScript, err := PromptText("iPXE script or URL", true)
+		if err != nil {
+			return err
 		}
-		ipxeScript = strings.Join(lines, "\n")
+		if strings.HasPrefix(ipxeScript, "#!ipxe") {
+			lines := []string{ipxeScript}
+			for {
+				line, readErr := readPromptLine()
+				if readErr != nil {
+					return readErr
+				}
+				if line == "." {
+					break
+				}
+				lines = append(lines, line)
+			}
+			body["ipxeScript"] = strings.Join(lines, "\n")
+			return nil
+		}
+		parsedURL, parseErr := url.ParseRequestURI(ipxeScript)
+		if parseErr == nil && (parsedURL.Scheme == "http" || parsedURL.Scheme == "https") && parsedURL.Hostname() != "" {
+			body["ipxeScript"] = ipxeScript
+			return nil
+		}
+		fmt.Println(Red("  (enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
 	}
-	body["ipxeScript"] = ipxeScript
-	return nil
 }
 
 func promptTemplatedIPXEOperatingSystem(
@@ -1605,12 +1613,12 @@ func promptIPXETemplateArtifact(name string) (map[string]interface{}, error) {
 	return artifact, nil
 }
 
-func promptOperatingSystemOptions(body map[string]interface{}, promptContext string) error {
+func promptOperatingSystemOptions(body map[string]interface{}, includeAllowOverride bool) error {
 	userData, err := PromptText("User data (optional)", false)
 	if err != nil {
 		return err
 	}
-	if promptContext == "os" {
+	if includeAllowOverride {
 		allowOverride, promptErr := PromptConfirm("Allow override at instance creation?")
 		if promptErr != nil {
 			return promptErr
@@ -3673,7 +3681,7 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		if err != nil {
 			return err
 		}
-		err = promptOperatingSystemOptions(body, "instance")
+		err = promptOperatingSystemOptions(body, false)
 		if err != nil {
 			return err
 		}
@@ -3725,7 +3733,6 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	logBody := make(map[string]interface{}, len(body))
 	for key, value := range body {
 		if key == "userData" || key == "ipxeScript" {
-			logBody[key] = "<redacted>"
 			continue
 		}
 		logBody[key] = value
@@ -3733,6 +3740,10 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	logBodyJSON, err := json.Marshal(logBody)
 	if err != nil {
 		return fmt.Errorf("encoding instance create request for logging: %w", err)
+	}
+	_, hasBootScript := body["ipxeScript"]
+	if hasBootScript {
+		fmt.Println(Dim("Boot data omitted; add an operating system or iPXE script before replaying this command."))
 	}
 	LogCmd(s, "instance", "create", "--data", shellQuoteCLIArg(string(logBodyJSON)))
 	resp, _, err := s.Client.Do("POST", apiPath(s, "instance"), nil, nil, bodyJSON)
