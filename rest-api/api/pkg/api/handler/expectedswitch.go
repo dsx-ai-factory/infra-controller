@@ -896,6 +896,10 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedSwitchDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedSwitch, error) {
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		switches, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedSwitch records in DB")
@@ -912,7 +916,7 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedSwitches"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}

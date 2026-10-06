@@ -17,6 +17,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -252,6 +253,20 @@ func TestExpectedInventoryBulkHandlers(t *testing.T) {
 			request := captured[len(captured)-1]
 			require.Equal(t, deletion.method, request.FullMethod)
 			require.Empty(t, request.EncryptedSecrets)
+		})
+	}
+
+	lockTx, err := cdb.BeginTx(ctx, dbSession, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, lockTx.Rollback()) })
+	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + site.ID.String())
+	require.NoError(t, lockTx.TryAcquireAdvisoryLock(ctx, lockID, nil))
+	for _, replacement := range replacements {
+		t.Run("reject concurrent "+replacement.name+" replacement", func(t *testing.T) {
+			callsBefore := len(captured)
+			recorder := invokeExpectedInventoryBulkHandler(t, user, org, http.MethodPut, replacement.path, replacement.body, "", replacement.handle)
+			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+			require.Len(t, captured, callsBefore, "lock conflict must not reach Core")
 		})
 	}
 

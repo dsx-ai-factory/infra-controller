@@ -42,6 +42,8 @@ const derivedTestProfile = "GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"
 
 type readbackCancelKey struct{}
 
+type expectedRackMutationHookKey struct{}
+
 type expectedRackDBContextHook struct {
 	t       *testing.T
 	updates *atomic.Int64
@@ -76,6 +78,9 @@ func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *moc
 		}
 		if cancel, ok := mutationCtx.Value(readbackCancelKey{}).(context.CancelFunc); ok {
 			cancel()
+		}
+		if hook, ok := mutationCtx.Value(expectedRackMutationHookKey{}).(func()); ok {
+			hook()
 		}
 	})
 	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).Return(func(ctx context.Context, _ tclient.StartWorkflowOptions, _ interface{}, args ...interface{}) tclient.WorkflowRun {
@@ -1870,6 +1875,91 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReplaceAllExpectedRacksHandler_ConcurrentRequests(t *testing.T) {
+	dbSession := testExpectedRackInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	org := "test-org"
+	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
+	user := &cdbm.User{
+		ID:          uuid.New(),
+		StarfleetID: cutil.GetPtr("concurrent-rack-user"),
+		OrgData: cdbm.OrgData{org: cdbm.Org{
+			Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"},
+		}},
+	}
+	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	pool := sc.NewClientPool(tcfg)
+	client := &tmocks.Client{}
+	pool.IDClientMap[site.ID.String()] = client
+	run := &tmocks.WorkflowRun{}
+	run.On("GetID").Return("concurrent-rack-workflow")
+	run.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+	mutation := client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "ReplaceAllExpectedRacks", mock.Anything).Return(run, nil).Once()
+	mockExpectedRackReadback(t, client, mutation, true)
+	t.Cleanup(func() {
+		client.AssertExpectations(t)
+		run.AssertExpectations(t)
+	})
+
+	handler := NewReplaceAllExpectedRacksHandler(dbSession, pool, cfg)
+	invoke := func(requestCtx context.Context, rackID string) (*httptest.ResponseRecorder, error) {
+		body, marshalErr := json.Marshal(model.APIReplaceAllExpectedRacksRequest{
+			SiteID: site.ID.String(),
+			ExpectedRacks: []*model.APIExpectedRackCreateRequest{{
+				SiteID: site.ID.String(), RackID: rackID,
+			}},
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/"+org+"/nico/expected-rack/all", bytes.NewReader(body))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req = req.WithContext(requestCtx)
+		rec := httptest.NewRecorder()
+		request := echo.New().NewContext(req, rec)
+		request.Set("user", user)
+		request.SetParamNames("orgName")
+		request.SetParamValues(org)
+		return rec, handler.Handle(request)
+	}
+
+	var second *httptest.ResponseRecorder
+	var secondErr error
+	firstCtx := context.WithValue(ctx, expectedRackMutationHookKey{}, func() {
+		second, secondErr = invoke(ctx, "rack-b")
+	})
+	first, firstErr := invoke(firstCtx, "rack-a")
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	require.Equal(t, http.StatusConflict, second.Code, second.Body.String())
+
+	var response []model.APIExpectedRack
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+	require.Len(t, response, 1)
+	require.Equal(t, "rack-a", response[0].RackID)
+
+	var stored []cdbm.ExpectedRack
+	require.NoError(t, dbSession.DB.NewSelect().Model(&stored).Where("site_id = ?", site.ID).Scan(ctx))
+	require.Len(t, stored, 1)
+	require.Equal(t, "rack-a", stored[0].RackID)
+
+	var coreRequest *corev1.ExpectedRackList
+	for _, call := range client.Calls {
+		if call.Arguments.Get(2) == "ReplaceAllExpectedRacks" {
+			coreRequest = call.Arguments.Get(3).(*corev1.ExpectedRackList)
+		}
+	}
+	require.NotNil(t, coreRequest)
+	require.Len(t, coreRequest.ExpectedRacks, 1)
+	require.Equal(t, "rack-a", coreRequest.ExpectedRacks[0].GetRackId().GetId())
 }
 
 func TestDeleteAllExpectedRacksHandler_Handle(t *testing.T) {

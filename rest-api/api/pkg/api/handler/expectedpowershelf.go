@@ -840,6 +840,10 @@ func (h ReplaceAllExpectedPowerShelvesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedPowerShelfDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedPowerShelf, error) {
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		shelves, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedPowerShelf records in DB")
@@ -856,7 +860,7 @@ func (h ReplaceAllExpectedPowerShelvesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedPowerShelves"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedPowerShelves_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedPowerShelves_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}
