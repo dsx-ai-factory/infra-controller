@@ -45,12 +45,14 @@ enum RulePrincipal {
     Flow,
     MaintenanceJobs,
     DsxExchangeConsumer,
-    SiteHealthProbe, // synthetic read-only monitoring (#5360)
-    Anonymous,       // Permitted for everything
+    SiteHealthProbe,   // synthetic read-only monitoring (#5360)
+    RackScaleAnalyzer, // RSA: NVLink domain and component health reports
+    Anonymous,         // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
+    Machineatron, MaintenanceJobs, Pxe, RackScaleAnalyzer, Scout, SiteAgent, SiteHealthProbe, Ssh,
+    SshRs,
 };
 
 impl InternalRBACRules {
@@ -165,7 +167,15 @@ impl InternalRBACRules {
         );
         x.perm(
             "InsertMachineHealthReport",
-            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs, Flow],
+            vec![
+                ForgeAdminCLI,
+                Health,
+                SiteAgent,
+                Ssh,
+                SshRs,
+                Flow,
+                RackScaleAnalyzer,
+            ],
         );
         x.perm(
             "RemoveMachineHealthReport",
@@ -189,7 +199,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "InsertSwitchHealthReport",
-            vec![ForgeAdminCLI, Health, SiteAgent],
+            vec![ForgeAdminCLI, Health, SiteAgent, RackScaleAnalyzer],
         );
         x.perm(
             "RemoveSwitchHealthReport",
@@ -201,7 +211,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "InsertPowerShelfHealthReport",
-            vec![ForgeAdminCLI, Health, SiteAgent],
+            vec![ForgeAdminCLI, Health, SiteAgent, RackScaleAnalyzer],
         );
         x.perm(
             "RemovePowerShelfHealthReport",
@@ -210,7 +220,7 @@ impl InternalRBACRules {
         x.perm("ListNVLinkDomainHealthReports", vec![ForgeAdminCLI, Health]);
         x.perm(
             "InsertNVLinkDomainHealthReport",
-            vec![ForgeAdminCLI, Health],
+            vec![ForgeAdminCLI, Health, RackScaleAnalyzer],
         );
         x.perm(
             "RemoveNVLinkDomainHealthReport",
@@ -225,7 +235,15 @@ impl InternalRBACRules {
         );
         x.perm(
             "InsertHealthReportOverride",
-            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs, Flow],
+            vec![
+                ForgeAdminCLI,
+                Health,
+                SiteAgent,
+                Ssh,
+                SshRs,
+                Flow,
+                RackScaleAnalyzer,
+            ],
         );
         x.perm(
             "RemoveHealthReportOverride",
@@ -1186,6 +1204,12 @@ impl RuleInfo {
                     RulePrincipal::SiteHealthProbe => vec![Principal::SpiffeServiceIdentifier(
                         "nico-site-health-probe".to_string(),
                     )],
+                    // Not a NICo service: the rack-scale analyzer, matched by
+                    // its service-account name `rsa` under any trusted
+                    // `spiffe_service_base_paths` entry.
+                    RulePrincipal::RackScaleAnalyzer => {
+                        vec![Principal::SpiffeServiceIdentifier("rsa".to_string())]
+                    }
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1391,6 +1415,37 @@ mod rbac_rule_tests {
                 "{deprecated} should mirror {canonical}"
             );
         }
+    }
+
+    /// RSA can insert NVLink domain, machine, switch, and power shelf health
+    /// reports, and nothing beyond RPCs open to every caller.
+    #[test]
+    fn rack_scale_analyzer_only_inserts_health_reports() {
+        let allowed_only_for_rsa = |method: &&String| {
+            InternalRBACRules::allowed_from_static(
+                method,
+                &[Principal::SpiffeServiceIdentifier("rsa".to_string())],
+            ) && !InternalRBACRules::allowed_from_static(
+                method,
+                &[Principal::SpiffeServiceIdentifier("unlisted".to_string())],
+            )
+        };
+        let mut methods: Vec<&String> = INTERNAL_RBAC_RULES
+            .perms
+            .keys()
+            .filter(allowed_only_for_rsa)
+            .collect();
+        methods.sort();
+        assert_eq!(
+            methods,
+            [
+                "InsertHealthReportOverride",
+                "InsertMachineHealthReport",
+                "InsertNVLinkDomainHealthReport",
+                "InsertPowerShelfHealthReport",
+                "InsertSwitchHealthReport",
+            ]
+        );
     }
 
     #[test]
