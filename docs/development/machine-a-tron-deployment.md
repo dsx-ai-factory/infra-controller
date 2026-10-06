@@ -479,6 +479,7 @@ directly, with no `bmc_proxy`. Validated profiles live in `helm-prereqs/values/`
 | `machine-a-tron-scale.yaml` | 100 hosts x 2 DPUs in one pod |
 | `machine-a-tron-multipod.yaml` | 2 pods x 100 hosts x 2 DPUs |
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
+| `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -596,27 +597,14 @@ switches, and 8 power shelves, 71 BMCs in total. One machine-a-tron pod is
 sized for about 25 racks, so a 250-rack site runs 10 pods behind the protocol
 gateway. The gateway serves one Unified Fabric Manager (UFM) API and one RMS
 API for all of them. Each pod declares its racks under `racks` with rack ids
-that are unique across pods. The values below layer on
-`machine-a-tron-multipod.yaml`, whose 100-host `compute` groups must be nulled
-so they do not deep-merge into the rack pods:
+that are unique across pods. `machine-a-tron-250racks.yaml` ships this fleet,
+10 pods of 25 racks each, in the shape of `machine-a-tron-10racks.yaml`:
 
 ```yaml
-mat-k8s-controller:
-  enabled: true
-  gateway:
-    enabled: true
-  config:
-    insecureSkipVerify: true
-
-persistence:
-  enabled: true  # simulator state survives pod restarts
-
 pods:
-  default: null
   mat-0:
     machines:
       rack-machines: null  # the chart's example group
-      compute: null        # the profile's 100-host group
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -625,8 +613,7 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.104.0.1"
   mat-1:
-    machines:
-      compute: null
+    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -637,29 +624,35 @@ pods:
   # mat-2 to mat-9 follow the same pattern
 ```
 
-Install with both files. Check first that the render carries no machine
-group, so the count prints 0:
+Install it like the 10-rack file. Check first that the render carries no
+machine group, so the count prints 0:
 
 ```bash
 helm template nico-machine-a-tron helm/charts/nico-machine-a-tron \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml \
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml \
   | grep -c '^ *\[machines\.'
+python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-250racks.yaml \
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
+  --set createNamespace=false \
   --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
   --set image.tag="${TAG}" \
   --set mat-k8s-controller.image.repository="${NICO_IMAGE_REGISTRY}/mat-k8s-controller" \
   --set mat-k8s-controller.image.tag="${CONTROLLER_TAG}" \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml
 ```
 
 `helm template` again omits the `host_bmc_password` and `dpu_bmc_password`
 lines. The site credentials lookup adds them when the install renders against
 the cluster.
 
-The `resources` block comes from the multipod profile, which sizes 2Gi of
-memory for 300 BMCs per pod. Raise it for 1,775 BMCs per pod.
-`machine-a-tron-scale-4500.yaml` allots 8Gi to pods of up to 8,100 BMCs.
+The shipped `resources` block limits each pod to 4 CPUs and 6Gi of memory for
+1,775 BMCs (requests 1 CPU and 2Gi). For comparison, `machine-a-tron-multipod.yaml`
+sizes 2Gi for 300 BMCs per pod and `machine-a-tron-scale-4500.yaml` allots 8Gi
+to pods of up to 8,100 BMCs. The profile leaves `persistence.enabled` at the
+chart default, so a restarted pod repeats its 25-rack registration (about
+30 min) and the machines it already created are re-reported, not re-created.
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service. The
 nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
