@@ -373,6 +373,10 @@ navigation:
             - section: Module Reference
               contents:
                 - directory: automation/ansible/modules
+        - section: Terraform Provider
+          contents:
+            - page: Getting Started
+              path: automation/terraform/getting-started.md
 
     - section: Reference
       contents:
