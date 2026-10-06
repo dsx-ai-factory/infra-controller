@@ -61,10 +61,12 @@ spec:
     rms.nico: []
     {{- end }}
     {{- if $temporalHaPostgres }}
-    # No role flags: temporal.nico owns only the temporal/temporal_visibility
-    # databases (databases: below); Temporal's own schema-update job creates
-    # tables/indexes there as the owner and needs nothing wider.
-    temporal.nico: []
+    # temporal.nico owns the temporal/temporal_visibility databases (databases:
+    # below). It still needs createdb: the Temporal chart's pre-install schema
+    # job runs CREATE DATABASE, and PostgreSQL rejects that for a role without
+    # createdb even when the database already exists.
+    temporal.nico:
+      - createdb
     {{- end }}
     {{- if $keycloakHaPostgres }}
     # No role flags: keycloak.nico owns only the keycloak database (databases:

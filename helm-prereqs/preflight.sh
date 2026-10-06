@@ -691,9 +691,10 @@ _yaml_toplevel_value() {
 }
 
 # Prints the PostgreSQL host the deployed Temporal or Keycloak connects to, or
-# nothing when it isn't deployed. Fails when the cluster can't be read.
+# nothing when it isn't deployed. Fails when the cluster can't be read, or when
+# a deployed Keycloak doesn't set KC_DB_URL as a literal value.
 _deployed_db_host() {
-    local _release _values _kc_ns _kc_url
+    local _release _values _kc_ns _kc_deployment _kc_url
     case "$1" in
         temporal)
             _release="$(helm list -n temporal --short --filter '^temporal$')" || return 1
@@ -704,9 +705,14 @@ _deployed_db_host() {
             ;;
         keycloak)
             _kc_ns="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)}"
-            _kc_url="$(kubectl get deployment keycloak -n "${_kc_ns:-nico-rest}" --ignore-not-found \
+            _kc_ns="${_kc_ns:-nico-rest}"
+            _kc_deployment="$(kubectl get deployment keycloak -n "${_kc_ns}" --ignore-not-found -o name)" \
+                || return 1
+            [[ -n "${_kc_deployment}" ]] || return 0
+            _kc_url="$(kubectl get deployment keycloak -n "${_kc_ns}" \
                 -o jsonpath='{.spec.template.spec.containers[?(@.name=="keycloak")].env[?(@.name=="KC_DB_URL")].value}')" \
                 || return 1
+            [[ -n "${_kc_url}" ]] || return 1
             _kc_url="${_kc_url#jdbc:postgresql://}"
             printf '%s\n' "${_kc_url%%[:/]*}"
             ;;
@@ -715,12 +721,13 @@ _deployed_db_host() {
 
 # Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
 # _USE_HA_POSTGRES as true or false. `auto` keeps a deployed workload on the
-# database it already uses, and keeps a Site that still runs the standalone
-# postgres StatefulSet on it, so an upgrade never points a Site at an empty
-# database. Only a new Site gets nico-pg-cluster. Records an error and leaves
-# _USE_HA_POSTGRES empty when it can't decide.
+# database it already uses, and keeps a Site that still has the standalone
+# postgres StatefulSet or its data volume on it, so an upgrade never points a
+# Site at an empty database. Only a new Site gets nico-pg-cluster. Records an
+# error and leaves _USE_HA_POSTGRES empty when it can't decide, including when
+# the deployed workload uses a host that is neither of the two.
 _resolve_use_ha_postgres() {
-    local _component="$1" _value _db_host _legacy_sts
+    local _component="$1" _value _db_host _standalone
     _USE_HA_POSTGRES=""
     _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
     case "${_value}" in
@@ -735,23 +742,32 @@ _resolve_use_ha_postgres() {
             ;;
     esac
 
+    # The PVC outlives a deleted StatefulSet, and phase 7c reattaches it.
     if ! _db_host="$(_deployed_db_host "${_component}" 2>/dev/null)" \
-        || ! _legacy_sts="$(kubectl get statefulset postgres -n postgres \
+        || ! _standalone="$(kubectl get statefulset/postgres \
+            persistentvolumeclaim/postgres-data-postgres-0 -n postgres \
             --ignore-not-found -o name 2>/dev/null)"; then
-        ERRORS+=("${_component}.useHaPostgres: auto could not read which PostgreSQL the deployed ${_component} uses. Check cluster access, or set it to true or false")
+        ERRORS+=("${_component}.useHaPostgres: auto could not tell which PostgreSQL the deployed ${_component} uses. Set it to true or false")
         return 0
     fi
-    if [[ -n "${_db_host}" ]]; then
-        if [[ "${_db_host}" == nico-pg-cluster.* ]]; then
+    case "${_db_host}" in
+        nico-pg-cluster.postgres|nico-pg-cluster.postgres.*)
             _USE_HA_POSTGRES=true
-        else
+            ;;
+        postgres.postgres|postgres.postgres.*)
             _USE_HA_POSTGRES=false
-        fi
-    elif [[ -n "${_legacy_sts}" ]]; then
-        _USE_HA_POSTGRES=false
-    else
-        _USE_HA_POSTGRES=true
-    fi
+            ;;
+        "")
+            if [[ -n "${_standalone}" ]]; then
+                _USE_HA_POSTGRES=false
+            else
+                _USE_HA_POSTGRES=true
+            fi
+            ;;
+        *)
+            ERRORS+=("${_component}.useHaPostgres: auto doesn't recognize ${_db_host}, the PostgreSQL host the deployed ${_component} uses. Set it to true or false")
+            ;;
+    esac
     return 0
 }
 

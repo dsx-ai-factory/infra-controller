@@ -2104,6 +2104,9 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
     fi
 
     if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+        # ESO only syncs into a namespace that exists. Phase 7a creates just
+        # nico-rest, and keycloak/setup.sh creates any other one after this wait.
+        kubectl create namespace "${KEYCLOAK_NS}" 2>/dev/null || true
         echo "Waiting for Keycloak DB credentials to be synced by ESO (nico-keycloak-pg-creds in ${KEYCLOAK_NS})..."
         for _kc_i in $(seq 1 24); do
             if kubectl get secret nico-keycloak-pg-creds -n "${KEYCLOAK_NS}" &>/dev/null; then

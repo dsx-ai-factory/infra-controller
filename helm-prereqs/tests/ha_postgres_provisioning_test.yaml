@@ -10,7 +10,8 @@ tests:
     asserts:
       - equal:
           path: spec.users["temporal.nico"]
-          value: []
+          value:
+            - createdb
         template: templates/postgresql.yaml
         documentSelector: &cluster
           path: kind

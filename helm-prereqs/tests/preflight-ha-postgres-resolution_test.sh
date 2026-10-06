@@ -49,13 +49,22 @@ if [[ "${FAKE_READS_FAIL}" == "true" ]]; then
     exit 1
 fi
 case "$*" in
-    'get deployment keycloak -n kc-ns --ignore-not-found -o jsonpath='*)
-        printf '%s' "${FAKE_KEYCLOAK_URL}"
-        ;;
-    'get statefulset postgres -n postgres --ignore-not-found -o name')
-        if [[ "${FAKE_LEGACY_STS}" == "true" ]]; then
-            echo statefulset.apps/postgres
+    'get deployment keycloak -n kc-ns --ignore-not-found -o name')
+        if [[ -n "${FAKE_KEYCLOAK_URL}" ]]; then
+            echo deployment.apps/keycloak
         fi
+        ;;
+    'get deployment keycloak -n kc-ns -o jsonpath='*)
+        # valueFrom stands for a KC_DB_URL with no literal value.
+        if [[ "${FAKE_KEYCLOAK_URL}" != "valueFrom" ]]; then
+            printf '%s' "${FAKE_KEYCLOAK_URL}"
+        fi
+        ;;
+    'get statefulset/postgres persistentvolumeclaim/postgres-data-postgres-0 -n postgres --ignore-not-found -o name')
+        case "${FAKE_STANDALONE}" in
+            statefulset) printf '%s\n' statefulset.apps/postgres persistentvolumeclaim/postgres-data-postgres-0 ;;
+            pvc) echo persistentvolumeclaim/postgres-data-postgres-0 ;;
+        esac
         ;;
     *)
         echo "unexpected: kubectl $*" >&2
@@ -70,21 +79,25 @@ _SITE_VALUES_CFG="${TEST_TMP_DIR}/values.yaml"
 failures=0
 
 # name | component | value | deployed Temporal DB host | deployed Keycloak KC_DB_URL |
-#   standalone StatefulSet exists | cluster reads fail | expected | expected error
+#   standalone resources left (statefulset, pvc, or none) | cluster reads fail |
+#   expected | expected error
 cases=(
-    "new Site|temporal|auto|||false|false|true|"
-    "existing Site on the StatefulSet|temporal|auto|postgres.postgres.svc.cluster.local.||true|false|false|"
-    "migrated Site stays on nico-pg-cluster|temporal|auto|nico-pg-cluster.postgres.svc.cluster.local||true|false|true|"
-    "StatefulSet without a deployed Temporal|temporal|auto|||true|false|false|"
-    "explicit true overrides the deployed database|temporal|true|postgres.postgres.svc.cluster.local.||true|false|true|"
-    "Keycloak on the StatefulSet|keycloak|auto||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|true|false|false|"
-    "Keycloak on nico-pg-cluster|keycloak|auto||jdbc:postgresql://nico-pg-cluster.postgres.svc.cluster.local:5432/keycloak?sslmode=require|true|false|true|"
-    "unreadable cluster state|temporal|auto|||false|true||auto could not read which PostgreSQL the deployed temporal uses"
-    "invalid value|keycloak|maybe|||false|false||keycloak.useHaPostgres must be true, false, or auto (got 'maybe')"
+    "new Site|temporal|auto||||false|true|"
+    "existing Site on the StatefulSet|temporal|auto|postgres.postgres.svc.cluster.local.||statefulset|false|false|"
+    "migrated Site stays on nico-pg-cluster|temporal|auto|nico-pg-cluster.postgres.svc.cluster.local||statefulset|false|true|"
+    "StatefulSet without a deployed Temporal|temporal|auto|||statefulset|false|false|"
+    "retained PVC without the StatefulSet or a deployed Temporal|temporal|auto|||pvc|false|false|"
+    "explicit true overrides the deployed database|temporal|true|postgres.postgres.svc.cluster.local.||statefulset|false|true|"
+    "Temporal on an unrecognized host|temporal|auto|pg.example.com|||false||auto doesn't recognize pg.example.com, the PostgreSQL host the deployed temporal uses"
+    "Keycloak on the StatefulSet|keycloak|auto||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|false|false|"
+    "Keycloak on nico-pg-cluster|keycloak|auto||jdbc:postgresql://nico-pg-cluster.postgres.svc.cluster.local:5432/keycloak?sslmode=require|statefulset|false|true|"
+    "Keycloak with KC_DB_URL from valueFrom|keycloak|auto||valueFrom||false||auto could not tell which PostgreSQL the deployed keycloak uses"
+    "unreadable cluster state|temporal|auto||||true||auto could not tell which PostgreSQL the deployed temporal uses"
+    "invalid value|keycloak|maybe||||false||keycloak.useHaPostgres must be true, false, or auto (got 'maybe')"
 )
 
 for row in "${cases[@]}"; do
-    IFS='|' read -r name component value temporal_host keycloak_url legacy_sts reads_fail expected expected_error <<< "${row}"
+    IFS='|' read -r name component value temporal_host keycloak_url standalone reads_fail expected expected_error <<< "${row}"
     temporal_value=auto
     keycloak_value=auto
     if [[ "${component}" == "temporal" ]]; then
@@ -103,7 +116,7 @@ EOF
 
     ERRORS=()
     FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" \
-        FAKE_LEGACY_STS="${legacy_sts}" FAKE_READS_FAIL="${reads_fail}" \
+        FAKE_STANDALONE="${standalone}" FAKE_READS_FAIL="${reads_fail}" \
         PATH="${TEST_TMP_DIR}/bin:${PATH}" _resolve_use_ha_postgres "${component}"
     errors="${ERRORS[*]:-}"
 
