@@ -303,23 +303,38 @@ func buildDomainTopologySnapshot(
 			snapshot.clusterByGroup[groupID] = nil
 		}
 	}
+	// Core reports one membership per switch, so log once per sync rather than per switch.
+	skippedRackIDs := make(map[string]struct{})
+	skippedMemberships := 0
 	for _, membership := range memberships {
 		rackID, known := rackIDByExternalID[membership.RackID]
 		groupID := snapshot.groupByRack[rackID]
 		if !known || groupID == "" {
-			log.Warn().Str("rack_id", membership.RackID).Msg("Skipping NMX-C observation without a known rack group")
+			skippedRackIDs[membership.RackID] = struct{}{}
+			skippedMemberships++
 			continue
 		}
 		clusterID, err := uuid.Parse(membership.DomainID)
 		current := snapshot.clusterByGroup[groupID]
 		if err != nil || clusterID == uuid.Nil || (current != nil && *current != clusterID) {
-			log.Error().Str("rack_group_id", groupID).Str("nmxc_cluster_id", membership.DomainID).
-				Msg("Invalid or conflicting NMX-C cluster observation; preserving this group's cluster")
+			if !snapshot.invalidGroups[groupID] {
+				log.Error().Str("rack_group_id", groupID).Str("nmxc_cluster_id", membership.DomainID).
+					Msg("Invalid or conflicting NMX-C cluster observation; preserving this group's cluster")
+			}
 			snapshot.invalidGroups[groupID] = true
 		}
 		if !snapshot.invalidGroups[groupID] {
 			snapshot.clusterByGroup[groupID] = &clusterID
 		}
+	}
+	if skippedMemberships > 0 {
+		rackIDs := make([]string, 0, len(skippedRackIDs))
+		for rackID := range skippedRackIDs {
+			rackIDs = append(rackIDs, rackID)
+		}
+		sort.Strings(rackIDs)
+		log.Warn().Int("skipped_memberships", skippedMemberships).Strs("rack_ids", rackIDs).
+			Msg("Skipping NMX-C observations without a known rack group")
 	}
 	for groupID := range snapshot.invalidGroups {
 		snapshot.clusterByGroup[groupID] = nil
