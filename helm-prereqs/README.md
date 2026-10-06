@@ -550,11 +550,12 @@ database the deployed Temporal release and Keycloak Deployment use, and keeps
 them there. A workload on any other database host fails preflight, so set the
 value explicitly for that Site.
 
-If Temporal or Keycloak isn't deployed yet, preflight looks for the `postgres`
-StatefulSet or its `postgres-data-postgres-0` volume in the `postgres`
-namespace. If either one is still there, the databases stay on the
-StatefulSet, so no data is left behind. Otherwise they're created in
-`nico-pg-cluster`.
+If Temporal or Keycloak isn't deployed, preflight uses the location `setup.sh`
+recorded after its last deploy, in the `nico-workload-databases` ConfigMap in
+the `postgres` namespace. Without a record, it looks for the `postgres`
+StatefulSet or its `postgres-data-postgres-0` volume in the same namespace. If
+either one is still there, the databases stay on the StatefulSet, so no data is
+left behind. Otherwise they're created in `nico-pg-cluster`.
 
 Phase 7c only deploys the StatefulSet while either value resolves to `false`.
 So a new Site never gets it. While either database stays on it, preflight warns
@@ -574,17 +575,18 @@ that for Keycloak.
 
 1. Set `temporal.useHaPostgres: true`, `keycloak.useHaPostgres: true`, or
    both. `auto` isn't enough, because it leaves an existing Site's databases
-   where they are. Then run `helmfile sync -l name=nico-prereqs`, or `setup.sh` through
-   Phase 6, to create the users, databases, and `ClusterExternalSecret`s
-   above. A Site that was on `auto` already has them.
+   where they are. Then run `helmfile sync -l name=nico-prereqs`, or
+   `setup.sh --skip-rest`, to create the users, databases, and
+   `ClusterExternalSecret`s above. A Site that was on `auto` already has them.
 2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh` with
    `--db temporal`, `--db keycloak`, or `--db both`, to match the values you
    set to `true`. The default is `both`, which fails if only one target is
    provisioned. The script scales the workloads to zero and dumps their
    databases from `postgres.postgres`. It then restores them into
-   `nico-pg-cluster`. This is a stop-the-world cutover. Temporal stops
-   processing workflows and Keycloak stops serving logins while it runs. They
-   stay down afterward, as
+   `nico-pg-cluster`. When every copy succeeds, it leaves a receipt in the
+   `nico-workload-databases` ConfigMap. This is a stop-the-world cutover.
+   Temporal stops processing workflows and Keycloak stops serving logins while
+   it runs. They stay down afterward, as
    [Why does the migration script leave things scaled down?](#why-does-the-migration-script-leave-things-scaled-down)
    explains.
 3. Re-run `setup.sh`. Phases 7d and 7f point Temporal and Keycloak at
@@ -592,10 +594,11 @@ that for Keycloak.
    `nico-pg-cluster`, phase 7c stops applying the standalone StatefulSet. The
    StatefulSet keeps running with the old data until you remove it.
 
-`preflight.sh` catches a skipped step 2. When a value resolves to `true` and
-`postgres.postgres` still has data, it compares each database with its copy on
-`nico-pg-cluster`. If the copy is missing or its row count doesn't match,
-preflight reports an error that points at the migration script.
+`preflight.sh` stops `setup.sh` from moving a database off the StatefulSet
+before step 2 is done. When `true` would move it, preflight requires the
+receipt from step 2. The workload also has to have stayed scaled to zero since,
+so the copy is still current. Otherwise setup stops, even with `-y`. `auto`
+never moves a database, so this check only applies to `true`.
 
 ### Why does the migration script leave things scaled down?
 
@@ -608,6 +611,9 @@ endpoint over. So the migration script leaves a successfully-migrated
 workload at zero replicas, and step 3 is what brings it back up. A *failed*
 migration is the exception: the script restores the original replica count
 immediately, since nothing was cut over.
+
+Preflight relies on this too. A workload that runs again before step 3 makes
+the copy stale, so preflight asks for a new migration.
 
 ### Namespace caveats
 
