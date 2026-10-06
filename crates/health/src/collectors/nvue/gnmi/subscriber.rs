@@ -303,8 +303,82 @@ struct GnmiUsernamePassword {
 
 /// Carries the stream name and optional requested paths into connection logs.
 struct StreamDiagnostics<'a> {
-    stream: Option<&'static str>,
+    stream: Option<&'a str>,
     paths: Option<&'a [proto::Path]>,
+}
+
+/// Converts legacy in-band errors into the stream's terminal status.
+#[allow(deprecated, reason = "accept the legacy in-band gNMI error response")]
+fn subscription_response(
+    response: proto::SubscribeResponse,
+) -> Result<proto::SubscribeResponse, tonic::Status> {
+    if let Some(proto::subscribe_response::Response::Error(error)) = &response.response {
+        let code = i32::try_from(error.code)
+            .map(tonic::Code::from_i32)
+            .unwrap_or(tonic::Code::Unknown);
+
+        return Err(tonic::Status::new(code, error.message.clone()));
+    }
+
+    Ok(response)
+}
+
+/// Receives synchronized responses until cancellation, EOF, or a terminal error.
+/// The caller releases the stream and readiness guards before refreshing credentials.
+async fn consume_synchronized_stream<S, F>(
+    cancel_token: &CancellationToken,
+    responses: &mut S,
+    client_provider: &GnmiClientProvider,
+    stream_metrics: &GnmiStreamMetrics,
+    diagnostics: StreamDiagnostics<'_>,
+    mut process_response: F,
+) -> Result<(), tonic::Status>
+where
+    S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Unpin,
+    F: FnMut(&proto::SubscribeResponse),
+{
+    loop {
+        let Some(response) = cancel_token.run_until_cancelled(responses.next()).await else {
+            stream_metrics.connection_state.set(SHUTDOWN);
+
+            return Ok(());
+        };
+
+        let Some(response) = response else {
+            stream_metrics.connection_state.set(IDLE);
+            stream_metrics.server_initiated_closures_total.inc();
+
+            tracing::info!(
+                switch_id = %client_provider.switch_id,
+                stream = diagnostics.stream,
+                requested_paths = ?diagnostics.paths.map(request_path_names),
+                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                "gNMI stream closed by server; reconnecting"
+            );
+
+            return Ok(());
+        };
+
+        match response.and_then(subscription_response) {
+            Ok(response) => process_response(&response),
+            Err(error) => {
+                stream_metrics.connection_state.set(TRANSIENT_FAILURE);
+                stream_metrics.stream_errors_total.inc();
+                stream_metrics.reconnections_total.inc();
+
+                tracing::warn!(
+                    error = ?error,
+                    switch_id = %client_provider.switch_id,
+                    stream = diagnostics.stream,
+                    requested_paths = ?diagnostics.paths.map(request_path_names),
+                    rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                    "gNMI stream error; reconnecting"
+                );
+
+                return Err(error);
+            }
+        }
+    }
 }
 
 /// Processes responses until `sync_response=true` completes initial synchronization.
@@ -334,21 +408,13 @@ where
                 return Ok(false);
             };
 
-            let response = response?;
+            let response = subscription_response(response?)?;
 
             match response.response.as_ref() {
                 Some(proto::subscribe_response::Response::SyncResponse(true)) => {
                     return Ok(true);
                 }
                 Some(proto::subscribe_response::Response::SyncResponse(false)) => continue,
-                #[allow(deprecated, reason = "accept the legacy in-band gNMI error response")]
-                Some(proto::subscribe_response::Response::Error(error)) => {
-                    let code = i32::try_from(error.code)
-                        .map(tonic::Code::from_i32)
-                        .unwrap_or(tonic::Code::Unknown);
-
-                    return Err(tonic::Status::new(code, error.message.clone()));
-                }
                 _ => process_response(&response)?,
             }
         }
@@ -1252,10 +1318,10 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     .connection_established_timestamp
                     .set(now_unix_secs());
 
-                let _connection_guard =
+                let connection_guard =
                     StreamingConnectionGuard::inc(stream_metrics.connected.clone());
 
-                let Some(_synchronization_guard) = await_stream_synchronization(
+                let Some(synchronization_guard) = await_stream_synchronization(
                     cancel_token,
                     &mut stream,
                     &config.client_provider,
@@ -1283,80 +1349,34 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     "nvue_gnmi SAMPLE: stream connected"
                 );
 
-                loop {
-                    let Some(msg) = cancel_token.run_until_cancelled(stream.next()).await else {
-                        stream_metrics.connection_state.set(SHUTDOWN);
-                        tracing::info!(
-                            switch_id = %sample_processor.switch_id,
-                            stream = sample_processor.diagnostic_stream,
-                            rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                            "nvue_gnmi SAMPLE: cancelled, shutting down"
-                        );
-                        return;
-                    };
+                let result = consume_synchronized_stream(
+                    cancel_token,
+                    &mut stream,
+                    &config.client_provider,
+                    stream_metrics,
+                    StreamDiagnostics {
+                        stream: sample_processor.diagnostic_stream,
+                        paths: diagnostic_paths,
+                    },
+                    |response| {
+                        sample_processor.process_subscribe_response(response, stream_metrics);
+                    },
+                )
+                .await;
 
-                    match msg {
-                        Some(Ok(resp)) => {
-                            // Some targets report path rejection in-band rather than
-                            // closing the RPC. Retry the selected stream and surface
-                            // the rejected path set instead of treating it as healthy.
-                            #[allow(
-                                deprecated,
-                                reason = "accept the legacy in-band gNMI error response"
-                            )]
-                            if let Some(proto::subscribe_response::Response::Error(error)) =
-                                &resp.response
-                                && diagnostic_paths.is_some()
-                            {
-                                stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                                stream_metrics.stream_errors_total.inc();
-                                stream_metrics.reconnections_total.inc();
-                                tracing::warn!(
-                                    grpc_status_code = error.code,
-                                    error = %error.message,
-                                    switch_id = %sample_processor.switch_id,
-                                    stream = sample_processor.diagnostic_stream,
-                                    requested_paths = ?diagnostic_paths.map(request_path_names),
-                                    "nvue_gnmi SAMPLE: selected interface path request rejected, reconnecting"
-                                );
+                // Release readiness and the failed RPC before credential refresh can block.
+                drop(stream);
+                drop(synchronization_guard);
+                drop(connection_guard);
 
-                                break;
-                            }
-
-                            sample_processor.process_subscribe_response(&resp, stream_metrics);
-                        }
-                        None => {
-                            stream_metrics.connection_state.set(IDLE);
-                            stream_metrics.server_initiated_closures_total.inc();
-                            tracing::info!(
-                                switch_id = %sample_processor.switch_id,
-                                stream = sample_processor.diagnostic_stream,
-                                requested_paths = ?diagnostic_paths.map(request_path_names),
-                                rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi SAMPLE: stream closed by server, reconnecting"
-                            );
-                            backoff.reset();
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                            stream_metrics.stream_errors_total.inc();
-                            stream_metrics.reconnections_total.inc();
+                if let Err(error) = result {
+                    cancel_token
+                        .run_until_cancelled(
                             config
                                 .client_provider
-                                .refresh_status_auth_if_needed(&e, credential_generation)
-                                .await;
-                            tracing::warn!(
-                                error = ?e,
-                                switch_id = %sample_processor.switch_id,
-                                stream = sample_processor.diagnostic_stream,
-                                requested_paths = ?diagnostic_paths.map(request_path_names),
-                                rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi SAMPLE: stream error, reconnecting"
-                            );
-                            break;
-                        }
-                    }
+                                .refresh_status_auth_if_needed(&error, credential_generation),
+                        )
+                        .await;
                 }
             }
         }
@@ -1423,10 +1443,10 @@ async fn gnmi_on_change_task(
                     .connection_established_timestamp
                     .set(now_unix_secs());
 
-                let _connection_guard =
+                let connection_guard =
                     StreamingConnectionGuard::inc(stream_metrics.connected.clone());
 
-                let Some(_synchronization_guard) = await_stream_synchronization(
+                let Some(synchronization_guard) = await_stream_synchronization(
                     &cancel_token,
                     &mut stream,
                     &client_provider,
@@ -1454,51 +1474,33 @@ async fn gnmi_on_change_task(
                     "nvue_gnmi ON_CHANGE: stream connected"
                 );
 
-                loop {
-                    let Some(msg) = cancel_token.run_until_cancelled(stream.message()).await else {
-                        stream_metrics.connection_state.set(SHUTDOWN);
-                        tracing::info!(
-                            switch_id = %on_change_processor.switch_id,
-                            stream = %on_change_processor.collector_name,
-                            rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                            "nvue_gnmi ON_CHANGE: cancelled, shutting down"
-                        );
-                        return;
-                    };
+                let result = consume_synchronized_stream(
+                    &cancel_token,
+                    &mut stream,
+                    &client_provider,
+                    &stream_metrics,
+                    StreamDiagnostics {
+                        stream: Some(&on_change_processor.collector_name),
+                        paths: None,
+                    },
+                    |response| {
+                        on_change_processor.process_subscribe_response(response, &stream_metrics);
+                    },
+                )
+                .await;
 
-                    match msg {
-                        Ok(Some(resp)) => {
-                            on_change_processor.process_subscribe_response(&resp, &stream_metrics);
-                        }
-                        Ok(None) => {
-                            stream_metrics.connection_state.set(IDLE);
-                            stream_metrics.server_initiated_closures_total.inc();
-                            tracing::info!(
-                                switch_id = %on_change_processor.switch_id,
-                                stream = %on_change_processor.collector_name,
-                                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi ON_CHANGE: stream closed by server, reconnecting"
-                            );
-                            backoff.reset();
-                            break;
-                        }
-                        Err(e) => {
-                            stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                            stream_metrics.stream_errors_total.inc();
-                            stream_metrics.reconnections_total.inc();
+                // Release readiness and the failed RPC before credential refresh can block.
+                drop(stream);
+                drop(synchronization_guard);
+                drop(connection_guard);
+
+                if let Err(error) = result {
+                    cancel_token
+                        .run_until_cancelled(
                             client_provider
-                                .refresh_status_auth_if_needed(&e, credential_generation)
-                                .await;
-                            tracing::warn!(
-                                error = ?e,
-                                switch_id = %on_change_processor.switch_id,
-                                stream = %on_change_processor.collector_name,
-                                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi ON_CHANGE: stream error, reconnecting"
-                            );
-                            break;
-                        }
-                    }
+                                .refresh_status_auth_if_needed(&error, credential_generation),
+                        )
+                        .await;
                 }
             }
         }
@@ -1559,6 +1561,7 @@ mod tests {
 
     enum ProviderResponse {
         Credentials(BmcCredentials),
+        CredentialsThenPending(BmcCredentials),
         Error(&'static str),
         Pending,
     }
@@ -1593,10 +1596,18 @@ mod tests {
             &'a self,
             endpoint: &'a BmcAddr,
         ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let previous_calls = self.calls.fetch_add(1, Ordering::SeqCst);
             self.observed_addrs.lock().unwrap().push(endpoint.clone());
+
             let response = match &self.response {
                 ProviderResponse::Credentials(credentials) => Ok(credentials.clone()),
+                ProviderResponse::CredentialsThenPending(credentials) => {
+                    if previous_calls > 0 {
+                        return Box::pin(std::future::pending());
+                    }
+
+                    Ok(credentials.clone())
+                }
                 ProviderResponse::Error(message) => {
                     Err(HealthError::GenericError((*message).to_string()))
                 }
@@ -2047,6 +2058,150 @@ mod tests {
         assert_eq!(metrics.connection_state.get(), SHUTDOWN);
         assert_eq!(metrics.connected.get(), 0);
         assert_eq!(metrics.synchronized.get(), 0);
+    }
+
+    async fn wait_for_stream_condition(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("stream condition should become observable");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(deprecated, reason = "exercise legacy in-band gNMI error recovery")]
+    async fn sample_post_sync_errors_release_readiness_and_retry() {
+        for (diagnostic_stream, code, expected_fetches) in [
+            (None, tonic::Code::Unavailable, 1),
+            (Some(INTERFACE_STREAM_NAME), tonic::Code::Unavailable, 1),
+            (Some(LEAK_SENSOR_STREAM_NAME), tonic::Code::Unimplemented, 1),
+            (None, tonic::Code::Unauthenticated, 2),
+        ] {
+            let cancel_token = CancellationToken::new();
+
+            let provider = RecordingProvider::responding_with(
+                ProviderResponse::CredentialsThenPending(BmcCredentials::UsernamePassword {
+                    username: "admin".to_string(),
+                    password: None,
+                }),
+            );
+
+            let config = GnmiStreamConfig {
+                client_provider: test_client_provider(provider.clone()),
+                paths: Vec::new(),
+                sample_interval_nanos: 1,
+            };
+
+            let (_, generation) = config
+                .client_provider
+                .new_client()
+                .await
+                .expect("initial credentials");
+
+            let metrics = test_gnmi_stream_metrics();
+            let processor = test_sample_processor(diagnostic_stream);
+
+            let sync = proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                ..Default::default()
+            };
+
+            let update = proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    Default::default(),
+                )),
+                ..Default::default()
+            };
+
+            let (first_tx, first_rx) = tokio::sync::mpsc::channel(4);
+            let (retry_tx, retry_rx) = tokio::sync::mpsc::channel(4);
+            let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel(2);
+
+            let mut streams: VecDeque<TestStream> = VecDeque::from([
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(first_rx)) as TestStream,
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(retry_rx)) as TestStream,
+            ]);
+
+            let run = run_gnmi_sample_task(&cancel_token, &config, &metrics, &processor, || {
+                attempt_tx.try_send(()).expect("subscription attempt");
+
+                std::future::ready(Ok((streams.pop_front().expect("test stream"), generation)))
+            });
+
+            let observe = async {
+                attempt_rx.recv().await.expect("initial subscription");
+                first_tx.send(Ok(sync.clone())).await.expect("initial sync");
+                first_tx
+                    .send(Ok(update.clone()))
+                    .await
+                    .expect("initial update");
+
+                wait_for_stream_condition(|| metrics.notifications_received_total.get() == 1.0)
+                    .await;
+
+                assert_eq!(metrics.connected.get(), 1);
+                assert_eq!(metrics.synchronized.get(), 1);
+                assert_eq!(metrics.notifications_received_total.get(), 1.0);
+
+                first_tx
+                    .send(Ok(proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Error(proto::Error {
+                            code: code as u32,
+                            message: "post-sync subscription failure".to_string(),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }))
+                    .await
+                    .expect("in-band error");
+
+                wait_for_stream_condition(|| metrics.stream_errors_total.get() == 1.0).await;
+
+                assert_eq!(metrics.connection_state.get(), TRANSIENT_FAILURE);
+                assert_eq!(metrics.connected.get(), 0);
+                assert_eq!(metrics.synchronized.get(), 0);
+                assert_eq!(metrics.stream_errors_total.get(), 1.0);
+                assert_eq!(metrics.reconnections_total.get(), 1.0);
+                assert_eq!(metrics.server_initiated_closures_total.get(), 0.0);
+                assert!(first_tx.is_closed(), "failed subscription must be dropped");
+
+                if code == tonic::Code::Unauthenticated {
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+                    cancel_token.cancel();
+                    return;
+                }
+
+                attempt_rx.recv().await.expect("replacement subscription");
+                wait_for_stream_condition(|| metrics.connected.get() == 1).await;
+
+                assert_eq!(metrics.connected.get(), 1);
+                assert_eq!(metrics.synchronized.get(), 0);
+
+                retry_tx.send(Ok(sync)).await.expect("replacement sync");
+                retry_tx.send(Ok(update)).await.expect("replacement update");
+
+                wait_for_stream_condition(|| metrics.notifications_received_total.get() == 2.0)
+                    .await;
+
+                assert_eq!(metrics.connection_state.get(), READY);
+                assert_eq!(metrics.synchronized.get(), 1);
+                assert_eq!(metrics.notifications_received_total.get(), 2.0);
+                assert_eq!(metrics.stream_errors_total.get(), 1.0);
+                assert_eq!(metrics.reconnections_total.get(), 1.0);
+
+                cancel_token.cancel();
+            };
+
+            tokio::join!(run, observe);
+
+            assert_eq!(metrics.connection_state.get(), SHUTDOWN);
+            assert_eq!(metrics.connected.get(), 0);
+            assert_eq!(metrics.synchronized.get(), 0);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), expected_fetches);
+        }
     }
 
     #[tokio::test(start_paused = true)]

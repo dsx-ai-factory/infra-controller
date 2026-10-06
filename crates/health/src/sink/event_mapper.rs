@@ -28,8 +28,8 @@ pub(crate) trait RedfishEventMapper: Send + Sync {
     /// Decoded protobuf notifications use their payload hash. Redfish state
     /// notifications share a resource key. Periodic entries use their service
     /// and entry IDs. SSE records prefer the event ID, then the linked log
-    /// entry URI, then the event record URI. Other records use message or body
-    /// content as a fallback.
+    /// entry URI, then the event record URI plus an optional occurrence
+    /// fingerprint. Other records use message or body content as a fallback.
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
 }
 
@@ -40,8 +40,8 @@ pub trait RedfishEventMapper: Send + Sync {
     /// Decoded protobuf notifications use their payload hash. Redfish state
     /// notifications share a resource key. Periodic entries use their service
     /// and entry IDs. SSE records prefer the event ID, then the linked log
-    /// entry URI, then the event record URI. Other records use message or body
-    /// content as a fallback.
+    /// entry URI, then the event record URI plus an optional occurrence
+    /// fingerprint. Other records use message or body content as a fallback.
     fn queue_key(&self, bmc_id: &str, attributes: &[(Cow<'static, str>, String)]) -> String;
 }
 
@@ -123,10 +123,15 @@ impl RedfishEventMapper for OpenBmcEventMapper {
             return format!("{bmc_id}|redfish-entry|{log_entry_id}");
         }
 
-        // SSE events without either optional identifier use the EventRecord URI.
+        // EventRecord URIs may repeat across SSE payloads. A source fingerprint
+        // distinguishes changed occurrence fields while exact replays coalesce.
         if let Some(event_record_id) =
             Self::find_attr(attributes, "event_record_id").filter(|value| !value.is_empty())
         {
+            if let Some(fingerprint) = Self::find_attr(attributes, "event_record_fingerprint") {
+                return format!("{bmc_id}|redfish-event-record|{event_record_id}|{fingerprint}");
+            }
+
             return format!("{bmc_id}|redfish-event-record|{event_record_id}");
         }
 
@@ -283,6 +288,11 @@ mod tests {
             "SSE events fall back to their event record URI" {
                 (&[("event_record_id", "record-1")][..],
                  &[("event_record_id", "record-2")][..]) => false,
+            }
+
+            "SSE state notifications retain latest-wins resource keys" {
+                (&[("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"resource\"]"), ("event_record_id", "record-1"), ("event_record_fingerprint", "old")][..],
+                 &[("message_id", "ResourceEvent.1.0.ResourceStatusChanged"), ("message_args", "[\"resource\"]"), ("event_record_id", "record-1"), ("event_record_fingerprint", "new")][..]) => true,
             }
 
             "SSE log entry links take precedence over event record URIs" {
