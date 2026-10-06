@@ -109,6 +109,7 @@ RUN export GO_VERSION="1.26.4" && \
 	tar -C ${GOTMPDIR} -xzf ${GOTMPDIR}/${TARFILE} && \
 	mv ${GOTMPDIR}/go /usr/local/go && \
 	rm -rf ${GOTMPDIR}
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # create a postgres user
 RUN /etc/init.d/postgresql start && su postgres -c "/usr/lib/postgresql/15/bin/createuser -d root" && /etc/init.d/postgresql stop

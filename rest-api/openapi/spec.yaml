@@ -4736,7 +4736,7 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '409':
           description: |-
-            The Subnet is already attached to a different VPC and `allowReplace` is not `true`, the Site cannot confirm a versioned tenant Subnet or reports a different VPC than REST (reconciliation required), the Tenant's Site association could not be confirmed while reserving the reassignment, the Subnet changed while the reassignment was being reserved, Core definitively rejected the reassignment with a conflict, or a VPC reassignment is pending reconciliation. A definitive Core conflict clears the new intent and leaves the source VPC unchanged. A pending reassignment is durable: do not interpret it as a rollback. Retrieve the Subnet to observe the reconciled VPC before retrying.
+            The Subnet is already attached to a different VPC and `allowReplace` is not `true`, the Site cannot confirm a versioned tenant Subnet or reports a different VPC than REST (reconciliation required), the Subnet changed while the reassignment was being reserved, Core definitively rejected the reassignment with a conflict, or a VPC reassignment is pending reconciliation. A definitive Core conflict clears the new intent and leaves the source VPC unchanged. A pending reassignment is durable: do not interpret it as a rollback. Retrieve the Subnet to observe the reconciled VPC before retrying.
           content:
             application/json:
               schema:
@@ -4747,6 +4747,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
