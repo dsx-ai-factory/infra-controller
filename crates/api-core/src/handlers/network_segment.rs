@@ -350,7 +350,7 @@ pub(crate) async fn attach_to_vpc(
         NetworkSegmentType::Tenant if site_agent_call => {
             let current_vpc_id = segment.config.vpc_id.ok_or_else(|| {
                 CarbideError::FailedPrecondition(format!(
-                    "tenant network segment {} must already belong to an Ethernet virtualizer VPC",
+                    "tenant network segment {} must already belong to an ethernet virtualizer VPC",
                     segment.id
                 ))
             })?;
@@ -411,7 +411,7 @@ pub(crate) async fn attach_to_vpc(
             let target_type = target_vpc.config.network_virtualization_type;
             if !supports_tenant_segment_reassignment(current_type, target_type) {
                 return Err(CarbideError::FailedPrecondition(format!(
-                    "tenant network segment {} can only move between VPCs using the same Ethernet virtualizer mode",
+                    "tenant network segment {} can only move between VPCs using the same ethernet virtualizer mode",
                     segment.id
                 ))
                 .into());
