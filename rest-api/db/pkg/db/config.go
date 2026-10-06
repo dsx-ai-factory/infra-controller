@@ -69,7 +69,8 @@ func ConfigFromEnv() (Config, error) {
 }
 
 // BuildDSN builds the Data Source Name (DSN) string for connecting to
-// the database. IPv6 hosts may be supplied with or without brackets.
+// the database. IPv6 hosts may be supplied with or without brackets, and a
+// filesystem path selects a PostgreSQL Unix-domain socket directory.
 func (c *Config) BuildDSN() string {
 	host := c.Host
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
