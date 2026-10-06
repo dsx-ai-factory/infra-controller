@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -379,22 +380,22 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 
 	// Commit Deleting before contacting Core. This blocks new REST subnet
 	// references and leaves a recoverable owner/Core-ID mapping if a proxy
-	// times out, the API process exits, or the final REST write fails.
+	// times out, the API process exits, or the final REST write fails. Keep
+	// recovery outside the handler's complete RPC window, including on retries.
 	domainDAO := cdbm.NewDomainDAO(ddh.dbSession)
-	if domain.Status != cdbm.DomainStatusDeleting {
-		if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusRejecting && domain.Status != cdbm.DomainStatusError {
-			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
-		}
-		changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
-			return domainDAO.TransitionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, domain.Status, cdbm.DomainStatusDeleting)
-		})
-		if transitionErr != nil {
-			return common.HandleTxError(c, logger, transitionErr, "Failed to reserve Domain deletion, DB transaction error")
-		}
-		if !changed {
-			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain changed while reserving deletion", nil)
-		}
+	if domain.Status != cdbm.DomainStatusReady && domain.Status != cdbm.DomainStatusPending && domain.Status != cdbm.DomainStatusRejecting && domain.Status != cdbm.DomainStatusError && domain.Status != cdbm.DomainStatusDeleting {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain is not available for deletion", nil)
 	}
+	changed, transitionErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
+		return domainDAO.ReserveDeletionOwned(ctx, tx, domain.ID, *domain.ControllerDomainID, domain.Status, 90*time.Second)
+	})
+	if transitionErr != nil {
+		return common.HandleTxError(c, logger, transitionErr, "Failed to reserve Domain deletion, DB transaction error")
+	}
+	if !changed {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Domain changed while reserving deletion", nil)
+	}
+	restoreOnRefusal := domain.Status == cdbm.DomainStatusReady
 
 	// Cancellation creates a terminal Core tombstone if a late reserved-ID
 	// create has not yet arrived. A plain not-found delete cannot close that
@@ -403,6 +404,21 @@ func (ddh DeleteDomainHandler) Handle(c echo.Context) error {
 		Id: &corev1.DomainId{Value: domain.ControllerDomainID.String()}, CancelReservedId: true,
 	}, nil, site.ID.String())
 	if apiErr != nil {
+		if apiErr.Code == http.StatusPreconditionFailed {
+			// Core definitively refused deletion while the Domain is referenced.
+			// Only this request's fresh Ready->Deleting reservation can be
+			// restored. A retried/older deletion may still have an RPC in flight.
+			if restoreOnRefusal {
+				restored, restoreErr := cdb.WithTxResult(ctx, ddh.dbSession, func(tx *cdb.Tx) (bool, error) {
+					return domainDAO.RestoreRejectedDeletion(ctx, tx, domain.ID, *domain.ControllerDomainID)
+				})
+				if restoreErr != nil || !restored {
+					logger.Error().Err(restoreErr).Bool("restored", restored).Str("domainID", domain.ID.String()).Msg("could not restore Domain after referenced-delete rejection")
+					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to restore Domain after deletion was rejected", nil)
+				}
+			}
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
 		logAPIError(logger, apiErr, "Domain deletion is unconfirmed; durable Deleting reservation retained")
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}

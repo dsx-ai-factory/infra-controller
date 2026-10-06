@@ -325,3 +325,25 @@ func TestGetAllSuggestions_GeneratedResourceAfterValueFlag(t *testing.T) {
 		})
 	}
 }
+
+func TestGetAllSuggestions_SubnetAttachBoundsBlockingFetcher(t *testing.T) {
+	cache := NewCache()
+	resolver := NewResolver(cache)
+	resolver.RegisterFetcher("vpc", func(ctx context.Context) ([]NamedItem, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	session := &Session{
+		Org:      "acme",
+		Scope:    Scope{SiteID: "site-1"},
+		Cache:    cache,
+		Resolver: resolver,
+	}
+	cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
+
+	started := time.Now()
+	assert.Nil(t, getAllSuggestions(session, "subnet attach-vpc sub", []string{"subnet attach-vpc"}))
+	elapsed := time.Since(started)
+	assert.GreaterOrEqual(t, elapsed, autocompleteFetchTimeout)
+	assert.Less(t, elapsed, autocompleteFetchTimeout+time.Second)
+}

@@ -239,8 +239,9 @@ func (r ApiDeleteDomainRequest) Execute() (*http.Response, error) {
 DeleteDomain Delete Domain
 
 Delete a tenant-owned DNS Domain by its REST ID. Referenced Domains
-cannot be deleted. If Core deletion or its reserved-ID cancellation
-cannot be confirmed, the owned reservation remains Deleting. Retry
+cannot be deleted. A definitive 412 refusal leaves a newly requested
+Ready Domain unchanged and usable. If Core deletion or its reserved-ID
+cancellation cannot be confirmed, the owned reservation remains Deleting. Retry
 DELETE with the same REST ID after an unconfirmed 504; 204 means Core
 deletion/cancellation and REST removal were both confirmed. Do not
 interpret a 504 as absence or rollback. The owning tenant with a

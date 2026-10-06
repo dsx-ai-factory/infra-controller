@@ -1158,8 +1158,17 @@ func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
 	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName,
 		coreRequest, coreResponse, subnet.SiteID.String())
 	if apiErr != nil {
-		// A 504 does not cancel the Site RPC. Keep the due intent for the
-		// recovery worker to query Core and resolve under its version fence.
+		if isDefinitiveAttachmentRejection(apiErr.Code) {
+			cancelled, cancelErr := cdb.WithTxResult(ctx, asvh.dbSession, func(tx *cdb.Tx) (bool, error) {
+				return subnetDAO.CancelAttachment(ctx, tx, intent)
+			})
+			if cancelErr == nil && cancelled {
+				return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+			}
+			logger.Error().Err(cancelErr).Bool("cancelled", cancelled).Msg("could not clear definitively rejected Subnet attachment")
+		}
+		// A timeout, unavailable service, internal failure, or failed cancellation
+		// does not prove the Site RPC rolled back. Keep the version-fenced intent.
 		logAPIError(logger, apiErr, "Subnet attachment is unconfirmed; durable intent retained")
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
 	}
@@ -1188,6 +1197,15 @@ func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, model.NewAPISubnet(updatedSubnet, statusDetails, nil))
+}
+
+func isDefinitiveAttachmentRejection(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusPreconditionFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // ~~~~~ Delete Handler ~~~~~ //

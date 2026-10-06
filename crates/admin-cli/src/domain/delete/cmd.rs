@@ -18,19 +18,51 @@
 use rpc::admin_cli::OutputFormat;
 
 use super::args::Args;
+use crate::async_writeln;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
 pub(super) async fn delete(
     args: Args,
     output_format: OutputFormat,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     api_client.delete_domain(args.domain).await?;
+    write_delete_output(args.domain, output_format, output_file).await
+}
+
+async fn write_delete_output(
+    domain: carbide_uuid::domain::DomainId,
+    output_format: OutputFormat,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+) -> CarbideCliResult<()> {
     if output_format == OutputFormat::Json {
-        println!("{{\"deleted\":\"{}\"}}", args.domain);
+        async_writeln!(output_file, "{{\"deleted\":\"{}\"}}", domain)?;
     } else {
-        println!("Deleted domain {}", args.domain);
+        async_writeln!(output_file, "Deleted domain {}", domain)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::async_write::CapturedOutput;
+
+    #[tokio::test]
+    async fn delete_output_uses_configured_writer() {
+        let mut captured = CapturedOutput::new();
+        let id = "12345678-1234-5678-90ab-cdef01234567".parse().unwrap();
+
+        write_delete_output(id, OutputFormat::Json, captured.writer())
+            .await
+            .unwrap();
+
+        let output = String::from_utf8(captured.into_bytes().await).unwrap();
+        assert_eq!(
+            output,
+            "{\"deleted\":\"12345678-1234-5678-90ab-cdef01234567\"}\n"
+        );
+    }
 }

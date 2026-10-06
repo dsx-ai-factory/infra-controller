@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 type subnetAttachVpcFixture struct {
@@ -156,6 +158,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 		expectedVpc        string
 		expectProxyRequest bool
 		expectReadRequest  bool
+		expectIntent       bool
 	}{
 		{
 			name: "reassigns an unallocated ETV Subnet after explicit acknowledgement",
@@ -373,6 +376,20 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
+			expectIntent:       true,
+		},
+		{
+			name: "clears a definitively rejected attachment",
+			workflowErr: tp.NewNonRetryableApplicationError(
+				"overlapping prefix", swe.ErrTypeNICoFailedPrecondition, errors.New("overlapping prefix")),
+			prepare: func(t *testing.T, fixture *subnetAttachVpcFixture) (string, string, *cdbm.User) {
+				body, err := json.Marshal(model.APISubnetAttachVpcRequest{VpcID: fixture.targetVpc.ID.String(), AllowReplace: true})
+				require.NoError(t, err)
+				return fixture.subnet.ID.String(), string(body), fixture.user
+			},
+			expectedStatus:     http.StatusPreconditionFailed,
+			expectedVpc:        "source",
+			expectProxyRequest: true,
 		},
 		{
 			name: "leaves REST VPC unchanged for an inconsistent Core response",
@@ -385,6 +402,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
+			expectIntent:       true,
 		},
 		{
 			name: "leaves REST VPC unchanged when Core returns a non-tenant segment",
@@ -399,6 +417,7 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 			expectedStatus:     http.StatusConflict,
 			expectedVpc:        "source",
 			expectProxyRequest: true,
+			expectIntent:       true,
 		},
 		{
 			name: "rejects an invalid Subnet path ID",
@@ -436,8 +455,10 @@ func TestAttachSubnetVpcHandler_Handle(t *testing.T) {
 				expectedVpcID = fixture.targetVpc.ID
 			}
 			assert.Equal(t, expectedVpcID, updatedSubnet.VpcID)
-			if test.expectReadRequest {
-				assert.Nil(t, updatedSubnet.AttachIntentID, "rejected attachment must not leave an intent")
+			if test.expectIntent {
+				assert.NotNil(t, updatedSubnet.AttachIntentID, "ambiguous attachment must retain its intent")
+			} else if test.expectProxyRequest || test.expectReadRequest {
+				assert.Nil(t, updatedSubnet.AttachIntentID, "completed or definitively rejected attachment must clear its intent")
 			}
 
 			if test.expectProxyRequest || test.expectReadRequest {

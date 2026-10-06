@@ -500,7 +500,7 @@ async fn test_domain_reserved_id_replay_and_reference_guard(pool: PgPool) {
         .await
         .expect_err("live subnet must prevent domain deletion");
     assert_eq!(blocked.code(), tonic::Code::FailedPrecondition);
-    assert!(segment.id.to_string().len() > 0);
+    assert!(!segment.id.to_string().is_empty());
 
     api.delete_domain(Request::new(DomainDeletionRequest {
         id: Some(id),

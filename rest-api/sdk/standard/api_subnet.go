@@ -45,7 +45,7 @@ func (r ApiAttachVpcToSubnetRequest) Execute() (*Subnet, *http.Response, error) 
 /*
 AttachVpcToSubnet Attach Subnet to VPC
 
-Attach an unused tenant Subnet to an Ethernet virtualizer VPC at the same Site. Set `allowReplace` to `true` to reassign a Subnet that is already attached to a different VPC. Attaching to the current VPC is idempotent. The operation cannot detach a Subnet or move it across network-virtualization modes.
+Attach an unused tenant Subnet to an Ethernet virtualizer VPC at the same Site. Set `allowReplace` to `true` to reassign a Subnet that is already attached to a different VPC. Attaching to the current VPC is idempotent. The operation cannot detach a Subnet or move it across network-virtualization modes. A definitive Core rejection leaves the Subnet on its source VPC and clears the reassignment intent so it can be attached again or deleted. An ambiguous failure retains the durable intent for reconciliation.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 

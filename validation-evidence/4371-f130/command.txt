@@ -1,4 +1,0 @@
-source=f1307ed233c55cab1c6ec70fb0fa29f4e7774cbf
-env -i HOME=/home/developer PATH=/home/developer/.local/go/bin:/usr/local/bin:/usr/bin:/bin GOCACHE=/home/developer/.cache/go-build GOPATH=/home/developer/go GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local PGPORT=31435 PGUSER=developer timeout 300s make -f Makefile -f /home/developer/workspace/evidence/4371-f130/verify.mk test-4371-domain-handlers
-Original attempt make=2, zero tests: overlay used empty $(GO) and invoked shell test; corrected to go test.
-Corrected: same command after overlay changes $(GO) to go; inspect handlers.log and handlers.status for this execution.

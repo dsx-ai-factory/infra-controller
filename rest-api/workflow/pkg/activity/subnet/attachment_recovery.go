@@ -6,6 +6,7 @@ package subnet
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -43,9 +44,13 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	if s.AttachIntentID == nil || s.AttachRecoveryToken == nil {
 		return fmt.Errorf("unclaimed Subnet attachment")
 	}
-	// Bound retries and release the cross-replica claim even if every remote
-	// read fails. No worker may finalize using an expired/replaced token.
+	// Bound retries and release the cross-replica claim if this pass cannot
+	// resolve it. No worker may finalize using an expired/replaced token.
+	resolved := false
 	defer func() {
+		if resolved {
+			return
+		}
 		delay := time.Duration(30+min(s.AttachAttempts*10, 270)) * time.Second
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
@@ -56,6 +61,24 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	if s.AttachSourceVpcID == nil || s.AttachTargetVpcID == nil || s.AttachSourceControllerVpcID == nil ||
 		s.AttachTargetControllerVpcID == nil || s.AttachSegmentVersion == nil || s.ControllerNetworkSegmentID == nil {
 		return fmt.Errorf("incomplete durable Subnet attachment identity")
+	}
+	intent := cdbm.SubnetAttachIntent{
+		ID: *s.AttachIntentID, SubnetID: s.ID, TenantID: s.TenantID, SiteID: s.SiteID,
+		ControllerSegmentID: *s.ControllerNetworkSegmentID,
+		SourceVpcID:         *s.AttachSourceVpcID, TargetVpcID: *s.AttachTargetVpcID,
+		SourceControllerVpcID: *s.AttachSourceControllerVpcID,
+		TargetControllerVpcID: *s.AttachTargetControllerVpcID,
+		SegmentVersion:        *s.AttachSegmentVersion, RecoveryToken: s.AttachRecoveryToken,
+	}
+	cancelIntent := func() error {
+		changed, err := cdb.WithTxResult(ctx, ms.dbSession, func(tx *cdb.Tx) (bool, error) {
+			return dao.CancelAttachment(ctx, tx, intent)
+		})
+		if err != nil || !changed {
+			return fmt.Errorf("cannot cancel rejected attachment: changed=%t err=%v", changed, err)
+		}
+		resolved = true
+		return nil
 	}
 	// Previously authorized operation only: fail closed on revoked tenant-Site
 	// association or Site deletion before any new Site-facing RPC.
@@ -92,27 +115,24 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	}
 	vpc := segment.GetConfig().GetVpcId().GetValue()
 	if vpc == s.AttachTargetControllerVpcID.String() {
-		intent := cdbm.SubnetAttachIntent{
-			ID: *s.AttachIntentID, SubnetID: s.ID, TenantID: s.TenantID, SiteID: s.SiteID,
-			ControllerSegmentID: *s.ControllerNetworkSegmentID,
-			SourceVpcID:         *s.AttachSourceVpcID, TargetVpcID: *s.AttachTargetVpcID,
-			RecoveryToken: s.AttachRecoveryToken,
-		}
 		changed, err := cdb.WithTxResult(ctx, ms.dbSession, func(tx *cdb.Tx) (bool, error) {
 			return dao.CompleteAttachment(ctx, tx, intent)
 		})
 		if err != nil || !changed {
 			return fmt.Errorf("cannot finalize Core-confirmed attachment: changed=%t err=%v", changed, err)
 		}
+		resolved = true
 		return nil
 	}
-	if vpc != s.AttachSourceControllerVpcID.String() {
-		return fmt.Errorf("Core segment moved to a third VPC; manual reconciliation required")
-	}
 	if segment.GetStatus().GetLifecycle().GetVersion() != *s.AttachSegmentVersion {
-		// A different Core version fences this intent's late RPC. Do not
-		// reverse someone else's write; operator investigation is required.
-		return fmt.Errorf("Core segment version changed without expected attachment")
+		// Core's version fence makes the recorded request impossible to apply.
+		// Clear only this worker's still-leased immutable intent.
+		return cancelIntent()
+	}
+	if vpc != s.AttachSourceControllerVpcID.String() {
+		// Core may move a segment without changing its version, so the old
+		// request is not proven impossible. Preserve it for manual recovery.
+		return fmt.Errorf("Core segment moved to a third VPC at the recorded version; manual reconciliation required")
 	}
 	request := &corev1.AttachNetworkSegmentToVpcRequest{
 		NetworkSegmentId:       &corev1.NetworkSegmentId{Value: s.ControllerNetworkSegmentID.String()},
@@ -123,6 +143,9 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	}
 	response := &corev1.NetworkSegment{}
 	if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName, request, response, s.SiteID.String()); apiErr != nil {
+		if definitiveAttachmentRejection(apiErr.Code) {
+			return cancelIntent()
+		}
 		return fmt.Errorf("Core attach unconfirmed: %s", apiErr.Message)
 	}
 	if response.GetId().GetValue() != s.ControllerNetworkSegmentID.String() || response.GetConfig().GetVpcId().GetValue() != s.AttachTargetControllerVpcID.String() {
@@ -137,12 +160,19 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	if segment.GetConfig().GetVpcId().GetValue() != s.AttachTargetControllerVpcID.String() {
 		return fmt.Errorf("Core target not confirmed after attach")
 	}
-	intent := cdbm.SubnetAttachIntent{ID: *s.AttachIntentID, SubnetID: s.ID, TenantID: s.TenantID, SiteID: s.SiteID,
-		ControllerSegmentID: *s.ControllerNetworkSegmentID, SourceVpcID: *s.AttachSourceVpcID,
-		TargetVpcID: *s.AttachTargetVpcID, RecoveryToken: s.AttachRecoveryToken}
 	changed, err := cdb.WithTxResult(ctx, ms.dbSession, func(tx *cdb.Tx) (bool, error) { return dao.CompleteAttachment(ctx, tx, intent) })
 	if err != nil || !changed {
 		return fmt.Errorf("cannot commit verified Core attachment: changed=%t err=%v", changed, err)
 	}
+	resolved = true
 	return nil
+}
+
+func definitiveAttachmentRejection(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusPreconditionFailed:
+		return true
+	default:
+		return false
+	}
 }

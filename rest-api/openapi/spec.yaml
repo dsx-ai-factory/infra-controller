@@ -3081,8 +3081,9 @@ paths:
       operationId: delete-domain
       description: |-
         Delete a tenant-owned DNS Domain by its REST ID. Referenced Domains
-        cannot be deleted. If Core deletion or its reserved-ID cancellation
-        cannot be confirmed, the owned reservation remains Deleting. Retry
+        cannot be deleted. A definitive 412 refusal leaves a newly requested
+        Ready Domain unchanged and usable. If Core deletion or its reserved-ID
+        cancellation cannot be confirmed, the owned reservation remains Deleting. Retry
         DELETE with the same REST ID after an unconfirmed 504; 204 means Core
         deletion/cancellation and REST removal were both confirmed. Do not
         interpret a 504 as absence or rollback. The owning tenant with a
@@ -3112,7 +3113,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '412':
-          $ref: '#/components/responses/GenericHttpError'
+          description: Core refused deletion because the Domain is still referenced. A newly requested Ready Domain remains Ready and usable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -4696,7 +4701,7 @@ paths:
       summary: Attach Subnet to VPC
       operationId: attach-vpc-to-subnet
       description: |-
-        Attach an unused tenant Subnet to an Ethernet virtualizer VPC at the same Site. Set `allowReplace` to `true` to reassign a Subnet that is already attached to a different VPC. Attaching to the current VPC is idempotent. The operation cannot detach a Subnet or move it across network-virtualization modes.
+        Attach an unused tenant Subnet to an Ethernet virtualizer VPC at the same Site. Set `allowReplace` to `true` to reassign a Subnet that is already attached to a different VPC. Attaching to the current VPC is idempotent. The operation cannot detach a Subnet or move it across network-virtualization modes. A definitive Core rejection leaves the Subnet on its source VPC and clears the reassignment intent so it can be attached again or deleted. An ambiguous failure retains the durable intent for reconciliation.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       requestBody:
@@ -4725,13 +4730,17 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '409':
           description: |-
-            The Subnet is already attached to a different VPC and `allowReplace` is not `true`, the Site cannot confirm a versioned tenant Subnet or reports a different VPC than REST (reconciliation required), the Tenant's Site association could not be confirmed while reserving the reassignment, the Subnet changed while the reassignment was being reserved, or a VPC reassignment is pending reconciliation. A pending reassignment is durable: do not interpret this response as a rollback. Retrieve the Subnet to observe the reconciled VPC before retrying.
+            The Subnet is already attached to a different VPC and `allowReplace` is not `true`, the Site cannot confirm a versioned tenant Subnet or reports a different VPC than REST (reconciliation required), the Tenant's Site association could not be confirmed while reserving the reassignment, the Subnet changed while the reassignment was being reserved, Core definitively rejected the reassignment with a conflict, or a VPC reassignment is pending reconciliation. A definitive Core conflict clears the new intent and leaves the source VPC unchanged. A pending reassignment is durable: do not interpret it as a rollback. Retrieve the Subnet to observe the reconciled VPC before retrying.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '412':
-          $ref: '#/components/responses/GenericHttpError'
+          description: Core definitively rejected the reassignment. The intent was cleared and the Subnet remains attached to its source VPC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:

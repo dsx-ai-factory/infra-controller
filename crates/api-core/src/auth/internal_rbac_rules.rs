@@ -69,7 +69,7 @@ impl InternalRBACRules {
         x.perm("FindDomainLegacy", vec![ForgeAdminCLI]);
         x.perm("UpdateDomain", vec![ForgeAdminCLI]);
         x.perm("DeleteDomain", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("FindDomain", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
@@ -1230,7 +1230,7 @@ mod rbac_rule_tests {
         let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
         let unrelated = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
         let anonymous = Principal::Anonymous;
-        for method in ["CreateDomain", "DeleteDomain", "FindDomain"] {
+        for method in ["CreateDomain", "DeleteDomain"] {
             for principal in [&admin, &site_agent] {
                 assert!(
                     InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal)),
@@ -1248,6 +1248,20 @@ mod rbac_rule_tests {
                     principal.as_identifier()
                 );
             }
+        }
+        assert!(InternalRBACRules::allowed_from_static(
+            "FindDomain",
+            std::slice::from_ref(&admin)
+        ));
+        for principal in [&site_agent, &unrelated, &anonymous] {
+            assert!(
+                !InternalRBACRules::allowed_from_static(
+                    "FindDomain",
+                    std::slice::from_ref(principal)
+                ),
+                "FindDomain allowed {}",
+                principal.as_identifier()
+            );
         }
         assert!(InternalRBACRules::allowed_from_static(
             "AttachNetworkSegmentToVpc",

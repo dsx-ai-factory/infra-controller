@@ -110,6 +110,13 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 		// before REST may soft-delete its projection (late create race).
 		req := &corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: d.ControllerDomainID.String()}, CancelReservedId: true}
 		if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
+			if apiErr.Code == http.StatusPreconditionFailed {
+				changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusDeleting, cdbm.DomainStatusReady, false)
+				if err != nil || !changed {
+					return fmt.Errorf("Domain referenced-delete restoration failed: changed=%t err=%v", changed, err)
+				}
+				return nil
+			}
 			return fmt.Errorf("Core deletion/cancellation unconfirmed: %s", apiErr.Message)
 		}
 		changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusDeleting, cdbm.DomainStatusDeleting, true)

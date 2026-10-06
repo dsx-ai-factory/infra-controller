@@ -11,12 +11,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -446,10 +448,12 @@ func TestGetDomainHandler_Handle(t *testing.T) {
 
 func TestDeleteDomainHandler_Handle(t *testing.T) {
 	tests := []struct {
-		name            string
-		coreError       error
-		expectedStatus  int
-		expectedDeleted bool
+		name                 string
+		coreError            error
+		expectedStatus       int
+		expectedDeleted      bool
+		expectedDomainStatus string
+		initialDomainStatus  string
 	}{
 		{
 			name:            "success",
@@ -457,13 +461,25 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			expectedDeleted: true,
 		},
 		{
-			name: "Core failed precondition preserves Deleting reservation",
+			name: "Core failed precondition restores Ready Domain",
 			coreError: tp.NewNonRetryableApplicationError(
 				"Domain is in use",
 				swe.ErrTypeNICoFailedPrecondition,
 				errors.New("Domain is in use"),
 			),
-			expectedStatus: http.StatusPreconditionFailed,
+			expectedStatus:       http.StatusPreconditionFailed,
+			expectedDomainStatus: cdbm.DomainStatusReady,
+		},
+		{
+			name: "retried Deleting Core refusal stays Deleting",
+			coreError: tp.NewNonRetryableApplicationError(
+				"Domain is in use",
+				swe.ErrTypeNICoFailedPrecondition,
+				errors.New("Domain is in use"),
+			),
+			expectedStatus:       http.StatusPreconditionFailed,
+			expectedDomainStatus: cdbm.DomainStatusDeleting,
+			initialDomainStatus:  cdbm.DomainStatusDeleting,
 		},
 		{
 			name: "Core not found retains Deleting reservation",
@@ -472,7 +488,14 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 				swe.ErrTypeNICoObjectNotFound,
 				errors.New("Domain not found"),
 			),
-			expectedStatus: http.StatusNotFound,
+			expectedStatus:       http.StatusNotFound,
+			expectedDomainStatus: cdbm.DomainStatusDeleting,
+		},
+		{
+			name:                 "Core timeout retains Deleting reservation",
+			coreError:            tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil, nil),
+			expectedStatus:       http.StatusGatewayTimeout,
+			expectedDomainStatus: cdbm.DomainStatusDeleting,
 		},
 	}
 
@@ -481,6 +504,11 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			fixture := newDomainHandlerFixture(t, nil)
 			controllerDomainID := uuid.New()
 			domain := fixture.createDomainWithControllerID(t, "delete.example.com", &fixture.tenant.ID, &fixture.site.ID, controllerDomainID)
+			if tt.initialDomainStatus != "" {
+				_, err := fixture.dbSession.DB.NewUpdate().Model((*cdbm.Domain)(nil)).
+					Set("status = ?", tt.initialDomainStatus).Where("id = ?", domain.ID).Exec(context.Background())
+				require.NoError(t, err)
+			}
 			proxiedRequest := fixture.expectCore(t, corev1.Forge_DeleteDomain_FullMethodName, nil, tt.coreError)
 
 			recorder := fixture.request(t, NewDeleteDomainHandler(fixture.dbSession, fixture.scp).Handle, http.MethodDelete, "/", domain.ID.String(), nil)
@@ -499,7 +527,15 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, domain.ID, persisted.ID)
-				assert.Equal(t, cdbm.DomainStatusDeleting, persisted.Status)
+				assert.Equal(t, tt.expectedDomainStatus, persisted.Status)
+				assert.Nil(t, persisted.RecoveryToken)
+				if persisted.Status == cdbm.DomainStatusDeleting {
+					require.NotNil(t, persisted.RecoveryNextAt)
+					assert.True(t, persisted.RecoveryNextAt.After(time.Now()), "handler must keep recovery behind its RPC window")
+					claims, claimErr := cdbm.NewDomainDAO(fixture.dbSession).ClaimRecovery(context.Background(), 1, time.Minute)
+					require.NoError(t, claimErr)
+					assert.Empty(t, claims, "recovery must not race a handler-owned deletion")
+				}
 			}
 		})
 	}

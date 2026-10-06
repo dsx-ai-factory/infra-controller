@@ -457,6 +457,7 @@ type SubnetDAO interface {
 	UpdateVpcFromInventory(ctx context.Context, id, siteID, expectedVpcID, reportedVpcID uuid.UUID, controllerSegmentID *uuid.UUID, mtu *int, clearMissing bool) (bool, error)
 	ReserveAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error)
 	CompleteAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error)
+	CancelAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error)
 	ClaimAttachmentRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Subnet, error)
 	DeferAttachmentRecovery(ctx context.Context, subnetID, intentID, token uuid.UUID, delay time.Duration) (bool, error)
 	//

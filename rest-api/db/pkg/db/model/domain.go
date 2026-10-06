@@ -131,6 +131,8 @@ func (d *Domain) BeforeAppendModel(ctx context.Context, query bun.Query) error {
 type DomainDAO interface {
 	ReserveOwned(ctx context.Context, tx *db.Tx, input DomainCreateInput) (*Domain, bool, error)
 	TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error)
+	ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (bool, error)
+	RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID) (bool, error)
 	StageRejectedOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, token *uuid.UUID) (bool, error)
 	ClaimRecovery(ctx context.Context, maxRows int, lease time.Duration) ([]Domain, error)
 	CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error)
@@ -251,13 +253,51 @@ func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input Domai
 func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error) {
 	if id == uuid.Nil || coreID == uuid.Nil ||
 		!((from == DomainStatusPending && to == DomainStatusReady) ||
-			(from == DomainStatusRejecting && to == DomainStatusError) ||
-			(to == DomainStatusDeleting && (from == DomainStatusPending || from == DomainStatusRejecting || from == DomainStatusReady || from == DomainStatusError))) {
+			(from == DomainStatusRejecting && to == DomainStatusError)) {
 		return false, fmt.Errorf("invalid owned Domain transition")
 	}
 	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
 		Set("status = ?", to).Set("updated = current_timestamp").
 		Where("id = ? AND controller_domain_id = ? AND status = ? AND deleted IS NULL", id, coreID, from).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+// ReserveDeletionOwned commits or refreshes a handler-owned Deleting intent.
+// Delaying recovery beyond the Site RPC timeout prevents a recovery worker from
+// dispatching a concurrent cancellation. An active worker claim is never stolen.
+func (dsd DomainSQLDAO) ReserveDeletionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from string, delay time.Duration) (bool, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil || delay < 90*time.Second || delay > 5*time.Minute ||
+		(from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusReady && from != DomainStatusError && from != DomainStatusDeleting) {
+		return false, fmt.Errorf("invalid owned Domain deletion reservation")
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusDeleting).Set("updated = current_timestamp").
+		Set("recovery_next_at = current_timestamp + (? * interval '1 second')", delay.Seconds()).
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, from).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+// RestoreRejectedDeletion returns a freshly reserved Ready Domain to service
+// only when no recovery worker has claimed it. Callers must separately prove
+// that this request changed Ready to Deleting before invoking this CAS.
+func (dsd DomainSQLDAO) RestoreRejectedDeletion(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID) (bool, error) {
+	if tx == nil || id == uuid.Nil || coreID == uuid.Nil {
+		return false, fmt.Errorf("invalid rejected Domain deletion restoration")
+	}
+	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
+		Set("status = ?", DomainStatusReady).Set("updated = current_timestamp").
+		Set("recovery_next_at = NULL").
+		Where("id = ? AND controller_domain_id = ? AND status = ? AND recovery_token IS NULL AND deleted IS NULL", id, coreID, DomainStatusDeleting).
 		Exec(ctx)
 	if err != nil {
 		return false, err
@@ -328,7 +368,10 @@ func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease ti
 // lease and only the immutable reserved Core identity from the claim.
 func (dsd DomainSQLDAO) CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error) {
 	if token == uuid.Nil || coreID == uuid.Nil || (from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusDeleting) ||
-		(!softDelete && !((from == DomainStatusPending && to == DomainStatusReady) || (from == DomainStatusRejecting && to == DomainStatusError))) || (softDelete && (from != DomainStatusDeleting || to != DomainStatusDeleting)) {
+		(!softDelete && !((from == DomainStatusPending && to == DomainStatusReady) ||
+			(from == DomainStatusRejecting && to == DomainStatusError) ||
+			(from == DomainStatusDeleting && to == DomainStatusReady))) ||
+		(softDelete && (from != DomainStatusDeleting || to != DomainStatusDeleting)) {
 		return false, fmt.Errorf("invalid Domain recovery completion")
 	}
 	q := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).

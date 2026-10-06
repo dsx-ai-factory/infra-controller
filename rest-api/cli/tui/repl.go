@@ -555,11 +555,13 @@ func getAllSuggestions(s *Session, input string, cmdNames []string) []string {
 		if strings.TrimSpace(s.Scope.SiteID) == "" {
 			return nil
 		}
-		tenantID, err := s.getTenantID(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), autocompleteFetchTimeout)
+		defer cancel()
+		tenantID, err := s.getTenantID(ctx)
 		if err != nil {
 			return nil
 		}
-		items, err := s.subnetAttachSources(context.Background(), s.Scope.SiteID, tenantID)
+		items, err := s.subnetAttachSources(ctx, s.Scope.SiteID, tenantID)
 		if err != nil {
 			return nil
 		}

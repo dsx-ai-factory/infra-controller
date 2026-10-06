@@ -82,6 +82,37 @@ func (ssd SubnetSQLDAO) CompleteAttachment(ctx context.Context, tx *db.Tx, inten
 	return count == 1, err
 }
 
+// CancelAttachment clears an attachment that Core definitively rejected or
+// whose expected version can no longer apply. The complete immutable source
+// identity and the handler/worker claim fence must still match.
+func (ssd SubnetSQLDAO) CancelAttachment(ctx context.Context, tx *db.Tx, intent SubnetAttachIntent) (bool, error) {
+	if tx == nil || intent.ID == uuid.Nil || intent.SubnetID == uuid.Nil || intent.SiteID == uuid.Nil || intent.TenantID == uuid.Nil ||
+		intent.ControllerSegmentID == uuid.Nil || intent.SourceVpcID == uuid.Nil {
+		return false, fmt.Errorf("invalid Subnet attachment cancellation")
+	}
+	q := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(&Subnet{}).
+		Set("attach_intent_id = NULL").Set("attach_source_vpc_id = NULL").Set("attach_target_vpc_id = NULL").
+		Set("attach_source_controller_vpc_id = NULL").Set("attach_target_controller_vpc_id = NULL").
+		Set("attach_segment_version = NULL").Set("attach_recovery_token = NULL").
+		Set("attach_lease_until = NULL").Set("attach_next_at = NULL").Set("updated = current_timestamp").
+		Where("id = ? AND site_id = ? AND tenant_id = ? AND vpc_id = ? AND controller_network_segment_id = ? AND attach_intent_id = ? AND deleted IS NULL",
+			intent.SubnetID, intent.SiteID, intent.TenantID, intent.SourceVpcID, intent.ControllerSegmentID, intent.ID)
+	if intent.RecoveryToken == nil {
+		q = q.Where("attach_recovery_token IS NULL")
+	} else {
+		if *intent.RecoveryToken == uuid.Nil {
+			return false, fmt.Errorf("invalid Subnet attachment recovery token")
+		}
+		q = q.Where("attach_recovery_token = ? AND attach_lease_until > current_timestamp", *intent.RecoveryToken)
+	}
+	result, err := q.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
 // ClaimAttachmentRecovery uses SKIP LOCKED and a durable lease to coordinate
 // multiple workflow replicas. A lease only fences DB completion; delayed Site
 // requests are fenced by Core's expected segment version.

@@ -1842,11 +1842,16 @@ async fn create_test_env_with_overrides_inner(
     // Restart tests keep their database. Reuse the domain so its name stays
     // unique and existing segments keep the same domain ID.
     let domain_name = "dwrt1.com";
-    let existing_domain = db::dns::domain::find_by_name(&db_pool, domain_name)
+    let mut existing_domains = db::dns::domain::find_by_name(&db_pool, domain_name)
         .await
         .expect("fixture domain lookup succeeds")
         .into_iter()
-        .find(|domain| domain.vpc_id.is_none());
+        .filter(|domain| domain.vpc_id.is_none());
+    let existing_domain = existing_domains.next();
+    assert!(
+        existing_domains.next().is_none(),
+        "fixture domain lookup returns at most one live infrastructure domain"
+    );
     let domain = match existing_domain {
         Some(domain) => domain.id,
         None => api

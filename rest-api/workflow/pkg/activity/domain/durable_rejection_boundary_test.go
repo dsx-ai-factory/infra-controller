@@ -6,6 +6,7 @@ package domain
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -20,12 +21,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 // Actual local PG15 reservation, transaction and lease CAS; Core cancellation is substituted.
 func TestReservedDomainDurableRejection_SQLStateOrders(t *testing.T) {
-	for _, name := range []string{"stale_token_no_destructive_dispatch", "ready_before_reject_no_destructive_dispatch", "cancel_reply_lost_then_recovery_confirms"} {
+	for _, name := range []string{"stale_token_no_destructive_dispatch", "ready_before_reject_no_destructive_dispatch", "cancel_reply_lost_then_recovery_confirms", "referenced_delete_restores_ready"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			session := common.TestInitDB(t)
@@ -88,6 +92,30 @@ func TestReservedDomainDurableRejection_SQLStateOrders(t *testing.T) {
 				stored, err := dao.GetByID(ctx, nil, row.ID, nil)
 				require.NoError(t, err)
 				require.Equal(t, cdbm.DomainStatusReady, stored.Status)
+			case "referenced_delete_restores_ready":
+				// The claimed row models a worker-owned Deleting reservation.
+				// Only its live token can restore the definitive Core refusal.
+				_, err = session.DB.ExecContext(ctx, `UPDATE domain SET status = ? WHERE id = ?`, cdbm.DomainStatusDeleting, row.ID)
+				require.NoError(t, err)
+				stale.Status = cdbm.DomainStatusDeleting
+				changed, err := dao.CompleteRecovery(ctx, row.ID, coreID, uuid.New(), cdbm.DomainStatusDeleting, cdbm.DomainStatusReady, false)
+				require.NoError(t, err)
+				require.False(t, changed, "stale token must not restore a worker-owned deletion")
+
+				client := &tmocks.Client{}
+				run := &tmocks.WorkflowRun{}
+				client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Return(run, nil).Once()
+				run.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(
+					"Domain is in use", swe.ErrTypeNICoFailedPrecondition, errors.New("Domain is in use"))).Once()
+				pool := sc.NewClientPool(nil)
+				pool.IDClientMap[site.ID.String()] = client
+				require.NoError(t, (ManageDomain{DB: session, Sites: pool}).reconcileOne(ctx, dao, &stale))
+				stored, err := dao.GetByID(ctx, nil, row.ID, nil)
+				require.NoError(t, err)
+				require.Equal(t, cdbm.DomainStatusReady, stored.Status)
+				require.Nil(t, stored.RecoveryToken)
+				client.AssertExpectations(t)
+				run.AssertExpectations(t)
 			case "cancel_reply_lost_then_recovery_confirms":
 				tx, err := cdb.BeginTx(ctx, session, &sql.TxOptions{})
 				require.NoError(t, err)

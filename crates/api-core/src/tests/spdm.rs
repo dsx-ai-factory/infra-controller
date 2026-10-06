@@ -62,10 +62,34 @@ pub(in crate::tests) mod tests {
     /// holds the fixture to seeding only when the profile is absent.
     #[crate::sqlx_test]
     async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
+        let mut seeded_domain = None;
         for _ in 0..2 {
             let mut overrides = TestEnvOverrides::no_network_segments();
             overrides.config = Some(spdm_enabled_config());
             let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
+
+            let domains = db::dns::domain::find_by_name(&pool, "dwrt1.com")
+                .await
+                .expect("seeded domain lookup succeeds");
+            assert_eq!(domains.len(), 1, "the fixture keeps one live seeded domain");
+            let domain = &domains[0];
+            let snapshot = (
+                domain.id,
+                domain.name.clone(),
+                domain.default_ttl,
+                domain.vpc_id,
+                domain.created,
+                domain.updated,
+                domain.deleted,
+            );
+            if let Some(first) = &seeded_domain {
+                assert_eq!(
+                    &snapshot, first,
+                    "the second environment reuses the exact seeded domain"
+                );
+            } else {
+                seeded_domain = Some(snapshot);
+            }
         }
     }
 
