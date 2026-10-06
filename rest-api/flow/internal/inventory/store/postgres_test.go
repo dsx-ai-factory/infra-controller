@@ -130,6 +130,49 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	assert.Equal(t, byID.OperationStatus, listed[0].OperationStatus)
 }
 
+func TestPostgresStore_GetListOfComponents(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+
+	ctx := t.Context()
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	pool, err := commonutils.UnitTestDB(ctx, t, dbConf)
+	require.NoError(t, err)
+	store := NewPostgres(pool)
+
+	domain := model.NVLDomain{Name: "group-domain", ExternalID: stringPtr("group-01")}
+	require.NoError(t, domain.Create(ctx, pool.DB))
+	rack := model.Rack{Name: "rack", ExternalID: stringPtr("rack-01"), NVLDomainID: domain.ID}
+	require.NoError(t, rack.Create(ctx, pool.DB))
+	component := model.Component{
+		Name:        "compute",
+		Type:        devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+		RackID:      rack.ID,
+		ComponentID: stringPtr("compute-01"),
+	}
+	require.NoError(t, component.Create(ctx, pool.DB))
+
+	components, total, err := store.GetListOfComponents(
+		ctx,
+		dbquery.StringQueryInfo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), total)
+	require.Len(t, components, 1)
+	assert.Equal(t, rack.ID, components[0].RackID)
+	assert.Equal(t, "rack-01", components[0].RackExternalID)
+	assert.Equal(t, domain.ID, components[0].NVLDomainID)
+	assert.Equal(t, domain.ExternalID, components[0].NVLDomainExternalID)
+	assert.Equal(t, domain.ExternalID, protobuf.ComponentTo(components[0]).NvlDomainExternalId)
+}
+
 func stringPtr(value string) *string {
 	return &value
 }
