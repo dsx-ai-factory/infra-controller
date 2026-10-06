@@ -325,7 +325,7 @@ func (mos ManageOsImage) updateOperatingSystemStatusInDB(ctx context.Context, tx
 
 	os, err := osDAO.GetByID(ctx, tx, osID, nil)
 	if err != nil {
-		if err == cdb.ErrDoesNotExist {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received request for unknown or deleted Operating System")
 			return nil
 		}
