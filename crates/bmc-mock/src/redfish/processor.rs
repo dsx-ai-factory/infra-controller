@@ -68,6 +68,26 @@ impl Processor {
     pub(crate) fn metrics_json(&self) -> serde_json::Value {
         self.metrics.clone()
     }
+
+    /// Adds the Vera Rubin compute-tray position reported by an NVIDIA GPU.
+    pub(crate) fn with_mnnvlink_topology(
+        mut self,
+        tray_slot_number: i64,
+        tray_slot_index: i64,
+    ) -> Self {
+        self.resource = self.resource.patch(json!({
+            "Oem": {
+                "Nvidia": {
+                    "@odata.type": "#NvidiaProcessor.v1_4_0.NvidiaGPU",
+                    "MNNVLinkTopology": {
+                        "TraySlotNumber": tray_slot_number,
+                        "TraySlotIndex": tray_slot_index
+                    }
+                }
+            }
+        }));
+        self
+    }
 }
 
 fn builder(resource: &redfish::Resource) -> ProcessorBuilder {
@@ -327,5 +347,24 @@ mod tests {
         assert_eq!(oem["SMActivityPercent"], 62.5);
         // ...and one that only the GPU shape declares.
         assert_eq!(oem["C2CDataTxBandwidthGbps"], 400.0);
+    }
+
+    #[test]
+    fn gpu_processor_can_report_mnnvlink_topology() {
+        let processor = gpu(
+            "HGX_Baseboard_0",
+            "GPU_0",
+            "/redfish/v1/Chassis/HGX_GPU_0/Sensors/Voltage_1",
+            &test_identity(),
+        )
+        .with_mnnvlink_topology(26, 16);
+
+        assert_eq!(
+            processor.to_json()["Oem"]["Nvidia"]["MNNVLinkTopology"],
+            serde_json::json!({
+                "TraySlotNumber": 26,
+                "TraySlotIndex": 16
+            })
+        );
     }
 }

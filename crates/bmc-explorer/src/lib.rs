@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
 use computer_system::ExploredComputerSystem;
+pub use computer_system::{VeraRubinMachinePosition, parse_vera_rubin_machine_position};
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
@@ -156,15 +157,30 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         root = root.as_ref().clone().restrict_expand().into();
     }
 
-    let mut systems_iter = root
+    let systems = root
         .systems()
         .await
         .map_err(Error::nv_redfish("systems"))?
         .ok_or_else(Error::bmc_not_provided("systems"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("systems members"))?
-        .into_iter();
+        .map_err(Error::nv_redfish("systems members"))?;
+
+    let machine_position = if root.vendor() == Some(Vendor::new("NVIDIA"))
+        && root.product() == Some(Product::new("VR NVL72"))
+    {
+        match systems
+            .iter()
+            .find(|system| system.raw().id == "HGX_Baseboard_0")
+        {
+            Some(system) => computer_system::vera_rubin_machine_position(system).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let mut systems_iter = systems.into_iter();
 
     let first_system = systems_iter
         .next()
@@ -327,6 +343,21 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
     let hardware_class = hardware_class(&root, &system);
+    let chassis = explored_chassis.to_model();
+    let physical_slot_number = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.physical_slot_number.is_none())
+        })
+        .and_then(|position| position.physical_slot_number);
+    let compute_tray_index = machine_position
+        .filter(|_| {
+            chassis
+                .iter()
+                .all(|chassis| chassis.compute_tray_index.is_none())
+        })
+        .and_then(|position| position.compute_tray_index);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -335,7 +366,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_id: None,
         managers: vec![manager],
         systems: vec![system],
-        chassis: explored_chassis.to_model(),
+        chassis,
         service,
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
@@ -348,8 +379,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        physical_slot_number: None,
-        compute_tray_index: None,
+        physical_slot_number,
+        compute_tray_index,
         topology_id: None,
         revision_id: None,
         remediation_error: None,
