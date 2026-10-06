@@ -111,21 +111,13 @@ nico-api at 8 cores. To set it, use the nico-api chart value
 config overlay `siteConfig.nicoApiSiteConfig`, which nico-api merges over the
 base configuration.
 
-A run on `main` as of 2026-09-30 with the same settings took 8.2 hours at 80,
-against the 4.5 to 5.0 hours in the table. The cause is the connection-pool
-waves described in [issue 7064](https://github.com/dsx-ai-factory/infra-controller/issues/7064): the
-9,000 DPU agents poll their network config in lockstep every 30 seconds and
-leave the pool with no idle connection for about a third of each period. The
-`max_database_connections` and hardware-health `[rate_limit]` rows below,
-plus jitter in the agent poll interval, are the mitigation.
-
 ## Settings Changed From the Defaults
 
 | Setting | Used | Default and why it was changed |
 |---|---|---|
 | `[site_explorer]` `explorations_per_run`, `machines_created_per_run`, and `concurrent_explorations` | 2000, 1000, and 300 | 360, 100, and 100: the defaults cap how many endpoints each explorer iteration probes and how many machines it creates, so 13,500 machines would need many more iterations |
 | `[site_explorer]` `switches_created_per_run` and `power_shelves_created_per_run` | 1000 and 1000 | 9 switches and 1 power shelf per iteration. Even at 100 each, 2,250 switches and 2,000 shelves needed more than 20 iterations |
-| `max_database_connections` | 900 | 1000. The 9,000 DPU agents poll their network config in lockstep every 30 s, and each poll holds a connection for about 15 statements. A 500 pool had no idle connection for about 10 s of every 30 s, and every database user in nico-api waited. 900 cut agent requests from 605 ms to 204 ms. helm-prereqs sets Postgres `max_connections` to 1024, which nico-api shares with the other databases on the cluster. Refer to [issue 7064](https://github.com/dsx-ai-factory/infra-controller/issues/7064) |
+| `max_database_connections` | 900 | 1000. The DPU agents poll their network configuration on a shared interval, and at 9,000 DPUs one poll burst can take most of the pool while every other database user in nico-api waits. 900 keeps idle headroom under the Postgres `max_connections` of 1024 that helm-prereqs sets, which nico-api shares with the other services |
 | nico-hardware-health `[rate_limit]` (`CARBIDE_HEALTH__RATE_LIMIT__BUCKET_BURST` and `CARBIDE_HEALTH__RATE_LIMIT__BUCKET_REPLENISH` in the chart's `env`) | `bucket_burst` 100 and `bucket_replenish` 30ms, the limiter's own defaults | Off. Without the limiter every simulated BMC re-authenticates through nico-api every 120 s, about 100 credential mints per second and about 20 percent of the agent request time |
 | nico-api CPU limit | 8 cores | 3 cores: nico-api used 5 to 6 cores at controller concurrency 80 and above. The 32 GiB memory limit is the chart default and was not changed |
 | Postgres CPU and memory limits | 16 cores and 32 GiB | 8 cores and 16 GiB: throttled in 88 percent of CFS periods at 8 cores. The memory raise was headroom only, refer to the sizing section |

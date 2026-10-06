@@ -43,7 +43,8 @@ protocol gateway. To replicate it on a fresh site:
    Secret from step 1. The copy already carries the `[site_explorer]` budget,
    `max_concurrency`, and the nico-api CPU limit from the sizing page. It also
    sets `max_database_connections = 900` and enables the hardware-health rate
-   limiter, both from [issue 7064](https://github.com/dsx-ai-factory/infra-controller/issues/7064).
+   limiter, which keep the connection pool and the Redfish session rate within
+   limits at this scale.
 1. In the same copy, widen `[networks.simulated-oob]` to a `/17` before
    nico-api first starts, as the sizing page's
    [fleet paragraph](large-site-sizing-and-settings.md#settings-changed-from-the-defaults)
