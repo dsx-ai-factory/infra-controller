@@ -163,7 +163,7 @@ impl InternalRBACRules {
         x.perm("RecordDpuNetworkStatus", vec![Agent, Machineatron]);
         x.perm(
             "ListMachineHealthReports",
-            vec![ForgeAdminCLI, Health, Ssh, SshRs],
+            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs],
         );
         x.perm(
             "InsertMachineHealthReport",
@@ -183,28 +183,40 @@ impl InternalRBACRules {
         );
         x.perm(
             "ListRackHealthReports",
-            vec![ForgeAdminCLI, Health, DsxExchangeConsumer],
+            vec![ForgeAdminCLI, Health, SiteAgent, DsxExchangeConsumer],
         );
         x.perm(
             "InsertRackHealthReport",
-            vec![ForgeAdminCLI, Health, DsxExchangeConsumer],
+            vec![ForgeAdminCLI, Health, SiteAgent, DsxExchangeConsumer],
         );
         x.perm(
             "RemoveRackHealthReport",
-            vec![ForgeAdminCLI, Health, DsxExchangeConsumer],
+            vec![ForgeAdminCLI, Health, SiteAgent, DsxExchangeConsumer],
         );
-        x.perm("ListSwitchHealthReports", vec![ForgeAdminCLI, Health]);
+        x.perm(
+            "ListSwitchHealthReports",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
         x.perm(
             "InsertSwitchHealthReport",
-            vec![ForgeAdminCLI, Health, RackScaleAnalyzer],
+            vec![ForgeAdminCLI, Health, SiteAgent, RackScaleAnalyzer],
         );
-        x.perm("RemoveSwitchHealthReport", vec![ForgeAdminCLI, Health]);
-        x.perm("ListPowerShelfHealthReports", vec![ForgeAdminCLI, Health]);
+        x.perm(
+            "RemoveSwitchHealthReport",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
+        x.perm(
+            "ListPowerShelfHealthReports",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
         x.perm(
             "InsertPowerShelfHealthReport",
-            vec![ForgeAdminCLI, Health, RackScaleAnalyzer],
+            vec![ForgeAdminCLI, Health, SiteAgent, RackScaleAnalyzer],
         );
-        x.perm("RemovePowerShelfHealthReport", vec![ForgeAdminCLI, Health]);
+        x.perm(
+            "RemovePowerShelfHealthReport",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
         x.perm("ListNVLinkDomainHealthReports", vec![ForgeAdminCLI, Health]);
         x.perm(
             "InsertNVLinkDomainHealthReport",
@@ -219,7 +231,7 @@ impl InternalRBACRules {
         // confident no clients are still calling the old names.
         x.perm(
             "ListHealthReportOverrides",
-            vec![ForgeAdminCLI, Health, Ssh, SshRs],
+            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs],
         );
         x.perm(
             "InsertHealthReportOverride",
@@ -340,7 +352,7 @@ impl InternalRBACRules {
         x.perm("AdminReleaseReservedAddresses", vec![ForgeAdminCLI]);
         x.perm(
             "DecommissionManagedHost",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm("AdminForceDeleteRack", vec![ForgeAdminCLI, Machineatron]);
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
@@ -373,10 +385,13 @@ impl InternalRBACRules {
         x.perm("GetMachineBootInterfaces", vec![ForgeAdminCLI]);
         x.perm("GetNetworkTopology", vec![ForgeAdminCLI]);
         x.perm("FindNetworkDevicesByDeviceIds", vec![ForgeAdminCLI]);
-        x.perm("CreateCredential", vec![ForgeAdminCLI]);
+        x.perm("CreateCredential", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteCredential", vec![ForgeAdminCLI]);
-        x.perm("RotateCredential", vec![ForgeAdminCLI]);
-        x.perm("GetCredentialRotationStatus", vec![ForgeAdminCLI]);
+        x.perm("RotateCredential", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "GetCredentialRotationStatus",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("TriggerBmcCredentialRotation", vec![ForgeAdminCLI]);
         x.perm("TriggerUefiCredentialRotation", vec![ForgeAdminCLI]);
         x.perm("TriggerNicLockdownCredentialRotation", vec![ForgeAdminCLI]);
@@ -696,7 +711,7 @@ impl InternalRBACRules {
         );
         x.perm("UpsertHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteHostFirmwareConfig", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("CreateSku", vec![ForgeAdminCLI]);
+        x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
         x.perm("AssignSkuToMachine", vec![ForgeAdminCLI]);
         x.perm("VerifySkuForMachine", vec![ForgeAdminCLI]);
@@ -706,10 +721,10 @@ impl InternalRBACRules {
             "FindSkusByIds",
             vec![ForgeAdminCLI, Health, SiteAgent, Flow],
         );
-        x.perm("DeleteSku", vec![ForgeAdminCLI]);
-        x.perm("UpdateSkuMetadata", vec![ForgeAdminCLI]);
+        x.perm("DeleteSku", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateSkuMetadata", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateMachineHardwareInfo", vec![ForgeAdminCLI]);
-        x.perm("ReplaceSku", vec![ForgeAdminCLI]);
+        x.perm("ReplaceSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetManagedHostQuarantineState",
             vec![ForgeAdminCLI, SiteAgent],
@@ -1301,6 +1316,61 @@ mod rbac_rule_tests {
             "SetMaintenance",
             std::slice::from_ref(&probe),
         ));
+    }
+
+    #[test]
+    fn rest_proxied_operations_allow_site_agent() {
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+        let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+
+        // REST authorizes the caller before proxying these methods to Core as the site agent.
+        for method in [
+            "CreateCredential",
+            "CreateSku",
+            "DecommissionManagedHost",
+            "DeleteSku",
+            "GetCredentialRotationStatus",
+            "InsertPowerShelfHealthReport",
+            "InsertRackHealthReport",
+            "InsertSwitchHealthReport",
+            "ListMachineHealthReports",
+            "ListPowerShelfHealthReports",
+            "ListRackHealthReports",
+            "ListSwitchHealthReports",
+            "RemovePowerShelfHealthReport",
+            "RemoveRackHealthReport",
+            "RemoveSwitchHealthReport",
+            "ReplaceSku",
+            "RotateCredential",
+            "UpdateSkuMetadata",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
+                "{method} should allow the site agent"
+            );
+            assert!(
+                !InternalRBACRules::allowed_from_static(
+                    method,
+                    std::slice::from_ref(&unrelated_service)
+                ),
+                "{method} should reject unrelated services"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_health_report_aliases_match_canonical_permissions() {
+        for (canonical, deprecated) in [
+            ("ListMachineHealthReports", "ListHealthReportOverrides"),
+            ("InsertMachineHealthReport", "InsertHealthReportOverride"),
+            ("RemoveMachineHealthReport", "RemoveHealthReportOverride"),
+        ] {
+            assert_eq!(
+                INTERNAL_RBAC_RULES.perms[canonical].principals,
+                INTERNAL_RBAC_RULES.perms[deprecated].principals,
+                "{deprecated} should mirror {canonical}"
+            );
+        }
     }
 
     /// RSA can insert NVLink domain, machine, switch, and power shelf health
