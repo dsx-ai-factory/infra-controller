@@ -34,6 +34,7 @@ func TestConfig_BuildDSN(t *testing.T) {
 		{name: "IPv4", host: "192.0.2.1", wantHost: "192.0.2.1"},
 		{name: "IPv6", host: "2001:db8::1", wantHost: "2001:db8::1"},
 		{name: "bracketed IPv6", host: "[2001:db8::1]", wantHost: "2001:db8::1"},
+		{name: "Unix socket", host: "/var/run/postgresql", wantHost: "/var/run/postgresql"},
 		{name: "CA certificate", host: "db.example.internal", caCertificatePath: "/var/secrets/db/ca.crt"},
 	}
 

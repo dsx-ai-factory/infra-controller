@@ -35,27 +35,32 @@ func getTestDBParams() TestDBConfig {
 		Password: "postgres",
 	}
 
+	if os.Getenv("CI") == "true" {
+		dbcfg.Host = "postgres"
+		dbcfg.Port = 5432
+	}
+
+	host, ok := os.LookupEnv("PGHOST")
+	if ok {
+		dbcfg.Host = host
+	}
+
 	port, ok := os.LookupEnv("PGPORT")
 	if ok {
 		portv, err := strconv.Atoi(port)
 		if err == nil {
-			tdbcfg.Port = portv
+			dbcfg.Port = portv
 		}
 	}
 
 	user, ok := os.LookupEnv("PGUSER")
 	if ok {
-		tdbcfg.User = user
+		dbcfg.User = user
 	}
 
 	password, ok := os.LookupEnv("PGPASSWORD")
 	if ok {
-		tdbcfg.Password = password
-	}
-
-	if os.Getenv("CI") == "true" {
-		tdbcfg.Host = "postgres"
-		tdbcfg.Port = 5432
+		dbcfg.Password = password
 	}
 
 	return tdbcfg

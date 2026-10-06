@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,6 +147,36 @@ func (f subnetAttachVpcFixture) request(t *testing.T, user *cdbm.User, subnetID 
 	}
 	require.NoError(t, NewAttachSubnetVpcHandler(f.dbSession, f.scp).Handle(ec))
 	return rec
+}
+
+func TestSubnetAttachmentReservationError(t *testing.T) {
+	tests := []struct {
+		name            string
+		err             error
+		expectedStatus  int
+		expectedMessage string
+	}{
+		{
+			name:            "missing Tenant Site association is forbidden",
+			err:             fmt.Errorf("association lookup: %w", cdb.ErrDoesNotExist),
+			expectedStatus:  http.StatusForbidden,
+			expectedMessage: "Tenant does not have access to Site",
+		},
+		{
+			name:            "database failure is internal",
+			err:             errors.New("database unavailable"),
+			expectedStatus:  http.StatusInternalServerError,
+			expectedMessage: "Failed to reserve Subnet attachment due to DB error",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, message := subnetAttachmentReservationError(test.err)
+			assert.Equal(t, test.expectedStatus, status)
+			assert.Equal(t, test.expectedMessage, message)
+		})
+	}
 }
 
 func TestAttachSubnetVpcHandler_Handle(t *testing.T) {

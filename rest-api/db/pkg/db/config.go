@@ -76,12 +76,22 @@ func (c *Config) BuildDSN() string {
 		host = host[1 : len(host)-1]
 	}
 
+	address := net.JoinHostPort(host, strconv.Itoa(c.Port))
+	query := ""
+	if strings.HasPrefix(host, "/") {
+		address = ""
+		query = url.Values{
+			"host": {host},
+			"port": {strconv.Itoa(c.Port)},
+		}.Encode() + "&"
+	}
 	dsn := fmt.Sprintf(
-		"postgres://%v:%v@%v/%v?sslmode=",
+		"postgres://%v:%v@%v/%v?%vsslmode=",
 		url.PathEscape(c.Credential.User),
 		url.PathEscape(c.Credential.Password.Value),
-		net.JoinHostPort(host, strconv.Itoa(c.Port)),
+		address,
 		c.DBName,
+		query,
 	)
 
 	// `sslmode=disable` broke hostssl-only servers in v1.3.1. Keep `prefer`

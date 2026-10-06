@@ -1143,7 +1143,8 @@ func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("could not reserve Subnet attachment")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Could not reserve Subnet attachment for an authorized Site", nil)
+		status, message := subnetAttachmentReservationError(err)
+		return cutil.NewAPIErrorResponse(c, status, message, nil)
 	}
 	if !reserved {
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Subnet changed or has a pending VPC reassignment", nil)
@@ -1197,6 +1198,13 @@ func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, model.NewAPISubnet(updatedSubnet, statusDetails, nil))
+}
+
+func subnetAttachmentReservationError(err error) (int, string) {
+	if errors.Is(err, cdb.ErrDoesNotExist) {
+		return http.StatusForbidden, "Tenant does not have access to Site"
+	}
+	return http.StatusInternalServerError, "Failed to reserve Subnet attachment due to DB error"
 }
 
 func isDefinitiveAttachmentRejection(code int) bool {

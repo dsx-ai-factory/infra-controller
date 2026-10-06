@@ -60,6 +60,13 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
     let rest_dir = manifest.join("../../rest-api");
     let result_file = tempfile::NamedTempFile::new().expect("fixture result file");
     let result_path = result_file.path().to_owned();
+    let db_options = pool.connect_options();
+    let db_host = db_options
+        .get_socket()
+        .map(|socket| socket.to_string_lossy().into_owned())
+        .unwrap_or_else(|| db_options.get_host().to_owned());
+    let db_port = db_options.get_port().to_string();
+    let db_user = db_options.get_username().to_owned();
     let result = tokio::task::spawn_blocking(move || {
         Command::new("timeout")
             .args([
@@ -76,6 +83,11 @@ async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
                 "-timeout=150s",
             ])
             .current_dir(rest_dir)
+            // The subprocess uses a separate `nicotest` database, but must use
+            // the same PostgreSQL server and identity as this SQLx fixture.
+            .env("PGHOST", db_host)
+            .env("PGPORT", db_port)
+            .env("PGUSER", db_user)
             .env("CORE_JOINED_ADDR", addr.to_string())
             .env("CORE_JOINED_RESULT", result_path)
             .output()
