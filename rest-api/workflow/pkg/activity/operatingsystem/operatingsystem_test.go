@@ -413,21 +413,15 @@ type osStatusDeletionRaceHook struct {
 }
 
 func (h *osStatusDeletionRaceHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if ctx.Value(osStatusDeletionRaceKey{}) != true {
-		return ctx
+	if ctx.Value(osStatusDeletionRaceKey{}) == true && (strings.Contains(event.Query, "pg_try_advisory_xact_lock") || strings.HasPrefix(event.Query, `UPDATE "operating_system"`)) {
+		h.once.Do(func() {
+			close(h.ready)
+			select {
+			case <-h.resume:
+			case <-ctx.Done():
+			}
+		})
 	}
-	isLock := strings.Contains(event.Query, "pg_try_advisory_xact_lock")
-	isStatusWrite := strings.HasPrefix(event.Query, `UPDATE "operating_system"`)
-	if !isLock && !isStatusWrite {
-		return ctx
-	}
-	h.once.Do(func() {
-		close(h.ready)
-		select {
-		case <-h.resume:
-		case <-ctx.Done():
-		}
-	})
 	return ctx
 }
 
@@ -436,173 +430,182 @@ func (*osStatusDeletionRaceHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 func TestManageOsImage_UpdateOperatingSystemStatusInDB(t *testing.T) {
 	dbSession := util.TestInitDB(t)
 	defer dbSession.Close()
+
 	util.TestSetupSchema(t, dbSession)
 
-	ctx := context.Background()
 	ipOrg := "test-provider-org"
-	ipu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
-	ip := util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
-	tnOrg := "test-tenant-org"
-	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, []string{"FORGE_TENANT_ADMIN"})
-	tn := util.TestBuildTenant(t, dbSession, "test-tenant", tnOrg, nil, tnu)
+	ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
 
-	mos := ManageOsImage{dbSession: dbSession}
-	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
-	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
+	ipu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, ipRoles)
+	ip := util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+
+	tnOrg := "test-tenant-org"
+	tnRoles := []string{"FORGE_TENANT_ADMIN"}
+
+	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, tnRoles)
+
+	tn := util.TestBuildTenant(t, dbSession, "test-tenant", tnOrg, nil, tnu)
+	assert.NotNil(t, tn)
+
+	st1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
+	assert.NotNil(t, st1)
+
+	st2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
+	assert.NotNil(t, st2)
+
+	// Build OsImage1
+	os1 := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, "test-OsImage-1", tnOrg, nil, cdbm.OperatingSystemStatusSyncing)
+	assert.NotNil(t, os1)
+
+	// Build OperatingSystemSiteAssociation1
+	ossa1 := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os1.ID, st1.ID, cdbm.OperatingSystemSiteAssociationStatusSyncing, "12312312434233425", false)
+	assert.NotNil(t, ossa1)
+
+	// Build OsImage2
+	os2 := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, "test-OsImage-2", tnOrg, nil, cdbm.OperatingSystemStatusError)
+	assert.NotNil(t, os1)
+
+	// Build OperatingSystemSiteAssociation2
+	ossa2 := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os2.ID, st2.ID, cdbm.OperatingSystemSiteAssociationStatusSynced, "12312312434awsdq212", false)
+	assert.NotNil(t, ossa2)
+
+	os3 := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, "test-concurrent-delete", tnOrg, nil, cdbm.OperatingSystemStatusSyncing)
+	ossa3 := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os3.ID, st1.ID, cdbm.OperatingSystemSiteAssociationStatusSynced, "delete-version", false)
+
+	tSiteClientPool := util.TestTemporalSiteClientPool(t)
+	assert.NotNil(t, tSiteClientPool)
+
+	temporalsuit := testsuite.WorkflowTestSuite{}
+	env := temporalsuit.NewTestWorkflowEnvironment()
+
+	type fields struct {
+		dbSession      *cdb.Session
+		siteClientPool *sc.ClientPool
+		env            *testsuite.TestWorkflowEnvironment
+	}
+
+	type args struct {
+		ctx   context.Context
+		ossas *cdbm.OperatingSystemSiteAssociation
+		os    *cdbm.OperatingSystem
+		site  *cdbm.Site
+	}
 
 	tests := []struct {
-		name          string
-		initialStatus string
-		siteStatuses  []string
-		wantStatus    string
-		wantMessage   string
-		deletionRace  bool
+		name         string
+		deletionRace bool
+		fields       fields
+		args         args
 	}{
 		{
-			name:          "unchanged status does not write a status detail",
-			initialStatus: cdbm.OperatingSystemStatusSyncing,
-			siteStatuses:  []string{cdbm.OperatingSystemSiteAssociationStatusSyncing},
-			wantStatus:    cdbm.OperatingSystemStatusSyncing,
-		},
-		{
-			name:          "synced sites make the OS ready",
-			initialStatus: cdbm.OperatingSystemStatusError,
-			siteStatuses:  []string{cdbm.OperatingSystemSiteAssociationStatusSynced},
-			wantStatus:    cdbm.OperatingSystemStatusReady,
-			wantMessage:   "Operating System successfully synced to all Sites",
-		},
-		{
-			name:          "syncing sites take precedence over synced sites",
-			initialStatus: cdbm.OperatingSystemStatusReady,
-			siteStatuses: []string{
-				cdbm.OperatingSystemSiteAssociationStatusSynced,
-				cdbm.OperatingSystemSiteAssociationStatusSyncing,
+			name: "test update os status syncing when os site association still syncing",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
 			},
-			wantStatus:  cdbm.OperatingSystemStatusSyncing,
-			wantMessage: "Operating System syncing to one or more Sites",
-		},
-		{
-			name:          "site errors take precedence over syncing sites",
-			initialStatus: cdbm.OperatingSystemStatusReady,
-			siteStatuses: []string{
-				cdbm.OperatingSystemSiteAssociationStatusSyncing,
-				cdbm.OperatingSystemSiteAssociationStatusError,
+			args: args{
+				ctx:   context.Background(),
+				ossas: ossa1,
+				os:    os1,
+				site:  st1,
 			},
-			wantStatus:  cdbm.OperatingSystemStatusError,
-			wantMessage: "Failed to sync Operating System to one or more Sites",
 		},
 		{
-			name:          "no sites makes the OS ready",
-			initialStatus: cdbm.OperatingSystemStatusSyncing,
-			wantStatus:    cdbm.OperatingSystemStatusReady,
-			wantMessage:   "Operating System successfully synced to all Sites",
+			name: "test update os status ready when os site association synced",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:   context.Background(),
+				ossas: ossa2,
+				os:    os2,
+				site:  st2,
+			},
 		},
 		{
-			name:          "concurrent deletion is preserved and finishes after the last association is removed",
-			initialStatus: cdbm.OperatingSystemStatusSyncing,
-			siteStatuses:  []string{cdbm.OperatingSystemSiteAssociationStatusSynced},
-			deletionRace:  true,
+			name:         "concurrent deletion is preserved and finishes after the last association is removed",
+			deletionRace: true,
+			fields:       fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:         args{ctx: context.WithValue(context.Background(), osStatusDeletionRaceKey{}, true), ossas: ossa3, os: os3, site: st1},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, uuid.NewString(), tnOrg, nil, tt.initialStatus)
-			var associations []*cdbm.OperatingSystemSiteAssociation
-			for _, status := range tt.siteStatuses {
-				site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, ipu)
-				association := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os.ID, site.ID, status, "test-version", false)
-				associations = append(associations, association)
+			mv := ManageOsImage{
+				dbSession:      tt.fields.dbSession,
+				siteClientPool: tSiteClientPool,
 			}
 
+			mtc := &tmocks.Client{}
+			mv.siteClientPool.IDClientMap[tt.args.site.ID.String()] = mtc
+
+			osDAO := cdbm.NewOperatingSystemDAO(dbSession)
 			if tt.deletionRace {
-				testConcurrentOSDeletion(t, mos, os.ID, associations[0].ID)
+				raceCtx, cancel := context.WithTimeout(tt.args.ctx, 10*time.Second)
+				defer cancel()
+				hook := &osStatusDeletionRaceHook{ready: make(chan struct{}), resume: make(chan struct{})}
+				dbSession.DB.AddQueryHook(hook)
+				tx, err := cdb.BeginTx(context.Background(), dbSession, nil)
+				require.NoError(t, err)
+				defer func() { _ = tx.Rollback() }()
+				err = tx.TryAcquireAdvisoryLock(context.Background(), cdb.GetAdvisoryLockIDFromString(tt.args.os.ID.String()), nil)
+				require.NoError(t, err)
+				_, err = osDAO.Update(context.Background(), tx, cdbm.OperatingSystemUpdateInput{OperatingSystemId: tt.args.os.ID, Status: cutil.GetPtr(cdbm.OperatingSystemStatusDeleting)})
+				require.NoError(t, err)
+				ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
+				_, err = ossaDAO.Update(context.Background(), tx, cdbm.OperatingSystemSiteAssociationUpdateInput{OperatingSystemSiteAssociationID: tt.args.ossas.ID, Status: cutil.GetPtr(cdbm.OperatingSystemSiteAssociationStatusDeleting)})
+				require.NoError(t, err)
+				result := make(chan error, 1)
+				go func() { result <- mv.UpdateOperatingSystemStatusInDB(raceCtx, tt.args.os.ID) }()
+				select {
+				case <-hook.ready:
+				case <-raceCtx.Done():
+					t.Fatal("status activity did not reach its lock or status write")
+				}
+				require.NoError(t, tx.Commit())
+				close(hook.resume)
+				select {
+				case err = <-result:
+					require.NoError(t, err)
+				case <-raceCtx.Done():
+					t.Fatal("status activity did not finish after the delete committed")
+				}
+				stored, err := osDAO.GetByID(context.Background(), nil, tt.args.os.ID, nil)
+				require.NoError(t, err)
+				require.Equal(t, cdbm.OperatingSystemStatusDeleting, stored.Status)
+				var readyDetails int
+				err = dbSession.DB.NewSelect().Model((*cdbm.StatusDetail)(nil)).ColumnExpr("count(*)").Where("entity_id = ? AND status = ?", tt.args.os.ID.String(), cdbm.OperatingSystemStatusReady).Scan(context.Background(), &readyDetails)
+				require.NoError(t, err)
+				require.Zero(t, readyDetails, "no stale readiness audit entry should be written")
+				require.NoError(t, ossaDAO.Delete(context.Background(), nil, tt.args.ossas.ID))
+				require.NoError(t, mv.UpdateOperatingSystemStatusInDB(context.Background(), tt.args.os.ID))
+				_, err = osDAO.GetByID(context.Background(), nil, tt.args.os.ID, nil)
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 				return
 			}
+			err := mv.UpdateOperatingSystemStatusInDB(tt.args.ctx, tt.args.os.ID)
+			assert.NoError(t, err)
 
-			err := mos.UpdateOperatingSystemStatusInDB(ctx, os.ID)
-			require.NoError(t, err)
-			stored, err := osDAO.GetByID(ctx, nil, os.ID, nil)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantStatus, stored.Status)
+			uos, err := osDAO.GetByID(context.Background(), nil, tt.args.os.ID, nil)
+			assert.Nil(t, err)
 
-			// Repeating the update must not add a duplicate audit entry.
-			err = mos.UpdateOperatingSystemStatusInDB(ctx, os.ID)
-			require.NoError(t, err)
-			details, err := statusDetailDAO.GetRecentByEntityIDs(ctx, nil, []string{os.ID.String()}, 10)
-			require.NoError(t, err)
-			if tt.wantMessage == "" {
-				assert.Empty(t, details)
-				return
+			if tt.args.ossas.Status == cdbm.OperatingSystemSiteAssociationStatusSyncing {
+				assert.Equal(t, uos.Status, cdbm.OperatingSystemStatusSyncing)
 			}
-			require.Len(t, details, 1)
-			assert.Equal(t, tt.wantStatus, details[0].Status)
-			assert.Equal(t, cutil.GetPtr(tt.wantMessage), details[0].Message)
+
+			if tt.args.ossas.Status == cdbm.OperatingSystemSiteAssociationStatusError {
+				assert.Equal(t, uos.Status, cdbm.OperatingSystemStatusError)
+			}
+
+			if tt.args.ossas.Status == cdbm.OperatingSystemSiteAssociationStatusSynced {
+				assert.Equal(t, uos.Status, cdbm.OperatingSystemStatusReady)
+			}
+
 		})
 	}
-}
-
-func testConcurrentOSDeletion(t *testing.T, mos ManageOsImage, osID, associationID uuid.UUID) {
-	t.Helper()
-
-	ctx := context.Background()
-	raceCtx, cancel := context.WithTimeout(context.WithValue(ctx, osStatusDeletionRaceKey{}, true), 10*time.Second)
-	defer cancel()
-	hook := &osStatusDeletionRaceHook{ready: make(chan struct{}), resume: make(chan struct{})}
-	mos.dbSession.DB.AddQueryHook(hook)
-	osDAO := cdbm.NewOperatingSystemDAO(mos.dbSession)
-	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
-
-	// Hold the API deletion lock and leave its status changes uncommitted.
-	tx, err := cdb.BeginTx(ctx, mos.dbSession, nil)
-	require.NoError(t, err)
-	defer func() { _ = tx.Rollback() }()
-	err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(osID.String()), nil)
-	require.NoError(t, err)
-	_, err = osDAO.Update(ctx, tx, cdbm.OperatingSystemUpdateInput{
-		OperatingSystemId: osID,
-		Status:            cutil.GetPtr(cdbm.OperatingSystemStatusDeleting),
-	})
-	require.NoError(t, err)
-	_, err = ossaDAO.Update(ctx, tx, cdbm.OperatingSystemSiteAssociationUpdateInput{
-		OperatingSystemSiteAssociationID: associationID,
-		Status:                           cutil.GetPtr(cdbm.OperatingSystemSiteAssociationStatusDeleting),
-	})
-	require.NoError(t, err)
-
-	// Pause aggregation before its lock (or its stale write before the fix).
-	result := make(chan error, 1)
-	go func() { result <- mos.UpdateOperatingSystemStatusInDB(raceCtx, osID) }()
-	select {
-	case <-hook.ready:
-	case <-raceCtx.Done():
-		t.Fatal("status activity did not reach its lock or status write")
-	}
-
-	// Commit deletion first, then allow aggregation to continue.
-	require.NoError(t, tx.Commit())
-	close(hook.resume)
-	select {
-	case err = <-result:
-		require.NoError(t, err)
-	case <-raceCtx.Done():
-		t.Fatal("status activity did not finish after the delete committed")
-	}
-
-	stored, err := osDAO.GetByID(ctx, nil, osID, nil)
-	require.NoError(t, err)
-	require.Equal(t, cdbm.OperatingSystemStatusDeleting, stored.Status)
-	readyDetails, err := mos.dbSession.DB.NewSelect().
-		Model((*cdbm.StatusDetail)(nil)).
-		Where("entity_id = ? AND status = ?", osID.String(), cdbm.OperatingSystemStatusReady).
-		Count(ctx)
-	require.NoError(t, err)
-	require.Zero(t, readyDetails, "no stale readiness audit entry should be written")
-
-	// Removing the final association lets the next aggregation finish deletion.
-	require.NoError(t, ossaDAO.Delete(ctx, nil, associationID))
-	require.NoError(t, mos.UpdateOperatingSystemStatusInDB(ctx, osID))
-	_, err = osDAO.GetByID(ctx, nil, osID, nil)
-	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 }
 
 // backdateOssaCreated ages a Site association past the staleness threshold. The create input

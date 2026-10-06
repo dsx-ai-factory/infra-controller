@@ -315,6 +315,9 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 
 		logger.Info().Msg("retrieved Operating System from DB")
 
+		var osStatus *string
+		var osMessage *string
+
 		ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
 		ossas, ossaTotal, err := ossaDAO.GetAll(
 			ctx,
@@ -340,22 +343,23 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 			return nil
 		}
 
-		statusCount := map[string]int{}
-		for _, association := range ossas {
-			statusCount[association.Status]++
+		statusCountMap := map[string]int{}
+		for _, dbossa := range ossas {
+			statusCountMap[dbossa.Status]++
 		}
 
-		osStatus := cdbm.OperatingSystemStatusReady
-		osMessage := "Operating System successfully synced to all Sites"
 		switch {
-		case statusCount[cdbm.OperatingSystemSiteAssociationStatusError] > 0:
-			osStatus = cdbm.OperatingSystemStatusError
-			osMessage = "Failed to sync Operating System to one or more Sites"
-		case statusCount[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0:
-			osStatus = cdbm.OperatingSystemStatusSyncing
-			osMessage = "Operating System syncing to one or more Sites"
+		case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusError] > 0:
+			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusError)
+			osMessage = cutil.GetPtr("Failed to sync Operating System to one or more Sites")
+		case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0:
+			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusSyncing)
+			osMessage = cutil.GetPtr("Operating System syncing to one or more Sites")
+		default:
+			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusReady)
+			osMessage = cutil.GetPtr("Operating System successfully synced to all Sites")
 		}
-		if os.Status == osStatus {
+		if os.Status == *osStatus {
 			return nil
 		}
 
@@ -365,7 +369,7 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 			tx,
 			cdbm.OperatingSystemUpdateInput{
 				OperatingSystemId: osID,
-				Status:            cutil.GetPtr(osStatus),
+				Status:            osStatus,
 			},
 		)
 		if err != nil {
@@ -373,12 +377,12 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 		}
 
 		statusDetailDAO := cdbm.NewStatusDetailDAO(mos.dbSession)
-		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{
-			EntityID: osID.String(),
-			Status:   osStatus,
-			Message:  cutil.GetPtr(osMessage),
-		})
-		return err
+		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: osID.String(), Status: *osStatus, Message: osMessage})
+		if err != nil {
+			return err
+		}
+
+		return nil
 	})
 	if err != nil {
 		return err
