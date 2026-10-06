@@ -161,7 +161,7 @@ impl InternalRBACRules {
         x.perm("RecordDpuNetworkStatus", vec![Agent, Machineatron]);
         x.perm(
             "ListMachineHealthReports",
-            vec![ForgeAdminCLI, Health, Ssh, SshRs],
+            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs],
         );
         x.perm(
             "InsertMachineHealthReport",
@@ -173,7 +173,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "ListRackHealthReports",
-            vec![ForgeAdminCLI, Health, DsxExchangeConsumer],
+            vec![ForgeAdminCLI, Health, SiteAgent, DsxExchangeConsumer],
         );
         x.perm(
             "InsertRackHealthReport",
@@ -183,10 +183,16 @@ impl InternalRBACRules {
             "RemoveRackHealthReport",
             vec![ForgeAdminCLI, Health, DsxExchangeConsumer],
         );
-        x.perm("ListSwitchHealthReports", vec![ForgeAdminCLI, Health]);
+        x.perm(
+            "ListSwitchHealthReports",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
         x.perm("InsertSwitchHealthReport", vec![ForgeAdminCLI, Health]);
         x.perm("RemoveSwitchHealthReport", vec![ForgeAdminCLI, Health]);
-        x.perm("ListPowerShelfHealthReports", vec![ForgeAdminCLI, Health]);
+        x.perm(
+            "ListPowerShelfHealthReports",
+            vec![ForgeAdminCLI, Health, SiteAgent],
+        );
         x.perm("InsertPowerShelfHealthReport", vec![ForgeAdminCLI, Health]);
         x.perm("RemovePowerShelfHealthReport", vec![ForgeAdminCLI, Health]);
         x.perm("ListNVLinkDomainHealthReports", vec![ForgeAdminCLI, Health]);
@@ -1374,6 +1380,33 @@ mod rbac_rule_tests {
                     )]
                 ),
                 "{method} should allow hardware health"
+            );
+        }
+    }
+
+    #[test]
+    fn site_agent_can_list_health_reports_for_rest() {
+        for method in [
+            "ListMachineHealthReports",
+            "ListRackHealthReports",
+            "ListSwitchHealthReports",
+            "ListPowerShelfHealthReports",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(
+                    method,
+                    &[Principal::SpiffeServiceIdentifier(
+                        "elektra-site-agent".to_string()
+                    )]
+                ),
+                "{method} should allow the site agent"
+            );
+            assert!(
+                !InternalRBACRules::allowed_from_static(
+                    method,
+                    &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())]
+                ),
+                "{method} should reject unrelated services"
             );
         }
     }
