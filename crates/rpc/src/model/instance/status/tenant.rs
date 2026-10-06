@@ -32,6 +32,7 @@ use crate::errors::RpcDataConversionError;
 /// When `operator_managed_networking` is true, NICo has no data-plane readiness
 /// signal to wait for. Allocation and network-wait states are therefore projected
 /// as tenant-ready while terminal and update states retain precedence.
+/// Pre-assignment attestation and assignment-cycle setup remain provisioning.
 pub fn instance_status_tenant_state(
     machine_state: ManagedHostState,
     configs_synced: SyncState,
@@ -60,6 +61,11 @@ pub fn instance_status_tenant_state(
             } else {
                 TenantState::Provisioning
             }
+        }
+        // These states occur after allocation and before Assigned, while the
+        // host is still completing the assignment's attestation checks.
+        ManagedHostState::PreAssignedMeasuring { .. } | ManagedHostState::StartAssignmentCycle => {
+            TenantState::Provisioning
         }
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Init
@@ -278,6 +284,40 @@ mod tests {
                     },
                     SyncState::Synced,
                 ) => Yields(TenantState::Failed),
+            }
+        );
+    }
+
+    #[test]
+    fn assignment_checks_remain_provisioning() {
+        scenarios!(
+            run = |(machine_state, operator_managed_networking)| {
+                instance_status_tenant_state(
+                    machine_state,
+                    SyncState::Synced,
+                    false,
+                    None,
+                    true,
+                    operator_managed_networking,
+                    true,
+                )
+                .map_err(drop)
+            };
+            "pre-assignment attestation" {
+                (
+                    ManagedHostState::PreAssignedMeasuring {
+                        spdm_measuring_state: model::machine::SpdmMeasuringState::TriggerMeasurements,
+                    },
+                    false,
+                ) => Yields(TenantState::Provisioning),
+            }
+
+            "start assignment cycle" {
+                (ManagedHostState::StartAssignmentCycle, false) => Yields(TenantState::Provisioning),
+            }
+
+            "operator-managed networking still requires assignment checks" {
+                (ManagedHostState::StartAssignmentCycle, true) => Yields(TenantState::Provisioning),
             }
         );
     }
