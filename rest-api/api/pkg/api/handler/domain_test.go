@@ -563,7 +563,7 @@ func TestDeleteDomainHandler_Handle(t *testing.T) {
 		persisted, err := cdbm.NewDomainDAO(fixture.dbSession).GetByID(context.Background(), nil, domain.ID, nil)
 		require.NoError(t, err)
 		require.Equal(t, cdbm.DomainStatusDeleting, persisted.Status)
-		require.Equal(t, *retryReservedAt, persisted.Updated)
+		require.True(t, retryReservedAt.Equal(persisted.Updated))
 	})
 
 	t.Run("local Subnet reference", runDeleteDomainHandlerRejectsLocalSubnetReference)
