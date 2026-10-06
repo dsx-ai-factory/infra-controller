@@ -676,10 +676,11 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		TaskQueue: queue.SiteTaskQueue,
 	}
 
-	// Prepare the config update request workflow object. NetworkSecurityGroupId is
-	// intentionally omitted: this activity only syncs metadata fields.
+	// Carry the persisted NSG association while syncing metadata because Core
+	// treats an omitted NetworkSecurityGroupId as detachment.
 	updateVpcRequest := &corev1.VpcUpdateRequest{
-		Id: &corev1.VpcId{Value: vpc.ID.String()},
+		Id:                     &corev1.VpcId{Value: vpc.ID.String()},
+		NetworkSecurityGroupId: vpc.NetworkSecurityGroupID,
 		Metadata: &corev1.Metadata{
 			Name:        vpc.Name,
 			Description: description,
