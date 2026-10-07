@@ -74,10 +74,11 @@ func TestGetListOfRacks(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			orderBy := protobuf.OrderByFrom(&pb.OrderBy{
+			orderBy, err := protobuf.RackOrderByFrom(&pb.OrderBy{
 				Field:     &pb.OrderBy_RackField{RackField: tc.field},
 				Direction: tc.direction,
 			})
+			require.NoError(t, err)
 			require.NotNil(t, orderBy)
 			var gotIDs []uuid.UUID
 			for page := range (len(racks) + tc.pageSize - 1) / tc.pageSize {

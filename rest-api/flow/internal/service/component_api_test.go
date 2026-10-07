@@ -729,6 +729,45 @@ func TestPatchComponent_BMCsNotProvidedPreservesExisting(t *testing.T) {
 
 // --- GetComponents Tests ---
 
+func TestFlowServerImpl_GetListOfRacks(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).GetListOfRacks(
+		t.Context(),
+		&pb.GetListOfRacksRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestFlowServerImpl_GetComponents(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).GetComponents(
+		t.Context(),
+		&pb.GetComponentsRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestFlowServerImpl_ValidateComponents(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).ValidateComponents(
+		t.Context(),
+		&pb.ValidateComponentsRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
 func TestGetComponents_TargetSpecNoPagination(t *testing.T) {
 	mgr := newMockManager()
 	rackID, _ := setupValidateTestData(mgr)
