@@ -208,8 +208,10 @@ they are not literal request content. Flow forwards object values as raw JSON an
 unquotes string values before forwarding them. The outer REST `version` field
 remains a string in both the shared and layered forms.
 
-If a layered document omits a component-type key, Flow skips the firmware
-action for that component type.
+If a layered document omits a component-type key, Flow skips every rule step
+for that component type, including pre/post actions and later stages. Those
+steps are reported as skipped. The component's targets remain available to
+cross-component readiness checks in selected steps.
 
 ### Firmware authentication
 

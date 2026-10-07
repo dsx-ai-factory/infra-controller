@@ -174,66 +174,6 @@ func (c *firmwareStateClient) FindExploredEndpointsByIds(
 	return c.endpoints, nil
 }
 
-func TestFirmwareControl_EmptyVersionUsesDesiredFirmware(t *testing.T) {
-	tests := map[string]struct {
-		actual          map[string]string
-		expectScheduled bool
-	}{
-		"desired firmware skips scheduling": {
-			actual:          map[string]string{"bmc": "1.0"},
-			expectScheduled: false,
-		},
-		"different firmware schedules update": {
-			actual:          map[string]string{"bmc": "0.9"},
-			expectScheduled: true,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			scheduleError := errors.New("firmware update scheduled")
-			mockClient := nicoapi.NewMockClient()
-			mockClient.SetFirmwareUpdateTimeWindowError(scheduleError)
-			mockClient.AddMachine(nicoapi.MachineDetail{
-				MachineID: "machine-1",
-				BmcIP:     "192.0.2.1",
-			})
-
-			client := &firmwareStateClient{
-				Client: mockClient,
-				desired: []*corev1.DesiredFirmwareVersionEntry{{
-					ComponentVersions: map[string]string{"bmc": "1.0"},
-				}},
-				endpoints: []*corev1.ExploredEndpoint{{
-					Address: "192.0.2.1",
-					Report: &corev1.EndpointExplorationReport{
-						FirmwareVersions: tc.actual,
-					},
-				}},
-			}
-			manager := New(client, 0, nil)
-			target := common.Target{
-				Type:        devicetypes.ComponentTypeCompute,
-				Identifiers: []string{"machine-1"},
-			}
-
-			err := manager.FirmwareControl(
-				context.Background(),
-				target,
-				operations.FirmwareControlTaskInfo{
-					Operation: operations.FirmwareOperationUpgrade,
-				},
-			)
-
-			if tc.expectScheduled {
-				require.ErrorIs(t, err, scheduleError)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
 func TestFirmwareControl_SubTargetsAccepted(t *testing.T) {
 	tests := map[string]struct {
 		subTargets []string

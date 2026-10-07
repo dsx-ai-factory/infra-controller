@@ -291,11 +291,9 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		fwInfo.OverrideReadinessCheck = extractOverrideReadinessCheck(actx.operationInfo)
 	}
 
-	targetVersion, selected := extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
-	if !selected {
-		return nil
-	}
-	fwInfo.TargetVersion = targetVersion
+	// Legacy child histories must still schedule firmware and status activities.
+	// Component selection belongs to the versioned firmware parent.
+	fwInfo.TargetVersion, _ = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
 
 	if err := workflow.ExecuteActivity(
 		ctx, activity.NameFirmwareControl, target, fwInfo,
@@ -490,7 +488,7 @@ func verifyPowerStatus(
 		}
 
 		// Sleep before next poll (durable sleep in workflow)
-		workflow.Sleep(ctx, pollInterval)
+		_ = workflow.Sleep(ctx, pollInterval)
 	}
 }
 
@@ -722,7 +720,7 @@ func verifyReachability(
 			)
 		}
 
-		workflow.Sleep(ctx, pollInterval)
+		_ = workflow.Sleep(ctx, pollInterval)
 	}
 }
 
@@ -1023,7 +1021,7 @@ var knownComponentTypeKeys = []string{"compute", "nvswitch", "powershelf"}
 // plain value (e.g. "1.3.1" → 1.3.1); object values are returned as raw
 // JSON for component managers that parse multi-field version payloads.
 // If the key is absent but the document contains another known
-// component-type key, selected is false so the workflow skips that component.
+// component-type key, selected is false to exclude that type's rule steps.
 // If the document does not look layered, the original string is returned for
 // backward compatibility with single-component updates.
 func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) (string, bool) {
