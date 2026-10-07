@@ -584,7 +584,8 @@ that for Keycloak.
    provisioned. The script scales the workloads to zero and dumps their
    databases from `postgres.postgres`. It then restores them into
    `nico-pg-cluster`. When every copy succeeds, it leaves a receipt in the
-   `nico-workload-databases` ConfigMap. This is a stop-the-world cutover.
+   `nico-workload-databases` ConfigMap. A new run clears the old receipt
+   before it copies anything. This is a stop-the-world cutover.
    Temporal stops processing workflows and Keycloak stops serving logins while
    it runs. They stay down afterward, as
    [Why does the migration script leave things scaled down?](#why-does-the-migration-script-leave-things-scaled-down)
@@ -596,9 +597,10 @@ that for Keycloak.
 
 `preflight.sh` stops `setup.sh` from moving a database off the StatefulSet
 before step 2 is done. When `true` would move it, preflight requires the
-receipt from step 2. The workload also has to have stayed scaled to zero since,
-so the copy is still current. Otherwise setup stops, even with `-y`. `auto`
-never moves a database, so this check only applies to `true`.
+receipt from step 2. The Deployments the script stopped also have to be
+unchanged since. A restart, scale, or recreate in between means the copy may be
+stale. Otherwise setup stops, even with `-y`. `auto` never moves a database, so
+this check only applies to `true`.
 
 ### Why does the migration script leave things scaled down?
 
