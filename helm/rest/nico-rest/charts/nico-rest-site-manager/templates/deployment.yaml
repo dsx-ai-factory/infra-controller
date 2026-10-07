@@ -47,6 +47,7 @@ spec:
           args:
             - --listen-port={{ .Values.args.listenPort }}
             - --creds-manager-url={{ include "nico-rest-site-manager.credsManagerUrl" . }}
+            - --creds-manager-ca-path={{ .Values.args.credsManagerCaPath }}
             - --tls-cert-path={{ .Values.args.tlsCertPath }}
             - --tls-key-path={{ .Values.args.tlsKeyPath }}
             - --namespace={{ include "nico-rest-site-manager.namespace" . }}
@@ -66,6 +67,9 @@ spec:
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/tls
+              readOnly: true
+            - name: credsmgr-ca
+              mountPath: /etc/credsmgr-ca
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -89,6 +93,14 @@ spec:
         - name: tls-certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
+        # Only the CA certificate is projected. The signing key lives in the
+        # same Secret and Site Manager has no business reading it.
+        - name: credsmgr-ca
+          secret:
+            secretName: {{ .Values.credsManagerCa.secretName }}
+            items:
+              - key: {{ .Values.credsManagerCa.key }}
+                path: ca.crt
         # sitemgr skips its own cert issuance while `args.tlsCertPath` and
         # `args.tlsKeyPath` are set. Clearing either one sends it back to
         # writing /tmp/mgr.cert, so keep this writable alongside the read-only

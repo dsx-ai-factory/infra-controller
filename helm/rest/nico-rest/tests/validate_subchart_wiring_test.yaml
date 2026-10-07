@@ -12,6 +12,53 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: rejects a signing Secret override that Site Manager was not told about
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+    asserts:
+      - failedTemplate:
+          errorPattern: 'caSigningSecret is "site-ca".*still the default "ca-signing-secret"'
+
+  - it: accepts a signing Secret override once Site Manager trusts it
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+      nico-rest-site-manager.credsManagerCa.secretName: site-ca
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects a Vault-signed listener that Site Manager was not told about
+    set:
+      nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
+    asserts:
+      - failedTemplate:
+          errorPattern: 'signs its listener from "/vault/secrets/vault-root-ca-certificate/certificate".*cannot see'
+
+  - it: accepts a Vault-signed listener once Site Manager trusts a matching bundle
+    set:
+      nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
+      nico-rest-site-manager.args.credsManagerCaPath: /vault/secrets/vault-root-ca-certificate/certificate
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ignores a half-configured primary pair, which falls back to the mount
+    set:
+      nico-rest-cert-manager.config.caCertFile: ""
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: leaves a deliberately separate trust Secret alone
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+      nico-rest-site-manager.credsManagerCa.secretName: site-ca-bundle
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: rejects relocating cert-manager while site-manager derives its endpoint
     set:
       nico-rest-cert-manager.namespaceOverride: nico-rest-staging
@@ -66,6 +113,7 @@ tests:
     set:
       nico-rest-cert-manager.enabled: false
       nico-rest-cert-manager.namespaceOverride: nico-rest-staging
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
     asserts:
       - hasDocuments:
           count: 0

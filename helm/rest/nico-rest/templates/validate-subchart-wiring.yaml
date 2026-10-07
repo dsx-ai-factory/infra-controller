@@ -3,14 +3,48 @@
 
 {{/*
 nico-rest-site-manager has to reach nico-rest-cert-manager over verified TLS,
-which needs the hostname it dials to agree with how that subchart is actually
-deployed. A subchart cannot read a sibling's values, so neither can keep itself
-in step; this chart is the only scope that sees both. Each failure names the
-setting to adjust.
+which needs the hostname it dials and the CA it trusts to agree with how that
+subchart is actually deployed. A subchart cannot read a sibling's values, so
+neither can keep itself in step; this chart is the only scope that sees both.
+Each failure names the setting to adjust.
 */}}
 {{- $certManager := (index .Values "nico-rest-cert-manager") | default dict -}}
 {{- $siteManager := (index .Values "nico-rest-site-manager") | default dict -}}
 {{- if and $certManager.enabled $siteManager.enabled -}}
+
+{{/*
+Trust anchor. Overriding the signing Secret on one side only leaves Site
+Manager mounting a Secret that either does not exist, which makes it
+unschedulable, or holds an unrelated CA, which fails every verification. Only
+enforced while Site Manager still carries the chart default, since an operator
+who set both has deliberately pointed trust at another copy of the same CA.
+*/}}
+{{- $signingSecret := ($certManager.secrets | default dict).caSigningSecret -}}
+{{- $trustedSecret := ($siteManager.credsManagerCa | default dict).secretName -}}
+{{- if and $signingSecret (eq $trustedSecret "ca-signing-secret") (ne $signingSecret $trustedSecret) -}}
+{{- fail (printf "nico-rest-cert-manager.secrets.caSigningSecret is %q, but nico-rest-site-manager.credsManagerCa.secretName is still the default %q, so Site Manager would not trust the CA that signs the endpoint it verifies. Set nico-rest-site-manager.credsManagerCa.secretName to %q." $signingSecret $trustedSecret $signingSecret) -}}
+{{- end -}}
+
+{{/*
+Renaming the Secret is only one way the two sides drift. cert-manager signs
+with whatever config.caCertFile and config.caKeyFile resolve to, and the
+binary's own defaults are Vault agent paths, so pointing those values off the
+/etc/pki/ca mount this chart provides leaves the listener signed by a CA the
+chart never sees while Site Manager still trusts the mounted Secret. The
+condition below mirrors NewNativeCertificateIssuer: the primary pair is used
+only when both are set, and anything else falls back to the alternate paths,
+which are the mount. Nothing here can discover the real signer, so Site
+Manager's trust has to have been aimed deliberately.
+*/}}
+{{- $certManagerConfig := $certManager.config | default dict -}}
+{{- $siteManagerArgs := $siteManager.args | default dict -}}
+{{- $primaryCaCert := $certManagerConfig.caCertFile | default "" -}}
+{{- $primaryCaKey := $certManagerConfig.caKeyFile | default "" -}}
+{{- $signerIsUnknown := and (ne $primaryCaCert "") (ne $primaryCaKey "") (not (and (eq $primaryCaCert "/etc/pki/ca/tls.crt") (eq $primaryCaKey "/etc/pki/ca/tls.key"))) -}}
+{{- $trustIsDefault := and (eq $trustedSecret "ca-signing-secret") (eq ($siteManagerArgs.credsManagerCaPath | default "") "/etc/credsmgr-ca/ca.crt") -}}
+{{- if and $signerIsUnknown $trustIsDefault -}}
+{{- fail (printf "nico-rest-cert-manager signs its listener from %q, outside the /etc/pki/ca mount this chart populates from nico-rest-cert-manager.secrets.caSigningSecret, so the signing CA is one the chart cannot see. nico-rest-site-manager still trusts the mounted Secret and every certificate request would fail with \"certificate signed by unknown authority\". Point Site Manager at the real signer: set nico-rest-site-manager.credsManagerCa.secretName to a Secret holding it, or nico-rest-site-manager.args.credsManagerCaPath to a bundle injected into that pod." $primaryCaCert) -}}
+{{- end -}}
 
 {{/*
 Endpoint. Site Manager derives it from the release namespace and the fixed

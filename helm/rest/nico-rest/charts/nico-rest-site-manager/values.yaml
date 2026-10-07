@@ -27,7 +27,24 @@ args:
   credsManagerUrl: ""
   tlsCertPath: /etc/tls/tls.crt
   tlsKeyPath: /etc/tls/tls.key
+  # -- CA bundle used to verify nico-rest-cert-manager, read from the
+  # credsManagerCa mount below. Point it elsewhere only if you also arrange for
+  # a bundle to exist at that path.
+  credsManagerCaPath: /etc/credsmgr-ca/ca.crt
   debug: true
+
+# -- CA that signs nico-rest-cert-manager's HTTPS listener, which is what Site
+# Manager has to trust to verify it. This is deliberately not the issuer of
+# Site Manager's own serving certificate: global.certificate.issuerRef and
+# nico-rest-cert-manager.secrets.caSigningSecret are independent settings, so
+# the chart cannot assume one vouches for the other. Only the certificate is
+# projected; the signing key stays in the Secret. The Secret has to exist in
+# the namespace this chart deploys into, and has to be the one
+# nico-rest-cert-manager.secrets.caSigningSecret names; the nico-rest parent
+# chart fails rendering when that is overridden and this is left at the default.
+credsManagerCa:
+  secretName: ca-signing-secret
+  key: tls.crt
 
 resources:
   requests:
