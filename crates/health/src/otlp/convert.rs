@@ -1352,7 +1352,11 @@ mod tests {
                         .to_string(),
                 ),
                 message: "Leak detected: 2 detector alerts reached threshold 1".to_string(),
-                classifications: vec![Classification::Leak, Classification::PreventAllocations],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             },
             sensor_alert(),
         ];
@@ -1385,7 +1389,7 @@ mod tests {
         );
         assert_eq!(
             details[0]["classifications"],
-            serde_json::json!(["Leak", "PreventAllocations"])
+            serde_json::json!(["TrayLeak", "SensorCritical", "PreventAllocations"])
         );
 
         assert_eq!(details[1]["probe_id"], "BmcSensor");
