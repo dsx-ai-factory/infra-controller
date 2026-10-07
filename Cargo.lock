@@ -1250,6 +1250,7 @@ dependencies = [
  "reqwest 0.13.4",
  "reqwest-middleware",
  "reqwest-tracing",
+ "rms-observability",
  "rsa 0.9.10",
  "rumqttc",
  "rustls",
@@ -7830,6 +7831,7 @@ dependencies = [
  "prettytable-rs",
  "prost",
  "reqwest 0.13.4",
+ "rms-observability",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -9970,6 +9972,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rms-observability"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "librms",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "tonic",
+ "tower",
+ "trace-propagation",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -12277,6 +12295,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12286,6 +12314,8 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
@@ -12293,6 +12323,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
