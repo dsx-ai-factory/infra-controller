@@ -2147,6 +2147,11 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
         export KEYCLOAK_DB_SSLMODE="require"
         export KEYCLOAK_DB_PASSWORD_SECRET_NAME="nico-keycloak-pg-creds"
         export KEYCLOAK_DB_PASSWORD_SECRET_KEY="password"
+    else
+        # keycloak/setup.sh keeps any KEYCLOAK_DB_* it inherits, so clear them
+        # to make it use its standalone defaults.
+        unset KEYCLOAK_DB_HOST KEYCLOAK_DB_NAME KEYCLOAK_DB_USER KEYCLOAK_DB_SSLMODE \
+            KEYCLOAK_DB_PASSWORD_SECRET_NAME KEYCLOAK_DB_PASSWORD_SECRET_KEY
     fi
 
     "${SCRIPT_DIR}/keycloak/setup.sh"
