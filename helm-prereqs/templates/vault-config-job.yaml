@@ -320,11 +320,20 @@ spec:
               echo "Enabling KV v2 at {{ .Values.vault.kvMount }}/..."
               vault secrets enable -path={{ .Values.vault.kvMount }} kv-v2 2>/dev/null || true
 
+              # Seeds are first-write only. This Job also runs on every upgrade,
+              # and several seeds are placeholders an operator fills in afterwards
+              # (`credential add-uefi`), so a key that already holds a value is
+              # left alone; -cas=0 makes Vault refuse the write if a version
+              # appeared between the check and the put.
               {{- range .Values.vault.kvSeeds }}
-              echo "Seeding {{ $.Values.vault.kvMount }}/{{ .path }}..."
-              vault kv put {{ $.Values.vault.kvMount }}/{{ .path }} - <<'KVSEED'
+              if vault kv get {{ $.Values.vault.kvMount }}/{{ .path }} >/dev/null 2>&1; then
+                echo "Keeping {{ $.Values.vault.kvMount }}/{{ .path }} (already set; seeds never overwrite)"
+              else
+                echo "Seeding {{ $.Values.vault.kvMount }}/{{ .path }}..."
+                vault kv put -cas=0 {{ $.Values.vault.kvMount }}/{{ .path }} - <<'KVSEED'
               {{ .data | toJson }}
               KVSEED
+              fi
               {{- end }}
 
               echo "Enabling AppRole auth..."
