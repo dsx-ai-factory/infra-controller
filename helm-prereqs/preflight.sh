@@ -823,11 +823,12 @@ _resolve_use_ha_postgres() {
 # Records a blocking error unless an explicit true can safely move the
 # component's database onto nico-pg-cluster. Moving it off the standalone
 # StatefulSet needs the receipt migrate-temporal-keycloak-db.sh leaves after a
-# complete copy. The workload also has to have stayed scaled to zero since, or
-# the standalone database may have taken writes the copy doesn't have.
+# complete copy. Every Deployment it stopped also has to keep the uid and
+# generation the receipt lists. A restart, scale, or recreate changes them,
+# and may have let the standalone database take writes the copy doesn't have.
 _check_db_cutover() {
-    local _component="$1" _ns _receipt _replicas _dep _hint
-    local -a _deployments
+    local _component="$1" _ns _receipt _state _recorded _entry _dep _hint
+    local -a _deployments _entries
     _hint="helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db ${_component}"
     _db_location "${_component}"
     case "${_DB_LOCATION}" in
@@ -858,14 +859,21 @@ _check_db_cutover() {
         BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
         return 0
     fi
+    read -r -a _entries <<< "${_receipt}"
     for _dep in "${_deployments[@]}"; do
-        if ! _replicas="$(kubectl get deployment "${_dep}" -n "${_ns}" --ignore-not-found \
-            -o jsonpath='{.spec.replicas}' 2>/dev/null)"; then
-            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read the replica count of ${_ns}/${_dep}. Check cluster access and re-run")
+        if ! _state="$(kubectl get deployment "${_dep}" -n "${_ns}" --ignore-not-found \
+            -o jsonpath='{.metadata.uid}/{.metadata.generation}' 2>/dev/null)"; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read ${_ns}/${_dep}. Check cluster access and re-run")
             return 0
         fi
-        if [[ -n "${_replicas}" && "${_replicas}" != "0" ]]; then
-            BLOCKING_ERRORS+=("${_component}.useHaPostgres: ${_ns}/${_dep} has run since the migration at ${_receipt}, so the standalone database may have newer data. Run '${_hint}' again")
+        _recorded=""
+        for _entry in "${_entries[@]}"; do
+            if [[ "${_entry%%=*}" == "${_dep}" ]]; then
+                _recorded="${_entry#*=}"
+            fi
+        done
+        if [[ -z "${_state}" || "${_state}" != "${_recorded}" ]]; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: ${_ns}/${_dep} changed after the migration, so the standalone database may have newer data. Run '${_hint}' again")
             return 0
         fi
     done
