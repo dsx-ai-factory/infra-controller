@@ -22,6 +22,7 @@ use axum::Router;
 use metrics_endpoint::{
     MetricsEndpointConfig, MetricsSetup, new_metrics_setup, run_metrics_endpoint_with_cancellation,
 };
+use tokio::net::TcpListener;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use ufm_mock::{InventoryConfig, UfmAuthToken, UfmMock};
@@ -312,6 +313,21 @@ pub async fn run(
     auth_token: &UfmAuthToken,
     shutdown: CancellationToken,
 ) -> eyre::Result<ExitReason> {
+    let listener = TcpListener::bind(config.listen_address).await?;
+    run_with_listener(config, auth_token, shutdown, listener).await
+}
+
+/// Runs the gateway on an already bound listener until shutdown or a source set change.
+/// The listener's address replaces `config.listen_address`, including an OS-assigned port.
+/// Ownership of the listener transfers to the gateway and ends when the server stops.
+pub async fn run_with_listener(
+    mut config: GatewayConfig,
+    auth_token: &UfmAuthToken,
+    shutdown: CancellationToken,
+    listener: TcpListener,
+) -> eyre::Result<ExitReason> {
+    config.listen_address = listener.local_addr()?;
+
     let controller = SourceListClient::new(
         config.controller.sources_url.clone(),
         config.controller.request_timeout,
@@ -324,8 +340,9 @@ pub async fn run(
         tls = gateway.config.tls.is_some(),
         "Starting machine-a-tron protocol gateway"
     );
-    let mut server = tokio::spawn(ufm_mock::serve(
-        gateway.config.listen_address,
+
+    let mut server = tokio::spawn(ufm_mock::serve_with_listener(
+        listener,
         gateway.config.tls.clone(),
         gateway.router(),
         shutdown.child_token(),

@@ -36,7 +36,9 @@ use librms::protos::rack_manager::{
     Endpoint, NetworkInterface, NodeInfo, NodeOperationStats, NodeSet,
 };
 use mac_address::MacAddress;
-use mat_protocol_gateway::{ControllerConfig, ExitReason, GatewayConfig, SourceListClient, run};
+use mat_protocol_gateway::{
+    ControllerConfig, ExitReason, GatewayConfig, SourceListClient, run_with_listener,
+};
 use reqwest::header::AUTHORIZATION;
 use rms_mock::{RmsMock, RmsMockConfig, SimNode, SimNodeKind, StaticInventory};
 use serde_json::{Value, json};
@@ -75,15 +77,6 @@ pub(crate) async fn serve(router: Router) -> SocketAddr {
         axum::serve(listener, router).await.unwrap();
     });
     address
-}
-
-/// Reserves a loopback port and releases it so that [`run`] can bind it.
-///
-/// `run` reports no bound address, so a test that must reach a gateway started through `run`, or
-/// restart it on the same port, picks the port up front.
-pub(crate) async fn free_loopback_address() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap()
 }
 
 /// Polls `condition` every 25ms until it holds or [`WAIT`] elapses.
@@ -431,8 +424,9 @@ pub(crate) fn auth_token() -> UfmAuthToken {
 pub(crate) fn spawn_run(
     config: GatewayConfig,
     shutdown: CancellationToken,
+    listener: TcpListener,
 ) -> JoinHandle<eyre::Result<ExitReason>> {
-    tokio::spawn(async move { run(config, &auth_token(), shutdown).await })
+    tokio::spawn(async move { run_with_listener(config, &auth_token(), shutdown, listener).await })
 }
 
 /// Waits for the spawned `run` to return and unwraps its result.
