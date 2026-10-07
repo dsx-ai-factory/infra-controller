@@ -160,6 +160,50 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Migration receipt: what preflight requires before setup.sh moves a workload
+# onto nico-pg-cluster. It lists each stopped Deployment's uid/generation, which
+# any later restart, scale, or recreate changes. The old receipt is cleared
+# before anything is copied, so a failed retry can't leave a past success in
+# place. Keep the ConfigMap name in sync with _DB_RECORD_CONFIGMAP in
+# preflight.sh.
+# ---------------------------------------------------------------------------
+DB_RECORD_CONFIGMAP="nico-workload-databases"
+
+_clear_receipt() {
+    if kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1; then
+        _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+            -p "{\"data\":{\"$1-migrated\":null}}"
+    fi
+}
+
+_write_receipt() {
+    kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
+    _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"$1-migrated\":\"$2\"}}"
+}
+
+# Prints "<deployment>=<uid>/<generation>" for each Deployment, space-separated.
+_deployment_states() {
+    local _ns="$1" _dep _state
+    local -a _states=()
+    shift
+    for _dep in "$@"; do
+        _state="$(kubectl get deploy "${_dep}" -n "${_ns}" \
+            -o jsonpath='{.metadata.uid}/{.metadata.generation}')"
+        _states+=("${_dep}=${_state}")
+    done
+    printf '%s\n' "${_states[*]}"
+}
+
+if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
+    _clear_receipt temporal
+fi
+if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
+    _clear_receipt keycloak
+fi
+
+# ---------------------------------------------------------------------------
 # Scale a set of Deployments to zero (or back to their prior replica count).
 # Replica counts are cached in the global _SAVED_REPLICAS_* vars, keyed by
 # "<ns>/<deployment>", so a caller can scale a group of Deployments down once,
@@ -283,6 +327,7 @@ _dump_restore_db() {
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
     _TEMPORAL_DEPLOYMENTS=(temporal-frontend temporal-history temporal-matching temporal-worker)
     _scale_down temporal "${_TEMPORAL_DEPLOYMENTS[@]}"
+    _TEMPORAL_RECEIPT="$(_deployment_states temporal "${_TEMPORAL_DEPLOYMENTS[@]}")"
     _dump_restore_db "temporal" "temporal.nico"
     _dump_restore_db "temporal_visibility" "temporal.nico"
 fi
@@ -294,6 +339,7 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _KEYCLOAK_NS="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${PREREQS_DIR}/values.yaml" keycloak namespace)}"
     _KEYCLOAK_NS="${_KEYCLOAK_NS:-nico-rest}"
     _scale_down "${_KEYCLOAK_NS}" keycloak
+    _KEYCLOAK_RECEIPT="$(_deployment_states "${_KEYCLOAK_NS}" keycloak)"
     _dump_restore_db "keycloak" "keycloak.nico"
 fi
 
@@ -309,22 +355,11 @@ if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
     _disarm_group "${_KEYCLOAK_NS}"
 fi
 
-# The receipt preflight requires before setup.sh moves a workload onto
-# nico-pg-cluster. Keep the name in sync with _DB_RECORD_CONFIGMAP in
-# preflight.sh.
-DB_RECORD_CONFIGMAP="nico-workload-databases"
-_record_migration() {
-    local _component="$1"
-    kubectl get configmap "${DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
-        || _run kubectl create configmap "${DB_RECORD_CONFIGMAP}" -n postgres
-    _run kubectl patch configmap "${DB_RECORD_CONFIGMAP}" -n postgres --type merge \
-        -p "{\"data\":{\"${_component}-migrated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}"
-}
 if [[ "${DB_TARGET}" == "temporal" || "${DB_TARGET}" == "both" ]]; then
-    _record_migration temporal
+    _write_receipt temporal "${_TEMPORAL_RECEIPT}"
 fi
 if [[ "${DB_TARGET}" == "keycloak" || "${DB_TARGET}" == "both" ]]; then
-    _record_migration keycloak
+    _write_receipt keycloak "${_KEYCLOAK_RECEIPT}"
 fi
 
 echo ""

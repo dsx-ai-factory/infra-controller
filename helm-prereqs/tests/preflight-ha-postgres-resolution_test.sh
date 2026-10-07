@@ -80,9 +80,9 @@ case "$*" in
             fi
         done
         ;;
-    'get deployment temporal-'*' -n temporal --ignore-not-found -o jsonpath={.spec.replicas}' \
-        | 'get deployment keycloak -n kc-ns --ignore-not-found -o jsonpath={.spec.replicas}')
-        printf '%s' "${FAKE_REPLICAS}"
+    'get deployment temporal-'*' -n temporal --ignore-not-found -o jsonpath={.metadata.uid}/{.metadata.generation}' \
+        | 'get deployment keycloak -n kc-ns --ignore-not-found -o jsonpath={.metadata.uid}/{.metadata.generation}')
+        printf '%s' "${FAKE_DEPLOYMENT_STATE}"
         ;;
     *)
         echo "unexpected: kubectl $*" >&2
@@ -151,7 +151,7 @@ for row in "${resolver_cases[@]}"; do
     write_values "${component}" "${value}"
     ERRORS=()
     FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" \
-        FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" FAKE_REPLICAS="" \
+        FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" FAKE_DEPLOYMENT_STATE="" \
         FAKE_READS_FAIL="${reads_fail}" PATH="${TEST_TMP_DIR}/bin:${PATH}" \
         _resolve_use_ha_postgres "${component}"
     if [[ "${_USE_HA_POSTGRES}" != "${expected}" ]]; then
@@ -163,25 +163,27 @@ for row in "${resolver_cases[@]}"; do
 done
 
 # The cutover check runs for an explicit true only. Same columns as above
-# without value and expected, plus the replica count of the workload's
-# Deployments.
+# without value and expected, plus the current uid/generation every Deployment
+# of the workload reports.
+temporal_receipt="temporal-migrated=temporal-frontend=uid-t/4 temporal-history=uid-t/4 temporal-matching=uid-t/4 temporal-worker=uid-t/4"
 cutover_cases=(
-    "migrated Site already on nico-pg-cluster|temporal|nico-pg-cluster.postgres.svc.cluster.local||statefulset||1|false|"
-    "Keycloak cutover after a migration, still stopped|keycloak||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|keycloak-migrated=2026-10-06T00:00:00Z|0|false|"
-    "Temporal on the StatefulSet without a migration|temporal|postgres.postgres.svc.cluster.local.||statefulset||0|false|true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
-    "Temporal ran again after its migration|temporal|postgres.postgres.svc.cluster.local.||statefulset|temporal-migrated=2026-10-06T00:00:00Z|1|false|temporal/temporal-frontend has run since the migration"
+    "migrated Site already on nico-pg-cluster|temporal|nico-pg-cluster.postgres.svc.cluster.local||statefulset||uid-t/9|false|"
+    "Temporal cutover after a migration, Deployments unchanged|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/4|false|"
+    "Keycloak cutover after a migration, Deployment unchanged|keycloak||jdbc:postgresql://postgres.postgres:5432/keycloak?sslmode=disable|statefulset|keycloak-migrated=keycloak=uid-k/2|uid-k/2|false|"
+    "Temporal on the StatefulSet without a migration|temporal|postgres.postgres.svc.cluster.local.||statefulset||uid-t/4|false|true moves temporal off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated"
+    "Temporal restarted and stopped again after its migration|temporal|postgres.postgres.svc.cluster.local.||statefulset|${temporal_receipt}|uid-t/6|false|temporal/temporal-frontend changed after the migration"
     "unreadable cluster state|temporal||||||true|so it can't rule out moving temporal off the standalone postgres.postgres StatefulSet"
 )
 
 for row in "${cutover_cases[@]}"; do
-    IFS='|' read -r name component temporal_host keycloak_url standalone record replicas \
+    IFS='|' read -r name component temporal_host keycloak_url standalone record deployment_state \
         reads_fail expected_error <<< "${row}"
     write_values "${component}" true
     BLOCKING_ERRORS=()
     FAKE_TEMPORAL_HOST="${temporal_host}" FAKE_KEYCLOAK_URL="${keycloak_url}" \
-        FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" FAKE_REPLICAS="${replicas}" \
-        FAKE_READS_FAIL="${reads_fail}" PATH="${TEST_TMP_DIR}/bin:${PATH}" \
-        _check_db_cutover "${component}"
+        FAKE_STANDALONE="${standalone}" FAKE_RECORD="${record}" \
+        FAKE_DEPLOYMENT_STATE="${deployment_state}" FAKE_READS_FAIL="${reads_fail}" \
+        PATH="${TEST_TMP_DIR}/bin:${PATH}" _check_db_cutover "${component}"
     check_errors "cutover: ${name}" "${BLOCKING_ERRORS[*]:-}" "${expected_error}"
 done
 

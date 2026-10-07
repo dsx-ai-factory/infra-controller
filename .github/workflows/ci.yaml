@@ -2171,6 +2171,9 @@ jobs:
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
 
+      - name: Test Temporal/Keycloak migration receipt
+        run: bash helm-prereqs/tests/migrate-temporal-keycloak-db-receipt_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
