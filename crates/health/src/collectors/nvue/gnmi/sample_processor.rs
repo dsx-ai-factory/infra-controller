@@ -430,12 +430,7 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["asic", "state", "asic-temp"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp(
-                "component_asic_temperature",
-                comp_name,
-                v,
-                "celsius",
-            );
+            self.emit_comp("component_asic_temperature", comp_name, v, "celsius");
         } else if leaf_matches(elems, &["cpu", "utilization", "state", "avg"])
             && let Some(v) = typed_value_to_f64(val)
         {
@@ -728,7 +723,7 @@ const OTHER_SAMPLE_METRIC_PATHS: &[(&str, &str)] = &[
     ),
     (
         "components/component/asic/state/asic-temp",
-        "component_asic_temperature_celsius",
+        "component_asic_temperature",
     ),
     (
         "components/component/cpu/utilization/state/avg",
@@ -2582,7 +2577,7 @@ mod tests {
                 component_name: "ASIC1",
                 tail: &["asic", "state", "asic-temp"],
                 raw: 46,
-                metric_type: "component_asic_temperature_celsius",
+                metric_type: "component_asic_temperature",
                 unit: "celsius",
             },
             Case {
