@@ -701,6 +701,7 @@ DPF-managed hosts. An instance cannot have `DPF_HELM_CHART` and
 same service more than once.
 
 The DPU target policy selects instance DPUs independently for each Helm service:
+
 ```proto
 enum DpuExtensionServiceDpuTarget {
   DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY = 0;
