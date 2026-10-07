@@ -194,16 +194,21 @@ pub(crate) async fn create(
     // Validate service type is supported by the site
     validate_extension_service_type_enabled(&service_type, api.runtime_config.dpf.enabled)?;
 
-    // Validate the complete service definition before writing anything.
-    // Kubernetes Pod data is stored exactly as provided; DPF Helm chart data
-    // is parsed before becoming durable desired state.
+    // Validate the service data before writing anything.
     validate_extension_service_data_size(&req.data)?;
-    let data = match &service_type {
+    let (data, dpf_service_id) = match &service_type {
         ExtensionServiceType::KubernetesPod => {
             validate_pod_spec_file(&req.data)?;
-            req.data
+            (req.data, None)
         }
-        ExtensionServiceType::DpfHelmChart => parse_dpf_helm_chart_data(&req.data)?,
+        ExtensionServiceType::DpfHelmChart => {
+            let data = parse_dpf_helm_chart_data(&req.data)?;
+            let dpf_service_id = data.service_id.clone();
+            let normalized_data = data
+                .normalized_json()
+                .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+            (normalized_data, dpf_service_id)
+        }
     };
 
     // @TODO(Felicity): support observability for DpfHelmChart extension services
@@ -261,6 +266,7 @@ pub(crate) async fn create(
                     req.description.as_deref(),
                     &service_vpc_interfaces,
                     &data,
+                    dpf_service_id.as_deref(),
                     observability,
                     req.credential.is_some(),
                 )
@@ -327,7 +333,7 @@ pub(crate) async fn create(
 /// Updates an existing extension service.
 ///
 /// Metadata-only updates do not create a version. DPF Helm chart updates mutate
-/// the stable V1 definition for asynchronous controller reconciliation, whereas
+/// the stable V1 data for asynchronous controller reconciliation, whereas
 /// Kubernetes Pod updates create a new version and may update Vault credentials.
 /// Interface requirements are replaced only when no durable attachment exists.
 pub(crate) async fn update(
@@ -468,7 +474,7 @@ pub(crate) async fn update(
     updated_extension_service_response(api, service_id, updated_service, latest_version_row).await
 }
 
-/// Updates the mutable V1 definition of a DPF Helm chart service and requests
+/// Updates the mutable V1 data of a DPF Helm chart service and requests
 /// asynchronous reconciliation of its stable DPUService.
 ///
 /// Networked definitions remain immutable until issue #6123 adds the resource
@@ -502,11 +508,27 @@ async fn update_dpf_helm_chart(
     }
 
     validate_extension_service_data_size(&req.data)?;
-    let parsed_data = parse_dpf_helm_chart_data(&req.data)?;
+
+    let desired_data = parse_dpf_helm_chart_data(&req.data)?;
     let existing_v1 =
         extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
-    let parsed_existing = parse_dpf_helm_chart_data(&existing_v1.data)?;
-    if parsed_data == parsed_existing
+    let existing_data = parse_dpf_helm_chart_data(&existing_v1.data)?;
+    let dpf_service_id = match desired_data.service_id.as_deref() {
+        None => {
+            return Err(
+                CarbideError::InvalidArgument("serviceID must not be empty".to_string()).into(),
+            );
+        }
+        Some(id) if existing_data.service_id.as_deref() == Some(id) => id,
+        Some(_) => {
+            return Err(CarbideError::InvalidArgument(
+                "serviceID cannot be changed for a DPF helm chart extension service".to_string(),
+            )
+            .into());
+        }
+    };
+
+    if desired_data == existing_data
         && service_vpc_interfaces == current_service.service_vpc_interfaces
     {
         return Err(CarbideError::InvalidArgument(
@@ -527,6 +549,10 @@ async fn update_dpf_helm_chart(
         .into());
     }
 
+    let desired_data = desired_data
+        .normalized_json()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+
     let controller_state_version_change = current_service
         .status
         .controller_state
@@ -539,7 +565,8 @@ async fn update_dpf_helm_chart(
         req.service_name.as_deref(),
         req.description.as_deref(),
         service_vpc_interfaces,
-        &parsed_data,
+        &desired_data,
+        dpf_service_id,
         existing_v1.version,
         current_service.version_ctr,
         controller_state_version_change,
@@ -1263,15 +1290,16 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
     Ok(())
 }
 
-/// Parses and validates a DPF Helm chart definition, returning the stable JSON
-/// representation stored as the service's desired state.
-fn parse_dpf_helm_chart_data(data: &str) -> Result<String, CarbideError> {
+/// Parses and validates DPF Helm chart data so callers can derive the
+/// normalized desired state and any fields needed by their persistence path.
+fn parse_dpf_helm_chart_data(data: &str) -> Result<DpfHelmChartServiceData, CarbideError> {
+    // Translate model validation failures at the API boundary while retaining
+    // the typed data for caller-specific processing.
     DpfHelmChartServiceData::parse(data)
-        .and_then(|definition| definition.normalized_json())
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
 }
 
-/// Rejects extension-service definitions that exceed the API size limit.
+/// Rejects extension-service data that exceeds the API size limit.
 fn validate_extension_service_data_size(data: &str) -> Result<(), CarbideError> {
     if data.len() > MAX_DATA_SIZE {
         return Err(CarbideError::InvalidArgument(format!(

@@ -86,6 +86,30 @@ pub(super) struct UpstreamResponse {
     pub(super) sensitive_values: Vec<String>,
 }
 
+/// An attempt that got no answer from the BMC: the caller's answer, and how
+/// the BMC failed it, if the proxy did not fail it first.
+pub(super) struct AttemptFailed {
+    pub(super) response: Response<Body>,
+    pub(super) by_bmc: Option<BmcFailure>,
+}
+
+/// How the BMC failed an attempt.
+pub(super) enum BmcFailure {
+    /// The proxy could not connect to it.
+    Unreachable,
+    /// It did not answer within the attempt's `budget`.
+    TimedOut { budget: Duration },
+}
+
+impl From<Response<Body>> for AttemptFailed {
+    fn from(response: Response<Body>) -> Self {
+        Self {
+            response,
+            by_bmc: None,
+        }
+    }
+}
+
 impl UpstreamBody {
     pub(super) async fn prepare(headers: &HeaderMap, body: Body) -> Result<Self, axum::Error> {
         let declared_length = headers
@@ -167,7 +191,7 @@ pub(super) async fn send_upstream(
     path_and_query: http::uri::PathAndQuery,
     upstream_body: &mut UpstreamBody,
     deadline: tokio::time::Instant,
-) -> Result<UpstreamResponse, Response<Body>> {
+) -> Result<UpstreamResponse, AttemptFailed> {
     let mut bmc_client_info = tokio::time::timeout_at(
         deadline,
         create_client(
@@ -209,11 +233,9 @@ pub(super) async fn send_upstream(
         .map_err(|e| {
             error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
         })?;
+    let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
     let upstream_request = upstream_body
-        .attach(
-            upstream_request,
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
+        .attach(upstream_request, budget)
         .map_err(error_response)?;
 
     let started = Instant::now();
@@ -228,7 +250,18 @@ pub(super) async fn send_upstream(
             response,
             sensitive_values,
         })
-        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
+        .map_err(|error| AttemptFailed {
+            by_bmc: match &error {
+                reqwest_middleware::Error::Reqwest(cause) if cause.is_connect() => {
+                    Some(BmcFailure::Unreachable)
+                }
+                reqwest_middleware::Error::Reqwest(cause) if cause.is_timeout() => {
+                    Some(BmcFailure::TimedOut { budget })
+                }
+                _ => None,
+            },
+            response: error_response((StatusCode::BAD_GATEWAY, error.to_string()).into()),
+        })
 }
 
 fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
@@ -457,6 +490,8 @@ mod tests {
     use carbide_utils::HostPortPair;
     use rpc::forge_api_client::ForgeApiClient;
     use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use tokio::task::JoinSet;
+    use tokio_util::sync::CancellationToken;
     use url::Url;
 
     use super::{
@@ -501,17 +536,34 @@ mod tests {
         credentials: CredentialSummary,
     }
 
-    async fn spawn_http(app: Router) -> std::net::SocketAddr {
+    async fn spawn_http(
+        app: Router,
+        tasks: &mut JoinSet<std::io::Result<()>>,
+        shutdown: CancellationToken,
+    ) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test HTTP server");
         let address = listener.local_addr().expect("test server address");
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
                 .await
-                .expect("test HTTP server runs");
         });
         address
+    }
+
+    async fn stop_http(tasks: &mut JoinSet<std::io::Result<()>>, shutdown: &CancellationToken) {
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = tasks.join_next().await {
+                result
+                    .expect("test HTTP server task did not panic")
+                    .expect("test HTTP server stopped successfully");
+            }
+        })
+        .await
+        .expect("test HTTP servers stop within five seconds");
     }
 
     #[test]
@@ -551,6 +603,9 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_client_does_not_follow_cross_origin_redirect() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
         let destination_hits = Arc::new(AtomicUsize::new(0));
         let destination = Router::new()
             .route(
@@ -561,7 +616,7 @@ mod tests {
                 }),
             )
             .with_state(destination_hits.clone());
-        let destination = spawn_http(destination).await;
+        let destination = spawn_http(destination, &mut servers, shutdown.clone()).await;
         let location = format!("http://{destination}/target");
         let source = Router::new().route(
             "/start",
@@ -575,7 +630,7 @@ mod tests {
                 }
             }),
         );
-        let source = spawn_http(source).await;
+        let source = spawn_http(source, &mut servers, shutdown.clone()).await;
 
         let response = build_http_client(RedirectMode::FollowSameOrigin)
             .expect("HTTP client builds")
@@ -587,10 +642,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
+        drop(response);
+        stop_http(&mut servers, &shutdown).await;
     }
 
     #[tokio::test]
     async fn upstream_client_stops_after_five_same_origin_redirects() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
         let requests = Arc::new(AtomicUsize::new(0));
         let chain =
             Router::new()
@@ -613,7 +673,7 @@ mod tests {
                     ),
                 )
                 .with_state(requests.clone());
-        let chain = spawn_http(chain).await;
+        let chain = spawn_http(chain, &mut servers, shutdown.clone()).await;
 
         build_http_client(RedirectMode::FollowSameOrigin)
             .expect("HTTP client builds")
@@ -623,6 +683,7 @@ mod tests {
             .expect_err("sixth redirect exceeds the configured limit");
 
         assert_eq!(requests.load(Ordering::SeqCst), 6);
+        stop_http(&mut servers, &shutdown).await;
     }
 
     fn header_for_copy_case(case: HeaderCopyCase) -> (HeaderName, HeaderValue) {

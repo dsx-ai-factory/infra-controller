@@ -73,7 +73,10 @@ pub enum SwitchMaintenanceOperation {
     /// Power on the switch.
     PowerOn,
     /// Power off the switch.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
     /// Reset the switch (restart / AC power cycle).
     Reset,
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
@@ -775,11 +778,11 @@ mod tests {
 
             "maintenance: power off" {
                 SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::PowerOff,
+                    operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
                     request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                 ),
             }
@@ -955,8 +958,12 @@ mod tests {
                 SwitchMaintenanceOperation::PowerOn => Yields(r#"{"operation":"poweron"}"#.to_string()),
             }
 
-            "power off" {
-                SwitchMaintenanceOperation::PowerOff => Yields(r#"{"operation":"poweroff"}"#.to_string()),
+            "power off (forced, default)" {
+                SwitchMaintenanceOperation::PowerOff { graceful: false } => Yields(r#"{"operation":"poweroff","graceful":false}"#.to_string()),
+            }
+
+            "graceful power off" {
+                SwitchMaintenanceOperation::PowerOff { graceful: true } => Yields(r#"{"operation":"poweroff","graceful":true}"#.to_string()),
             }
 
             "reset" {
@@ -979,8 +986,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(SwitchMaintenanceOperation::PowerOn),
             }
 
-            "power off" {
-                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff),
+            "power off defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "graceful power off" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "reset" {

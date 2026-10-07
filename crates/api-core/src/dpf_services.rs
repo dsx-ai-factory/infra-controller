@@ -33,7 +33,7 @@ use carbide_dpf::{
 
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
-    DpfResolvedMandatoryServicesConfig, DpfServiceConfig, NodeAuthConfig,
+    DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -807,7 +807,24 @@ fn weave_flow_controller_underlay_interfaces() -> Vec<serde_json::Value> {
         .collect()
 }
 
-pub(crate) fn doca_weave_flow_controller_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
+pub(crate) fn doca_weave_flow_controller_service(
+    cfg: &DpfServiceConfig,
+    ewethers_config: Option<&EwEthersConfig>,
+) -> ServiceDefinition {
+    let overlay_network_prefix_len = ewethers_config
+        .map(|config| config.subnet_mask)
+        .unwrap_or_else(EwEthersConfig::default_subnet_mask);
+    let default_astra_config = crate::cfg::file::AstraConfig::default();
+    let astra_config = ewethers_config
+        .map(|config| &config.astra)
+        .unwrap_or(&default_astra_config);
+    let underlay_config_map_data = serde_json::json!({
+        "nicIDType": "mac",
+        "overlayNetworkPrefixLength": overlay_network_prefix_len,
+        "softwarePlaneIDBitLength": astra_config.underlay_ip_software_plane_id_bit_len,
+        "railIDBitLength": astra_config.underlay_ip_rail_id_bit_len,
+        "interfaces": weave_flow_controller_underlay_interfaces(),
+    });
     let mut helm_values = serde_json::json!({
         "weaveFlowController": {
             "containers": {
@@ -826,13 +843,7 @@ pub(crate) fn doca_weave_flow_controller_service(cfg: &DpfServiceConfig) -> Serv
         config_values: Some(serde_json::json!({
             "weaveFlowController": {
                 "enabled": true,
-                "underlayConfigMapData": {
-                    "nicIDType": "mac",
-                    "overlayNetworkPrefixLength": 11,
-                    "softwarePlaneIDBitLength": 8,
-                    "railIDBitLength": 4,
-                    "interfaces": weave_flow_controller_underlay_interfaces(),
-                }
+                "underlayConfigMapData": underlay_config_map_data
             }
         })),
         ..ServiceDefinition::new(
@@ -873,6 +884,7 @@ pub(crate) fn mandatory_services(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     service_vpc_slots: ServiceVpcSlots,
     node_auth: &NodeAuthConfig,
+    ewethers_config: Option<&EwEthersConfig>,
 ) -> Vec<ServiceDefinition> {
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
@@ -895,7 +907,7 @@ pub(crate) fn mandatory_services(
                 service_vec.push(doca_weave_dhcp_agent_service(cfg))
             }
             DpfExtraService::DocaWeaveFlowController => {
-                service_vec.push(doca_weave_flow_controller_service(cfg))
+                service_vec.push(doca_weave_flow_controller_service(cfg, ewethers_config))
             }
             DpfExtraService::DocaXplane => service_vec.push(doca_xplane_service(cfg)),
         }
@@ -1228,7 +1240,7 @@ mod tests {
                     ),
                     DpfExtraService::DocaWeaveFlowController => (
                         default_doca_weave_flow_controller_service(),
-                        doca_weave_flow_controller_service,
+                        |cfg| doca_weave_flow_controller_service(cfg, None),
                     ),
                     DpfExtraService::DocaXplane => (
                         default_doca_xplane_service(),
@@ -1365,7 +1377,8 @@ mod tests {
 
     #[test]
     fn weave_flow_controller_service_emits_underlay_config_values() {
-        let svc = doca_weave_flow_controller_service(&default_doca_weave_flow_controller_service());
+        let svc =
+            doca_weave_flow_controller_service(&default_doca_weave_flow_controller_service(), None);
         let helm_values = svc.helm_values.expect("helm_values must be set");
         assert_eq!(
             helm_values["weaveFlowController"]["containers"]["weaveFlowController"]["image"]["repository"],
@@ -1389,14 +1402,9 @@ mod tests {
             config["weaveFlowController"]["underlayConfigMapData"]["overlayNetworkPrefixLength"],
             11
         );
-        assert_eq!(
-            config["weaveFlowController"]["underlayConfigMapData"]["softwarePlaneIDBitLength"],
-            8
-        );
-        assert_eq!(
-            config["weaveFlowController"]["underlayConfigMapData"]["railIDBitLength"],
-            4
-        );
+        let underlay = &config["weaveFlowController"]["underlayConfigMapData"];
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 8);
+        assert_eq!(underlay["railIDBitLength"], 4);
 
         let interfaces = config["weaveFlowController"]["underlayConfigMapData"]["interfaces"]
             .as_array()
@@ -1410,6 +1418,53 @@ mod tests {
             interfaces.as_slice(),
             weave_flow_controller_underlay_interfaces().as_slice()
         );
+    }
+
+    #[test]
+    fn weave_flow_controller_service_uses_ewethers_overrides() {
+        let resolved = DpfResolvedMandatoryServicesConfig {
+            base: serde_json::from_value(serde_json::json!({}))
+                .expect("mandatory services build from their serde defaults"),
+            extra: BTreeMap::from([(
+                DpfExtraService::DocaWeaveFlowController,
+                default_doca_weave_flow_controller_service(),
+            )]),
+        };
+        let ewethers_config = EwEthersConfig {
+            subnet_mask: 24,
+            astra: crate::cfg::file::AstraConfig {
+                underlay_ip_rail_id_bit_len: 5,
+                underlay_ip_software_plane_id_bit_len: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let service = mandatory_services(
+            &resolved,
+            &DpfDpuAgentBootstrapCa::default(),
+            &[],
+            ServiceVpcSlots::default(),
+            &NodeAuthConfig::default(),
+            Some(&ewethers_config),
+        )
+        .into_iter()
+        .find(|service| service.name == DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME)
+        .expect("Weave flow controller must be present");
+        let configuration =
+            build_service_configuration(&service, TEST_NS, "bf4astra", &BTreeMap::new());
+        let values = configuration
+            .spec
+            .service_configuration
+            .expect("serviceConfiguration must be set")
+            .helm_chart
+            .expect("helmChart must be set")
+            .values
+            .expect("helmChart values must be set");
+        let underlay = &values["weaveFlowController"]["underlayConfigMapData"];
+
+        assert_eq!(underlay["overlayNetworkPrefixLength"], 24);
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 7);
+        assert_eq!(underlay["railIDBitLength"], 5);
     }
 
     // ---- dpu_service_interfaces ----
@@ -1672,6 +1727,7 @@ mod tests {
                 &[],
                 ServiceVpcSlots::default(),
                 node_auth,
+                None,
             )
             .into_iter()
             .find(|s| s.name == FMDS_SERVICE_NAME)

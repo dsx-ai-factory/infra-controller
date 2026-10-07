@@ -1855,7 +1855,8 @@ async fn resolve_pre_ingestion_switch_identities(
 fn to_rms_power_operation(action: PowerAction) -> i32 {
     match action {
         PowerAction::On => rms::PowerOperation::On as i32,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+        PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
+        PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             rms::PowerOperation::Reset as i32
         }
@@ -5349,7 +5350,7 @@ mod tests {
 
             "power off" {
                 PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
-                PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+                PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
             }
 
             "reset" {
@@ -8497,7 +8498,7 @@ mod tests {
 
         let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
+        assert_eq!(calls[0].operation, rms::PowerOperation::ForceOff as i32);
     }
 
     #[carbide_macros::sqlx_test]

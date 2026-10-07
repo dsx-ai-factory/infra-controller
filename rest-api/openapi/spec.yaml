@@ -4055,10 +4055,20 @@ paths:
       summary: Delete VPC Prefix
       operationId: delete-vpc-prefix
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The VPC Prefix's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific VPC Prefix by ID.
 
@@ -29339,6 +29349,56 @@ components:
             - boolean
             - 'null'
           description: When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
+    ExpectedMachineInterface:
+      title: ExpectedMachineInterface
+      type: object
+      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+          nicType: CX9
+          fixedIp: '192.0.2.10'
+          primary: true
+          role: Host
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        nicType:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
+        fixedIp:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional fixed IPv4 or IPv6 address for the interface. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+        fixedMask:
+          type: [string, 'null']
+          description: Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.
+        fixedGateway:
+          type: [string, 'null']
+          description: Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
+        primary:
+          type: [boolean, 'null']
+          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+        networkSegmentType:
+          type: [string, 'null']
+          enum: [Tenant, Admin, Underlay, HostInband, null]
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+        role:
+          type: [string, 'null']
+          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, null]
+          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+        ipAllocation:
+          type: [string, 'null']
+          enum: [Unspecified, Dynamic, Fixed, Retained, null]
+          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+      required:
+        - macAddress
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29355,6 +29415,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -29388,6 +29452,11 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type: array
+          description: Expected host NIC declarations in their configured order
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -29491,6 +29560,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -29531,6 +29604,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Optional expected host NIC declarations. Omission or null creates an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -29648,6 +29728,10 @@ components:
           skuId: sku-xyz789
           rackId: rack-02
           isDpfEnabled: false
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           manufacturer: Lenovo
           labels:
             environment: staging
@@ -29701,6 +29785,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -30848,14 +30939,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
         switchSerialNumber:
           type: string
           minLength: 1
@@ -31010,16 +31100,15 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
           type:
             - string
@@ -32624,6 +32713,8 @@ components:
         - repoURL
         - chartName
         - chartVersion
+        - serviceID
+        - deployInCluster
         - security
       properties:
         repoURL:
@@ -32639,6 +32730,15 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
+        serviceID:
+          type: string
+          minLength: 1
+          description: Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+        deployInCluster:
+          type: boolean
+          enum:
+            - false
+          description: Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
@@ -32749,7 +32849,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string

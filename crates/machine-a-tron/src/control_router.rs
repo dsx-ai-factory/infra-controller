@@ -653,7 +653,7 @@ mod tests {
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
     use crate::expected_inventory::ExpectedInventorySummary;
-    use crate::rack::{RackMemberRegistration, RackRegistration, expected_rack_group};
+    use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
     use crate::{DeviceHandle, discovery_info};
@@ -707,19 +707,15 @@ mod tests {
         )
     }
 
-    /// A GB200 rack registration holding only the listed members. Real racks
-    /// are complete, so the profile is fixed rather than derived.
+    /// A GB200 rack registration holding only the listed members.
     fn partial_rack_registration(
         rack_id: &str,
         members: Vec<RackMemberRegistration>,
     ) -> RackRegistration {
-        let rack_id = RackId::new(rack_id);
-        let rack_type = RackType::WiwynnGb200Nvl72;
         RackRegistration {
-            rack_group: expected_rack_group(&rack_id, rack_type, &members).unwrap(),
-            rack_id,
+            rack_id: RackId::new(rack_id),
             rack_profile_id: RackProfileId::new("test-profile"),
-            rack_type,
+            rack_type: RackType::WiwynnGb200Nvl72,
             version: 1,
             members,
         }

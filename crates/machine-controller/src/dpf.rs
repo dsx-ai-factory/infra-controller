@@ -27,9 +27,9 @@ use carbide_dpf::types::{
     ServiceTemplateVersion,
 };
 use carbide_dpf::{
-    BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk, DpuDeploymentType,
-    DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository, ResourceLabeler,
-    node_id_from_dpu_node_cr_name,
+    AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
+    DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository,
+    ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpa_interface::DpaInterface;
@@ -517,12 +517,14 @@ impl BmcPasswordProvider for CarbideBmcPasswordProvider {
 pub struct DpfSdkOps {
     sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
     _watcher: DpuWatcher,
+    astra_route_prefixes: AstraRoutePrefixes,
 }
 
 impl DpfSdkOps {
     /// Create a new DpfSdkOps using the DPF SDK and sets up watcher callbacks to trigger carbide state handling.
     pub fn new(
         sdk: Arc<DpfSdk<KubeRepository, CarbideDPFLabeler>>,
+        astra_route_prefixes: AstraRoutePrefixes,
         db_pool: PgPool,
         join_set: &mut JoinSet<()>,
     ) -> std::io::Result<Self> {
@@ -609,6 +611,7 @@ impl DpfSdkOps {
         Ok(Self {
             sdk,
             _watcher: watcher,
+            astra_route_prefixes,
         })
     }
 }
@@ -728,7 +731,12 @@ impl DpfOperations for DpfSdkOps {
         info: DpuDeviceInfo,
         astra_nics: Option<Vec<&'a DpaInterface>>,
     ) -> Result<(), DpfError> {
-        self.sdk.register_dpu_device(info, astra_nics).await
+        self.sdk
+            .register_dpu_device(
+                info,
+                astra_nics.map(|nics| (nics, self.astra_route_prefixes)),
+            )
+            .await
     }
 
     async fn register_dpu_node(&self, info: DpuNodeInfo) -> Result<(), DpfError> {

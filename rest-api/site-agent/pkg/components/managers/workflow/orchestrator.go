@@ -28,7 +28,6 @@ import (
 
 // Orchestrator - Workflow Orchestrator
 func Orchestrator() {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	log := ManagerAccess.Data.EB.Log
 	state := ManagerAccess.Data.EB.Managers.Workflow.State
 

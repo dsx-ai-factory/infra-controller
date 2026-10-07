@@ -968,8 +968,9 @@ func OrderByFrom(ob *pb.OrderBy) *dbquery.OrderBy {
 	}
 
 	return &dbquery.OrderBy{
-		Column:    column,
-		Direction: dbquery.OrderDirection(ob.GetDirection()),
+		Column:       column,
+		Direction:    dbquery.OrderDirection(ob.GetDirection()),
+		IsExpression: rackField == pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL,
 	}
 }
 

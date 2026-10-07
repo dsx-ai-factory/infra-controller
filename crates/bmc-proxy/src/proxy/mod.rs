@@ -22,7 +22,8 @@
 //!
 //! - `ingress`: accepts connections over TLS. The proxy's own identity and
 //!   trusted CAs are reloaded from disk on the first connection after five
-//!   minutes. A client certificate is optional here.
+//!   minutes. Failed reloads retain the previous configuration and retry after
+//!   thirty seconds. A client certificate is optional here.
 //! - `guard`: identifies the caller from its certificate, then checks the
 //!   principal allow-list and the per-principal ACL.
 //! - `target`: resolves the BMC the `Forwarded` header names to its IP.
@@ -73,8 +74,10 @@ use tokio_util::sync::CancellationToken;
 use trace_propagation::set_span_parent_from_headers;
 use tracing::Instrument;
 
+use crate::class::RequestClass;
+use crate::config::Trip;
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
-use crate::proxy::admission::Admission;
+use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
     CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
 };
@@ -85,7 +88,8 @@ use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
 use crate::proxy::upstream::{
-    UpstreamBody, UpstreamResponse, build_http_client, method_supports_body, send_upstream,
+    AttemptFailed, BmcFailure, UpstreamBody, UpstreamResponse, build_http_client,
+    method_supports_body, send_upstream,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -399,7 +403,8 @@ async fn proxy_request_inner(
         )
     })?
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
-    let slot = state
+    let streamed = !upstream_body.is_replayable();
+    let mut slot = state
         .admission
         .acquire(
             target_ip,
@@ -417,7 +422,8 @@ async fn proxy_request_inner(
         &mut upstream_body,
         deadline,
     )
-    .await?;
+    .await
+    .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
 
     // A BMC that rejects the credential the proxy cached (an expired Redfish
     // session, a rotated password) gets one replay with freshly resolved
@@ -440,7 +446,8 @@ async fn proxy_request_inner(
             &mut upstream_body,
             tokio::time::Instant::now() + class.upstream_timeout,
         )
-        .await?;
+        .await
+        .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
     }
 
     let UpstreamResponse {
@@ -448,6 +455,7 @@ async fn proxy_request_inner(
         sensitive_values,
     } = upstream_response;
     let status = response.status();
+    report(&mut slot, class, Trip::Status(status));
     let headers = response.headers().clone();
     let origins = BmcOrigins::new(response.url().clone(), target_ip);
     let body = prepare_response_body(
@@ -472,6 +480,44 @@ async fn proxy_request_inner(
         &sensitive_values,
     )
     .map(|body| slot.hold_until_sent(body)))
+}
+
+/// The caller's answer to an attempt that got no answer. Reports an attempt
+/// the BMC failed: one the proxy could not connect for, or one the BMC did
+/// not answer within at least half its class's budget. A shorter attempt was
+/// cut short by the wait for its slot, and a timed-out upload, `streamed`,
+/// may have been the caller's.
+fn answer_failed_attempt(
+    slot: &mut Slot,
+    failed: AttemptFailed,
+    class: &RequestClass,
+    streamed: bool,
+) -> Response<Body> {
+    let ended = match failed.by_bmc {
+        Some(BmcFailure::Unreachable) => Some(Trip::Unreachable),
+        Some(BmcFailure::TimedOut { budget })
+            if !streamed && budget >= class.upstream_timeout / 2 =>
+        {
+            Some(Trip::Timeout)
+        }
+        _ => None,
+    };
+    if let Some(ended) = ended {
+        report(slot, class, ended);
+    }
+    failed.response
+}
+
+/// Counts an exchange that ended as `ended` against `class`'s breaker at the
+/// BMC, through `slot`, when the class's `trip_on` names it.
+fn report(slot: &mut Slot, class: &RequestClass, ended: Trip) {
+    if class
+        .breaker
+        .as_ref()
+        .is_some_and(|breaker| breaker.trips_on(ended))
+    {
+        slot.bmc_failed();
+    }
 }
 
 fn error_response(error: ProxyError) -> Response<Body> {

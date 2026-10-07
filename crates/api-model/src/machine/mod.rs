@@ -2807,7 +2807,10 @@ pub enum MachineMaintenanceOperation {
     /// Power on the host.
     PowerOn,
     /// Power off the host.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
     /// Reset the host (restart / AC power cycle).
     Reset,
     /// Reset the identified Redfish chassis through the host BMC.

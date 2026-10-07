@@ -197,9 +197,7 @@ data:
 
     [racks.{{ $sectionName }}]
     type = {{ $section.type | quote }}
-    {{- with $section.rack_profile_id }}
-    rack_profile_id = {{ . | quote }}
-    {{- end }}
+    rack_profile_id = {{ $section.rack_profile_id | quote }}
     ids = {{ $section.ids | toJson }}
     dpu_reboot_delay = {{ $section.dpu_reboot_delay | default $defaults.dpuRebootDelay | int }}
     host_reboot_delay = {{ $section.host_reboot_delay | default $defaults.hostRebootDelay | int }}

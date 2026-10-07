@@ -1641,6 +1641,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -6979,7 +6980,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.8#1ba3499cd53c919990f619966ba911d5d87bb41b"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.10#bcd34e1c8c09c10103c456690eb2cfd32b3c355d"
 dependencies = [
  "chrono",
  "clap",

@@ -194,6 +194,7 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
               ids:
                 - rack-001
               bmc_dhcp_relay_address: 10.96.64.1

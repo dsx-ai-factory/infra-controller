@@ -509,6 +509,136 @@ mod tests {
     use crate::endpoint::test_support::{mac, test_endpoint};
     use crate::sink::LogSeverity;
 
+    #[tokio::test]
+    async fn sse_envelopes_preserve_content_through_the_health_client() {
+        use bmc_mock::test_support::serve_https;
+
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials as HealthCredentials};
+
+        let app = Router::new()
+            .route(
+                "/redfish/v1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.type": "#ServiceRoot.ServiceRoot",
+                        "@odata.id": "/redfish/v1", "Id": "RootService", "Name": "Root",
+                        "Links": {
+                            "Sessions": {
+                                "@odata.id": "/redfish/v1/SessionService/Sessions"
+                            }
+                        },
+                        "EventService": {"@odata.id": "/redfish/v1/EventService"}
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/EventService",
+                get(|| async {
+                    Json(json!({
+                        "@odata.type": "#EventService.EventService",
+                        "@odata.id": "/redfish/v1/EventService", "Id": "EventService",
+                        "Name": "Event service", "ServerSentEventUri": "/events"
+                    }))
+                }),
+            );
+
+        let cases = [
+            (
+                "missing record identifier",
+                false,
+                "/redfish/v1/EventService/SSE#/Events/record-7",
+            ),
+            (
+                "explicit record identifier",
+                true,
+                "/redfish/v1/EventService/Events/control/Events/record-7",
+            ),
+        ];
+
+        for (name, explicit_record_id, expected_record_id) in cases {
+            let mut payload = json!({
+                "@odata.type": "#Event.Event", "Name": "Synthetic health event",
+                "Id": "control", "@odata.id": "/redfish/v1/EventService/Events/control",
+                "Events": [{
+                    "MemberId": "record-7", "EventId": "event-7", "EventType": "Alert",
+                    "MessageId": "Example.Fault", "Message": "synthetic failure",
+                    "MessageSeverity": "Critical", "Oem": {"Example": {"ErrorId": "error-7"}}
+                }]
+            });
+
+            if explicit_record_id {
+                payload["Events"][0]["@odata.id"] =
+                    json!("/redfish/v1/EventService/Events/control/Events/record-7");
+            }
+
+            let frame = format!("id: 42\ndata: {payload}\n\n");
+
+            let router = app.clone().route(
+                "/events",
+                get(move || {
+                    let frame = frame.clone();
+
+                    async move { ([("content-type", "text/event-stream")], frame) }
+                }),
+            );
+            let (mut server, base_url) = serve_https("health-sse", router);
+
+            let endpoint = Arc::new(endpoint_with_creds(
+                BmcAddr {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    port: base_url.port(),
+                    mac: None,
+                },
+                HealthCredentials::SessionToken {
+                    token: "fixture-token".into(),
+                },
+                None,
+                None,
+            ));
+
+            let mut collector = SseLogCollector::new_runner(
+                Arc::clone(endpoint.bmc()),
+                endpoint,
+                SseLogCollectorConfig {
+                    include_diagnostics: false,
+                    request_concurrency: NonZeroUsize::MIN,
+                    gpu_inventory: None,
+                },
+            )
+            .expect("collector builds");
+
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                let StreamingConnectResult::Connected(mut stream) =
+                    collector.connect().await.expect("collector connects")
+                else {
+                    panic!("connected stream expected");
+                };
+
+                stream.next().await.expect("one collector result exists")
+            })
+            .await
+            .expect("collector receives an event within its deadline");
+
+            let event = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            let record = log_record(&event);
+
+            assert_eq!(record.body, "synthetic failure", "{name}");
+            assert_eq!(record.severity, LogSeverity::Fatal, "{name}");
+
+            for (key, expected) in [
+                ("event_record_id", expected_record_id),
+                ("event_id", "event-7"),
+                ("message_id", "Example.Fault"),
+                ("redfish.oem", r#"{"Example":{"ErrorId":"error-7"}}"#),
+            ] {
+                assert_eq!(attribute(record, key), Some(expected), "{name}: {key}");
+            }
+
+            server.stop().await.expect("server stops");
+        }
+    }
+
     async fn event_to_logs_with_timeout<B: Bmc>(
         event: &Event,
         bmc: &B,

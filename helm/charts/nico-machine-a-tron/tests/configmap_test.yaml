@@ -87,6 +87,7 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
               ids:
                 - rack-001
               dpu_reboot_delay: 20
@@ -98,9 +99,9 @@ tests:
       - matchRegex:
           path: data["mat.toml"]
           pattern: '\[racks\.gb200\]'
-      - notMatchRegex:
+      - matchRegex:
           path: data["mat.toml"]
-          pattern: 'rack_profile_id'
+          pattern: 'rack_profile_id = "NVL72"'
       - matchRegex:
           path: data["mat.toml"]
           pattern: 'acceleration_factor = 0\.03'
@@ -120,6 +121,7 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
               ids:
                 - rack-002
               bmc_dhcp_relay_address: 10.96.64.1
@@ -151,6 +153,7 @@ tests:
           racks:
             gb200:
               type: wiwynn_gb200_nvl72
+              rack_profile_id: NVL72
               ids:
                 - rack-001
               dpu_reboot_delay: 20

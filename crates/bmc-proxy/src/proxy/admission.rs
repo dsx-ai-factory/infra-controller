@@ -19,20 +19,31 @@
 //! time, and which waiting request goes next.
 //!
 //! A request takes a slot at its BMC before it is sent when its class sets
-//! `max_in_flight`, or when `[admission] max_in_flight_per_bmc` is set. It
-//! holds the slot until the proxy has passed the BMC's response on to the
-//! caller, or the exchange has failed, and for at most the bound its caller
-//! gives from the grant on, after which the slot goes to the next waiting
-//! request even if a caller that stopped reading still holds its response. A
-//! request that finds no free slot waits in its class's queue at that BMC. A
-//! freed slot goes to the highest-priority class that has a request waiting
-//! and is under its own `max_in_flight`; classes of equal priority take
-//! turns, and each class's requests go in the order they came. A request is
-//! refused with `429` when its class's queue at that BMC is full of requests
-//! still waiting, or when no slot frees before its deadline, and with `503`
-//! when the proxy already tracks [`MAX_BMCS`] BMCs and this is another, or
+//! `max_in_flight` or has a breaker, or when `[admission]
+//! max_in_flight_per_bmc` is set. It holds the slot until the proxy has
+//! passed the BMC's response on to the caller, or the exchange has failed,
+//! and for at most the bound its caller gives from the grant on, after which
+//! the slot goes to the next waiting request even if a caller that stopped
+//! reading still holds its response. A request that finds no free slot waits
+//! in its class's queue at that BMC. A freed slot goes to the highest-priority
+//! class that has a request waiting and is under its own `max_in_flight`;
+//! classes of equal priority take turns, and each class's requests go in the
+//! order they came. A request is refused with `429` when its class's queue at
+//! that BMC is full of requests still waiting, or when no slot frees before
+//! its deadline, and with `503` when the proxy already tracks [`MAX_BMCS`]
+//! BMCs and this is another, when its class's breaker at the BMC is open, or
 //! when the proxy is shutting down. Limits are per proxy replica: with two
 //! replicas, a BMC can receive twice a limit.
+//!
+//! A class with a breaker has one at each BMC, the dispatcher's. An exchange
+//! the BMC fails in a way the class's `trip_on` names counts against it; once
+//! enough of the class's recent exchanges with the BMC failed, the breaker
+//! opens: the proxy refuses the class's new requests to that BMC with `503`
+//! for the cool-down, then lets one through, whose outcome closes the breaker
+//! or opens it again. Other classes' requests to the BMC go on as before. The
+//! breaker counts every freed slot as an exchange, so a request that stopped
+//! waiting, or got its slot too late to use it, counts as one that succeeded:
+//! such requests dilute the failures, and one can be the request let through.
 //!
 //! Each BMC in use has its own `nv_redfish_dispatcher` runtime, driven by a
 //! task of its own, as nico-api's admission drives one for its callers.
@@ -43,14 +54,14 @@
 //! dropped or its time is up:
 //!
 //! ```text
-//! Runtime (max_in_flight_per_bmc)        one per BMC in use
-//! └─ StrictPriority                      by class priority
-//!    └─ BoundedConcurrency(class max_in_flight)
-//!       └─ BoundedQueue(class max_queued)  first come, first served
+//! Runtime                                    one per BMC in use
+//! └─ BmcClasses(max_in_flight_per_bmc)       by class priority
+//!    └─ CircuitBreaker                       one per class; never opens without a breaker
+//!       └─ BoundedConcurrency(class max_in_flight)
+//!          └─ BoundedQueue(class max_queued) first come, first served
 //! ```
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::net::IpAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::Pin;
@@ -65,11 +76,11 @@ use http::StatusCode;
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use nv_redfish_dispatcher::schedulers::{
     AdmissionContext, AdmissionDecision, AdmissionPolicy, BoundedConcurrency, BoundedQueue,
-    BoundedQueueProducer, Fifo, StrictPriority,
+    BoundedQueueProducer, BreakerState, CircuitBreaker, CircuitBreakerConfig, Fifo,
 };
 use nv_redfish_dispatcher::{
-    BoundedQueueBuilder, ClockConfig, EnqueueOutcome, FutureWork, Runtime, RuntimeConfig,
-    RuntimeOutput, ScheduledWork, WithPriority,
+    BoundedQueueBuilder, ClockConfig, Completion, EnqueueOutcome, FutureWork, QueueEventSink,
+    Readiness, Runtime, RuntimeConfig, RuntimeHandle, RuntimeOutput, ScheduledWork, Scheduler,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -77,15 +88,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::class::{ClassName, ClassTable, RequestClass};
-use crate::config::AdmissionConfig;
+use crate::config::{AdmissionConfig, BreakerConfig};
 
-type Work = FutureWork<(), Infallible>;
+type Work = FutureWork<(), ExchangeFailed>;
 type ClassQueue = BoundedQueue<Work, Waiting, GaveUpFirst, Fifo>;
 type ClassProducer = BoundedQueueProducer<Work, Waiting, GaveUpFirst, Fifo>;
-type ClassNode = BoundedConcurrency<Work, ClassQueue>;
-type Root = StrictPriority<Work, ClassNode>;
-/// Work leaves the priority node tagged with its class's priority.
-type Meta = WithPriority<Waiting>;
+/// A class's breaker at one BMC, over the class's limit and queue there.
+type ClassNode = CircuitBreaker<Work, BoundedConcurrency<Work, ClassQueue>>;
 
 /// How long a BMC's runtime outlives its last request. A BMC polled every
 /// few seconds keeps it; one left alone for a minute gives it up, and its
@@ -99,8 +108,9 @@ const IDLE_BMC_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Most BMCs the proxy keeps runtimes for at a time. Only IPs nico-api has
 /// credentials for get one, and each costs from about 6 to 20 KiB, by the
-/// number of classes that take slots and their `max_queued`. Sized, like the
-/// proxy's caches, far above any realistic fleet.
+/// number of classes that take slots and their `max_queued`, and up to 1 KiB
+/// more for each class's breaker `window`. Sized, like the proxy's caches,
+/// far above any realistic fleet.
 const MAX_BMCS: usize = 100_000;
 
 /// Most places a class's queue keeps, beyond its `max_queued`, for requests
@@ -120,16 +130,23 @@ pub(super) enum Refused {
     TooManyBmcs,
     #[error("the proxy is shutting down")]
     ShuttingDown,
+    #[error(
+        "this BMC failed too many recent requests of this class; the proxy is holding off on them"
+    )]
+    BreakerOpen,
 }
 
 impl Refused {
     /// What the caller is answered: `429` when the proxy's per-BMC limits
-    /// turned the request away, `503` when the proxy itself could not take
-    /// it. Either way, the BMC never received the request.
+    /// turned the request away, `503` when the proxy could not take it or the
+    /// class's breaker at the BMC is open. Either way, the BMC never received
+    /// the request.
     pub(super) fn status(self) -> StatusCode {
         match self {
             Self::QueueFull | Self::Timeout => StatusCode::TOO_MANY_REQUESTS,
-            Self::TooManyBmcs | Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TooManyBmcs | Self::ShuttingDown | Self::BreakerOpen => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
         }
     }
 }
@@ -151,7 +168,8 @@ struct AdmissionGranted {
     waited: Duration,
 }
 
-/// The proxy refused a request for want of a slot at its BMC. Metric-only:
+/// The proxy refused a request without sending it: for want of a slot at
+/// its BMC, or because its class's breaker there is open. Metric-only:
 /// refusals come as fast as callers retry, and the caller's answer names the
 /// reason.
 #[derive(Event)]
@@ -161,7 +179,7 @@ struct AdmissionGranted {
     component = "nico-bmc-proxy",
     log = off,
     metric = counter,
-    describe = "Number of requests the proxy refused without sending them, for want of a slot at their BMC, by request class and reason (queue_full, timeout, too_many_bmcs, shutting_down)"
+    describe = "Number of requests the proxy refused without sending them, for want of a slot at their BMC or because their class's breaker there was open, by request class and reason (queue_full, timeout, too_many_bmcs, breaker_open, shutting_down)"
 )]
 struct AdmissionRefused {
     #[label]
@@ -169,6 +187,28 @@ struct AdmissionRefused {
     #[label]
     reason: Refused,
 }
+
+/// A class's circuit breaker at a BMC opened.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_breaker_opened",
+    metric_name = "carbide_bmc_proxy_breaker_opened_total",
+    component = "nico-bmc-proxy",
+    log = warn,
+    metric = counter,
+    message = "BMC circuit breaker opened; refusing the class's requests to the BMC until a probe succeeds",
+    describe = "Number of times a request class's circuit breaker at a BMC opened: the BMC failed too many of the class's recent exchanges, by request class"
+)]
+struct BreakerOpened {
+    #[label]
+    class: ClassName,
+    #[context]
+    bmc_ip_address: String,
+}
+
+/// The failure of an exchange the BMC failed, as its grant reports it to the
+/// BMC's circuit breaker.
+struct ExchangeFailed;
 
 /// A queued request.
 struct Waiting {
@@ -190,7 +230,7 @@ impl AdmissionPolicy<Work, Waiting> for GaveUpFirst {
         context: AdmissionContext<'_, Work, Waiting>,
         incoming: &ScheduledWork<Work, Waiting>,
     ) -> AdmissionDecision {
-        if context.depth() < incoming.meta.room {
+        if context.depth() < incoming.meta.room.min(context.capacity()) {
             return AdmissionDecision::Admit;
         }
         context
@@ -208,6 +248,7 @@ struct SlotClass {
     priority: u8,
     max_in_flight: NonZeroU32,
     max_queued: NonZeroUsize,
+    breaker: Option<CircuitBreakerConfig>,
 }
 
 /// A BMC in use: its class queues, and the runtime serving them.
@@ -215,9 +256,42 @@ struct Bmc {
     /// One per class that takes slots, in the order of
     /// [`Admission::classes`].
     queues: Vec<ClassProducer>,
+    runtime: RuntimeHandle<(), ExchangeFailed, Waiting>,
     /// Stops the BMC's runtime.
     stop: CancellationToken,
     last_used: Instant,
+}
+
+impl Bmc {
+    fn breaker(&self, class: usize) -> BreakerState {
+        self.runtime
+            .with_root(|root: &BmcClasses| root.classes[class].node.state())
+            .expect("a BMC's runtime root is its classes")
+    }
+
+    fn breaker_open(&self) -> bool {
+        self.runtime
+            .with_root(|root: &BmcClasses| {
+                root.classes
+                    .iter()
+                    .any(|class| matches!(class.node.state(), BreakerState::Open { .. }))
+            })
+            .expect("a BMC's runtime root is its classes")
+    }
+
+    /// Whether class `class`'s breaker at this BMC lets a new request in:
+    /// always when closed, and when half-open only as its probe, once none of
+    /// the class's requests is queued at or sent to the BMC.
+    fn breaker_admits(&self, class: usize) -> bool {
+        match self.breaker(class) {
+            BreakerState::Closed => true,
+            BreakerState::Open { .. } | BreakerState::HalfOpen { probing: true } => false,
+            BreakerState::HalfOpen { probing: false } => {
+                let stats = self.queues[class].stats();
+                stats.depth == 0 && stats.in_flight == 0
+            }
+        }
+    }
 }
 
 pub(super) struct Admission {
@@ -244,12 +318,15 @@ impl Admission {
         let per_bmc = config.max_in_flight_per_bmc;
         let classes: Vec<SlotClass> = classes
             .iter()
-            .filter(|class| per_bmc.is_some() || class.max_in_flight.is_some())
+            .filter(|class| {
+                per_bmc.is_some() || class.breaker.is_some() || class.max_in_flight.is_some()
+            })
             .map(|class| SlotClass {
                 name: class.name.clone(),
                 priority: class.priority,
                 max_in_flight: class.max_in_flight.unwrap_or(NonZeroU32::MAX),
                 max_queued: class.max_queued,
+                breaker: class.breaker.as_ref().map(CircuitBreakerConfig::from),
             })
             .collect();
         let admission = Arc::new(Self {
@@ -287,7 +364,7 @@ impl Admission {
             .iter()
             .position(|slot_class| slot_class.name == class.name)
         else {
-            return Ok(Slot { _release: None });
+            return Ok(Slot::free());
         };
         let started = Instant::now();
         let granted = self.wait_for_slot(bmc, index, deadline, hold_for).await;
@@ -335,7 +412,8 @@ impl Admission {
                     return Err(Refused::Timeout);
                 }
                 Ok(Slot {
-                    _release: Some(release),
+                    release: Some(release),
+                    failed: false,
                 })
             }
             () = tokio::time::sleep_until(deadline) => Err(Refused::Timeout),
@@ -350,14 +428,17 @@ impl Admission {
         bmc: IpAddr,
         class: usize,
         claim: Weak<()>,
-        grant: impl Future<Output = Result<Vec<()>, Infallible>> + Send + 'static,
+        grant: impl Future<Output = Result<Vec<()>, ExchangeFailed>> + Send + 'static,
     ) -> Result<(), Refused> {
         let mut bmcs = lock(&self.bmcs);
         if !bmcs.contains_key(&bmc) && bmcs.len() >= MAX_BMCS {
             return Err(Refused::TooManyBmcs);
         }
-        let bmc = bmcs.entry(bmc).or_insert_with(|| self.start_bmc());
+        let bmc = bmcs.entry(bmc).or_insert_with(|| self.start_bmc(bmc));
         bmc.last_used = Instant::now();
+        if self.classes[class].breaker.is_some() && !bmc.breaker_admits(class) {
+            return Err(Refused::BreakerOpen);
+        }
         // Requests queue one at a time under this lock. The runtime grants
         // and frees slots meanwhile, so the room can be off by a slot.
         let waiting = Waiting {
@@ -389,36 +470,18 @@ impl Admission {
         self.classes[class].max_queued.get().saturating_add(free)
     }
 
-    /// A BMC's queues, and its runtime started on its own task.
-    fn start_bmc(&self) -> Bmc {
-        let mut root = Root::new();
-        let queues = self
-            .classes
-            .iter()
-            .map(|class| {
-                let passing_through = usize::try_from(class.max_in_flight.get())
-                    .unwrap_or(usize::MAX)
-                    .min(self.max_in_flight_per_bmc.get())
-                    .min(MAX_PASSING_THROUGH);
-                let (queue, producer): (ClassQueue, ClassProducer) =
-                    BoundedQueueBuilder::new(class.max_queued.saturating_add(passing_through))
-                        .admission_policy(GaveUpFirst)
-                        .fifo()
-                        .build();
-                root.add_child(
-                    BoundedConcurrency::new(class.max_in_flight, queue),
-                    class.priority,
-                );
-                producer
-            })
-            .collect();
+    /// The queues of the BMC at `address`, and its runtime started on its
+    /// own task.
+    fn start_bmc(&self, address: IpAddr) -> Bmc {
+        let (root, queues) = BmcClasses::new(address, &self.classes, self.max_in_flight_per_bmc);
         let runtime = Runtime::new(
             RuntimeConfig {
-                global_max_in_flight: self.max_in_flight_per_bmc,
+                global_max_in_flight: NonZeroUsize::MAX,
                 clock: ClockConfig::Wallclock,
             },
             root,
         );
+        let handle = runtime.handle();
         let stop = self.shutdown.child_token();
         lock(&self.runtimes)
             .build_task()
@@ -427,6 +490,7 @@ impl Admission {
             .expect("spawning a bmc admission runtime must succeed");
         Bmc {
             queues,
+            runtime: handle,
             stop,
             last_used: Instant::now(),
         }
@@ -462,8 +526,10 @@ impl Admission {
     }
 
     /// Stops the runtime of every BMC that has had no request for
-    /// [`IDLE_BMC_TIMEOUT`] and that no request holds a slot at or waits
-    /// for now.
+    /// [`IDLE_BMC_TIMEOUT`], that no request holds a slot at or waits for
+    /// now, and none of whose breakers is open. A breaker past its cool-down
+    /// stays half-open until a request comes, so it goes with its idle BMC,
+    /// whose next request starts with a closed one.
     fn stop_idle_bmcs(&self, now: Instant) {
         let stopped: Vec<Bmc> = {
             let mut bmcs = lock(&self.bmcs);
@@ -475,6 +541,7 @@ impl Admission {
                             let stats = queue.stats();
                             stats.depth == 0 && stats.in_flight == 0
                         })
+                        && !bmc.breaker_open()
                 })
                 .map(|(ip, _)| *ip)
                 .collect();
@@ -486,44 +553,217 @@ impl Admission {
     }
 }
 
+/// The breaker of a class without one: it keeps no outcomes.
+const NEVER_OPENS: CircuitBreakerConfig = CircuitBreakerConfig {
+    failure_threshold: 1.0,
+    sample_window: 0,
+    min_samples: 1,
+    cool_down: Duration::ZERO,
+};
+
+impl From<&BreakerConfig> for CircuitBreakerConfig {
+    fn from(config: &BreakerConfig) -> Self {
+        Self {
+            failure_threshold: config.failure_threshold,
+            sample_window: config.window,
+            min_samples: config.min_samples,
+            cool_down: config.cool_down,
+        }
+    }
+}
+
 /// The work the dispatcher runs for a request: hands the request its slot,
 /// then holds the BMC's capacity until the request drops the slot, or for
-/// `hold_for` at most, after which the slot's exchange must have ended.
+/// `hold_for` at most, after which the slot's exchange must have ended. It
+/// fails when the request reports the BMC failed its exchange.
 async fn grant(
-    slot: oneshot::Sender<oneshot::Sender<()>>,
+    slot: oneshot::Sender<oneshot::Sender<bool>>,
     hold_for: Duration,
-) -> Result<Vec<()>, Infallible> {
+) -> Result<Vec<()>, ExchangeFailed> {
     let (release, released) = oneshot::channel();
-    if slot.send(release).is_ok() {
-        // Ends, as an error, once the request drops its slot.
-        let _released_or_expired = tokio::time::timeout(hold_for, released).await;
+    if slot.send(release).is_ok()
+        && let Ok(Ok(true)) = tokio::time::timeout(hold_for, released).await
+    {
+        return Err(ExchangeFailed);
     }
     Ok(Vec::new())
 }
 
 /// Drives a BMC's runtime until `stop`. Requests that got their slot keep
 /// it; see [`Admission::start`] for the requests still waiting.
-async fn drive(mut runtime: Runtime<(), Infallible, Meta>, stop: CancellationToken) {
+async fn drive(mut runtime: Runtime<(), ExchangeFailed, Waiting>, stop: CancellationToken) {
+    // When an open breaker's cool-down ends. The runtime keeps serving the
+    // other classes meanwhile, and runs the grants, so it is polled on.
+    let mut deadline = None;
     loop {
         let output = tokio::select! {
             biased;
             () = stop.cancelled() => return,
             output = runtime.next() => output,
+            () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)),
+                if deadline.is_some() =>
+            {
+                deadline = None;
+                continue;
+            }
         };
         match output {
-            RuntimeOutput::SleepUntil(deadline) => {
-                tokio::select! {
-                    biased;
-                    () = stop.cancelled() => return,
-                    () = tokio::time::sleep_until(Instant::from_std(deadline)) => {}
-                }
-            }
-            RuntimeOutput::Work { result, .. } => match result {
-                Ok(_) => {}
-                Err(never) => match never {},
-            },
+            RuntimeOutput::SleepUntil(at) => deadline = Some(Instant::from_std(at)),
+            // The class's breaker has counted the outcome.
+            RuntimeOutput::Work { .. } => {}
             RuntimeOutput::Runtime(event) => match event {},
             RuntimeOutput::Shutdown => return,
+        }
+    }
+}
+
+/// The root of a BMC's runtime: its classes, under `max_in_flight_per_bmc`.
+/// A freed slot goes to the highest-priority class that lets a request
+/// through, and classes of equal priority take turns. The dispatcher's
+/// `BoundedConcurrency` over `StrictPriority` would do the same, but stops
+/// polling the classes at the limit, and a breaker opens for its cool-down
+/// from the time it was last polled; it also hides the classes' breakers.
+struct BmcClasses {
+    address: IpAddr,
+    /// In the order of [`Admission::classes`].
+    classes: Vec<ClassAtBmc>,
+    /// `classes` by priority, highest first.
+    tiers: Vec<Tier>,
+    max_in_flight: usize,
+    in_flight: usize,
+}
+
+struct ClassAtBmc {
+    name: ClassName,
+    node: ClassNode,
+}
+
+/// The classes of one priority, which take turns.
+struct Tier {
+    /// Indices into [`BmcClasses::classes`].
+    classes: Vec<usize>,
+    /// The position in `classes` of the class whose turn is next.
+    next: usize,
+}
+
+impl BmcClasses {
+    /// The root of the runtime of the BMC at `address`, and the producers of
+    /// its class queues, in the order of `classes`.
+    fn new(
+        address: IpAddr,
+        classes: &[SlotClass],
+        max_in_flight: NonZeroUsize,
+    ) -> (Self, Vec<ClassProducer>) {
+        let (nodes, queues) = classes
+            .iter()
+            .map(|class| {
+                let passing_through = usize::try_from(class.max_in_flight.get())
+                    .unwrap_or(usize::MAX)
+                    .min(max_in_flight.get())
+                    .min(MAX_PASSING_THROUGH);
+                let (queue, producer): (ClassQueue, ClassProducer) =
+                    BoundedQueueBuilder::new(class.max_queued.saturating_add(passing_through))
+                        .admission_policy(GaveUpFirst)
+                        .fifo()
+                        .build();
+                let node = CircuitBreaker::new(
+                    class.breaker.unwrap_or(NEVER_OPENS),
+                    BoundedConcurrency::new(class.max_in_flight, queue),
+                );
+                let class = ClassAtBmc {
+                    name: class.name.clone(),
+                    node,
+                };
+                (class, producer)
+            })
+            .unzip();
+        let mut priorities: Vec<u8> = classes.iter().map(|class| class.priority).collect();
+        priorities.sort_unstable_by(|a, b| b.cmp(a));
+        priorities.dedup();
+        let tiers = priorities
+            .into_iter()
+            .map(|priority| Tier {
+                classes: (0..classes.len())
+                    .filter(|&index| classes[index].priority == priority)
+                    .collect(),
+                next: 0,
+            })
+            .collect();
+        let root = Self {
+            address,
+            classes: nodes,
+            tiers,
+            max_in_flight: max_in_flight.get(),
+            in_flight: 0,
+        };
+        (root, queues)
+    }
+}
+
+impl Scheduler<Work> for BmcClasses {
+    type Meta = Waiting;
+
+    fn update_ready(&mut self, now: std::time::Instant) -> Readiness {
+        let mut ready = false;
+        let mut next_update_at = None;
+        for class in &mut self.classes {
+            let readiness = class.node.update_ready(now);
+            ready |= readiness.ready;
+            next_update_at = next_update_at
+                .into_iter()
+                .chain(readiness.next_update_at)
+                .min();
+        }
+        Readiness {
+            ready: ready && self.in_flight < self.max_in_flight,
+            next_update_at,
+            next_cost: None,
+        }
+    }
+
+    fn take_next(&mut self) -> Option<ScheduledWork<Work, Waiting>> {
+        if self.in_flight >= self.max_in_flight {
+            return None;
+        }
+        for tier in &mut self.tiers {
+            let turns = tier.classes.len();
+            for turn in 0..turns {
+                let at = (tier.next + turn) % turns;
+                let index = tier.classes[at];
+                if let Some(mut work) = self.classes[index].node.take_next() {
+                    tier.next = (at + 1) % turns;
+                    work.routing
+                        .push(u32::try_from(index).expect("a BMC has fewer than 2^32 classes"));
+                    self.in_flight += 1;
+                    return Some(work);
+                }
+            }
+        }
+        None
+    }
+
+    fn on_complete(&mut self, mut completion: Completion<Waiting>) {
+        let Some(class) = completion
+            .routing
+            .pop()
+            .and_then(|index| self.classes.get_mut(usize::try_from(index).ok()?))
+        else {
+            return;
+        };
+        self.in_flight = self.in_flight.saturating_sub(1);
+        let was_open = matches!(class.node.state(), BreakerState::Open { .. });
+        class.node.on_complete(completion);
+        if !was_open && matches!(class.node.state(), BreakerState::Open { .. }) {
+            emit(BreakerOpened {
+                class: class.name.clone(),
+                bmc_ip_address: self.address.to_string(),
+            });
+        }
+    }
+
+    fn register_queue_event_sink(&mut self, sink: QueueEventSink) {
+        for class in &mut self.classes {
+            class.node.register_queue_event_sink(sink.clone());
         }
     }
 }
@@ -532,12 +772,35 @@ async fn drive(mut runtime: Runtime<(), Infallible, Meta>, stop: CancellationTok
 /// waiting request.
 #[must_use]
 pub(super) struct Slot {
-    /// Dropping this ends the grant that holds the slot; `None` for a class
-    /// that takes no slots.
-    _release: Option<oneshot::Sender<()>>,
+    /// Sending on this, or dropping it, ends the grant that holds the slot;
+    /// `None` for a class that takes no slots.
+    release: Option<oneshot::Sender<bool>>,
+    /// Whether the BMC failed the exchange.
+    failed: bool,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release.send(self.failed).ok();
+        }
+    }
 }
 
 impl Slot {
+    fn free() -> Self {
+        Self {
+            release: None,
+            failed: false,
+        }
+    }
+
+    /// Reports that the BMC failed the exchange. Its breaker counts it once
+    /// the slot is freed.
+    pub(super) fn bmc_failed(&mut self) {
+        self.failed = true;
+    }
+
     /// `body`, holding this slot until the body has been sent or dropped.
     pub(super) fn hold_until_sent(self, body: Body) -> Body {
         Body::new(HeldBody { body, _slot: self })
@@ -579,6 +842,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use std::convert::Infallible;
     use std::net::IpAddr;
+    use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::time::Duration;
 
@@ -588,12 +852,15 @@ mod tests {
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use futures::FutureExt;
     use hyper::body::Body as HttpBody;
+    use nv_redfish_dispatcher::schedulers::CircuitBreakerConfig;
+    use nv_redfish_dispatcher::{ClockConfig, Runtime, RuntimeConfig};
     use tokio::task::JoinSet;
     use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Admission, Bmc, IDLE_BMC_SWEEP_INTERVAL, IDLE_BMC_TIMEOUT, MAX_BMCS, Refused, Slot,
+        Admission, Bmc, BmcClasses, IDLE_BMC_SWEEP_INTERVAL, IDLE_BMC_TIMEOUT, MAX_BMCS, Refused,
+        Slot,
     };
     use crate::proxy::BmcProxyState;
     use crate::proxy::test_support::test_state_with_config;
@@ -1002,6 +1269,14 @@ mod tests {
     async fn too_many_bmcs_are_refused() {
         let state = proxy_with(METRICS_ONE_AT_A_TIME);
         drop(granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await);
+        // Placeholders that share one runtime nobody drives.
+        let runtime = Runtime::new(
+            RuntimeConfig {
+                global_max_in_flight: NonZeroUsize::MIN,
+                clock: ClockConfig::Wallclock,
+            },
+            BmcClasses::new(bmc(0), &[], NonZeroUsize::MIN).0,
+        );
         {
             let mut bmcs = state.admission.bmcs.lock().unwrap();
             for n in 0..MAX_BMCS - 1 {
@@ -1010,6 +1285,7 @@ mod tests {
                     IpAddr::from(octets),
                     Bmc {
                         queues: Vec::new(),
+                        runtime: runtime.handle(),
                         stop: CancellationToken::new(),
                         last_used: Instant::now(),
                     },
@@ -1108,7 +1384,8 @@ mod tests {
     }
 
     /// The caller is answered `429` when the proxy's per-BMC limits turned its
-    /// request away, and `503` when the proxy itself could not take it.
+    /// request away, and `503` when the proxy could not take it or its class's
+    /// breaker at the BMC is open.
     #[test]
     fn a_refusal_answers_by_its_cause() {
         check_values(
@@ -1133,8 +1410,292 @@ mod tests {
                     input: Refused::ShuttingDown,
                     expect: 503,
                 },
+                Check {
+                    scenario: "the class's breaker at the BMC is open",
+                    input: Refused::BreakerOpen,
+                    expect: 503,
+                },
             ],
             |refused| refused.status().as_u16(),
+        );
+    }
+
+    /// How long the breakers in these tests stay open. Breaker tests run on
+    /// real time: the dispatcher's clock is the wall clock, which a paused
+    /// tokio clock does not move, so under one a breaker never leaves open.
+    const COOL_DOWN: Duration = Duration::from_millis(200);
+
+    /// Long enough for a BMC's runtime to see a freed slot's grant end, and
+    /// count its outcome.
+    const SETTLE: Duration = Duration::from_millis(20);
+
+    /// Breakers that open on the second failure in a row.
+    const BREAKER: &str = r#"
+        [admission.breaker]
+        window = 4
+        min_samples = 2
+        cool_down = "200ms"
+    "#;
+
+    /// Has a request of the default class at `at` fail its exchange.
+    async fn fail_an_exchange(state: &BmcProxyState, at: IpAddr) {
+        let mut slot = granted(slot(state, at, http::Method::GET, METRICS)).await;
+        slot.bmc_failed();
+        drop(slot);
+        tokio::time::sleep(SETTLE).await;
+    }
+
+    /// A class besides the default, which takes slots whenever the default
+    /// class does.
+    const POWER: &str = r#"
+        [[class]]
+        name = "power"
+        match = ["PATCH /redfish/v1/**/EnvironmentMetrics"]
+    "#;
+
+    /// What a request of the default class at `at` meets at once: `None` when
+    /// it is granted a slot.
+    async fn met_at_once(state: &BmcProxyState, at: IpAddr) -> Option<Refused> {
+        tokio::time::timeout(WATCHED_FOR, slot(state, at, http::Method::GET, METRICS))
+            .await
+            .expect("the request is answered at once")
+            .err()
+    }
+
+    /// Whether a `method` request at `at` is granted a slot at once.
+    async fn granted_at_once(state: &BmcProxyState, at: IpAddr, method: http::Method) -> bool {
+        tokio::time::timeout(WATCHED_FOR, slot(state, at, method, METRICS))
+            .await
+            .is_ok_and(|granted| granted.is_ok())
+    }
+
+    /// What `failures` failed exchanges of the default class at one BMC under
+    /// `admission` do, while an earlier exchange of the class there outlasts
+    /// them: (what the class's next request to the BMC meets, whether the
+    /// BMC's requests of another class and the class's requests to another
+    /// BMC are granted, breaker openings reported once the earlier exchange
+    /// has ended too, refusals for an open breaker counted).
+    async fn after_failures(
+        (admission, failures): (&'static str, usize),
+    ) -> (Option<Refused>, bool, f64, f64) {
+        let metrics = MetricsCapture::start();
+        let state = proxy_with(&format!("{admission}\n{POWER}"));
+        let earlier = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+        for _ in 0..failures {
+            fail_an_exchange(&state, bmc(1)).await;
+        }
+        let next = met_at_once(&state, bmc(1)).await;
+        let again = slot(&state, bmc(1), http::Method::GET, METRICS).await.err();
+        assert_eq!(next, again, "an open breaker refuses every request");
+        let others = granted_at_once(&state, bmc(1), http::Method::PATCH).await
+            && granted_at_once(&state, bmc(2), http::Method::GET).await;
+        drop(earlier);
+        tokio::time::sleep(SETTLE).await;
+        (
+            next,
+            others,
+            metrics.counter_delta(
+                "carbide_bmc_proxy_breaker_opened_total",
+                &[("class", "default")],
+            ),
+            metrics.counter_delta(
+                "carbide_bmc_proxy_admission_refused_total",
+                &[("class", "default"), ("reason", "breaker_open")],
+            ),
+        )
+    }
+
+    /// Failed exchanges open their class's breaker at their BMC, which
+    /// refuses the class's requests to that BMC at once and reports the
+    /// opening once; other classes and BMCs are served. Without a breaker,
+    /// failures refuse nothing, even as many as would open the dispatcher's
+    /// default breaker.
+    #[tokio::test]
+    async fn failures_open_their_class_breaker_at_their_bmc() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "with a breaker",
+                    input: (BREAKER, 2),
+                    expect: Yields((Some(Refused::BreakerOpen), true, 1.0, 2.0)),
+                },
+                Case {
+                    scenario: "without one",
+                    input: ("[admission]\nmax_in_flight_per_bmc = 4", 5),
+                    expect: Yields((None, true, 0.0, 0.0)),
+                },
+            ],
+            |input| async move { Ok::<_, Infallible>(after_failures(input).await) },
+        )
+        .await;
+    }
+
+    /// What a BMC's request meets once its open breaker cooled down, waited
+    /// for an exchange that outlasted the cool-down, and let a probe through,
+    /// which failed if `probe_fails`; and the breaker's openings reported.
+    async fn after_a_probe(probe_fails: bool) -> (Option<Refused>, f64) {
+        let metrics = MetricsCapture::start();
+        let state = proxy_with(BREAKER);
+        let earlier = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+        fail_an_exchange(&state, bmc(1)).await;
+        fail_an_exchange(&state, bmc(1)).await;
+        assert_eq!(
+            slot(&state, bmc(1), http::Method::GET, METRICS).await.err(),
+            Some(Refused::BreakerOpen),
+            "the breaker opened"
+        );
+        tokio::time::sleep(COOL_DOWN + SETTLE).await;
+        assert_eq!(
+            met_at_once(&state, bmc(1)).await,
+            Some(Refused::BreakerOpen),
+            "the probe waits for the earlier exchange"
+        );
+        drop(earlier);
+        tokio::time::sleep(SETTLE).await;
+        let mut probe = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+        assert_eq!(
+            slot(&state, bmc(1), http::Method::GET, METRICS).await.err(),
+            Some(Refused::BreakerOpen),
+            "the probe's verdict is awaited"
+        );
+        if probe_fails {
+            probe.bmc_failed();
+        }
+        drop(probe);
+        tokio::time::sleep(SETTLE).await;
+        let next = met_at_once(&state, bmc(1)).await;
+        (
+            next,
+            metrics.counter_delta(
+                "carbide_bmc_proxy_breaker_opened_total",
+                &[("class", "default")],
+            ),
+        )
+    }
+
+    /// After its cool-down, and once the class's earlier exchanges with the
+    /// BMC ended, an open breaker lets one request through, refusing the
+    /// others meanwhile and until its outcome closes the breaker or opens it
+    /// again, which is reported as another opening.
+    #[tokio::test]
+    async fn a_probe_decides_whether_the_breaker_closes() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "the probe succeeds",
+                    input: false,
+                    expect: Yields((None, 1.0)),
+                },
+                Case {
+                    scenario: "the probe fails",
+                    input: true,
+                    expect: Yields((Some(Refused::BreakerOpen), 2.0)),
+                },
+            ],
+            |probe_fails| async move { Ok::<_, Infallible>(after_a_probe(probe_fails).await) },
+        )
+        .await;
+    }
+
+    /// A breaker opens for its whole cool-down even when the BMC's last
+    /// exchange held its only slot for longer than that: the per-BMC limit
+    /// does not stop the breaker's clock.
+    #[tokio::test]
+    async fn a_breaker_under_the_per_bmc_limit_opens_for_its_cool_down() {
+        let _metrics = MetricsCapture::start();
+        let state = proxy_with(&format!(
+            "[admission]\nmax_in_flight_per_bmc = 1\n{BREAKER}"
+        ));
+        for _ in 0..2 {
+            let mut held = granted(slot(&state, bmc(1), http::Method::GET, METRICS)).await;
+            tokio::time::sleep(COOL_DOWN + COOL_DOWN / 2).await;
+            held.bmc_failed();
+            drop(held);
+            tokio::time::sleep(SETTLE).await;
+        }
+        assert_eq!(
+            slot(&state, bmc(1), http::Method::GET, METRICS).await.err(),
+            Some(Refused::BreakerOpen),
+        );
+    }
+
+    /// The sweep keeps an idle BMC while a breaker there is open, so the
+    /// breaker stays open for its cool-down, and stops it once the cool-down
+    /// has passed.
+    #[tokio::test]
+    async fn the_sweep_keeps_a_bmc_through_its_breakers_cool_down() {
+        let _metrics = MetricsCapture::start();
+        let state = proxy_with(BREAKER);
+        fail_an_exchange(&state, bmc(1)).await;
+        fail_an_exchange(&state, bmc(1)).await;
+        let tracked_after_a_sweep = || {
+            state
+                .admission
+                .stop_idle_bmcs(Instant::now() + IDLE_BMC_TIMEOUT);
+            state.admission.bmcs.lock().unwrap().contains_key(&bmc(1))
+        };
+        assert!(tracked_after_a_sweep(), "kept while the breaker is open");
+        assert_eq!(
+            slot(&state, bmc(1), http::Method::GET, METRICS).await.err(),
+            Some(Refused::BreakerOpen),
+        );
+        tokio::time::sleep(COOL_DOWN + SETTLE).await;
+        assert!(
+            !tracked_after_a_sweep(),
+            "stopped once the cool-down passed"
+        );
+    }
+
+    /// A full queue makes room for a newcomer by evicting a request that
+    /// stopped waiting, however many slots its class has.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_queue_evicts_requests_that_stopped_waiting() {
+        let state = proxy_with(
+            r#"
+            [[class]]
+            name = "metrics"
+            match = ["GET /redfish/v1/**/EnvironmentMetrics"]
+            max_in_flight = 200
+            max_queued = 1
+            "#,
+        );
+        // Each request is queued on its first poll, before the BMC's runtime
+        // takes any, and then stops waiting.
+        for _ in 0..200 {
+            assert!(
+                Box::pin(slot(&state, bmc(1), http::Method::GET, METRICS))
+                    .as_mut()
+                    .now_or_never()
+                    .is_none(),
+                "queued"
+            );
+        }
+        assert!(
+            Box::pin(slot(&state, bmc(1), http::Method::GET, METRICS))
+                .as_mut()
+                .now_or_never()
+                .is_none(),
+            "the newcomer is queued, not refused"
+        );
+    }
+
+    /// Each setting of a class's breaker reaches the dispatcher's breaker.
+    #[test]
+    fn breaker_settings_reach_the_dispatcher() {
+        let config = crate::Config::parse(&config_with(
+            "[admission.breaker]\nfailure_threshold = 0.25\nwindow = 7\nmin_samples = 3\ncool_down = \"42s\"",
+        ))
+        .expect("the config parses");
+        let class = config.classes.classify(&http::Method::GET, METRICS, &[]);
+        let breaker = CircuitBreakerConfig::from(class.breaker.as_ref().expect("set"));
+        assert_eq!(
+            (
+                breaker.failure_threshold,
+                breaker.sample_window,
+                breaker.min_samples,
+                breaker.cool_down,
+            ),
+            (0.25, 7, 3, Duration::from_secs(42)),
         );
     }
 
@@ -1142,7 +1703,7 @@ mod tests {
     /// caller's response is framed as it would be without one.
     #[test]
     fn a_held_body_is_framed_as_before() {
-        let held = |body| Slot { _release: None }.hold_until_sent(body);
+        let held = |body| Slot::free().hold_until_sent(body);
         assert_eq!(held(Body::from("abc")).size_hint().exact(), Some(3));
         assert!(held(Body::empty()).is_end_stream());
     }

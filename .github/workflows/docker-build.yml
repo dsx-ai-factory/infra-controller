@@ -299,6 +299,9 @@ jobs:
           # mirrors: the docker exporter cannot attach attestations, and
           # provenance would embed private downstream repo refs into artifacts
           provenance: ${{ github.repository == 'dsx-ai-factory/infra-controller' && 'mode=min' || 'false' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.image_tag }}
           tags: ${{ steps.tag_list.outputs.tags }}
           build-args: ${{ steps.parse-args.outputs.build_args }}
           # Every ref reads the cache; only main writes it. The Rust images

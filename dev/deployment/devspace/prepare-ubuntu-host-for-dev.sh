@@ -482,7 +482,7 @@ Types: deb
 URIs: https://apt.releases.hashicorp.com
 Suites: ${VERSION_CODENAME}
 Components: main
-  Signed-By: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+Signed-By: /usr/share/keyrings/hashicorp-archive-keyring.gpg
 EOF
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \

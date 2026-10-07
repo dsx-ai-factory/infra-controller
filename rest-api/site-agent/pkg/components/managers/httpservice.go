@@ -25,8 +25,14 @@ func handleSiteStatusRequest(w http.ResponseWriter, r *http.Request) {
 	for _, v := range siteStatus {
 		fmt.Fprint(w, v)
 	}
+	if ManagerAccess.Conf.EB.FlowGrpc.Enabled {
+		siteStatus = ManagerAccess.API.FlowGrpc.GetState()
+		for _, v := range siteStatus {
+			fmt.Fprint(w, v)
+		}
+	}
 	fmt.Fprint(w, fmt.Sprintln(" Site Agent Health: ",
-		computils.CompStatus(ManagerAccess.Data.EB.HealthStatus.Load()).String()))
+		computils.SiteHealth(ManagerAccess.Data.EB).String()))
 }
 
 func handleVpcStatusRequest(w http.ResponseWriter, r *http.Request) {

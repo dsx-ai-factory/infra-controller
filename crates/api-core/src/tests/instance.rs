@@ -8116,6 +8116,8 @@ const TEST_DPF_HELM_SERVICE_DATA: &str = r#"{
     "repoURL": "oci://registry.example.com/charts",
     "chartName": "tenant-service",
     "chartVersion": "1.2.3",
+    "serviceID": "tenant-service-v1",
+    "deployInCluster": false,
     "security": {"privileged": false}
 }"#;
 

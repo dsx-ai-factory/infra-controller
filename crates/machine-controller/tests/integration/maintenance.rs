@@ -173,7 +173,8 @@ struct Observation {
 fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
     match operation {
         MachineMaintenanceOperation::PowerOn => PowerAction::On,
-        MachineMaintenanceOperation::PowerOff => PowerAction::ForceOff,
+        MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
+        MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {
             unreachable!("chassis resets do not use the compute-tray backend")
@@ -310,7 +311,8 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
     let mut cases = Vec::new();
     for operation in [
         MachineMaintenanceOperation::PowerOn,
-        MachineMaintenanceOperation::PowerOff,
+        MachineMaintenanceOperation::PowerOff { graceful: true },
+        MachineMaintenanceOperation::PowerOff { graceful: false },
         MachineMaintenanceOperation::Reset,
     ] {
         for entry_state in [EntryState::Ready, EntryState::Failed] {
@@ -404,7 +406,8 @@ fn precondition_cases() -> Vec<Case<(MachineMaintenanceOperation, EntryState), O
     let mut cases = Vec::new();
     for operation in [
         MachineMaintenanceOperation::PowerOn,
-        MachineMaintenanceOperation::PowerOff,
+        MachineMaintenanceOperation::PowerOff { graceful: true },
+        MachineMaintenanceOperation::PowerOff { graceful: false },
         MachineMaintenanceOperation::Reset,
     ] {
         for entry_state in [EntryState::Ready, EntryState::Failed] {
@@ -501,7 +504,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
         ),
         (
             BackendOutcome::TransportFailure,
-            MachineMaintenanceOperation::PowerOff,
+            MachineMaintenanceOperation::PowerOff { graceful: false },
         ),
     ] {
         backend.set_outcome(result);
@@ -617,7 +620,7 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
             .request_machine_maintenance_via_state_controller(
                 &pool,
                 &[host.host.id],
-                MachineMaintenanceOperation::PowerOff,
+                MachineMaintenanceOperation::PowerOff { graceful: false },
                 "replacement",
             )
             .await

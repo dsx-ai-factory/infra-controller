@@ -1270,10 +1270,34 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
-| `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA subnet. |
-| `subnet_mask` | `i32` | `0` | CIDR prefix length for the DPA subnet. |
+| `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
+| `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
+| `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |
 | `monitor_run_interval` | `Duration` | `60s` | The interval at which the DPA monitor runs. |
 | `svpc` | `SvpcConfig` | *(defaults)* | SVPC MQTT connection settings (see [SvpcConfig](#svpcconfig)). |
+
+### `AstraConfig`
+
+Configure these fields under `[ewethers_config.astra]`. Astra underlay provisioning supports IPv4.
+Route prefixes must be less than 32, and the sum of `underlay_ip_rail_id_bit_len` and
+`underlay_ip_software_plane_id_bit_len` must be less than 32 to leave host bits.
+
+Route prefixes are written when NICo creates an Astra `DPUDevice` CR or backfills
+a CR whose `spec.values` is absent. Existing values are not automatically updated.
+Changing these prefixes at the site level requires updating or recreating the
+existing `DPUDevice` values and reprovisioning the affected DPUs to apply the new
+routes to netplan. Restarting NICo or reprovisioning only the `DPU` CR preserves
+the existing `DPUDevice` values and does not apply the new prefixes.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `underlay_rail_route_prefix_len` | `u8` | `16` | Optional override for IPv4 route prefix length (0–31) for each rail in Astra DPUDevice values. |
+| `underlay_software_plane_route_prefix_len` | `u8` | `13` | Optional override for IPv4 route prefix length (0–31) for each software plane in Astra DPUDevice values. |
+| `underlay_ip_rail_id_bit_len` | `u8` | `4` | Optional override for the number of bits used to identify a rail in the Weave service configuration. |
+| `underlay_ip_software_plane_id_bit_len` | `u8` | `8` | Optional override for the number of bits used to identify a software plane in the Weave service configuration. |
+
+Configuration loading rejects route prefix lengths of 32 or greater and a combined
+rail/software-plane identifier bit length of 32 or greater for IPv4.
 
 ### `SvpcConfig`
 

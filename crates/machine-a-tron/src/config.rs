@@ -371,13 +371,7 @@ impl LenovoGb300RackConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct RackConfig {
-    /// Deprecated. machine-a-tron declares each rack's expected rack group and
-    /// derives the profile from it exactly as nico-api does, so the profile
-    /// follows from `type`. When set, the value must equal the derived
-    /// profile; the key is accepted only so existing configurations keep
-    /// loading.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rack_profile_id: Option<RackProfileId>,
+    pub rack_profile_id: RackProfileId,
     pub ids: Vec<RackId>,
     #[serde(flatten)]
     pub model: RackModelConfig,
@@ -673,6 +667,10 @@ impl MachineATronConfig {
         for (rack_group, rack) in &self.racks {
             eyre::ensure!(!rack_group.is_empty(), "rack group name cannot be empty");
             eyre::ensure!(
+                !rack.rack_profile_id.as_str().is_empty(),
+                "racks.{rack_group}.rack_profile_id cannot be empty"
+            );
+            eyre::ensure!(
                 !rack.ids.is_empty(),
                 "racks.{rack_group}.ids must contain at least one rack ID"
             );
@@ -710,17 +708,12 @@ impl MachineATronConfig {
         let mut racks = Vec::new();
         let mut configured_racks = self
             .racks
-            .iter()
-            .flat_map(|(section, rack)| {
-                rack.ids
-                    .iter()
-                    .cloned()
-                    .map(move |rack_id| (rack_id, section, rack))
-            })
+            .values()
+            .flat_map(|rack| rack.ids.iter().cloned().map(move |rack_id| (rack_id, rack)))
             .collect::<Vec<_>>();
-        configured_racks.sort_unstable_by(|(left, ..), (right, ..)| left.cmp(right));
+        configured_racks.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
 
-        for (rack_id, section, rack) in configured_racks {
+        for (rack_id, rack) in configured_racks {
             let rack_type = rack.model.rack_type();
             let rack_info = RackInfo { rack_type };
             let elevation = rack_info.rack_elevation().wrap_err_with(|| {
@@ -758,16 +751,13 @@ impl MachineATronConfig {
                 });
             }
 
-            let registration =
-                RackRegistration::new(rack_id, rack_type, elevation.version, members)?;
-            if let Some(configured) = &rack.rack_profile_id {
-                eyre::ensure!(
-                    configured == &registration.rack_profile_id,
-                    "racks.{section}.rack_profile_id = {configured:?} does not match {}, the profile nico-api derives for a {rack_type} rack; remove the key",
-                    registration.rack_profile_id
-                );
-            }
-            racks.push(registration);
+            racks.push(RackRegistration {
+                rack_id,
+                rack_profile_id: rack.rack_profile_id.clone(),
+                rack_type,
+                version: elevation.version,
+                members,
+            });
         }
 
         Ok(ResolvedDeviceConfigs { machines, racks })
@@ -1162,10 +1152,12 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values};
     use carbide_uuid::rack::RackGroupId;
-    use model::rack_type::RackCapabilityType;
+    use model::expected_rack::derive_rack_profile_id;
+    use rpc::forge::{ExpectedRack, ExpectedRackGroup};
     use serde::de::DeserializeOwned;
 
     use super::*;
+    use crate::api_client::{ExpectedRecord, existing_rack_has_profile};
 
     fn rack_config() -> MachineATronConfig {
         toml::from_str(
@@ -1259,7 +1251,7 @@ scout_run_interval = "5s"
             "default".to_string(),
             RackConfig {
                 ids: vec![RackId::new("rack-002"), RackId::new("rack-001")],
-                rack_profile_id: None,
+                rack_profile_id: RackProfileId::new("GB200_NVL72R1_C2G4_WIWYNN"),
                 model: RackModelConfig::WiwynnGb200Nvl72 {
                     simulation: wiwynn_gb200_rack_from_machine(&template),
                 },
@@ -1277,7 +1269,7 @@ scout_run_interval = "5s"
             "default".to_string(),
             RackConfig {
                 ids: vec![RackId::new("rack-002"), RackId::new("rack-001")],
-                rack_profile_id: None,
+                rack_profile_id: RackProfileId::new("GB300_NVL72R1_C2G4_LENOVO"),
                 model: RackModelConfig::LenovoGb300Nvl72 {
                     simulation: lenovo_gb300_rack_from_machine(&template),
                 },
@@ -1307,22 +1299,30 @@ scout_run_interval = "5s"
             [
                 Case {
                     scenario: "WIWYNN GB200 rack",
-                    input: (gb200_rack_config(), "type = \"wiwynn_gb200_nvl72\""),
+                    input: (
+                        gb200_rack_config(),
+                        "type = \"wiwynn_gb200_nvl72\"",
+                        "rack_profile_id = \"GB200_NVL72R1_C2G4_WIWYNN\"",
+                    ),
                     expect: Yields(()),
                 },
                 Case {
                     scenario: "Lenovo GB300 rack",
-                    input: (gb300_rack_config(), "type = \"lenovo_gb300_nvl72\""),
+                    input: (
+                        gb300_rack_config(),
+                        "type = \"lenovo_gb300_nvl72\"",
+                        "rack_profile_id = \"GB300_NVL72R1_C2G4_LENOVO\"",
+                    ),
                     expect: Yields(()),
                 },
             ],
-            |(config, expected_type)| {
+            |(config, expected_type, expected_profile)| {
                 (|| -> eyre::Result<()> {
                     config.validate()?;
                     let serialized = toml::to_string(&config)?;
                     eyre::ensure!(serialized.contains("[racks.default]"));
                     eyre::ensure!(serialized.contains(expected_type));
-                    eyre::ensure!(!serialized.contains("rack_profile_id"));
+                    eyre::ensure!(serialized.contains(expected_profile));
                     eyre::ensure!(serialized.contains("ids = [\"rack-002\", \"rack-001\"]"));
                     let round_tripped = toml::from_str::<MachineATronConfig>(&serialized)?;
                     eyre::ensure!(round_tripped == config);
@@ -1333,15 +1333,14 @@ scout_run_interval = "5s"
         );
     }
 
-    /// Each rack model expands to the member count, hardware types, topology and
-    /// derived profile of its design.
+    /// Each rack model expands to the member count, hardware types and profile
+    /// of its design.
     #[test]
     fn rack_models_expand_their_managed_hardware() {
         #[derive(Debug)]
         struct ExpectedExpansion {
             config: MachineATronConfig,
             rack_profile_id: &'static str,
-            topology: &'static str,
             rack_type: RackType,
             member_count: usize,
             compute_type: HardwareType,
@@ -1359,7 +1358,6 @@ scout_run_interval = "5s"
                     input: ExpectedExpansion {
                         config: gb200_rack_config(),
                         rack_profile_id: "GB200_NVL72R1_C2G4_WIWYNN",
-                        topology: "gb200_nvl72r1_c2g4",
                         rack_type: RackType::WiwynnGb200Nvl72,
                         member_count: 35,
                         compute_type: HardwareType::WiwynnGB200Nvl,
@@ -1376,7 +1374,6 @@ scout_run_interval = "5s"
                     input: ExpectedExpansion {
                         config: gb300_rack_config(),
                         rack_profile_id: "GB300_NVL72R1_C2G4_LENOVO",
-                        topology: "gb300_nvl72r1_c2g4",
                         rack_type: RackType::LenovoGb300Nvl72,
                         member_count: 33,
                         compute_type: HardwareType::LenovoGB300Nvl,
@@ -1408,41 +1405,6 @@ scout_run_interval = "5s"
                         );
                         eyre::ensure!(rack.rack_type == expected.rack_type);
                         eyre::ensure!(rack.members.len() == expected.member_count);
-                        // The group declares exactly this rack with one member
-                        // per rack unit, in the topology nico-api derives the
-                        // profile from.
-                        let group = &rack.rack_group;
-                        eyre::ensure!(
-                            group.rack_group_id
-                                == RackGroupId::new(format!("group-{}", rack.rack_id))
-                        );
-                        eyre::ensure!(group.topology.as_str() == expected.topology);
-                        eyre::ensure!(
-                            group.protocol.as_ref().map(|protocol| protocol.as_str())
-                                == Some("NVLINK_V5")
-                        );
-                        let [group_rack] = &group.racks[..] else {
-                            eyre::bail!("group declares {} racks", group.racks.len());
-                        };
-                        eyre::ensure!(group_rack.rack_id == rack.rack_id);
-                        eyre::ensure!(group_rack.members.len() == expected.member_count);
-                        let count_of = |device_type: RackCapabilityType| {
-                            group_rack
-                                .members
-                                .iter()
-                                .filter(|member| member.device_type == device_type)
-                                .count()
-                        };
-                        eyre::ensure!(
-                            count_of(RackCapabilityType::Compute) == expected.compute_count / 2
-                        );
-                        eyre::ensure!(
-                            count_of(RackCapabilityType::Switch) == expected.switch_count / 2
-                        );
-                        eyre::ensure!(
-                            count_of(RackCapabilityType::PowerShelf)
-                                == expected.power_shelf_count / 2
-                        );
                         eyre::ensure!(
                             rack.members
                                 .iter()
@@ -1486,6 +1448,217 @@ scout_run_interval = "5s"
                     Ok(())
                 })()
                 .map_err(drop)
+            },
+        );
+    }
+
+    #[test]
+    fn racks_declare_their_expected_rack_group() {
+        #[derive(Debug)]
+        struct ExpectedGroup {
+            config: MachineATronConfig,
+            topology: &'static str,
+            compute_manufacturer: &'static str,
+            compute_count: usize,
+            switch_count: usize,
+            power_shelf_count: usize,
+            derived_profile_id: &'static str,
+        }
+
+        check_cases(
+            [
+                Case {
+                    scenario: "WIWYNN GB200 rack",
+                    input: ExpectedGroup {
+                        config: gb200_rack_config(),
+                        topology: "gb200_nvl72r1_c2g4",
+                        compute_manufacturer: "WIWYNN",
+                        compute_count: 18,
+                        switch_count: 9,
+                        power_shelf_count: 8,
+                        derived_profile_id: "GB200_NVL72R1_C2G4_WIWYNN",
+                    },
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "Lenovo GB300 rack",
+                    input: ExpectedGroup {
+                        config: gb300_rack_config(),
+                        topology: "gb300_nvl72r1_c2g4",
+                        compute_manufacturer: "Lenovo",
+                        compute_count: 18,
+                        switch_count: 9,
+                        power_shelf_count: 6,
+                        derived_profile_id: "GB300_NVL72R1_C2G4_LENOVO",
+                    },
+                    expect: Yields(()),
+                },
+            ],
+            |expected| {
+                (|| -> eyre::Result<()> {
+                    let resolved = expected.config.resolved_device_configs()?;
+                    eyre::ensure!(resolved.racks.len() == 2);
+                    for rack in &resolved.racks {
+                        let group = rack.expected_rack_group()?;
+                        eyre::ensure!(
+                            group.rack_group_id.as_ref().map(ToString::to_string)
+                                == Some(rack.rack_id.to_string())
+                        );
+                        eyre::ensure!(group.topology == expected.topology);
+                        eyre::ensure!(group.protocol == "NVLINK_V5");
+                        eyre::ensure!(group.racks.len() == 1);
+                        let declared = &group.racks[0];
+                        eyre::ensure!(declared.rack_id.as_ref() == Some(&rack.rack_id));
+                        eyre::ensure!(declared.members.len() == rack.members.len());
+                        eyre::ensure!(
+                            declared
+                                .members
+                                .iter()
+                                .map(|member| member.id.as_str())
+                                .collect::<BTreeSet<_>>()
+                                == rack
+                                    .members
+                                    .iter()
+                                    .map(|member| member.machine_config_section.as_str())
+                                    .collect::<BTreeSet<_>>()
+                        );
+                        for (device_type, manufacturer, count) in [
+                            (
+                                "Compute",
+                                expected.compute_manufacturer,
+                                expected.compute_count,
+                            ),
+                            ("Switch", "NVIDIA", expected.switch_count),
+                            ("PowerShelf", "LiteOn", expected.power_shelf_count),
+                        ] {
+                            eyre::ensure!(
+                                declared
+                                    .members
+                                    .iter()
+                                    .filter(|member| {
+                                        member.r#type == device_type
+                                            && member.manufacturer == manufacturer
+                                    })
+                                    .count()
+                                    == count
+                            );
+                        }
+                        let group = model::expected_rack_group::ExpectedRackGroup::try_from(group)?;
+                        eyre::ensure!(
+                            derive_rack_profile_id(&group, &rack.rack_id)
+                                .map_err(eyre::Report::msg)?
+                                == RackProfileId::new(expected.derived_profile_id)
+                        );
+                    }
+                    Ok(())
+                })()
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// Group declaring the rack under another ID and topology, as a site
+    /// that declared its groups by hand has.
+    fn existing_group(rack: &RackRegistration, topology: &str) -> ExpectedRackGroup {
+        let mut group = rack.expected_rack_group().unwrap();
+        group.rack_group_id = Some(RackGroupId::new("site-group"));
+        group.topology = topology.to_string();
+        group
+    }
+
+    #[test]
+    fn rack_profile_id_must_match_the_profile_derived_from_the_group() {
+        let resolved = gb200_rack_config().resolved_device_configs().unwrap();
+        let rack = resolved.racks[0].clone();
+        let with_profile = |profile: &str| RackRegistration {
+            rack_profile_id: RackProfileId::new(profile),
+            ..rack.clone()
+        };
+        let own_group_mismatch = "rack rack-001 configures rack_profile_id NVL72, but nico-api derives \
+                                  GB200_NVL72R1_C2G4_WIWYNN from expected rack group rack-001";
+        let existing_group_mismatch = "rack rack-001 configures rack_profile_id GB200_NVL72R1_C2G4_WIWYNN, \
+                                       but nico-api derives GB200_NVL72_WIWYNN from expected rack group site-group";
+        // nico-api returns a group stored before the protocol column with an empty protocol.
+        let mut legacy_group = existing_group(&rack, "gb200_nvl72r1_c2g4");
+        legacy_group.protocol.clear();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "own group, derived profile",
+                    input: (rack.clone(), None),
+                    expect: Yields(Some("rack-001".to_string())),
+                },
+                Case {
+                    scenario: "own group, other profile",
+                    input: (with_profile("NVL72"), None),
+                    expect: FailsWith(own_group_mismatch.to_string()),
+                },
+                Case {
+                    scenario: "existing group, its derived profile",
+                    input: (
+                        with_profile("GB200_NVL72_WIWYNN"),
+                        Some(existing_group(&rack, "gb200_nvl72")),
+                    ),
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "existing group, profile of the own group",
+                    input: (rack.clone(), Some(existing_group(&rack, "gb200_nvl72"))),
+                    expect: FailsWith(existing_group_mismatch.to_string()),
+                },
+                Case {
+                    scenario: "existing group stored before the protocol column",
+                    input: (rack.clone(), Some(legacy_group)),
+                    expect: Yields(None),
+                },
+            ],
+            |(rack, existing)| {
+                let ExpectedRecord::Rack { group, .. } = rack
+                    .expected_record(existing.as_ref())
+                    .map_err(|error| error.to_string())?
+                else {
+                    unreachable!("a rack registration yields a rack record");
+                };
+                Ok(group.map(|group| group.rack_group_id.unwrap().to_string()))
+            },
+        );
+    }
+
+    /// On restart the expected rack already exists with the profile nico-api
+    /// derived from the group; the same configuration must accept it.
+    #[test]
+    fn restart_with_the_same_config_accepts_the_stored_rack() {
+        let stored_rack = |rack: &RackRegistration, rack_profile_id: RackProfileId| ExpectedRack {
+            rack_group_id: None,
+            rack_id: Some(rack.rack_id.clone()),
+            rack_profile_id: Some(rack_profile_id),
+            metadata: None,
+        };
+        let resolved = gb200_rack_config().resolved_device_configs().unwrap();
+        let rack = &resolved.racks[0];
+        let own_group = rack.expected_rack_group().unwrap();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "rack stored by this configuration",
+                    input: stored_rack(rack, rack.derived_rack_profile_id(own_group).unwrap()),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "rack stored before the derived profile",
+                    input: stored_rack(rack, RackProfileId::new("NVL72")),
+                    expect: FailsWith(
+                        "configuration error: Expected rack rack-001 already exists with \
+                         rack_profile_id NVL72, not GB200_NVL72R1_C2G4_WIWYNN"
+                            .to_string(),
+                    ),
+                },
+            ],
+            |existing| {
+                existing_rack_has_profile(&existing, &rack.rack_id, &rack.rack_profile_id)
+                    .map_err(|error| error.to_string())
             },
         );
     }
@@ -1870,6 +2043,13 @@ server_address = "127.0.0.1:6767""#,
         let mut no_ids = valid.clone();
         no_ids.racks.get_mut("default").unwrap().ids.clear();
 
+        let mut empty_profile_id = valid.clone();
+        empty_profile_id
+            .racks
+            .get_mut("default")
+            .unwrap()
+            .rack_profile_id = RackProfileId::new("");
+
         let mut empty_rack_id = valid.clone();
         empty_rack_id.racks.get_mut("default").unwrap().ids[0] = RackId::new("");
 
@@ -1904,6 +2084,11 @@ server_address = "127.0.0.1:6767""#,
                     expect: Fails,
                 },
                 Case {
+                    scenario: "rack group without profile ID",
+                    input: empty_profile_id,
+                    expect: Fails,
+                },
+                Case {
                     scenario: "empty rack ID",
                     input: empty_rack_id,
                     expect: Fails,
@@ -1915,37 +2100,6 @@ server_address = "127.0.0.1:6767""#,
                 },
             ],
             |config| config.validate().map_err(drop),
-        );
-    }
-
-    /// A configured `rack_profile_id` is accepted only when it equals the profile
-    /// derived from the rack group.
-    #[test]
-    fn configured_rack_profile_id_must_match_the_derived_profile() {
-        check_cases(
-            [
-                Case {
-                    scenario: "profile omitted",
-                    input: None,
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "profile restates the derived value",
-                    input: Some("GB200_NVL72R1_C2G4_WIWYNN"),
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "profile predates group-derived naming",
-                    input: Some("NVL72"),
-                    expect: Fails,
-                },
-            ],
-            |profile| {
-                let mut config = gb200_rack_config();
-                config.racks.get_mut("default").unwrap().rack_profile_id =
-                    profile.map(RackProfileId::new);
-                config.resolved_device_configs().map(drop).map_err(drop)
-            },
         );
     }
 

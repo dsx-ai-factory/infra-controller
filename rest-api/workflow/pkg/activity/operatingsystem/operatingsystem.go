@@ -5,7 +5,6 @@ package operatingsystem
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"time"
 
@@ -295,119 +294,97 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 
 	logger.Info().Msg("starting activity")
 
-	osDAO := cdbm.NewOperatingSystemDAO(mos.dbSession)
-
-	os, err := osDAO.GetByID(ctx, nil, osID, nil)
-	if err != nil {
-		if err == cdb.ErrDoesNotExist {
-			logger.Warn().Err(err).Msg("received request for unknown or deleted Operating System")
-		} else {
-			logger.Error().Err(err).Msg("failed to retrieve Operating System from DB")
-		}
-		return nil
-	}
-
-	logger.Info().Msg("retrieved Operating System from DB")
-
-	var osStatus *string
-	var osMessage *string
-
-	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
-	ossas, ossaTotal, err := ossaDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.OperatingSystemSiteAssociationFilterInput{
-			OperatingSystemIDs: []uuid.UUID{osID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get Operating System Site Associations from DB for Operating System")
-		return err
-	}
-
-	// Operating System is in deleting state
-	if os.Status == cdbm.OperatingSystemStatusDeleting {
-		if ossaTotal == 0 {
-			// Start a db tx
-			tx, err := cdb.BeginTx(ctx, mos.dbSession, &sql.TxOptions{})
-			if err != nil {
-				logger.Error().Err(err).Msg("failed to start transaction")
-				return err
-			}
-
-			// No more associations left, we can delete the Operating System
-			serr := osDAO.Delete(ctx, tx, osID)
-			if serr != nil {
-				logger.Error().Err(serr).Msg("failed to delete Operating System from DB")
-				terr := tx.Rollback()
-				if terr != nil {
-					logger.Error().Err(terr).Msg("failed to rollback transaction")
-				}
-				return serr
-			}
-
-			// Commit transaction
-			err = tx.Commit()
-			if err != nil {
-				logger.Error().Err(err).Msg("error committing transaction to DB")
-				return err
-			}
+	err := cdb.WithTx(ctx, mos.dbSession, func(tx *cdb.Tx) error {
+		// Share the API delete lock before reading status. Otherwise a readiness
+		// update can wait behind deletion, then overwrite Deleting with stale Ready.
+		err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(osID.String()), nil)
+		if err != nil {
+			return err
 		}
 
-		// One or more associations left to delete from Sites
-		return nil
-	}
+		osDAO := cdbm.NewOperatingSystemDAO(mos.dbSession)
 
-	if ossaTotal == 0 {
-		if os.Status == cdbm.OperatingSystemStatusReady {
+		os, err := osDAO.GetByID(ctx, tx, osID, nil)
+		if err != nil {
+			if err == cdb.ErrDoesNotExist {
+				logger.Warn().Err(err).Msg("received request for unknown or deleted Operating System")
+			} else {
+				logger.Error().Err(err).Msg("failed to retrieve Operating System from DB")
+			}
 			return nil
 		}
-		osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusReady)
-		osMessage = cutil.GetPtr("Operating System successfully synced to all Sites")
-	} else {
+
+		logger.Info().Msg("retrieved Operating System from DB")
+
+		var osStatus *string
+		var osMessage *string
+
+		ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
+		ossas, ossaTotal, err := ossaDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.OperatingSystemSiteAssociationFilterInput{
+				OperatingSystemIDs: []uuid.UUID{osID},
+			},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get Operating System Site Associations from DB for Operating System")
+			return err
+		}
+
+		// Operating System is in deleting state
+		if os.Status == cdbm.OperatingSystemStatusDeleting {
+			if ossaTotal == 0 {
+				return osDAO.Delete(ctx, tx, osID)
+			}
+
+			// One or more associations left to delete from Sites
+			return nil
+		}
+
 		statusCountMap := map[string]int{}
 		for _, dbossa := range ossas {
 			statusCountMap[dbossa.Status]++
 		}
 
-		if statusCountMap[cdbm.OperatingSystemSiteAssociationStatusError] > 0 {
-			if os.Status == cdbm.OperatingSystemStatusError {
-				return nil
-			}
+		switch {
+		case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusError] > 0:
 			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusError)
 			osMessage = cutil.GetPtr("Failed to sync Operating System to one or more Sites")
-		} else if statusCountMap[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0 {
-			if os.Status == cdbm.OperatingSystemStatusSyncing {
-				return nil
-			}
+		case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0:
 			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusSyncing)
 			osMessage = cutil.GetPtr("Operating System syncing to one or more Sites")
-		} else {
-			if os.Status == cdbm.OperatingSystemStatusReady {
-				return nil
-			}
+		default:
 			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusReady)
 			osMessage = cutil.GetPtr("Operating System successfully synced to all Sites")
 		}
-	}
+		if os.Status == *osStatus {
+			return nil
+		}
 
-	// Update status
-	_, err = osDAO.Update(
-		ctx,
-		nil,
-		cdbm.OperatingSystemUpdateInput{
-			OperatingSystemId: osID,
-			Status:            osStatus,
-		},
-	)
-	if err != nil {
-		return err
-	}
+		// Update status
+		_, err = osDAO.Update(
+			ctx,
+			tx,
+			cdbm.OperatingSystemUpdateInput{
+				OperatingSystemId: osID,
+				Status:            osStatus,
+			},
+		)
+		if err != nil {
+			return err
+		}
 
-	statusDetailDAO := cdbm.NewStatusDetailDAO(mos.dbSession)
-	_, err = statusDetailDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: osID.String(), Status: *osStatus, Message: osMessage})
+		statusDetailDAO := cdbm.NewStatusDetailDAO(mos.dbSession)
+		_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: osID.String(), Status: *osStatus, Message: osMessage})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
 	if err != nil {
 		return err
 	}

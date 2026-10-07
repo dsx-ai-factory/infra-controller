@@ -245,32 +245,32 @@ pub async fn start(
 
         [host_models]
 
-        [rack_profiles.GB200_NVL72R1_C2G4_WIWYNN]
+        [rack_profiles.GB200_NVL72_WIWYNN]
         product_family = "gb200"
 
-        [rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.compute]
         name = "GB200"
         count = 18
         vendor = "NVIDIA"
 
-        [rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.switch]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.power_shelf]
+        [rack_profiles.GB200_NVL72_WIWYNN.rack_capabilities.power_shelf]
         count = 0
 
-        [rack_profiles.GB300_NVL72R1_C2G4_LENOVO]
+        [rack_profiles.GB300_NVL72_LENOVO]
         product_family = "gb300"
 
-        [rack_profiles.GB300_NVL72R1_C2G4_LENOVO.rack_capabilities.compute]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.compute]
         name = "GB300"
         count = 18
         vendor = "Lenovo"
 
-        [rack_profiles.GB300_NVL72R1_C2G4_LENOVO.rack_capabilities.switch]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.GB300_NVL72R1_C2G4_LENOVO.rack_capabilities.power_shelf]
+        [rack_profiles.GB300_NVL72_LENOVO.rack_capabilities.power_shelf]
         count = 0
 
         [firmware_global]

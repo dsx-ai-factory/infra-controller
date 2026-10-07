@@ -329,6 +329,10 @@ pods:
     # racks:
     #   gb200:
     #     type: wiwynn_gb200_nvl72
+    #     # The profile nico-api derives from the rack's expected rack group,
+    #     # which machine-a-tron declares when no group declares the rack yet.
+    #     # The nico-api chart ships the derived profiles for both rack types.
+    #     rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
     #     ids:
     #       - rack-001
     #     dpu_reboot_delay: 20

@@ -221,6 +221,22 @@ pub(crate) struct FirmwareTask {
     /// helper.
     pub(crate) target_version: String,
     pub(crate) state: TaskState,
+    /// Which host firmware component this task updates, resolved from
+    /// `component_id` against the platform's inventory ids when the upload is
+    /// recorded. It decides which event activates the staged version (a BMC
+    /// reset for the BMC, the host's next power-on for the rest) and names
+    /// that event in the task message.
+    pub(crate) component: FirmwareComponent,
+}
+
+/// The host firmware component a task targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FirmwareComponent {
+    Bmc,
+    Uefi,
+    /// Any other inventory entry (a DPU component appended by the platform, or
+    /// an id the platform does not recognise).
+    Other,
 }
 
 impl FirmwareTask {
@@ -246,10 +262,14 @@ impl FirmwareTask {
             "TaskStatus": "OK",
             "Messages": [{
                 "MessageId": "Update.1.0.OperationTransitionedToJob",
-                "Message": if self.state == TaskState::Completed {
-                    "Firmware staged; version will be applied after the next power-cycle."
-                } else {
-                    "Firmware upload in progress."
+                "Message": match (&self.state, self.component) {
+                    (TaskState::Running, _) => "Firmware upload in progress.",
+                    (TaskState::Completed, FirmwareComponent::Bmc) => {
+                        "Firmware staged; version will be applied after the next BMC reset."
+                    }
+                    (TaskState::Completed, _) => {
+                        "Firmware staged; version will be applied after the next host power-on."
+                    }
                 },
                 "Severity": "OK"
             }]
@@ -345,6 +365,17 @@ impl UpdateServiceState {
             .collect()
     }
 
+    /// Which host firmware component an inventory id names on this platform.
+    fn component_kind(&self, component_id: &str) -> FirmwareComponent {
+        if self.host_bmc_inventory_id.as_deref() == Some(component_id) {
+            FirmwareComponent::Bmc
+        } else if self.host_uefi_inventory_id.as_deref() == Some(component_id) {
+            FirmwareComponent::Uefi
+        } else {
+            FirmwareComponent::Other
+        }
+    }
+
     pub(crate) fn find_task(&self, id: &str) -> Option<serde_json::Value> {
         self.tasks.read().unwrap().get(id).map(|t| t.to_json())
     }
@@ -373,6 +404,7 @@ impl UpdateServiceState {
             component_id: component_id.to_string(),
             target_version: target_version.clone(),
             state: TaskState::Running,
+            component: self.component_kind(component_id),
         };
         let odata_id = task.odata_id();
         let running_json = task.to_json();
@@ -497,14 +529,15 @@ impl UpdateServiceState {
 
     /// Activate only completed host BMC firmware on a BMC reset.
     pub(crate) fn apply_staged_bmc_firmware(&self) {
-        if let Some(id) = self.host_bmc_inventory_id.as_deref() {
-            self.apply_staged_component(Some(id));
-        }
+        self.apply_staged_component(Some(FirmwareComponent::Bmc));
     }
 
-    fn apply_staged_component(&self, component: Option<&str>) {
+    /// Apply the staged versions of completed tasks, all of them or only those
+    /// for one component kind.
+    fn apply_staged_component(&self, component: Option<FirmwareComponent>) {
         let applies = |task: &FirmwareTask| {
-            task.state == TaskState::Completed && component.is_none_or(|id| task.component_id == id)
+            task.state == TaskState::Completed
+                && component.is_none_or(|kind| task.component == kind)
         };
         // Collect component IDs of completed tasks and prune them from the map.
         let completed_components: Vec<String> = {
@@ -1445,6 +1478,16 @@ mod tests {
                 assert_eq!(
                     get_json(&router, &task_path).await["TaskState"],
                     "Completed"
+                );
+                let event = if path == &bmc_path {
+                    "BMC reset"
+                } else {
+                    "host power-on"
+                };
+                assert_eq!(
+                    get_json(&router, &task_path).await["Messages"][0]["Message"],
+                    format!("Firmware staged; version will be applied after the next {event}."),
+                    "{hw_type:?} {path}"
                 );
                 assert_eq!(get_json(&router, path).await["Version"], old);
                 assert_eq!(post_empty(&router, reset).await.status(), StatusCode::OK);

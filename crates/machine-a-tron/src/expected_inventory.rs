@@ -121,6 +121,40 @@ impl ExpectedInventorySummary {
     }
 }
 
+/// Runs one API call under the registration retry policy: a transient
+/// failure is retried after a backoff for up to `MAX_ATTEMPTS` rounds.
+pub(crate) async fn with_retry<T, F, Fut>(
+    operation_name: &str,
+    operation: F,
+) -> Result<T, ClientApiError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, ClientApiError>>,
+{
+    let mut round = 1;
+    loop {
+        let error = match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if round < MAX_ATTEMPTS && classify(&error) == Disposition::Retry => error,
+            Err(error) => return Err(error),
+        };
+        let mut delay = backoff_delay(round - 1, rand::rng().random::<f64>());
+        if let Some(pushback) = pushback_delay(&error) {
+            delay = delay.max(pushback);
+        }
+        tracing::warn!(
+            operation = operation_name,
+            round,
+            max_attempts = MAX_ATTEMPTS,
+            error = %error,
+            retry_delay_milliseconds = delay.as_millis(),
+            "transient error; retrying"
+        );
+        tokio::time::sleep(delay).await;
+        round += 1;
+    }
+}
+
 /// Registers every record with at most `concurrency` in flight and returns
 /// the aggregate outcome. Records that fail transiently are retried together
 /// after one shared backoff for up to `MAX_ATTEMPTS` rounds.
@@ -368,6 +402,67 @@ mod tests {
         let attempts = attempts.lock().unwrap().clone();
         let peak_in_flight = in_flight.lock().unwrap().1;
         (summary, attempts, peak_in_flight)
+    }
+
+    /// Runs `with_retry` over scripted responses and returns the outcome
+    /// with the number of attempts made.
+    async fn retry_scripted(
+        responses: Vec<Result<u32, ClientApiError>>,
+    ) -> (Result<u32, String>, usize) {
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let attempts = Arc::new(Mutex::new(0_usize));
+        let result = with_retry("lookup", || {
+            let responses = responses.clone();
+            let attempts = attempts.clone();
+            async move {
+                *attempts.lock().unwrap() += 1;
+                responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("more attempts than scripted responses")
+            }
+        })
+        .await
+        .map_err(|error| error.to_string());
+        let attempts = *attempts.lock().unwrap();
+        (result, attempts)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_retry_retries_only_transient_failures() {
+        struct RetryCase {
+            scenario: &'static str,
+            responses: Vec<Result<u32, ClientApiError>>,
+            expect: Result<u32, String>,
+            attempts: usize,
+        }
+        let transient = || Err(invocation(Status::unavailable("busy")));
+        let cases = [
+            RetryCase {
+                scenario: "succeeds after transient failures",
+                responses: vec![transient(), transient(), Ok(7)],
+                expect: Ok(7),
+                attempts: 3,
+            },
+            RetryCase {
+                scenario: "permanent failure is not retried",
+                responses: vec![Err(invocation(Status::invalid_argument("bad")))],
+                expect: Err("the API call to the forge API server returned code: 'Client specified an invalid argument', message: \"bad\"".to_string()),
+                attempts: 1,
+            },
+            RetryCase {
+                scenario: "gives up after MAX_ATTEMPTS",
+                responses: (0..MAX_ATTEMPTS).map(|_| transient()).collect(),
+                expect: Err("the API call to the forge API server returned code: 'The service is currently unavailable', message: \"busy\"".to_string()),
+                attempts: MAX_ATTEMPTS as usize,
+            },
+        ];
+        for case in cases {
+            let (result, attempts) = retry_scripted(case.responses).await;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            assert_eq!(attempts, case.attempts, "{}", case.scenario);
+        }
     }
 
     #[tokio::test(start_paused = true)]

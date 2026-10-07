@@ -25,6 +25,66 @@ helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -f helm-prereqs/values/machine-a-tron-scale.yaml
 ```
 
+## Replicating the 250-Rack Fleet
+
+The quick start above installs host-count fleets. The 250-rack measurement in
+[Large Site Sizing and Settings](large-site-sizing-and-settings.md) ran ten
+machine-a-tron pods of 25 GB200 NVL72 racks each in Controller Mode behind the
+protocol gateway. To replicate it on a fresh site:
+
+1. In `helm-prereqs/values.yaml`, set `siteCredentials.enabled: true` with an
+   explicit `bmcRoot.password`
+   ([Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)),
+   and raise `postgresql.resources.limits` to the Postgres limits in
+   [Settings Changed From the Defaults](large-site-sizing-and-settings.md#settings-changed-from-the-defaults)
+   before `setup.sh` runs. Teardown deletes the `postgres` namespace, so a
+   resize applied to the live cluster is lost on the next install.
+1. Copy `helm-prereqs/values/nico-core-simulation.yaml`, fill in the site
+   blanks, and point `nico-api.credentials.file.existingSecret.name` at the
+   Secret from step 1. The copy already carries the `[site_explorer]` budget,
+   `max_concurrency`, and the nico-api CPU limit from the sizing page. It also
+   sets `max_database_connections = 900` and enables the hardware-health rate
+   limiter, which keep the connection pool and the Redfish session rate within
+   limits at this scale.
+1. In the same copy, widen `[networks.simulated-oob]` to a `/17` before
+   nico-api first starts, as the sizing page's
+   [fleet paragraph](large-site-sizing-and-settings.md#settings-changed-from-the-defaults)
+   explains, and point `nico-api.rms.apiUrl` at the protocol gateway
+   ([Pointing NICo at It](machine-a-tron-rms-mock.md#pointing-nico-at-it)).
+1. Deploy the DOCA Platform Framework (DPF) simulator, then run
+   `./setup.sh --skip-dpf --core-values <copy>` from `helm-prereqs/`. The
+   overlay header and the
+   [dpf-sim-controller quick start](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/k8s/dpf-sim-controller/README.md#quick-start-against-a-machine-a-tron-cluster)
+   give the `make deploy` command and the namespace it creates.
+1. Check the rack profile. nico-api derives an expected rack's profile id from
+   the expected rack group that declares it: the group topology in upper case,
+   an underscore, the compute vendor in upper case, and the suffix
+   `_NO_POWERSHELF` when the group declares no power shelf. It replaces the
+   requested id with the derived one and rejects the rack unless that id exists
+   under `[rack_profiles]`. With
+   [PR 6995](https://github.com/dsx-ai-factory/infra-controller/pull/6995),
+   machine-a-tron declares one group per rack from its rack type, so
+   `rack_profile_id` in the machine-a-tron values must equal the derived id
+   (`GB200_NVL72R1_C2G4_WIWYNN` for `wiwynn_gb200_nvl72`,
+   `GB300_NVL72R1_C2G4_LENOVO` for `lenovo_gb300_nvl72`), which the nico-api
+   chart ships; that PR also updates the deployment page and the 10-rack
+   values. On a site installed before it, create the groups with
+   `nico-admin-cli expected-rack-group` first. Inspect the declarations with
+   `nico-admin-cli expected-rack-group show` and `nico-admin-cli expected-rack show`.
+1. Create the labeled `nico-mat` namespace and pull Secret
+   ([Cluster Prerequisites](machine-a-tron-deployment.md#cluster-prerequisites)),
+   run `helm-prereqs/check-mat-service-cidr.py` against the machine-a-tron
+   values with `--site-config` pointing at the copy from step 2, then install
+   machine-a-tron from `helm-prereqs/values/machine-a-tron-10racks.yaml` with
+   each pod's `ids` list extended to 25 racks, its `rack_profile_id` set to
+   the id from step 5, and its `resources` and `startupProbe` scaled with it.
+   [Deploying a 250-Rack Site](machine-a-tron-deployment.md#deploying-a-250-rack-site)
+   gives the per-pod sizing and the Service count to expect.
+1. Leave `max_concurrency` at the overlay's 80 or raise it to 120.
+   [Time to Ready Is a Concurrency Setting](large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting)
+   gives the measured range and how to set it, and the settings table lists the
+   `[api_admission_control]` value used for the simulated fleet.
+
 ## What this work delivers
 
 1. **Controller Mode** in the `nico-machine-a-tron` chart, with the

@@ -35,7 +35,7 @@ func TestRlaRack(t *testing.T) {
 		index:     0,
 	},
 	}
-	rpcSucc := 0
+	rpcSucc := int(flowgrpc.ManagerAccess.Data.EB.Managers.FlowGrpc.State.GrpcSucc.Load())
 	for _, tc := range tcs {
 		t.Run(tc.descr, func(t *testing.T) {
 			switch tc.descr {
@@ -43,7 +43,7 @@ func TestRlaRack(t *testing.T) {
 				rackID := uuid.NewString()
 				ctx := context.Background()
 
-				// First create the rack in mock server (setup, not counted in metrics)
+				// Creating the rack is also a completed RPC and is counted.
 				createReq := &flowv1.CreateExpectedRackRequest{
 					Rack: &flowv1.Rack{
 						Info: &flowv1.DeviceInfo{
@@ -54,6 +54,7 @@ func TestRlaRack(t *testing.T) {
 				}
 				_, createErr := grpcClient.GrpcServiceClient().CreateExpectedRack(ctx, createReq)
 				assert.Nil(t, createErr)
+				rpcSucc++
 
 				// Now test GetRackInfoByID
 				ctx, span := otel.Tracer("flowgrpc-test").Start(ctx, "FlowTest-GetRack")
@@ -64,7 +65,6 @@ func TestRlaRack(t *testing.T) {
 
 				response, err := grpcClient.GrpcServiceClient().GetRackInfoByID(ctx, getRequest)
 				span.End()
-				flowgrpc.ManagerAccess.API.FlowGrpc.UpdateGrpcClientState(err)
 				if err != nil {
 					t.Log(err.Error())
 				}
@@ -86,7 +86,6 @@ func TestRlaRack(t *testing.T) {
 				listRequest := &flowv1.GetListOfRacksRequest{}
 				resq, err := grpcClient.GrpcServiceClient().GetListOfRacks(ctx, listRequest)
 				span.End()
-				flowgrpc.ManagerAccess.API.FlowGrpc.UpdateGrpcClientState(err)
 				if err != nil {
 					t.Log(err.Error())
 				}

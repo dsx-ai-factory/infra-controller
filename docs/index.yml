@@ -419,6 +419,8 @@ navigation:
               path: development/machine-a-tron-rms-mock.md
             - page: Machine-a-tron NMX-C Mock
               path: development/machine-a-tron-nmxc-mock.md
+            - page: Machine-a-tron Scale Testing
+              path: development/machine-a-tron-scale-testing.md
             - page: Large Site Sizing and Settings
               path: development/large-site-sizing-and-settings.md
         - page: Glossary

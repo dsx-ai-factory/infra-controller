@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -163,12 +164,12 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name: "successful creation",
+			name: "successful creation with a 256-character BMC username and 255-character password",
 			requestBody: model.APIExpectedSwitchCreateRequest{
 				SiteID:             site.ID.String(),
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr("admin"),
-				DefaultBmcPassword: cutil.GetPtr("password"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("u", 256)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				SwitchSerialNumber: "SWITCH123",
 				NvOsUsername:       cutil.GetPtr("nvos-admin"),
 				NvOsPassword:       cutil.GetPtr("nvos-password"),
@@ -833,10 +834,10 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedBmcIPAddress: cutil.GetPtr("192.168.1.100"),
 		},
 		{
-			name: "BMC password is encrypted without resubmitting its username",
+			name: "255-character BMC password is encrypted without resubmitting its username",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				DefaultBmcPassword: cutil.GetPtr("bmc-patch-secret"),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("b", 255)),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -847,10 +848,10 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			expectedPaths:  []string{"bmc_password"},
 		},
 		{
-			name: "BMC username is encrypted without resubmitting its password",
+			name: "512-character BMC username is encrypted without resubmitting its password",
 			id:   testES.ID.String(),
 			requestBody: model.APIExpectedSwitchUpdateRequest{
-				DefaultBmcUsername: cutil.GetPtr("bmc-patch-admin"),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("v", 512)),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))

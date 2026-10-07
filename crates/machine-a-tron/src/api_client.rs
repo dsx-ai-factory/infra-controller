@@ -15,22 +15,23 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
+
 use base64::prelude::*;
 use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, MachineInfo};
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
-use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupRack};
 use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
-    ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch, MachinesByIdsRequest,
-    SetDynamicConfigRequest,
+    ExpectedRackGroup, ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch,
+    MachinesByIdsRequest, SetDynamicConfigRequest,
 };
 use rpc::protos::forge_api_client::ForgeApiClient;
 
@@ -72,11 +73,11 @@ impl From<ForgeApiClient> for ApiClient {
 /// One expected inventory record that machine-a-tron registers at startup.
 #[derive(Clone, Debug)]
 pub(crate) enum ExpectedRecord {
-    /// The group nico-api requires before it accepts the rack it declares.
-    RackGroup { group: ExpectedRackGroup },
     Rack {
         rack_id: RackId,
         rack_profile_id: RackProfileId,
+        /// `None` when an expected rack group already declares the rack.
+        group: Option<ExpectedRackGroup>,
     },
     Machine {
         bmc_mac_address: String,
@@ -103,7 +104,6 @@ impl ExpectedRecord {
     /// Human-readable identity used in logs and the registration summary.
     pub(crate) fn identifier(&self) -> String {
         let (kind, serial, bmc_mac_address) = match self {
-            Self::RackGroup { group } => return format!("rack group {}", group.rack_group_id),
             Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
             Self::Machine {
                 chassis_serial_number,
@@ -133,16 +133,6 @@ pub struct DpuNetworkStatusArgs<'a> {
     pub instance_id: Option<InstanceId>,
     pub interfaces: Vec<rpc::forge::InstanceInterfaceStatusObservation>,
     pub machine_config: &'a MachineConfig,
-}
-
-/// Rack IDs with member counts, as `[rack-001 (71 members), ...]`, for the
-/// message reporting an existing group that differs from the simulated one.
-fn describe_racks(racks: &[ExpectedRackGroupRack]) -> String {
-    let racks: Vec<String> = racks
-        .iter()
-        .map(|rack| format!("{} ({} members)", rack.rack_id, rack.members.len()))
-        .collect();
-    format!("[{}]", racks.join(", "))
 }
 
 impl ApiClient {
@@ -436,11 +426,14 @@ impl ApiClient {
     /// Registers one expected inventory record of any supported kind.
     pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
         match record {
-            ExpectedRecord::RackGroup { group } => self.ensure_expected_rack_group(group).await,
             ExpectedRecord::Rack {
                 rack_id,
                 rack_profile_id,
-            } => self.ensure_expected_rack(rack_id, rack_profile_id).await,
+                group,
+            } => {
+                self.ensure_expected_rack(rack_id, rack_profile_id, group)
+                    .await
+            }
             ExpectedRecord::Machine {
                 bmc_mac_address,
                 chassis_serial_number,
@@ -576,64 +569,69 @@ impl ApiClient {
             .map_err(ClientApiError::InvocationError)
     }
 
-    /// Registers the expected rack group that declares one simulated rack.
-    /// A group the API already holds is accepted when it declares the same
-    /// topology and racks, since nico-api derived the rack's profile from
-    /// those; any other difference is a configuration error, as it is for a
-    /// rack that already exists with another profile.
-    pub(crate) async fn ensure_expected_rack_group(
+    /// The expected rack group declaring each rack, for every declared rack.
+    pub(crate) async fn declared_rack_groups(
         &self,
+    ) -> ClientApiResult<BTreeMap<RackId, ExpectedRackGroup>> {
+        let groups = self
+            .0
+            .get_all_expected_rack_groups()
+            .await
+            .map_err(ClientApiError::InvocationError)?;
+        Ok(groups
+            .expected_rack_groups
+            .into_iter()
+            .flat_map(|group| {
+                let rack_ids = group
+                    .racks
+                    .iter()
+                    .filter_map(|rack| rack.rack_id.clone())
+                    .collect::<Vec<_>>();
+                rack_ids
+                    .into_iter()
+                    .map(move |rack_id| (rack_id, group.clone()))
+            })
+            .collect())
+    }
+
+    /// Declares a per-rack expected rack group. A group already present under
+    /// that ID is accepted only if it declares the rack.
+    async fn ensure_expected_rack_group(
+        &self,
+        rack_id: &RackId,
         group: ExpectedRackGroup,
     ) -> ClientApiResult<()> {
-        let rack_group_id = group.rack_group_id.clone();
-        match self
-            .0
-            .add_expected_rack_group(rpc::forge::ExpectedRackGroup::from(group.clone()))
-            .await
-        {
+        let rack_group_id = group
+            .rack_group_id
+            .as_ref()
+            .map(RackGroupId::to_string)
+            .unwrap_or_default();
+        match self.0.add_expected_rack_group(group).await {
             Ok(()) => Ok(()),
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 let existing = self
                     .0
-                    .get_expected_rack_group(ExpectedRackGroupRequest {
-                        rack_group_id: rack_group_id.to_string(),
-                    })
+                    .get_expected_rack_group(ExpectedRackGroupRequest { rack_group_id })
                     .await
                     .map_err(ClientApiError::InvocationError)?;
-                let existing = ExpectedRackGroup::try_from(existing).map_err(|error| {
-                    ClientApiError::ConfigError(format!(
-                        "Expected rack group {rack_group_id} already exists but cannot be read back: {error}"
-                    ))
-                })?;
-                if existing.topology == group.topology && existing.racks == group.racks {
-                    Ok(())
-                } else {
-                    let difference = if existing.topology != group.topology {
-                        format!(
-                            "topology {} instead of the simulated {}",
-                            existing.topology, group.topology
-                        )
-                    } else {
-                        format!(
-                            "rack membership {} instead of the simulated {}",
-                            describe_racks(&existing.racks),
-                            describe_racks(&group.racks)
-                        )
-                    };
-                    Err(ClientApiError::ConfigError(format!(
-                        "Expected rack group {rack_group_id} already exists with {difference}; delete it with `nico-admin-cli expected-rack-group delete`"
-                    )))
-                }
+                existing_group_declares_rack(&existing, rack_id)
             }
             Err(status) => Err(ClientApiError::InvocationError(status)),
         }
     }
 
+    /// Declares the rack's expected rack group when no group declares the
+    /// rack yet, then the expected rack.
     pub async fn ensure_expected_rack(
         &self,
         rack_id: RackId,
         rack_profile_id: RackProfileId,
+        group: Option<ExpectedRackGroup>,
     ) -> ClientApiResult<()> {
+        if let Some(group) = group {
+            self.ensure_expected_rack_group(&rack_id, group).await?;
+        }
+
         let expected_rack = ExpectedRack {
             rack_group_id: None,
             rack_id: Some(rack_id.clone()),
@@ -651,20 +649,99 @@ impl ApiClient {
                     })
                     .await
                     .map_err(ClientApiError::InvocationError)?;
-                if existing.rack_profile_id.as_ref() == Some(&rack_profile_id) {
-                    Ok(())
-                } else {
-                    let existing_profile_id = existing
-                        .rack_profile_id
-                        .as_ref()
-                        .map(RackProfileId::as_str)
-                        .unwrap_or("<missing>");
-                    Err(ClientApiError::ConfigError(format!(
-                        "Expected rack {rack_id} already exists with rack_profile_id {existing_profile_id}, not {rack_profile_id}"
-                    )))
-                }
+                existing_rack_has_profile(&existing, &rack_id, &rack_profile_id)
             }
             Err(status) => Err(ClientApiError::InvocationError(status)),
         }
+    }
+}
+
+/// Accepts an existing rack only if it carries the configured profile.
+pub(crate) fn existing_rack_has_profile(
+    existing: &ExpectedRack,
+    rack_id: &RackId,
+    rack_profile_id: &RackProfileId,
+) -> ClientApiResult<()> {
+    if existing.rack_profile_id.as_ref() == Some(rack_profile_id) {
+        return Ok(());
+    }
+    let existing_profile_id = existing
+        .rack_profile_id
+        .as_ref()
+        .map(RackProfileId::as_str)
+        .unwrap_or("<missing>");
+    Err(ClientApiError::ConfigError(format!(
+        "Expected rack {rack_id} already exists with rack_profile_id {existing_profile_id}, not {rack_profile_id}"
+    )))
+}
+
+/// Accepts an existing group only if it declares the rack.
+fn existing_group_declares_rack(
+    group: &ExpectedRackGroup,
+    rack_id: &RackId,
+) -> ClientApiResult<()> {
+    if group
+        .racks
+        .iter()
+        .any(|rack| rack.rack_id.as_ref() == Some(rack_id))
+    {
+        return Ok(());
+    }
+    let rack_group_id = group
+        .rack_group_id
+        .as_ref()
+        .map(RackGroupId::as_str)
+        .unwrap_or("<missing>");
+    Err(ClientApiError::ConfigError(format!(
+        "Expected rack group {rack_group_id} already exists but does not declare rack {rack_id}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Case, Outcome, check_cases};
+    use rpc::forge::ExpectedRackGroupRack;
+
+    use super::*;
+
+    fn group(rack_group_id: &str, rack_ids: &[&str]) -> ExpectedRackGroup {
+        ExpectedRackGroup {
+            rack_group_id: Some(RackGroupId::new(rack_group_id)),
+            topology: "nvl72".to_string(),
+            protocol: "NVLINK_V5".to_string(),
+            metadata: None,
+            racks: rack_ids
+                .iter()
+                .map(|rack_id| ExpectedRackGroupRack {
+                    rack_id: Some(RackId::new(*rack_id)),
+                    members: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn existing_group_must_declare_the_rack() {
+        let rack_id = RackId::new("rack-001");
+        check_cases(
+            [
+                Case {
+                    scenario: "group declares the rack",
+                    input: group("rack-001", &["rack-001"]),
+                    expect: Outcome::Yields(()),
+                },
+                Case {
+                    scenario: "group declares another rack only",
+                    input: group("rack-001", &["rack-002"]),
+                    expect: Outcome::FailsWith(
+                        "configuration error: Expected rack group rack-001 already exists but does not declare rack rack-001"
+                            .to_string(),
+                    ),
+                },
+            ],
+            |group| {
+                existing_group_declares_rack(&group, &rack_id).map_err(|error| error.to_string())
+            },
+        );
     }
 }
