@@ -156,6 +156,17 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test invalid VPC create request - empty routing profile",
+			fields: fields{
+				Name:                      "test-name",
+				SiteID:                    uuid.NewString(),
+				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+				RoutingProfile:            cutil.GetPtr(""),
+			},
+			wantErr:         true,
+			wantErrContains: "`routingProfile` must not be empty",
+		},
+		{
 			name: "test invalid VPC create request - routing profile too short",
 			fields: fields{
 				Name:                      "test-name",

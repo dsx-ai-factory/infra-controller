@@ -596,6 +596,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		verifyChildSpanner bool
 		expectNoMutation   bool
 		expectRolledBack   bool
+		omitRoutingProfile bool
 	}{
 		{
 			name: "test VPC create API endpoint rejects power resource group when DPS power management is disabled",
@@ -684,7 +685,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test VPC create API endpoint returns Core-resolved routing profile",
+			name: "test VPC create API endpoint inherits Core-resolved routing profile when omitted",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -710,6 +711,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+			omitRoutingProfile: true,
 		},
 		{
 			name: "test VPC create API endpoint rolls back when Core-resolved routing profile cannot be persisted",
@@ -974,6 +976,27 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint rejects empty routing profile before dispatch",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      "Test VPC empty routing profile",
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					RoutingProfile:            cutil.GetPtr(""),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusBadRequest,
+				respMessage: "`routingProfile` must not be empty",
+			},
+			expectNoMutation: true,
 		},
 		{
 			name: "test VPC create API endpoint accepts site-configured routing profile",
@@ -1482,7 +1505,16 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				cfg:       tt.fields.cfg,
 			}
 
-			jsonData, _ := json.Marshal(tt.args.reqData)
+			jsonData, err := json.Marshal(tt.args.reqData)
+			require.NoError(t, err)
+			if tt.omitRoutingProfile {
+				var requestBody map[string]json.RawMessage
+				err = json.Unmarshal(jsonData, &requestBody)
+				require.NoError(t, err)
+				delete(requestBody, "routingProfile")
+				jsonData, err = json.Marshal(requestBody)
+				require.NoError(t, err)
+			}
 
 			// Setup echo server/context
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
