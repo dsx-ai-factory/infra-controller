@@ -234,39 +234,102 @@ func Test_InitMetricsServer(t *testing.T) {
 		e *echo.Echo
 	}
 	tests := []struct {
-		name string
-		args args
+		name  string
+		args  args
+		hosts []string
 	}{
 		{
-			name: "test initMetricsServer success",
+			name: "bounds caller-controlled Host labels",
 			args: args{
 				e: echo.New(),
+			},
+			hosts: []string{
+				"nico-probe-a.invalid",
+				"nico-probe-b.invalid",
+				"nico-probe-a.invalid",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			registry := useIsolatedPrometheusRegistry(t)
+
 			// A tracked route, since MetricsURLSkipper only records /v2/ and /metrics.
 			tt.args.e.GET("/v2/probe", func(c echo.Context) error {
-				return c.NoContent(http.StatusOK)
+				return c.NoContent(http.StatusUnauthorized)
 			})
-
 			InitMetricsServer(tt.args.e, config.DefaultMetricsNamespace)
 
-			tt.args.e.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v2/probe", nil))
-
-			// The prefix is the published contract. An empty Subsystem would
-			// silently produce echo_requests_total instead.
-			families, err := prometheus.DefaultGatherer.Gather()
-			assert.NoError(t, err)
-
-			names := make([]string, 0, len(families))
-			for _, family := range families {
-				names = append(names, family.GetName())
+			for _, host := range tt.hosts {
+				req := httptest.NewRequest(http.MethodGet, "/v2/probe", nil)
+				req.Host = host
+				rec := httptest.NewRecorder()
+				tt.args.e.ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			}
-			assert.Contains(t, names, "nico_rest_api_requests_total")
-			assert.Contains(t, names, "nico_rest_api_request_duration_seconds")
+
+			assertBoundedMetricsHostLabels(t, registry, config.DefaultMetricsNamespace)
 		})
+	}
+}
+
+func useIsolatedPrometheusRegistry(t *testing.T) *prometheus.Registry {
+	t.Helper()
+
+	registry := prometheus.NewRegistry()
+	previousRegisterer := prometheus.DefaultRegisterer
+	previousGatherer := prometheus.DefaultGatherer
+	prometheus.DefaultRegisterer = registry
+	prometheus.DefaultGatherer = registry
+
+	t.Cleanup(func() {
+		prometheus.DefaultRegisterer = previousRegisterer
+		prometheus.DefaultGatherer = previousGatherer
+	})
+
+	return registry
+}
+
+func assertBoundedMetricsHostLabels(t *testing.T, registry *prometheus.Registry, namespace string) {
+	t.Helper()
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	prefix := namespace + "_"
+	expectedFamilies := map[string]bool{
+		prefix + "requests_total":           false,
+		prefix + "request_duration_seconds": false,
+		prefix + "request_size_bytes":       false,
+		prefix + "response_size_bytes":      false,
+	}
+
+	for _, family := range families {
+		name := family.GetName()
+		if _, ok := expectedFamilies[name]; !ok {
+			continue
+		}
+
+		expectedFamilies[name] = true
+		require.Len(t, family.GetMetric(), 1, "%s must not create a series per HTTP Host", name)
+
+		hostLabels := 0
+
+		for _, label := range family.GetMetric()[0].GetLabel() {
+			if label.GetName() != "host" {
+				continue
+			}
+
+			hostLabels++
+
+			assert.Equal(t, namespace, label.GetValue())
+		}
+
+		assert.Equal(t, 1, hostLabels, "%s must retain one bounded host label", name)
+	}
+
+	for name, found := range expectedFamilies {
+		assert.True(t, found, "expected metric family %s", name)
 	}
 }
 
