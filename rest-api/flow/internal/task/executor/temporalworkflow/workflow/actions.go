@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ type actionExecutorDefinition struct {
 	execute            actionExecutor
 	batchByMaxParallel bool
 }
+
+const firmwareStatusTargetReconciliationChangeID = "firmware-status-target-reconciliation"
 
 // actionExecutorRegistry maps action names to their executor and dispatch
 // scope. Component operations are partitioned by max_parallel; step-wide
@@ -317,6 +320,25 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 	componentStr := devicetypes.ComponentTypeToString(target.Type)
 	startTime := workflow.Now(ctx)
 	deadline := startTime.Add(pollTimeout)
+	reconcileTargets := workflow.GetVersion(
+		ctx,
+		firmwareStatusTargetReconciliationChangeID,
+		workflow.DefaultVersion,
+		workflow.Version(1),
+	) != workflow.DefaultVersion
+
+	// New executions reconcile every poll against the requested identifiers.
+	// Existing histories retain the previous per-response completion decision.
+	expected := make(map[string]struct{}, target.Len())
+	targetIDs := make([]string, 0, target.Len())
+	for _, componentID := range target.Identifiers {
+		if _, present := expected[componentID]; present {
+			continue
+		}
+		expected[componentID] = struct{}{}
+		targetIDs = append(targetIDs, componentID)
+	}
+	latestStatuses := make(map[string]operations.FirmwareUpdateStatus, len(expected))
 
 	log.Debug().
 		Str("component_type", componentStr).
@@ -326,6 +348,24 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 	for {
 		if workflow.Now(ctx).After(deadline) {
+			if reconcileTargets {
+				failedComponents := make([]string, 0)
+				unresolvedComponents := make([]string, 0)
+				for _, componentID := range targetIDs {
+					status, present := latestStatuses[componentID]
+					if !present || !status.State.IsTerminal() {
+						unresolvedComponents = append(unresolvedComponents, componentID)
+						continue
+					}
+					if status.State == operations.FirmwareUpdateStateFailed {
+						failedComponents = append(failedComponents, componentID)
+					}
+				}
+				return fmt.Errorf(
+					"%s firmware update timed out after %v; failed components: %v; unresolved components: %v",
+					componentStr, pollTimeout, failedComponents, unresolvedComponents,
+				)
+			}
 			return fmt.Errorf(
 				"%s firmware update timed out after %v", componentStr, pollTimeout,
 			)
@@ -339,7 +379,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 			log.Warn().Err(err).
 				Str("target", target.String()).
 				Msg("Failed to get firmware update status, will retry")
-		} else {
+		} else if !reconcileTargets {
 			allCompleted := true
 			var failedComponents []string
 			for componentID, status := range result.Statuses {
@@ -358,6 +398,47 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 			}
 
 			if allCompleted {
+				log.Info().
+					Str("target", target.String()).
+					Dur("duration", workflow.Now(ctx).Sub(startTime)).
+					Msg("Firmware update completed")
+				return nil
+			}
+		} else {
+			unexpectedComponents := make([]string, 0)
+			for componentID := range result.Statuses {
+				if _, requested := expected[componentID]; !requested {
+					unexpectedComponents = append(unexpectedComponents, componentID)
+				}
+			}
+			if len(unexpectedComponents) > 0 {
+				sort.Strings(unexpectedComponents)
+				log.Warn().
+					Strs("component_ids", unexpectedComponents).
+					Msg("Ignoring firmware statuses for components outside the requested target")
+			}
+
+			latestStatuses = result.Statuses
+			allTerminal := true
+			failedComponents := make([]string, 0)
+			for _, componentID := range targetIDs {
+				status, present := result.Statuses[componentID]
+				if !present || !status.State.IsTerminal() {
+					allTerminal = false
+					continue
+				}
+				if status.State == operations.FirmwareUpdateStateFailed {
+					failedComponents = append(failedComponents, componentID)
+				}
+			}
+
+			if allTerminal {
+				if len(failedComponents) > 0 {
+					return fmt.Errorf(
+						"firmware update failed for components: %v", failedComponents,
+					)
+				}
+
 				log.Info().
 					Str("target", target.String()).
 					Dur("duration", workflow.Now(ctx).Sub(startTime)).
