@@ -132,7 +132,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 			ossa, ok := existingOsImageMap[osImageIDStr]
 			if !ok {
-				slogger.Error().Str("OS Image ID", controllerOsImage.Attributes.Id.Value).Msg("OS Image Site Association does not have a record in DB, possibly created directly on Site")
+				slogger.Error().Msg("OS Image Site Association does not have a record in DB, possibly created directly on Site")
 				continue
 			}
 
@@ -165,7 +165,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 			ok = ControllerOsImageStatusMap[controllerOsImage.Status]
 			if !ok {
-				slogger.Error().Str("OS Image ID", controllerOsImage.Attributes.Id.Value).Str("OS Image Status", controllerOsImage.Status.String()).Msg("received unknown OS Image status from Site Agent")
+				slogger.Error().Str("OS Image Status", controllerOsImage.Status.String()).Msg("received unknown OS Image status from Site Agent")
 			}
 
 			switch controllerOsImage.Status {

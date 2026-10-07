@@ -287,7 +287,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 					slogger.Error().Err(err).Msg("error committing Subnet delete transaction to DB")
 				} else {
 					// Add delete lifecycle event for metrics
-					slogger.Info().Str("Subnet ID", curSubnet.ID.String()).Msg("recording subnet delete lifecycle event")
+					slogger.Info().Msg("recording subnet delete lifecycle event")
 					subnetLifecycleEvents = append(subnetLifecycleEvents, cwm.InventoryObjectLifecycleEvent{ObjectID: curSubnet.ID, Deleted: cwutil.GetPtr(time.Now())})
 				}
 			}
@@ -752,7 +752,7 @@ func (mslm ManageSubnetLifecycleMetrics) RecordSubnetStatusTransitionMetrics(ctx
 
 	siteName, err := mslm.siteNames.Get(ctx, mslm.dbSession, siteID)
 	if err != nil {
-		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		logger.Error().Err(err).Msg("failed to retrieve Site from DB")
 		return err
 	}
 

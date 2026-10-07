@@ -3419,7 +3419,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		if des.TenantID != tenant.ID {
-			logger.Warn().Str("Tenant ID", tenant.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
+			logger.Warn().Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID.String()), nil)
 		}
 
@@ -3782,7 +3782,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				}
 
 				if sshkeygroup.TenantID != ui.TenantID {
-					logger.Warn().Str("Tenant ID", ui.TenantID.String()).Str("SSH Key Group ID", skgID.String()).Msg("SSH Key Group does not belong to current Tenant")
+					logger.Warn().Str("SSH Key Group ID", skgID.String()).Msg("SSH Key Group does not belong to current Tenant")
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update Instance, SSH Key Group with ID: %s does not belong to Tenant", skgID), nil)
 				}
 

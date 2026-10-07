@@ -689,7 +689,7 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 
 	we, err := tc.ExecuteWorkflow(ctx, workflowOptions, "UpdateVPC", updateVpcRequest)
 	if err != nil {
-		logger.Error().Err(err).Str("VPC ID", vpc.ID.String()).Msg("failed to trigger workflow to update VPC Metadata")
+		logger.Error().Err(err).Msg("failed to trigger workflow to update VPC Metadata")
 	} else {
 		logger.Info().Str("Workflow ID", we.GetID()).Msg("triggered workflow to update VPC Metadata")
 	}
@@ -723,7 +723,7 @@ func (mvlm ManageVpcLifecycleMetrics) RecordVpcStatusTransitionMetrics(ctx conte
 
 	siteName, err := mvlm.siteNames.Get(ctx, mvlm.dbSession, siteID)
 	if err != nil {
-		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		logger.Error().Err(err).Msg("failed to retrieve Site from DB")
 		return err
 	}
 

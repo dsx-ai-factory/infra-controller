@@ -140,7 +140,7 @@ func (mm *ManageInstance) CreateInstancesOnSite(ctx context.Context, request *co
 		return swe.WrapErr(err)
 	}
 
-	logger.Info().Int("Count", len(request.InstanceRequests)).Dur("grpc_duration", duration).Msg("Completed batch instance allocation activity")
+	logger.Info().Dur("grpc_duration", duration).Msg("Completed batch instance allocation activity")
 	return nil
 }
 

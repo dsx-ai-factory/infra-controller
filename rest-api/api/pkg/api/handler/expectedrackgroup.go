@@ -134,7 +134,7 @@ func (cerh CreateExpectedRackGroupHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Expected Rack Group uniqueness due to DB error", nil)
 	}
 	if count > 0 {
-		logger.Warn().Str("RackGroupID", apiRequest.RackGroupID).Msg("Expected Rack Group with specified RackGroupID already exists for Site")
+		logger.Warn().Msg("Expected Rack Group with specified RackGroupID already exists for Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Rack Group with specified RackGroupID already exists for Site", validation.Errors{
 			"rackGroupId": errors.New(existingRacks[0].ID.String()),
 		})

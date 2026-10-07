@@ -137,7 +137,7 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Expected Rack uniqueness due to DB error", nil)
 	}
 	if count > 0 {
-		logger.Warn().Str("RackID", apiRequest.RackID).Msg("Expected Rack with specified RackID already exists for Site")
+		logger.Warn().Msg("Expected Rack with specified RackID already exists for Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Rack with specified RackID already exists for Site", validation.Errors{
 			"rackId": errors.New(existingRacks[0].ID.String()),
 		})
