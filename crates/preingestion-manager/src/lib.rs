@@ -1569,6 +1569,26 @@ impl PreingestionManagerStatic {
                         .check_firmware_versions_below_preingestion(db, endpoint)
                         .await;
                 }
+                // The reset sequence powers off the host and resets the BMC,
+                // which a power shelf cannot do (its PSUs can't be turned off).
+                // log the error here and wait for an operator to populate the NTP servers on this site.
+                if endpoint.report.is_power_shelf() {
+                    if self.ntp_servers.is_empty() {
+                        // Nothing will converge the clock until an operator
+                        // configures site NTP (we won't power-cycle), so surface
+                        // that while we keep polling.
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Power shelf BMC clock is out of sync and no site NTP servers are configured; it cannot be power-cycled to reset its clock. Holding preingestion until site NTP servers are configured."
+                        );
+                    } else {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Power shelf BMC clock is out of sync; holding preingestion (no power-cycle) until site NTP converges the clock"
+                        );
+                    }
+                    return Ok(false);
+                }
                 // Time is not in sync, initiate reset sequence
                 tracing::warn!(
                     bmc_ip_address = %endpoint.address,
