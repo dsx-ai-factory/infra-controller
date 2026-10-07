@@ -360,7 +360,10 @@ The count covers the enabled external Services above, including the optional
 `nico-machine-a-tron` external Services, which are disabled by default, and
 any ingress or observability VIPs installed outside this chart. Switching
 `nico-api` or `nico-pxe` to `Cluster` frees one more IP at the cost of client
-source IPs.
+source IPs, provided the Service also joins a shared group: set its
+`loadBalancerIPs` annotation to the group's IP and its sharing annotation to
+the group's value. For `nico-pxe`, an `annotations` entry with the sharing key
+replaces the built-in `nico-pxe` value.
 
 The sharing rules above are MetalLB's. For another load-balancer controller,
 confirm its sharing annotation key, whether it supports IP sharing at all, and

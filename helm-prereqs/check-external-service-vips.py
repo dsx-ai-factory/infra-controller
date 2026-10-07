@@ -130,9 +130,11 @@ def check_vips(stream, metallb_stream=None):
                     errors.append(f"{component}.{name} needs loadBalancerIPs from your MetalLB pool")
                     break
                 owner = f"{component}.{name}[{index}]"
-                # A shared VIP needs the same MetalLB sharing value on every Service that uses it.
-                groups = {str(value) for key, value in (entry or {}).items()
-                          if key in ("metallb.universe.tf/allow-shared-ip", "metallb.io/allow-shared-ip")}
+                # A shared VIP needs the same MetalLB sharing value on every Service that uses it;
+                # a blank or null value does not allow sharing.
+                groups = {str(value).strip() for key, value in (entry or {}).items()
+                          if key in ("metallb.universe.tf/allow-shared-ip", "metallb.io/allow-shared-ip")
+                          and value is not None and str(value).strip()}
                 group = groups.pop() if len(groups) == 1 else None
                 for value in vips:
                     for vip in str(value).split(","):

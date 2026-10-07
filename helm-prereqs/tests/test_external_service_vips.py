@@ -362,18 +362,21 @@ spec:
 
     def test_shared_vip_sharing_annotation(self):
         """Accept a VIP shared under one MetalLB sharing value and warn when the values differ."""
+        warning = ["VIP 192.0.2.12 is shared by more than one service; sharing requires "
+                   "the same allow-shared-ip annotation value on every service that uses it"]
         cases = [
-            ("same sharing value", "nico-shared", []),
-            ("different sharing values", "other",
-             ["VIP 192.0.2.12 is shared by more than one service; sharing requires "
-              "the same allow-shared-ip annotation value on every service that uses it"]),
+            ("same sharing value", "nico-shared", "nico-shared", []),
+            ("different sharing values", "nico-shared", "other", warning),
+            # MetalLB does not share on a blank or null value, even when both Services carry one.
+            ("blank sharing values", "", "", warning),
+            ("null sharing values", None, None, warning),
         ]
-        for name, unbound_group, expected in cases:
+        for name, dhcp_group, unbound_group, expected in cases:
             with self.subTest(name=name):
                 values = {
                     "nico-dhcp": {"externalService": {"enabled": True, "annotations": {
                         "metallb.universe.tf/loadBalancerIPs": "192.0.2.12",
-                        "metallb.universe.tf/allow-shared-ip": "nico-shared",
+                        "metallb.universe.tf/allow-shared-ip": dhcp_group,
                     }}},
                     "unbound": {"externalService": {"enabled": True, "annotations": {
                         "metallb.io/loadBalancerIPs": "192.0.2.12",
