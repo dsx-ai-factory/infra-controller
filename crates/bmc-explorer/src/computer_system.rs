@@ -31,7 +31,7 @@ use nv_redfish::computer_system::{
     Bios, BootOption, ComputerSystem, SecureBoot, SecureBootCurrentBootType,
 };
 use nv_redfish::ethernet_interface::{EthernetInterface, UefiDevicePath as EthUefiDevicePath};
-use nv_redfish::oem::nvidia::NvidiaComputerSystem;
+use nv_redfish::oem::nvidia::{NvidiaComputerSystem, NvidiaProcessor};
 use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::resource::PowerState;
 use nv_redfish::schema::computer_system::SerialConsoleProtocol;
@@ -67,6 +67,37 @@ pub(crate) struct ExploredComputerSystem<B: Bmc> {
     ethernet_interfaces: Vec<EthernetInterface<B>>,
     oem_nvidia_bluefield: Option<NvidiaComputerSystem<B>>,
     secure_boot: Option<SecureBoot<B>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VeraRubinMachinePosition {
+    pub physical_slot_number: Option<i32>,
+    pub compute_tray_index: Option<i32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VeraRubinProcessor {
+    oem: Option<VeraRubinProcessorOem>,
+}
+
+#[derive(serde::Deserialize)]
+struct VeraRubinProcessorOem {
+    #[serde(rename = "Nvidia")]
+    nvidia: Option<VeraRubinNvidiaProcessor>,
+}
+
+#[derive(serde::Deserialize)]
+struct VeraRubinNvidiaProcessor {
+    #[serde(rename = "MNNVLinkTopology")]
+    mnnvlink_topology: Option<VeraRubinNvLinkTopology>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VeraRubinNvLinkTopology {
+    tray_slot_number: Option<i64>,
+    tray_slot_index: Option<i64>,
 }
 
 impl<B: Bmc> ExploredComputerSystem<B> {
@@ -623,6 +654,76 @@ impl<B: Bmc> ExploredComputerSystem<B> {
     }
 }
 
+/// Reads the compute-tray position from the canonical Vera Rubin GPU.
+///
+/// This is best effort so an unavailable optional Processor resource cannot
+/// turn an otherwise successful hardware discovery into a failure.
+pub(crate) async fn vera_rubin_machine_position<B: Bmc>(
+    system: &ComputerSystem<B>,
+) -> Option<VeraRubinMachinePosition> {
+    let processors = match system.processors().await {
+        Ok(Some(processors)) => processors,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "Failed to fetch Vera Rubin processors for machine position"
+            );
+            return None;
+        }
+    };
+    let gpu = processors
+        .iter()
+        .find(|processor| processor.raw().id == "GPU_0")?;
+    let oem = match gpu.oem_nvidia() {
+        Ok(Some(NvidiaProcessor::Gpu(oem))) => oem,
+        Ok(Some(NvidiaProcessor::Lpu(_) | NvidiaProcessor::Generic(_)) | None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                processor_id = %gpu.raw().id,
+                "Failed to parse NVIDIA processor data for machine position"
+            );
+            return None;
+        }
+    };
+    let topology = oem.mnnv_link_topology.as_ref()?.as_ref()?;
+
+    let position = VeraRubinMachinePosition {
+        physical_slot_number: machine_position_value(topology.tray_slot_number.flatten()),
+        compute_tray_index: machine_position_value(topology.tray_slot_index.flatten()),
+    };
+    (position.physical_slot_number.is_some() || position.compute_tray_index.is_some())
+        .then_some(position)
+}
+
+fn machine_position_value(value: Option<i64>) -> Option<i32> {
+    value.and_then(|value| i32::try_from(value).ok().filter(|value| *value >= 0))
+}
+
+/// Parses the Vera Rubin GPU's raw Redfish resource into report position fields.
+pub fn parse_vera_rubin_machine_position(
+    raw: &str,
+) -> Result<Option<VeraRubinMachinePosition>, serde_json::Error> {
+    let processor = serde_json::from_str::<VeraRubinProcessor>(raw)?;
+    let Some(topology) = processor
+        .oem
+        .and_then(|oem| oem.nvidia)
+        .and_then(|nvidia| nvidia.mnnvlink_topology)
+    else {
+        return Ok(None);
+    };
+    let position = VeraRubinMachinePosition {
+        physical_slot_number: machine_position_value(topology.tray_slot_number),
+        compute_tray_index: machine_position_value(topology.tray_slot_index),
+    };
+
+    Ok(
+        (position.physical_slot_number.is_some() || position.compute_tray_index.is_some())
+            .then_some(position),
+    )
+}
+
 fn is_usable_ethernet_mac_address(
     interface_enabled: Option<bool>,
     mac_address: Option<&str>,
@@ -740,8 +841,62 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::{
-        SerialConsoleProtocol, enabled_serial_console_ssh_port, is_usable_ethernet_mac_address,
+        SerialConsoleProtocol, VeraRubinMachinePosition, enabled_serial_console_ssh_port,
+        is_usable_ethernet_mac_address, machine_position_value, parse_vera_rubin_machine_position,
     };
+
+    #[test]
+    fn machine_position_values_preserve_zero_and_reject_sentinels_and_overflow() {
+        value_scenarios!(run = machine_position_value;
+            "valid values" {
+                Some(0) => Some(0),
+                Some(26) => Some(26),
+                Some(i64::from(i32::MAX)) => Some(i32::MAX),
+            }
+            "missing or invalid values" {
+                None => None,
+                Some(-1) => None,
+                Some(i64::from(i32::MAX) + 1) => None,
+            }
+        );
+    }
+
+    #[test]
+    fn vera_rubin_machine_position_parses_valid_fields_independently() {
+        value_scenarios!(
+            run = |raw| parse_vera_rubin_machine_position(raw).unwrap();
+            "complete topology" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":26,"TraySlotIndex":16}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(26),
+                        compute_tray_index: Some(16),
+                    }),
+            }
+            "zero is a valid position" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":0,"TraySlotIndex":0}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(0),
+                        compute_tray_index: Some(0),
+                    }),
+            }
+            "one invalid field preserves the other" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":26,"TraySlotIndex":-1}}}}"#
+                    => Some(VeraRubinMachinePosition {
+                        physical_slot_number: Some(26),
+                        compute_tray_index: None,
+                    }),
+            }
+            "missing topology has no position" {
+                r#"{"Oem":{"Nvidia":{}}}"# => None,
+            }
+            "invalid fields have no position" {
+                r#"{"Oem":{"Nvidia":{"MNNVLinkTopology":{"TraySlotNumber":-1,"TraySlotIndex":2147483648}}}}"#
+                    => None,
+            }
+        );
+
+        assert!(parse_vera_rubin_machine_position("not json").is_err());
+    }
 
     #[test]
     fn extracts_only_enabled_valid_ssh_serial_console_ports() {

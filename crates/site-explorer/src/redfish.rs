@@ -377,7 +377,8 @@ impl RedfishClient {
             is_dpu,
             is_host,
             linked_chassis_ids,
-        } = fetch_system(client.as_ref()).await?;
+            vera_rubin_machine_position,
+        } = fetch_system(client.as_ref(), service_root.is_vera_rubin()).await?;
 
         let fetch_network_adapter_ports = should_fetch_network_adapter_ports(
             supports_adapter_port_mac_inventory,
@@ -467,6 +468,20 @@ impl RedfishClient {
             service_root.vendor.as_deref(),
             service_root.product.as_deref(),
         );
+        let physical_slot_number = vera_rubin_machine_position
+            .filter(|_| {
+                chassis
+                    .iter()
+                    .all(|chassis| chassis.physical_slot_number.is_none())
+            })
+            .and_then(|position| position.physical_slot_number);
+        let compute_tray_index = vera_rubin_machine_position
+            .filter(|_| {
+                chassis
+                    .iter()
+                    .all(|chassis| chassis.compute_tray_index.is_none())
+            })
+            .and_then(|position| position.compute_tray_index);
 
         Ok(EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -488,8 +503,8 @@ impl RedfishClient {
             machine_setup_status,
             secure_boot_status,
             lockdown_status,
-            physical_slot_number: None,
-            compute_tray_index: None,
+            physical_slot_number,
+            compute_tray_index,
             topology_id: None,
             revision_id: None,
             remediation_error,
@@ -948,10 +963,19 @@ struct FetchedSystem {
     is_dpu: bool,
     is_host: bool,
     linked_chassis_ids: Vec<String>,
+    vera_rubin_machine_position: Option<bmc_explorer::VeraRubinMachinePosition>,
 }
 
-async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExplorationError> {
+async fn fetch_system(
+    client: &dyn Redfish,
+    fetch_vera_rubin_machine_position: bool,
+) -> Result<FetchedSystem, EndpointExplorationError> {
     let mut system = client.get_system().await.map_err(map_redfish_error)?;
+    let vera_rubin_machine_position = if fetch_vera_rubin_machine_position {
+        fetch_vera_rubin_machine_position_from_gpu(client).await
+    } else {
+        None
+    };
     let linked_chassis_ids = system
         .links
         .as_ref()
@@ -1098,7 +1122,36 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
         is_dpu,
         is_host: !(is_dpu || is_switch || is_powershelf),
         linked_chassis_ids,
+        vera_rubin_machine_position,
     })
+}
+
+async fn fetch_vera_rubin_machine_position_from_gpu(
+    client: &dyn Redfish,
+) -> Option<bmc_explorer::VeraRubinMachinePosition> {
+    let processor_path = "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0";
+    let resource = match client.get_resource(processor_path.into()).await {
+        Ok(resource) => resource,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %processor_path,
+                "Failed to fetch Vera Rubin GPU for machine position"
+            );
+            return None;
+        }
+    };
+    match bmc_explorer::parse_vera_rubin_machine_position(resource.raw.get()) {
+        Ok(position) => position,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %processor_path,
+                "Failed to parse Vera Rubin GPU for machine position"
+            );
+            None
+        }
+    }
 }
 
 async fn fetch_ethernet_interfaces(
