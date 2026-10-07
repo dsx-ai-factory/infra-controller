@@ -1002,27 +1002,9 @@ impl SiteExplorer {
                     });
             }
 
-            for system in ep.report.systems.iter() {
-                if should_alert_power_state(system.power_state) {
-                    new_health_report
-                        .alerts
-                        .push(health_report::HealthProbeAlert {
-                            // PoweredOff alert ID covers Off/Paused/Unknown states
-                            id: "PoweredOff".parse().unwrap(),
-                            target: Some(ep.address.to_string()),
-                            in_alert_since: None,
-                            message: format!(
-                                "System \"{}\" power state is \"{:?}\"",
-                                system.id, system.power_state
-                            ),
-                            tenant_message: None,
-                            classifications: vec![
-                                health_report::HealthAlertClassification::prevent_allocations(),
-                            ],
-                        });
-                    break;
-                }
-            }
+            new_health_report
+                .alerts
+                .extend(ep.report.power_state_alert(ep.address));
 
             let expected_machine = expected_endpoint_index.matched_expected_machine(&ep.address);
 
@@ -1049,14 +1031,13 @@ impl SiteExplorer {
                 let expected_sn = &expected_machine.data.serial_number;
 
                 // Check expected vs actual serial number
-                // using system serial numbers.
+                // using the primary system serial number.
                 // If nothing found, try again with chassis
                 // serial numbers.
                 if !ep
                     .report
-                    .systems
-                    .iter()
-                    .any(|s| s.check_serial_number(expected_sn) || s.check_sku(expected_sn))
+                    .primary_system()
+                    .is_some_and(|s| s.check_serial_number(expected_sn) || s.check_sku(expected_sn))
                     && !ep.report.chassis.iter().any(|s| match s.serial_number {
                         Some(ref sn) => sn == expected_sn,
                         _ => false,
@@ -4909,18 +4890,6 @@ fn pause_ingestion_and_poweron(
     false
 }
 
-/// Returns true if the power state should trigger a PoweredOff health alert.
-///
-/// We alert on `Off`, `Paused`, and `Unknown` states, but NOT on transitional
-/// states (`PoweringOn`, `PoweringOff`) because the BMC is still responding
-/// during graceful power reset (warm reboot)
-fn should_alert_power_state(power_state: PowerState) -> bool {
-    !matches!(
-        power_state,
-        PowerState::On | PowerState::PoweringOn | PowerState::PoweringOff
-    )
-}
-
 fn site_explorer_health_report_needs_update(
     previous_health_report: Option<&health_report::HealthReport>,
     new_health_report: &health_report::HealthReport,
@@ -6687,20 +6656,6 @@ mod tests {
                 (outcome, order)
             },
         );
-    }
-
-    #[test]
-    fn test_should_alert_power_state() {
-        // Should NOT alert on On or transitional states (PoweringOn/PoweringOff)
-        // because the BMC is still responding during graceful power reset
-        assert!(!should_alert_power_state(PowerState::On));
-        assert!(!should_alert_power_state(PowerState::PoweringOn));
-        assert!(!should_alert_power_state(PowerState::PoweringOff));
-
-        // Should alert on Off, Paused, and Unknown states
-        assert!(should_alert_power_state(PowerState::Off));
-        assert!(should_alert_power_state(PowerState::Paused));
-        assert!(should_alert_power_state(PowerState::Unknown));
     }
 
     #[test]

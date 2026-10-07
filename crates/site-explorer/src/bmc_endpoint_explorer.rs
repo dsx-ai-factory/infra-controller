@@ -1583,14 +1583,22 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         );
     }
 
-    for (s1, s2) in report1.systems.iter().zip(report2.systems.iter()) {
-        if s1.id != s2.id {
-            tracing::warn!(
-                libredfish_system_id = ?s1.id,
-                nvredfish_system_id = ?s2.id,
-                "system IDs are not equal"
-            );
-        } else {
+    if report1.primary_system().map(|system| &system.id)
+        != report2.primary_system().map(|system| &system.id)
+    {
+        tracing::warn!(
+            libredfish_primary_system = ?report1.primary_system().map(|system| &system.id),
+            nvredfish_primary_system = ?report2.primary_system().map(|system| &system.id),
+            "primary system IDs are not equal"
+        );
+    }
+    let second_systems = report2
+        .systems
+        .iter()
+        .map(|system| (&system.id, system))
+        .collect::<HashMap<_, _>>();
+    for s1 in &report1.systems {
+        if let Some(s2) = second_systems.get(&s1.id) {
             if s1.ethernet_interfaces != s2.ethernet_interfaces {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1705,6 +1713,23 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                 );
             }
 
+            if s1.bios_version != s2.bios_version {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_bios_version = ?s1.bios_version,
+                    nvredfish_bios_version = ?s2.bios_version,
+                    "system BIOS versions are not equal");
+            }
+            if report1
+                .primary_system()
+                .is_none_or(|primary| primary.id != s1.id)
+                && s1.serial_console_ssh_port != s2.serial_console_ssh_port
+            {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_serial_console_ssh_port = ?s1.serial_console_ssh_port,
+                    nvredfish_serial_console_ssh_port = ?s2.serial_console_ssh_port,
+                    "system serial-console ports are not equal");
+            }
+
             if s1.boot_order != s2.boot_order {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1713,6 +1738,8 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                     "system boot orders are not equal"
                 );
             }
+        } else {
+            tracing::warn!(system_id = %s1.id, "system is missing from the second report");
         }
     }
 

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chassis::ExploredChassisCollection;
-use computer_system::ExploredComputerSystem;
+use computer_system::{ComputerSystemExt, ExploredComputerSystem};
 pub use computer_system::{VeraRubinMachinePosition, parse_vera_rubin_machine_position};
 pub use error::Error;
 use inventories::ExploredInventories;
@@ -180,13 +180,25 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         None
     };
 
-    let mut systems_iter = systems.into_iter();
-
-    let first_system = systems_iter
-        .next()
-        .ok_or_else(Error::bmc_not_provided("at least one computer system"))?;
-    let other_system_with_bios = systems_iter.find(|system| system.raw().bios.is_some());
-    let system = other_system_with_bios.unwrap_or(first_system);
+    let primary_index = systems
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, system)| system.raw().bios.is_some())
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    if systems.is_empty() {
+        return Err(Error::bmc_not_provided("at least one computer system")());
+    }
+    let mut systems = systems;
+    let system = systems.swap_remove(primary_index);
+    let additional_systems = systems
+        .into_iter()
+        .filter(|other| other.raw().id != system.raw().id)
+        .sorted_by(|left, right| left.raw().id.cmp(&right.raw().id))
+        .dedup_by(|left, right| left.raw().id == right.raw().id)
+        .map(|other| other.to_model())
+        .collect::<Vec<_>>();
 
     let manager = root
         .managers()
@@ -365,7 +377,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         last_exploration_latency: None,
         machine_id: None,
         managers: vec![manager],
-        systems: vec![system],
+        systems: std::iter::once(system).chain(additional_systems).collect(),
         chassis,
         service,
         component_integrities: component_integrities.entries,

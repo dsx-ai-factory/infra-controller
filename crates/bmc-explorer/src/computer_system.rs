@@ -100,6 +100,63 @@ struct VeraRubinNvLinkTopology {
     tray_slot_index: Option<i64>,
 }
 
+/// Converts a Redfish system resource without fetching linked inventory.
+pub(super) trait ComputerSystemExt {
+    fn to_model(&self) -> ModelComputerSystem;
+}
+
+impl<B: Bmc> ComputerSystemExt for ComputerSystem<B> {
+    fn to_model(&self) -> ModelComputerSystem {
+        let hw_id = self.hardware_id();
+        let power_state = self
+            .power_state()
+            .and_then(|state| match state {
+                PowerState::On => Some(ModelPowerState::On),
+                PowerState::Off => Some(ModelPowerState::Off),
+                PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
+                PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
+                PowerState::Paused => Some(ModelPowerState::Paused),
+                PowerState::Hibernating => Some(ModelPowerState::Hibernating),
+                PowerState::Sleeping => Some(ModelPowerState::Sleeping),
+                PowerState::UnsupportedValue => None,
+            })
+            .unwrap_or_default();
+        let serial_console_ssh_port = self
+            .raw()
+            .serial_console
+            .as_ref()
+            .and_then(|console| console.ssh.as_ref())
+            .map(enabled_serial_console_ssh_port)
+            .transpose()
+            .unwrap_or_else(|invalid_port| {
+                tracing::warn!(system_id = %self.raw().id, serial_console_ssh_port = invalid_port,
+                    "Ignoring invalid SSH serial-console port reported by Redfish");
+                None
+            })
+            .flatten();
+
+        ModelComputerSystem {
+            id: self.raw().id.clone(),
+            manufacturer: hw_id.manufacturer.map(|value| value.to_string()),
+            model: hw_id.model.map(|value| value.to_string()),
+            serial_number: hw_id
+                .serial_number
+                .map(|value| value.into_inner().trim().to_string()),
+            sku: self.sku().map(|value| value.to_string()),
+            power_state,
+            bios_version: self
+                .raw()
+                .bios_version
+                .clone()
+                .flatten()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            serial_console_ssh_port,
+            ..Default::default()
+        }
+    }
+}
+
 impl<B: Bmc> ExploredComputerSystem<B> {
     pub(crate) async fn explore(
         system: ComputerSystem<B>,
@@ -227,19 +284,24 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             }
         }
     }
-    pub(crate) fn to_model(
+    /// Converts the primary system with its fully explored inventory and host fallbacks.
+    pub(super) fn to_model(
         &self,
         hw_type: Option<hw::HwType>,
         chassis: &ExploredChassisCollection<B>,
         pcie_devices: &[PcieDevice<B>],
     ) -> Result<ModelComputerSystem, Error<B>> {
-        let hw_id = self.system.hardware_id();
+        let system_model = self.system.to_model();
         let is_dpu = hw_type == Some(hw::HwType::Bluefield);
         let ethernet_interfaces = self.ethernet_interfaces(hw_type)?;
 
         let mut base_mac = None;
         let mut nic_mode = None;
-        let mut serial_number = hw_id.serial_number.map(|v| v.into_inner());
+        let mut serial_number = self
+            .system
+            .hardware_id()
+            .serial_number
+            .map(|value| value.into_inner());
         if is_dpu {
             // This part processes dpu case and do two things such as
             // 1. update system serial_number in case it is empty using chassis serial_number
@@ -311,54 +373,10 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         let power_state = chassis
             .liteon_power_state()
             .map(|v| v.to_model())
-            .unwrap_or_else(|| {
-                self.system
-                    .power_state()
-                    .and_then(|v| match v {
-                        PowerState::On => Some(ModelPowerState::On),
-                        PowerState::Off => Some(ModelPowerState::Off),
-                        PowerState::PoweringOn => Some(ModelPowerState::PoweringOn),
-                        PowerState::PoweringOff => Some(ModelPowerState::PoweringOff),
-                        PowerState::Paused => Some(ModelPowerState::Paused),
-                        PowerState::Hibernating => Some(ModelPowerState::Hibernating),
-                        PowerState::Sleeping => Some(ModelPowerState::Sleeping),
-                        PowerState::UnsupportedValue => None,
-                    })
-                    .unwrap_or_default()
-            });
-
-        let bios_version = self
-            .system
-            .raw()
-            .bios_version
-            .clone()
-            .flatten()
-            .map(|version| version.trim().to_string())
-            .filter(|version| !version.is_empty());
-
-        let serial_console_ssh_port = self
-            .system
-            .raw()
-            .serial_console
-            .as_ref()
-            .and_then(|serial_console| serial_console.ssh.as_ref())
-            .map(enabled_serial_console_ssh_port)
-            .transpose()
-            .unwrap_or_else(|invalid_port| {
-                tracing::warn!(
-                    system_id = %self.system.raw().id,
-                    serial_console_ssh_port = invalid_port,
-                    "Ignoring invalid SSH serial-console port reported by Redfish",
-                );
-                None
-            })
-            .flatten();
+            .unwrap_or(system_model.power_state);
 
         Ok(ModelComputerSystem {
             ethernet_interfaces,
-            id: self.system.raw().id.clone(),
-            manufacturer: hw_id.manufacturer.map(|v| v.to_string()),
-            model: hw_id.model.map(|v| v.to_string()),
             serial_number: serial_number.map(|v| v.to_string()),
             attributes: ComputerSystemAttributes {
                 nic_mode,
@@ -367,10 +385,8 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             pcie_devices,
             base_mac,
             power_state,
-            sku: self.system.sku().map(|v| v.to_string()),
             boot_order,
-            bios_version,
-            serial_console_ssh_port,
+            ..system_model
         })
     }
 
@@ -828,7 +844,7 @@ fn pcie_device_to_model<B: Bmc>(
 fn enabled_serial_console_ssh_port(ssh: &SerialConsoleProtocol) -> Result<Option<u16>, i64> {
     ssh.service_enabled
         .filter(|enabled| *enabled)
-        .and_then(|_| ssh.port.flatten())
+        .and(ssh.port.flatten())
         .map(|port| {
             let converted = u16::try_from(port).map_err(|_| port)?;
             (converted != 0).then_some(converted).ok_or(port)

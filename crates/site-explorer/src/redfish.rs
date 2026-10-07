@@ -30,9 +30,11 @@ use carbide_redfish::libredfish::{
 };
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use libredfish::model::ODataId;
 use libredfish::model::oem::nvidia_dpu::NicMode;
-use libredfish::model::service_root::RedfishVendor;
+use libredfish::model::service_root::{RedfishVendor, ServiceRoot};
+use libredfish::model::{
+    ComputerSystem as LibredfishComputerSystem, ODataId, SerialConsoleConnectionType,
+};
 use libredfish::{Redfish, RedfishError};
 use mac_address::MacAddress;
 use model::errors::{ErrorCode, ErrorSubsystem, OperatorError, OperatorErrorSchema};
@@ -380,6 +382,9 @@ impl RedfishClient {
             vera_rubin_machine_position,
         } = fetch_system(client.as_ref(), service_root.is_vera_rubin()).await?;
 
+        let additional_systems =
+            fetch_additional_systems(client.as_ref(), &service_root, &system.id).await;
+
         let fetch_network_adapter_ports = should_fetch_network_adapter_ports(
             supports_adapter_port_mac_inventory,
             is_host,
@@ -489,7 +494,7 @@ impl RedfishClient {
             last_exploration_latency: None,
             machine_id: None,
             managers: vec![manager],
-            systems: vec![system],
+            systems: std::iter::once(system).chain(additional_systems).collect(),
             chassis,
             service,
             component_integrities: component_integrities.entries,
@@ -956,6 +961,80 @@ async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
         id: manager.id,
         ipmi_port: None,
     })
+}
+
+fn additional_system_to_model(system: LibredfishComputerSystem) -> ComputerSystem {
+    let serial_console_ssh_port = system
+        .serial_console
+        .map(|console| enabled_serial_console_ssh_port(&console.ssh))
+        .transpose()
+        .unwrap_or_else(|invalid_port| {
+            tracing::warn!(system_id = %system.id, serial_console_ssh_port = invalid_port,
+                "Ignoring invalid SSH serial-console port reported by Redfish");
+            None
+        })
+        .flatten();
+    ComputerSystem {
+        id: system.id,
+        manufacturer: system.manufacturer,
+        model: system.model,
+        serial_number: system.serial_number.map(|value| value.trim().to_string()),
+        sku: system.sku,
+        power_state: system.power_state.into_model(),
+        bios_version: system
+            .bios_version
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        serial_console_ssh_port,
+        ..Default::default()
+    }
+}
+
+fn enabled_serial_console_ssh_port(
+    ssh: &SerialConsoleConnectionType,
+) -> Result<Option<u16>, usize> {
+    ssh.service_enabled
+        .then_some(ssh.port)
+        .flatten()
+        .map(|port| {
+            let converted = u16::try_from(port).map_err(|_| port)?;
+            (converted != 0).then_some(converted).ok_or(port)
+        })
+        .transpose()
+}
+
+/// Collects non-primary systems from the expanded Systems collection.
+/// Only resource fields are retained; linked inventory is not fetched.
+/// Collection failures leave the primary system report intact.
+async fn fetch_additional_systems(
+    client: &dyn Redfish,
+    root: &ServiceRoot,
+    primary_system_id: &str,
+) -> Vec<ComputerSystem> {
+    let Some(collection_uri) = root.systems.as_ref() else {
+        return Vec::new();
+    };
+    let collection = match client
+        .get_collection(collection_uri.clone())
+        .await
+        .and_then(|collection| collection.try_get::<LibredfishComputerSystem>())
+    {
+        Ok(collection) => collection,
+        Err(error) => {
+            tracing::warn!(%error, resource_uri = %collection_uri.odata_id,
+                "Failed to fetch additional Systems collection");
+            return Vec::new();
+        }
+    };
+    let mut systems: Vec<_> = collection
+        .members
+        .into_iter()
+        .filter(|system| system.id != primary_system_id)
+        .map(additional_system_to_model)
+        .collect();
+    systems.sort_by(|left, right| left.id.cmp(&right.id));
+    systems.dedup_by(|left, right| left.id == right.id);
+    systems
 }
 
 struct FetchedSystem {
@@ -1967,13 +2046,96 @@ mod tests {
     use libredfish::model::service_root::RedfishVendor;
     use mac_address::MacAddress;
     use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
+    use model::site_explorer::PowerState;
+    use serde_json::json;
 
     use super::{
-        BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, EndpointExplorationError,
-        EstablishedBmc, MachineSetupStatus, ProxiedPools, RedfishClient,
+        BmcAccess, BmcCredentialType, BootInterfaceTarget, ComputerSystem, CredentialKey,
+        EndpointExplorationError, EstablishedBmc, LibredfishComputerSystem, MachineSetupStatus,
+        ProxiedPools, RedfishClient, additional_system_to_model, fetch_additional_systems,
         fetch_machine_setup_status, nv_bmc_explore_config, record_evaluated_boot_interface,
         should_fetch_network_adapter_ports,
     };
+
+    #[test]
+    fn resource_fields_are_normalized_without_linked_inventory() {
+        let raw = json!({
+            "@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
+            "Id": "HGX_Baseboard_0", "Manufacturer": "NVIDIA", "Model": "VR NVL",
+            "SerialNumber": " board-serial ", "SKU": "board-sku", "PowerState": "Off",
+            "BiosVersion": " 1.2 ",
+            "SerialConsole": {"SSH": {"ServiceEnabled": true, "Port": 2200}, "IPMI": {"ServiceEnabled": false}},
+            "EthernetInterfaces": {"@odata.id": "/interfaces"},
+            "Processors": {"@odata.id": "/processors"},
+            "Boot": {"BootOptions": {"@odata.id": "/boot-options"}}
+        });
+        let system = additional_system_to_model(
+            serde_json::from_value::<LibredfishComputerSystem>(raw).unwrap(),
+        );
+        assert_eq!(
+            system,
+            ComputerSystem {
+                id: "HGX_Baseboard_0".into(),
+                manufacturer: Some("NVIDIA".into()),
+                model: Some("VR NVL".into()),
+                serial_number: Some("board-serial".into()),
+                sku: Some("board-sku".into()),
+                power_state: PowerState::Off,
+                bios_version: Some("1.2".into()),
+                serial_console_ssh_port: Some(2200),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn expanded_systems_keep_good_members_and_skip_primary_and_duplicates() {
+        let sim = Arc::new(RedfishSim::default());
+        sim.set_systems_collection_uri("/systems");
+        sim.set_resource("/systems", json!({
+            "@odata.id": "/systems", "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
+            "Name": "Systems", "Members@odata.count": 5,
+            "Members": [
+                {"@odata.id": "/primary", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "System_0"},
+                {"@odata.id": "/z", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "Z", "SerialNumber": "z-serial"},
+                {"@odata.id": "/broken", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": 42},
+                {"@odata.id": "/z", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "Z", "SerialNumber": "z-serial"},
+                {"@odata.id": "/a", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "A"}
+            ]
+        }));
+        let client = sim
+            .create_client("localhost", Some(443), RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        let root = client.get_service_root().await.unwrap();
+        let systems = fetch_additional_systems(client.as_ref(), &root, "System_0").await;
+        assert_eq!(
+            systems
+                .iter()
+                .map(|system| system.id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "Z"]
+        );
+        assert_eq!(sim.resource_requests(), ["/systems"]);
+        assert_eq!(systems[1].serial_number.as_deref(), Some("z-serial"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_collection_has_no_additional_inventory() {
+        let sim = Arc::new(RedfishSim::default());
+        sim.set_systems_collection_uri("/unavailable");
+        sim.fail_resource("/unavailable");
+        let client = sim
+            .create_client("localhost", Some(443), RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        let root = client.get_service_root().await.unwrap();
+        assert!(
+            fetch_additional_systems(client.as_ref(), &root, "System_0")
+                .await
+                .is_empty()
+        );
+    }
 
     fn test_addr() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443)
@@ -1983,6 +2145,102 @@ mod tests {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
         RedfishClient::new(sim, nv_pool, None)
+    }
+
+    #[tokio::test]
+    async fn both_backends_preserve_additional_system_resource_fields() {
+        let bmc = bmc_mock::test_support::nvidia_dgx_vr_host_bmc().await;
+        let raw_systems = bmc
+            .service_root
+            .systems()
+            .await
+            .unwrap()
+            .unwrap()
+            .members()
+            .await
+            .unwrap();
+        let hgx = raw_systems
+            .iter()
+            .find(|system| system.raw().id == "HGX_Baseboard_0")
+            .unwrap();
+        // HGX has no power-control callbacks, so its resource omits PowerState.
+        // libredfish defaults a missing PowerState but rejects an explicit null.
+        assert!(hgx.power_state().is_none());
+        let hardware = hgx.hardware_id();
+        let hgx_resource = serde_json::json!({
+            "@odata.id": "/redfish/v1/Systems/HGX_Baseboard_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem",
+            "Id": hgx.raw().id,
+            "Manufacturer": hardware.manufacturer.map(|value| value.to_string()),
+            "Model": hardware.model.map(|value| value.to_string()),
+            "SerialNumber": hardware.serial_number.map(|value| value.into_inner()),
+            "SKU": hgx.sku().map(|value| value.to_string()),
+            "BiosVersion": hgx.raw().bios_version.clone().flatten(),
+        });
+        let nv_report = bmc_explorer::nv_generate_exploration_report(
+            bmc.bmc.as_ref(),
+            bmc.service_root,
+            &bmc_explorer::Config {
+                boot_interface_mac: None,
+                error_classifier: &|_| None,
+                retry_timeout: std::time::Duration::ZERO,
+            },
+        )
+        .await
+        .unwrap();
+        let sim = Arc::new(RedfishSim::default());
+        sim.set_system_id("System_0");
+        sim.set_service_root_vendor(Some("NVIDIA".into()));
+        sim.set_service_root_product(Some("VR NVL72".into()));
+        sim.set_systems_collection_uri("/redfish/v1/Systems");
+        sim.set_resource(
+            "/redfish/v1/Systems",
+            serde_json::json!({"@odata.id": "/redfish/v1/Systems", "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection", "Name": "Systems", "Members@odata.count": 2, "Members": [
+                hgx_resource,
+                {"@odata.id": "/redfish/v1/Systems/System_0", "@odata.type": "#ComputerSystem.v1_20_0.ComputerSystem", "Id": "System_0"}
+            ]}),
+        );
+        let redfish = build_redfish_client(sim.clone());
+        let report = redfish
+            .generate_exploration_report(
+                test_addr(),
+                BmcAccess::Direct(Credentials::UsernamePassword {
+                    username: "root".into(),
+                    password: "password".into(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .systems
+                .iter()
+                .map(|system| system.id.as_str())
+                .collect::<Vec<_>>(),
+            ["System_0", "HGX_Baseboard_0"]
+        );
+        assert_eq!(report.systems[1], nv_report.systems[1]);
+        assert!(
+            !sim.resource_requests()
+                .iter()
+                .any(|uri| uri == "/redfish/v1/Systems/System_0")
+        );
+        sim.fail_resource("/redfish/v1/Systems");
+        let refreshed = redfish
+            .generate_exploration_report(
+                test_addr(),
+                BmcAccess::Direct(Credentials::UsernamePassword {
+                    username: "root".into(),
+                    password: "password".into(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.systems.len(), 1);
+        assert_eq!(refreshed.systems[0], report.systems[0]);
     }
 
     #[tokio::test]
