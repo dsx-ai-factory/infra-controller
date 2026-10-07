@@ -38,6 +38,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioExecutor;
 use ipnetwork::IpNetwork;
+use prost::Message;
 use rpc::forge::{
     DpuInfo, FlatInterfaceNetworkSecurityGroupConfig, InterfaceAssociationType, InterfaceType,
 };
@@ -55,7 +56,13 @@ struct State {
     num_health_reports: AtomicUsize,
     num_get_dpu_ips: AtomicUsize,
     virtualization_type: VpcVirtualizationType,
+    loopback_ip_override: Option<&'static str>,
+    last_network_status: Option<rpc::forge::DpuNetworkStatus>,
+    reject_dhcp_update: bool,
+    dhcp_updates: Vec<(bool, Bytes)>,
 }
+
+const DHCP_GATE_CONFIG_VERSION: &str = "V1-T1748645613333257";
 
 #[derive(Default, Debug)]
 struct TestOut {
@@ -81,6 +88,224 @@ async fn test_etv_nvue() -> eyre::Result<()> {
 async fn test_fnn_l3() -> eyre::Result<()> {
     let expected = include_str!("../../templates/tests/full_nvue_startup_fnn_l3.yaml.expected");
     test_nvue_generic(VpcVirtualizationType::Fnn, expected).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> eyre::Result<()> {
+    let Ok(repo_root) =
+        std::env::var("REPO_ROOT").or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
+    else {
+        tracing::warn!(
+            "Either REPO_ROOT or CONTAINER_REPO_ROOT need to be set to run this test. Skipping."
+        );
+        return Ok(());
+    };
+    let repo_root = std::path::PathBuf::from(repo_root);
+    if std::env::var_os("DHCP_RECOVERY_TEST_CHILD").is_none() {
+        // Set the child's environment before its runtime starts. Calling the
+        // shared environment fixture here would race unrelated test threads.
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(repo_root.join("dev/bin"))
+                .chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "tests::full::dhcp_unavailability_retries_the_same_ipv6_network_configuration",
+                "--nocapture",
+            ])
+            .env("DHCP_RECOVERY_TEST_CHILD", "true")
+            .env("DISABLE_TLS_ENFORCEMENT", "true")
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("NO_DPU_CONTAINERS", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        // Each of the two status waits allows 60 seconds; also allow startup
+        // and cleanup without leaving a stuck child behind.
+        let output = tokio::time::timeout(Duration::from_secs(150), command.output()).await??;
+        eyre::ensure!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "DHCP recovery test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    let state = Arc::new(Mutex::new(State {
+        virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
+        loopback_ip_override: Some("2001:db8::1"),
+        reject_dhcp_update: true,
+        ..Default::default()
+    }));
+    let (addr, server) = common::run_grpc_server(mock_core(state.clone())).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let dhcp_addr = listener.local_addr()?;
+    let dhcp_app = Router::new()
+        .route(
+            "/dhcp_server_control.DhcpServerControl/UpdateAndReloadConfig",
+            post(handle_dhcp_update),
+        )
+        .route(
+            "/dhcp_server_control.DhcpServerControl/GetDhcpTimestamps",
+            post(|| async { common::respond(()) }),
+        )
+        .with_state(state.clone());
+    let dhcp_server = tokio::spawn(async move { axum::serve(listener, dhcp_app).await });
+    let result = async {
+        let directory = tempfile::tempdir()?;
+        let config_file = tempfile::NamedTempFile::new()?;
+        let mut options =
+            common::setup_agent_run_options(&addr, &directory, &config_file, false, &repo_root)?;
+        let Some(crate::AgentCommand::Run(run)) = options.cmd.as_mut() else {
+            eyre::bail!("test fixture did not configure an agent run");
+        };
+        run.dhcp_grpc_server = Some(format!("http://{dhcp_addr}"));
+        fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
+        let startup_path = directory.path().join(crate::nvue::PATH);
+        const PREVIOUS_NETWORK: &str = "previous network configuration\n";
+        fs::write(&startup_path, PREVIOUS_NETWORK)?;
+
+        let agent = tokio::spawn(crate::start(options));
+        let result = async {
+            // The configuration can render successfully. Make the DHCP control
+            // endpoint unavailable, so the unchanged NVUE file proves the gate.
+            let rejected = wait_for_network_status(&state, |status| {
+                status.network_config_error.as_deref().is_some_and(|error| {
+                    error.contains("IPv6-only network update is waiting for DHCP")
+                })
+            })
+            .await?;
+            eyre::ensure!(
+                rejected
+                    .network_config_error
+                    .as_deref()
+                    .is_some_and(|error| { error.contains("injected DHCP rejection") }),
+                "unexpected DHCP rejection: {rejected:?}"
+            );
+            eyre::ensure!(
+                rejected.network_config_version.is_none()
+                    && rejected.instance_network_config_version.is_none(),
+                "rejected configuration was acknowledged: {rejected:?}"
+            );
+            eyre::ensure!(
+                fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
+                "DHCP rejection overwrote the existing network configuration"
+            );
+
+            // Clear the transient failure without changing the desired network
+            // or its versions. The next tick must retry the same DHCP request.
+            state.lock().await.reject_dhcp_update = false;
+            let applied = wait_for_network_status(&state, |status| {
+                status.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
+                    && status.instance_network_config_version.as_deref()
+                        == Some(DHCP_GATE_CONFIG_VERSION)
+            })
+            .await?;
+            eyre::ensure!(
+                applied.network_config_error.is_none(),
+                "acknowledged configuration still reports an error: {applied:?}"
+            );
+            let startup = fs::read_to_string(&startup_path)?;
+            eyre::ensure!(
+                startup != PREVIOUS_NETWORK,
+                "supported update did not replace the startup file"
+            );
+            serde_yaml::from_str::<Vec<serde_yaml::Value>>(&startup)?;
+            let state = state.lock().await;
+            let rejected_request = state
+                .dhcp_updates
+                .iter()
+                .find(|(rejected, _)| *rejected)
+                .expect("DHCP received a rejected update");
+            let accepted_request = state
+                .dhcp_updates
+                .iter()
+                .find(|(rejected, _)| !rejected)
+                .expect("DHCP received an accepted retry");
+            assert_eq!(rejected_request.1, accepted_request.1);
+            Ok::<_, eyre::Report>(())
+        }
+        .await;
+        agent.abort();
+        match agent.await {
+            Ok(Err(error)) => {
+                return Err(error).wrap_err("agent exited before reconciliation completed");
+            }
+            Err(error) if !error.is_cancelled() => return Err(error).wrap_err("agent task failed"),
+            _ => {}
+        }
+        result
+    }
+    .await;
+    dhcp_server.abort();
+    server.abort();
+    match dhcp_server.await {
+        Ok(result) => result.wrap_err("mock DHCP control server exited")?,
+        Err(error) if !error.is_cancelled() => return Err(error).wrap_err("mock DHCP task failed"),
+        _ => {}
+    }
+    if let Err(error) = server.await
+        && !error.is_cancelled()
+    {
+        return Err(error).wrap_err("mock core task failed");
+    }
+    result
+}
+
+async fn handle_dhcp_update(
+    AxumState(state): AxumState<Arc<Mutex<State>>>,
+    body: Bytes,
+) -> axum::response::Response {
+    let mut state = state.lock().await;
+    let rejected = state.reject_dhcp_update;
+    // Compare the complete request bytes after recovery; only the mock's
+    // availability changes, not the DHCP configuration the agent submits.
+    state.dhcp_updates.push((rejected, body));
+    if rejected {
+        return (
+            [
+                ("content-type", "application/grpc"),
+                ("grpc-status", "14"),
+                ("grpc-message", "injected%20DHCP%20rejection"),
+            ],
+            "",
+        )
+            .into_response();
+    }
+    common::respond(()).into_response()
+}
+
+async fn wait_for_network_status(
+    state: &Arc<Mutex<State>>,
+    matches: impl Fn(&rpc::forge::DpuNetworkStatus) -> bool,
+) -> eyre::Result<rpc::forge::DpuNetworkStatus> {
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = state.lock().await.last_network_status.clone();
+            if let Some(status) = status
+                && matches(&status)
+            {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let state = state.lock().await;
+            Err(error).wrap_err(format!(
+                "timed out waiting for expected DPU network status; last report: {:?}",
+                state.last_network_status
+            ))
+        }
+    }
 }
 
 // All of the new tests are leveraging nvue for configs, regardless
@@ -297,47 +522,7 @@ async fn run_common_parts(
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(Default::default()));
     state.lock().await.virtualization_type = virtualization_type;
 
-    // Simulate a local carbide-api by initializing a new axum::Router that exposes the
-    // same gRPC endpoints that Carbide API would (and, in this case, the exact gRPC
-    // endpoints that our local agent that we're spawning will need to make calls to).
-    // A `state` is provided to the Router so that each mocked call (e.g. how `handle_netconf
-    // is leveraged for `/forge.Forge/GetManagedHostNetworkConfig` calls) can have
-    // additional bits of context (just like carbide-api would).
-    let app = Router::new()
-        .route("/up", get(handle_up))
-        .route(
-            ::rpc::service_path!("DiscoverMachine"),
-            post(handle_discover),
-        )
-        .route(
-            ::rpc::service_path!("GetManagedHostNetworkConfig"),
-            post(handle_netconf),
-        )
-        .route(
-            ::rpc::service_path!("RecordDpuNetworkStatus"),
-            post(handle_record_netstat),
-        )
-        .route(
-            ::rpc::service_path!("DpuAgentUpgradeCheck"),
-            post(handle_dpu_agent_upgrade_check),
-        )
-        .route(
-            ::rpc::service_path!("UpdateAgentReportedInventory"),
-            post(handle_update_agent_reported_inventory),
-        )
-        .route(
-            ::rpc::service_path!("GetDpuInfoList"),
-            post(handle_get_dpu_info_list),
-        )
-        .route(
-            ::rpc::service_path!("FindInterfaces"),
-            post(handle_find_interfaces),
-        )
-        // ForgeApiClient needs a working Version route for connection retrying
-        .route(::rpc::service_path!("Version"), post(handle_version))
-        .fallback(handler)
-        .with_state(state.clone());
-    let (addr, join_handle) = common::run_grpc_server(app).await?;
+    let (addr, join_handle) = common::run_grpc_server(mock_core(state.clone())).await?;
 
     let td: tempfile::TempDir = tempfile::tempdir()?;
     let agent_config_file = tempfile::NamedTempFile::new()?;
@@ -401,6 +586,43 @@ async fn run_common_parts(
     })
 }
 
+fn mock_core(state: Arc<Mutex<State>>) -> Router {
+    Router::new()
+        .route("/up", get(handle_up))
+        .route(
+            ::rpc::service_path!("DiscoverMachine"),
+            post(handle_discover),
+        )
+        .route(
+            ::rpc::service_path!("GetManagedHostNetworkConfig"),
+            post(handle_netconf),
+        )
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatus"),
+            post(handle_record_netstat),
+        )
+        .route(
+            ::rpc::service_path!("DpuAgentUpgradeCheck"),
+            post(handle_dpu_agent_upgrade_check),
+        )
+        .route(
+            ::rpc::service_path!("UpdateAgentReportedInventory"),
+            post(handle_update_agent_reported_inventory),
+        )
+        .route(
+            ::rpc::service_path!("GetDpuInfoList"),
+            post(handle_get_dpu_info_list),
+        )
+        .route(
+            ::rpc::service_path!("FindInterfaces"),
+            post(handle_find_interfaces),
+        )
+        // ForgeApiClient needs a working Version route for connection retrying
+        .route(::rpc::service_path!("Version"), post(handle_version))
+        .fallback(handler)
+        .with_state(state)
+}
+
 /// Health check. When this responds we know the mock server is ready.
 async fn handle_up() -> &'static str {
     "OK"
@@ -443,8 +665,15 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             .num_netconf_fetches
             .fetch_add(1, Ordering::SeqCst);
     }
-    let virtualization_type = state.lock().await.virtualization_type;
-    let config_version = format!("V{}-T{}", 1, now().timestamp_micros());
+    let (virtualization_type, loopback_ip_override) = {
+        let state = state.lock().await;
+        (state.virtualization_type, state.loopback_ip_override)
+    };
+    let config_version = if loopback_ip_override.is_some() {
+        DHCP_GATE_CONFIG_VERSION.to_string()
+    } else {
+        format!("V{}-T{}", 1, now().timestamp_micros())
+    };
 
     let vpc_peer_prefixes = match virtualization_type {
         VpcVirtualizationType::EthernetVirtualizer => {
@@ -484,7 +713,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vpc_peer_vnis: vec![1025186, 1025197],
         prefix: Some("192.168.0.1/32".to_string()),
         fqdn: "host1".to_string(),
-        booturl: None,
+        booturl: loopback_ip_override.map(|_| "http://[2001:db8::80]/boot.efi".to_string()),
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -921,7 +1150,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vni_device: "".to_string(),
 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {
-            loopback_ip: "127.0.0.1".to_string(),
+            loopback_ip: loopback_ip_override.unwrap_or("127.0.0.1").to_string(),
             loopback_ip_v6: None,
             quarantine_state: None,
         }),
@@ -937,7 +1166,10 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         ),
         vpc_vni: None,
         route_servers: vec![],
-        remote_id: "".to_string(),
+        remote_id: loopback_ip_override
+            .map(|_| "test-dpu")
+            .unwrap_or_default()
+            .to_string(),
         deny_prefixes: vec!["1.1.1.1/32".to_string()],
         site_fabric_prefixes: vec!["2.2.2.2/32".to_string()],
         site_fabric_null_routes: None,
@@ -945,7 +1177,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vpc_isolation_behavior: rpc::forge::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         deprecated_deny_prefixes: vec![],
         enable_dhcp: true,
-        host_interface_id: None,
+        host_interface_id: loopback_ip_override
+            .map(|_| "11111111-1111-1111-1111-111111111111".to_string()),
         min_dpu_functioning_links: None,
         is_primary_dpu: true,
         dpu_network_pinger_type: Some("HbnExec".to_string()),
@@ -961,15 +1194,15 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
 
 async fn handle_record_netstat(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
-) -> impl IntoResponse {
-    {
-        state
-            .lock()
-            .await
-            .num_health_reports
-            .fetch_add(1, Ordering::SeqCst);
-    }
-    common::respond(())
+    body: Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    let payload = body.get(5..).ok_or(StatusCode::BAD_REQUEST)?;
+    let status =
+        rpc::forge::DpuNetworkStatus::decode(payload).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut state = state.lock().await;
+    state.num_health_reports.fetch_add(1, Ordering::SeqCst);
+    state.last_network_status = Some(status);
+    Ok(common::respond(()))
 }
 
 async fn handle_dpu_agent_upgrade_check(

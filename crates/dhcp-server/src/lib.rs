@@ -25,7 +25,11 @@ mod rpc;
 pub mod util;
 
 use ::rpc::forge_tls_client::ForgeClientConfig;
-use carbide_rpc_utils::dhcp::{DhcpConfig, HostConfig};
+use carbide_rpc_utils::dhcp::{
+    DhcpConfig, DhcpDataError, DhcpV4Config, DhcpV6ServerId, HostConfig,
+};
+
+use crate::errors::DhcpError;
 
 /// Runtime configuration shared by the DHCPv4 and DHCPv6 packet paths.
 #[derive(Debug, Clone)]
@@ -37,6 +41,32 @@ pub struct Config {
 }
 
 impl Config {
+    /// `ipv4` returns this generation's DHCPv4 settings, or `None` when
+    /// DHCPv4 is disabled. Incomplete IPv4 configuration is an error.
+    pub fn ipv4(&self) -> Result<Option<DhcpV4Config>, DhcpDataError> {
+        self.dhcp_config.ipv4()
+    }
+
+    /// Return this generation's DHCPv6 identity, after retained identity has
+    /// been applied by the configuration loader.
+    pub fn server_identifier(&self) -> Result<DhcpV6ServerId, DhcpDataError> {
+        self.dhcp_config.server_identifier()
+    }
+
+    /// Return the preferred and valid stateful DHCPv6 lifetimes in seconds.
+    /// Both must be nonzero, and the preferred lifetime must not exceed the valid lifetime.
+    pub fn stateful_lifetimes(&self) -> Result<(u32, u32), DhcpError> {
+        let preferred_lifetime = self.dhcp_config.dhcpv6_preferred_lifetime_secs;
+        let valid_lifetime = self.dhcp_config.dhcpv6_valid_lifetime_secs;
+        if preferred_lifetime == 0 || valid_lifetime == 0 || preferred_lifetime > valid_lifetime {
+            return Err(DhcpError::InvalidDhcpV6Lifetimes {
+                preferred_lifetime_secs: preferred_lifetime,
+                valid_lifetime_secs: valid_lifetime,
+            });
+        }
+        Ok((preferred_lifetime, valid_lifetime))
+    }
+
     /// Build one immutable server configuration for a listener generation.
     pub fn new(
         dhcp_config: DhcpConfig,

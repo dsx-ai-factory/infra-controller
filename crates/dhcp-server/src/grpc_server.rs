@@ -24,7 +24,7 @@ use carbide_rpc_utils::dhcp::{
     InterfaceInfoV6 as ModelInterfaceInfoV6,
 };
 use carbide_uuid::machine::MachineInterfaceId;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 mod proto {
@@ -48,16 +48,35 @@ use proto::{
 
 /// Messages sent from the gRPC handlers to the main restart loop.
 pub(super) enum ControlRequest {
-    /// Write new config YAML and immediately restart the DHCP server.
-    /// The restart loop skips the restart if the config is unchanged.
+    /// Stage replacement YAML and apply it when interfaces are supplied.
+    /// A running server restarts when configuration or interfaces change.
     UpdateAndReload {
         dhcp_yaml: String,
         host_yaml: Option<String>,
         interfaces: Vec<String>,
+        applied: oneshot::Sender<Result<(), ApplyError>>,
     },
     /// Stop the DHCP server.  The gRPC control server stays up so that a
     /// subsequent UpdateAndReload can restart the DHCP server.
     Stop,
+}
+
+/// Separates invalid caller configuration from failures reading or applying it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ApplyError {
+    #[error("{0}")]
+    InvalidConfig(#[source] DhcpError),
+    #[error("{0}")]
+    Internal(#[from] DhcpError),
+}
+
+impl From<ApplyError> for Status {
+    fn from(error: ApplyError) -> Self {
+        match error {
+            ApplyError::InvalidConfig(error) => Status::invalid_argument(error.to_string()),
+            ApplyError::Internal(error) => Status::internal(error.to_string()),
+        }
+    }
 }
 
 // ── Proto → model conversions ─────────────────────────────────────────────────
@@ -81,12 +100,17 @@ impl TryFrom<proto::DhcpConfig> for ModelDhcpConfig {
                 .iter()
                 .map(|s| s.parse())
                 .collect::<Result<Vec<_>, _>>()?,
-            carbide_provisioning_server_ipv4: c.carbide_provisioning_server_ipv4.parse()?,
+            carbide_provisioning_server_ipv4: (!c.carbide_provisioning_server_ipv4.is_empty())
+                .then(|| c.carbide_provisioning_server_ipv4.parse())
+                .transpose()?,
             carbide_provisioning_server_ipv6: c
                 .carbide_provisioning_server_ipv6
                 .map(|address| address.parse())
                 .transpose()?,
-            carbide_dhcp_server: c.carbide_dhcp_server.parse()?,
+            carbide_dhcp_server: (!c.carbide_dhcp_server.is_empty())
+                .then(|| c.carbide_dhcp_server.parse())
+                .transpose()?,
+            dhcpv6_server_id: c.dhcpv6_server_id.map(TryInto::try_into).transpose()?,
             carbide_nameservers_v6: c
                 .carbide_nameservers_v6
                 .iter()
@@ -181,9 +205,9 @@ struct DhcpServerControlService {
 
 #[tonic::async_trait]
 impl DhcpServerControl for DhcpServerControlService {
-    /// Converts the incoming typed config to YAML, forwards it to the control
-    /// loop, and triggers an immediate reload.  The control loop skips the
-    /// restart if the incoming config is identical to the active config on disk.
+    /// Wait for the control loop to persist and apply the config, not for sockets
+    /// to become ready. A timeout can leave an already-started apply in progress;
+    /// retrying the complete replacement is safe.
     async fn update_and_reload_config(
         &self,
         request: Request<UpdateAndReloadConfigRequest>,
@@ -194,6 +218,9 @@ impl DhcpServerControl for DhcpServerControlService {
             .dhcp_config
             .ok_or_else(|| Status::invalid_argument("dhcp_config is required"))?;
         let model_dhcp = ModelDhcpConfig::try_from(proto_dhcp)
+            .map_err(|e| Status::invalid_argument(format!("invalid dhcp_config: {e}")))?;
+        model_dhcp
+            .ipv4()
             .map_err(|e| Status::invalid_argument(format!("invalid dhcp_config: {e}")))?;
         let dhcp_yaml = serde_yaml::to_string(&model_dhcp)
             .map_err(|e| Status::internal(format!("failed to serialise dhcp_config: {e}")))?;
@@ -208,16 +235,32 @@ impl DhcpServerControl for DhcpServerControlService {
             None
         };
 
+        let (applied, result) = oneshot::channel();
         self.ctrl_tx
-            .send(ControlRequest::UpdateAndReload {
+            .try_send(ControlRequest::UpdateAndReload {
                 dhcp_yaml,
                 host_yaml,
                 interfaces: req.interfaces,
+                applied,
             })
-            .await
-            .map_err(|_| Status::internal("control channel closed"))?;
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    Status::resource_exhausted("config update queue full")
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    Status::unavailable("control channel closed")
+                }
+            })?;
 
-        tracing::debug!("UpdateAndReloadConfig accepted");
+        // Four queued updates and one active update bound accepted work. The
+        // caller waits at most 30 seconds, including time in that queue.
+        tokio::time::timeout(std::time::Duration::from_secs(30), result)
+            .await
+            .map_err(|_| Status::deadline_exceeded("config apply exceeded 30 seconds"))?
+            .map_err(|_| Status::unavailable("config apply stopped without a result"))?
+            .map_err(Status::from)?;
+
+        tracing::debug!("UpdateAndReloadConfig applied");
         Ok(Response::new(UpdateAndReloadConfigResponse {}))
     }
 
@@ -282,11 +325,278 @@ pub(super) async fn run_grpc_server(addr: SocketAddr, ctrl_tx: mpsc::Sender<Cont
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[test]
+    fn control_rpc_rejects_invalid_config_and_applies_a_valid_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let live = directory.path().join("dhcp.yaml");
+        let host = directory.path().join("host.yaml");
+        let staged = directory.path().join("dhcp.yaml_new");
+        let staged_host = directory.path().join("host.yaml_new");
+        let sidecar = directory.path().join("dhcp.yaml.duid");
+        let args = crate::command_line::Args {
+            interfaces: Vec::new(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            relay_response_port: 67,
+            dhcp_config: live.display().to_string(),
+            host_config: Some(host.display().to_string()),
+            forge_root_ca_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+            mode: crate::command_line::ServerMode::Controller,
+            grpc_listen_addr: None,
+            metrics_listen_addr: None,
+            validate_config: None,
+        };
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://{address}")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        drop(reservation);
+        runtime.block_on(async {
+            let exercise = async {
+                let channel = loop {
+                    if let Ok(channel) = endpoint.connect().await {
+                        break channel;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                };
+                let mut client = tonic::client::Grpc::new(channel);
+                let path = tonic::codegen::http::uri::PathAndQuery::from_static(
+                    "/dhcp_server_control.DhcpServerControl/UpdateAndReloadConfig",
+                );
+                let request = |dhcpv6_server_id| UpdateAndReloadConfigRequest {
+                    dhcp_config: Some(proto::DhcpConfig {
+                        lease_time_secs: 600,
+                        dhcpv6_server_id,
+                        ..Default::default()
+                    }),
+                    host_config: None,
+                    interfaces: vec!["lo".to_string()],
+                };
+
+                client.ready().await.unwrap();
+                let rejected: Result<Response<UpdateAndReloadConfigResponse>, Status> = client
+                    .unary(
+                        Request::new(request(None)),
+                        path.clone(),
+                        tonic_prost::ProstCodec::default(),
+                    )
+                    .await;
+                // Missing identity passes RPC conversion and fails in the control loop.
+                let status = rejected.unwrap_err();
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(status.message().contains("DHCPv6 server identifier"));
+                for path in [&live, &host, &staged, &staged_host, &sidecar] {
+                    assert!(!path.exists(), "rejected update wrote {}", path.display());
+                }
+
+                let identity =
+                    carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("test-dpu").unwrap();
+                let mut multiple_interfaces = request(Some(identity.as_bytes().to_vec()));
+                multiple_interfaces
+                    .interfaces
+                    .push("second-interface".to_string());
+                client.ready().await.unwrap();
+                let rejected: Result<Response<UpdateAndReloadConfigResponse>, Status> = client
+                    .unary(
+                        Request::new(multiple_interfaces),
+                        path.clone(),
+                        tonic_prost::ProstCodec::default(),
+                    )
+                    .await;
+                let status = rejected.unwrap_err();
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(status.message().contains("only 1 is supported"));
+                for path in [&live, &host, &staged, &staged_host, &sidecar] {
+                    assert!(
+                        !path.exists(),
+                        "rejected interfaces wrote {}",
+                        path.display()
+                    );
+                }
+
+                client.ready().await.unwrap();
+                let _: Response<UpdateAndReloadConfigResponse> = client
+                    .unary(
+                        Request::new(request(Some(identity.as_bytes().to_vec()))),
+                        path.clone(),
+                        tonic_prost::ProstCodec::default(),
+                    )
+                    .await
+                    .unwrap();
+                let applied: ModelDhcpConfig =
+                    serde_yaml::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+                assert_eq!(applied.ipv4().unwrap(), None);
+                assert_eq!(applied.lease_time_secs, 600);
+                assert_eq!(applied.dhcpv6_server_id.as_ref(), Some(&identity));
+                assert_eq!(std::fs::read(&sidecar).unwrap(), identity.as_bytes());
+                assert!(!staged.exists());
+                assert!(!staged_host.exists());
+
+                // Stored corruption is a server failure even though the caller
+                // can provide a valid replacement identity.
+                std::fs::write(&sidecar, b"corrupt identity").unwrap();
+                client.ready().await.unwrap();
+                let rejected: Result<Response<UpdateAndReloadConfigResponse>, Status> = client
+                    .unary(
+                        Request::new(request(Some(identity.as_bytes().to_vec()))),
+                        path,
+                        tonic_prost::ProstCodec::default(),
+                    )
+                    .await;
+                let status = rejected.unwrap_err();
+                assert_eq!(status.code(), tonic::Code::Internal);
+                assert!(status.message().contains("dhcp.yaml.duid"));
+                assert_eq!(std::fs::read(&sidecar).unwrap(), b"corrupt identity");
+            };
+            tokio::select! {
+                result = crate::run_with_grpc_control(args, address, 0) => {
+                    panic!("control loop exited during configuration updates: {result:?}");
+                }
+                result = tokio::time::timeout(Duration::from_secs(10), exercise) => {
+                    result.expect("configuration RPC sequence did not finish");
+                }
+            }
+        });
+        // Stop every background task before its configuration directory is removed.
+        drop(runtime);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_waits_for_apply_and_returns_its_failure() {
+        let identity = carbide_rpc_utils::dhcp::DhcpV6ServerId::from_remote_id("test-dpu").unwrap();
+        for applied_result in [
+            Ok(()),
+            Err(ApplyError::Internal(DhcpError::IoError(
+                std::io::Error::other("identity storage unavailable"),
+            ))),
+        ] {
+            let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
+            let service = DhcpServerControlService { ctrl_tx };
+            let request = Request::new(UpdateAndReloadConfigRequest {
+                dhcp_config: Some(if applied_result.is_ok() {
+                    proto::DhcpConfig {
+                        dhcpv6_server_id: Some(identity.as_bytes().to_vec()),
+                        ..Default::default()
+                    }
+                } else {
+                    proto::DhcpConfig {
+                        carbide_provisioning_server_ipv4: "192.0.2.2".to_string(),
+                        carbide_dhcp_server: "192.0.2.1".to_string(),
+                        ..Default::default()
+                    }
+                }),
+                host_config: None,
+                interfaces: vec!["lo".to_string()],
+            });
+            let update = service.update_and_reload_config(request);
+            tokio::pin!(update);
+            let control = tokio::select! {
+                result = &mut update => panic!("update returned before apply: {result:?}"),
+                control = ctrl_rx.recv() => control.unwrap(),
+            };
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut update)
+                    .await
+                    .is_err()
+            );
+            let ControlRequest::UpdateAndReload {
+                dhcp_yaml, applied, ..
+            } = control
+            else {
+                panic!("expected update control request");
+            };
+            if applied_result.is_ok() {
+                let config: ModelDhcpConfig = serde_yaml::from_str(&dhcp_yaml).unwrap();
+                assert_eq!(config.carbide_provisioning_server_ipv4, None);
+                assert_eq!(config.carbide_dhcp_server, None);
+                assert_eq!(config.dhcpv6_server_id.as_ref(), Some(&identity));
+            }
+            let expected_error = applied_result.as_ref().err().map(ToString::to_string);
+            applied.send(applied_result).unwrap();
+            match (expected_error, update.await) {
+                (None, Ok(_)) => {}
+                (Some(message), Err(status)) => {
+                    assert_eq!(status.code(), tonic::Code::Internal);
+                    assert_eq!(status.message(), message);
+                }
+                (_, result) => panic!("unexpected apply response: {result:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_reports_queue_and_completion_failures() {
+        enum Failure {
+            Full,
+            Closed,
+            DroppedResult,
+            Deadline,
+        }
+        for (failure, expected) in [
+            (Failure::Full, tonic::Code::ResourceExhausted),
+            (Failure::Closed, tonic::Code::Unavailable),
+            (Failure::DroppedResult, tonic::Code::Unavailable),
+            (Failure::Deadline, tonic::Code::DeadlineExceeded),
+        ] {
+            let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
+            let service = DhcpServerControlService { ctrl_tx };
+            let update =
+                service.update_and_reload_config(Request::new(UpdateAndReloadConfigRequest {
+                    dhcp_config: Some(proto::DhcpConfig {
+                        carbide_provisioning_server_ipv4: "192.0.2.2".to_string(),
+                        carbide_dhcp_server: "192.0.2.1".to_string(),
+                        ..Default::default()
+                    }),
+                    host_config: None,
+                    interfaces: vec!["lo".to_string()],
+                }));
+            tokio::pin!(update);
+            let status = match failure {
+                Failure::Full => {
+                    service.ctrl_tx.try_send(ControlRequest::Stop).unwrap();
+                    update.await.unwrap_err()
+                }
+                Failure::Closed => {
+                    drop(ctrl_rx);
+                    update.await.unwrap_err()
+                }
+                Failure::DroppedResult | Failure::Deadline => {
+                    let control = tokio::select! {
+                        result = &mut update => panic!("update returned before completion: {result:?}"),
+                        control = ctrl_rx.recv() => control.unwrap(),
+                    };
+                    let ControlRequest::UpdateAndReload { applied, .. } = control else {
+                        panic!("expected update");
+                    };
+                    if matches!(failure, Failure::DroppedResult) {
+                        drop(applied);
+                        update.await.unwrap_err()
+                    } else {
+                        tokio::time::advance(Duration::from_secs(30)).await;
+                        let status = update.await.unwrap_err();
+                        assert!(
+                            applied.is_closed(),
+                            "expired caller must abandon its queued work"
+                        );
+                        status
+                    }
+                }
+            };
+            assert_eq!(status.code(), expected);
+        }
+    }
 
     type InterfaceIpv4Summary = (Option<Ipv4Addr>, Option<Ipv4Addr>, Option<String>);
 
@@ -296,6 +606,8 @@ mod tests {
             .map_err(drop)
     }
 
+    // IPv6 provisioning changes must not swap the distinct DHCPv4 server and
+    // provisioning addresses as the control request becomes a model.
     #[test]
     fn provisioning_ipv6_requires_an_ipv6_address_when_present() {
         scenarios!(run = |address: Option<&str>| {
@@ -305,7 +617,14 @@ mod tests {
                     carbide_provisioning_server_ipv6: address.map(str::to_string),
                     ..Default::default()
                 })
-                    .map(|config| config.carbide_provisioning_server_ipv6)
+                    .map(|config| {
+                        assert_eq!(config.carbide_dhcp_server, Some(Ipv4Addr::new(192, 0, 2, 1)));
+                        assert_eq!(
+                            config.carbide_provisioning_server_ipv4,
+                            Some(Ipv4Addr::new(192, 0, 2, 10)),
+                        );
+                        config.carbide_provisioning_server_ipv6
+                    })
                     .map_err(drop)
             };
             "optional IPv6 provisioning source" {

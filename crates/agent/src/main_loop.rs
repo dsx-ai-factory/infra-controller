@@ -54,6 +54,7 @@ use crate::dpu::route::{DpuRoutePlan, IpRoute, Route};
 use crate::duppet::{SummaryFormat, SyncOptions};
 use crate::ethernet_virtualization::{
     InterfaceTranslationMode, NvueClientContext, NvueUpdateFlavor, ServiceAddresses,
+    managed_host_ipv4_loopback,
 };
 use crate::fmds_client::{FmdsUpdater, register_external_connection_metric};
 use crate::health::HealthCheckParams;
@@ -1128,7 +1129,11 @@ impl MainLoop {
                             },
                         };
 
-                    let update_result = if let Some(err) = supplemental_config_error {
+                    let update_result = if let Err(error) =
+                        require_dhcp_before_ipv6_only_network_update(&conf, &dhcp_result)
+                    {
+                        Err(error)
+                    } else if let Some(err) = supplemental_config_error {
                         Err(err)
                     } else if self
                         .current_network_version
@@ -1934,6 +1939,25 @@ ATF: v2.2(release):4.9.3-")
     }
 
     // This method will either reboot a card or just return ok.
+    Ok(())
+}
+
+/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates,
+/// including later network-policy changes that configure DHCP. Secondary admin
+/// DPUs only stop DHCP, so a failed stop must not delay their NVUE isolation.
+/// Any DHCP error still leaves the network version pending for the next retry.
+fn require_dhcp_before_ipv6_only_network_update(
+    config: &rpc::ManagedHostNetworkConfigResponse,
+    dhcp_result: &eyre::Result<bool>,
+) -> eyre::Result<()> {
+    let Some(host) = &config.managed_host_config else {
+        return Ok(());
+    };
+    let stops_dhcp = config.use_admin_network && !config.is_primary_dpu;
+    if !stops_dhcp && managed_host_ipv4_loopback(host)?.is_none() && dhcp_result.is_err() {
+        // The caller reports the original DHCP error alongside this gate error.
+        eyre::bail!("IPv6-only network update is waiting for DHCP");
+    }
     Ok(())
 }
 

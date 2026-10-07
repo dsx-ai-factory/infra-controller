@@ -23,7 +23,7 @@ use std::time::Duration;
 use carbide_dhcp_server::modes::dpu::Dpu;
 use carbide_dhcp_server::packet_handler_v6::process_packet;
 use carbide_dhcp_server::util::get_socket_v6;
-use carbide_rpc_utils::dhcp::{InterfaceInfo, InterfaceInfoV6};
+use carbide_rpc_utils::dhcp::{DhcpV6ServerId, InterfaceInfo, InterfaceInfoV6};
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use dhcproto::v6::{
@@ -42,6 +42,64 @@ use common::{
 };
 
 const INTERFACE: &str = "eth0";
+
+#[tokio::test]
+async fn ipv6_only_server_accepts_renew_with_its_advertised_identity() {
+    let address = "2001:db8::20".parse().unwrap();
+    let server_id = DhcpV6ServerId::from_remote_id("test-dpu").unwrap();
+    let mut options = base_dhcp_config(None);
+    options.carbide_dhcp_server = None;
+    options.carbide_provisioning_server_ipv4 = None;
+    options.dhcpv6_server_id = Some(server_id.clone());
+    let config = dpu_config_with_options(
+        BTreeMap::from([(
+            INTERFACE.to_string(),
+            InterfaceInfo {
+                ipv6: Some(InterfaceInfoV6 {
+                    address: Some(address),
+                    prefix: "2001:db8::/64".to_string(),
+                }),
+                ..Default::default()
+            },
+        )]),
+        options,
+    );
+    assert_eq!(config.ipv4().unwrap(), None);
+    let mut cache = machine_cache();
+    let mut selected_server = None;
+    for (message_type, response_type) in [
+        (MessageType::Solicit, MessageType::Advertise),
+        (MessageType::Renew, MessageType::Reply),
+    ] {
+        let request = client_message(message_type, DUID_LL, Some(address), selected_server);
+        let packet = process_packet(
+            &encode(&request),
+            Ipv6Addr::LOCALHOST,
+            &config,
+            INTERFACE,
+            &Dpu {},
+            &mut cache,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response = decode_response(&packet);
+        assert_eq!(response.msg_type(), response_type);
+        let Some(DhcpOption::ServerId(advertised_id)) = response.opts().get(OptionCode::ServerId)
+        else {
+            panic!("response must identify the IPv6-only server");
+        };
+        assert_eq!(advertised_id, server_id.as_bytes());
+        let Some(DhcpOption::IAAddr(binding)) =
+            response_ia_na(&response).opts.get(OptionCode::IAAddr)
+        else {
+            panic!("response must retain the IPv6 binding");
+        };
+        assert_eq!(binding.addr, address);
+        // RENEW selects the identity learned from ADVERTISE, not an IPv4 seed.
+        selected_server = Some(advertised_id.clone());
+    }
+}
 
 #[tokio::test]
 async fn boot_options_follow_configuration_and_client_requests() {
