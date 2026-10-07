@@ -276,7 +276,7 @@ nico-api:
       metallb.universe.tf/loadBalancerIPs: "10.x.x.x"
 ```
 
-Services with external LoadBalancer support: `nico-api`, `nico-dhcp`, `nico-dns`, `nico-ntp`, `nico-pxe`, and `nico-ssh-console-rs`.
+Services with external LoadBalancer support: `nico-api`, `nico-dhcp`, `nico-dns`, `nico-ntp`, `nico-pxe`, `nico-ssh-console-rs`, and `unbound`.
 
 For StatefulSet-based services (`nico-dns`, `nico-ntp`), per-pod LoadBalancer IPs can be assigned:
 
@@ -306,9 +306,12 @@ makes no assumption beyond passing the annotations through.
   their own UDP and TCP (or port 80 and 8080) Services share one IP. The key is
   `externalService.sharedIpAnnotation` (default
   `metallb.universe.tf/allow-shared-ip`). Change it for a controller that uses
-  a different key, or set it to `""` to omit it. An operator annotation with
-  the same key overrides the built-in value, and the rendered Service never
-  contains a duplicate key.
+  a different key, or set it to `""` to omit it. An operator annotation
+  overrides the built-in value only when its key matches
+  `externalService.sharedIpAnnotation` exactly. MetalLB also accepts
+  `metallb.io/allow-shared-ip`, but the chart merges by key string, so an
+  operator annotation with the other spelling is rendered next to the built-in
+  one instead of replacing it.
 - Other charts pass `externalService.annotations` (or `perPodAnnotations`)
   through unchanged. Add the controller's sharing annotation there to join a
   group.
@@ -361,8 +364,12 @@ source IPs.
 
 The sharing rules above are MetalLB's. For another load-balancer controller,
 confirm its sharing annotation key, whether it supports IP sharing at all, and
-its `Local` policy rules before relying on this plan. If it does not share
-IPs, set `nico-pxe.externalService.alternatePort: 0` to keep PXE on one IP.
+its `Local` policy rules before relying on this plan. Both `nico-pxe` ports
+are in use: UEFI HTTP boot fetches iPXE from port 8080, and DPU agents reach
+the PXE server on port 80. The two `nico-pxe` Services exist for those two
+clients and share one IP. A controller that cannot share IPs needs a single
+Service that exposes both ports, which the chart does not render, so do not
+set `alternatePort: 0` to work around it.
 
 ## Architecture
 

@@ -130,6 +130,10 @@ def check_vips(stream, metallb_stream=None):
                     errors.append(f"{component}.{name} needs loadBalancerIPs from your MetalLB pool")
                     break
                 owner = f"{component}.{name}[{index}]"
+                # A shared VIP needs the same MetalLB sharing value on every Service that uses it.
+                groups = {str(value) for key, value in (entry or {}).items()
+                          if key in ("metallb.universe.tf/allow-shared-ip", "metallb.io/allow-shared-ip")}
+                group = groups.pop() if len(groups) == 1 else None
                 for value in vips:
                     for vip in str(value).split(","):
                         try:
@@ -152,11 +156,12 @@ def check_vips(stream, metallb_stream=None):
                             errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {families}")
                             continue
                         # Normalize addresses, but do not count annotation aliases as separate Services.
-                        if seen_vips.get(address) == owner:
+                        if seen_vips.get(address, (None, None))[0] == owner:
                             continue
-                        if address in seen_vips:
-                            warnings.append(f"VIP {address} is assigned to more than one service (each service needs a unique IP)")
-                        seen_vips[address] = owner
+                        if address in seen_vips and (group is None or seen_vips[address][1] != group):
+                            warnings.append(f"VIP {address} is shared by more than one service; sharing requires "
+                                            "the same allow-shared-ip annotation value on every service that uses it")
+                        seen_vips[address] = (owner, group)
                         # Missing rendered pools retain the existing format-only validation behavior.
                         if pools and not any(first.version == address.version and first <= address <= last
                                              for first, last in pools):

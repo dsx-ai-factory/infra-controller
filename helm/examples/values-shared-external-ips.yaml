@@ -1,10 +1,23 @@
 ## =============================================================================
-## Shared External IPs — NICo Bare Metal Manager
+## Shared External IPs - NICo Bare Metal Manager
 ## =============================================================================
 ## Overlay that places the external LoadBalancer Services on eight IPs by
 ## letting compatible Services share one IP, differentiated by protocol and
 ## port. Apply it on top of your site values, for example values-full.yaml.
-## Every port stays at its default, so clients need no changes.
+##
+## The overlay sets the LoadBalancer IP of every external Service (nico-api,
+## nico-pxe, nico-ssh-console-rs, nico-dhcp, unbound, each nico-dns replica,
+## and each nico-ntp replica) and the three DHCP hook parameters that
+## advertise them: nameservers, ntpServer, and provisioningServer. Replace the
+## EXAMPLE addresses with addresses from your pool and keep the hook
+## parameters in step with the Services they point at. Ports stay at their
+## defaults. Clients that already use these addresses need no changes, but a
+## changed address or resolver changes what DHCP hands out.
+##
+## nameservers advertises the unbound IP, not a nico-dns IP: nico-dns is
+## authoritative only and does not recurse, so managed machines use unbound
+## for all lookups (docs/provisioning/ip-and-network-configuration.md,
+## section 3.2).
 ##
 ## Install from the repository root with:
 ##   helm install nico ./helm -n nico-system --create-namespace \
@@ -50,7 +63,7 @@ nico-dhcp:
   config:
     kea:
       hookParameters:
-        nameservers: "10.0.0.12"                      # unbound (shared IP)
+        nameservers: "10.0.0.12"                      # unbound (shared IP), see header
         ntpServer: "10.0.0.30,10.0.0.31,10.0.0.32"    # nico-ntp replicas
         provisioningServer: "10.0.0.11"               # nico-pxe
 
@@ -64,9 +77,9 @@ unbound:
       metallb.universe.tf/allow-shared-ip: "nico-shared"
 
 ## Per-replica endpoints are preserved: one IP per DNS replica and one per
-## NTP replica, matching the default replica counts.
+## NTP replica. The lists match the default replica counts; add an entry for
+## each extra replica your site runs.
 nico-dns:
-  replicas: 2
   externalService:
     enabled: true
     perPodAnnotations:
@@ -75,7 +88,6 @@ nico-dns:
 
 nico-ntp:
   enabled: true
-  replicas: 3
   externalService:
     enabled: true
     externalTrafficPolicy: Local

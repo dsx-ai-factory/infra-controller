@@ -13,14 +13,20 @@ tests:
       - notExists:
           path: spec.externalTrafficPolicy
       - notExists:
+          path: spec.ipFamilyPolicy
+      - notExists:
+          path: spec.ipFamilies
+      - notExists:
           path: metadata.annotations
 
-  - it: overrides the external port and traffic policy and passes annotations through
+  - it: overrides the external port, traffic policy, and address family and passes annotations through
     set:
       externalService:
         enabled: true
         port: 2222
         externalTrafficPolicy: Local
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
         annotations:
           metallb.universe.tf/allow-shared-ip: "nico-shared"
     asserts:
@@ -30,6 +36,12 @@ tests:
       - equal:
           path: spec.externalTrafficPolicy
           value: Local
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
       - equal:
           path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
           value: nico-shared

@@ -6,7 +6,7 @@ hosts use these VIPs as their resolver to reach the .forge zone. Two Services
 Set one address per family with externalService.annotations, for example:
   metallb.io/loadBalancerIPs: "192.0.2.53,2001:db8::53"
 */}}
-{{- $annotations := include "unbound.externalAnnotations" . | fromYaml }}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" .Values.externalService "group" (printf "%s-external" (include "unbound.name" .)) "annotations" .Values.externalService.annotations) | fromYaml }}
 ---
 apiVersion: v1
 kind: Service

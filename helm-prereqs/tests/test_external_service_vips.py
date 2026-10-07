@@ -358,7 +358,32 @@ spec:
             self.assertIn("ERROR: nico-dhcp.v6ExternalService: VIP 2001:db8::67 is not within any MetalLB IPAddressPool", result.stdout)
             self.assertNotIn("VIP 192.0.2.10", result.stdout)
             self.assertEqual(result.stdout.count("WARNING:"), 1)
-            self.assertIn("WARNING: VIP 2001:db8::67 is assigned to more than one service", result.stdout)
+            self.assertIn("WARNING: VIP 2001:db8::67 is shared by more than one service", result.stdout)
+
+    def test_shared_vip_sharing_annotation(self):
+        """Accept a VIP shared under one MetalLB sharing value and warn when the values differ."""
+        cases = [
+            ("same sharing value", "nico-shared", []),
+            ("different sharing values", "other",
+             ["VIP 192.0.2.12 is shared by more than one service; sharing requires "
+              "the same allow-shared-ip annotation value on every service that uses it"]),
+        ]
+        for name, unbound_group, expected in cases:
+            with self.subTest(name=name):
+                values = {
+                    "nico-dhcp": {"externalService": {"enabled": True, "annotations": {
+                        "metallb.universe.tf/loadBalancerIPs": "192.0.2.12",
+                        "metallb.universe.tf/allow-shared-ip": "nico-shared",
+                    }}},
+                    "unbound": {"externalService": {"enabled": True, "annotations": {
+                        "metallb.io/loadBalancerIPs": "192.0.2.12",
+                        "metallb.io/allow-shared-ip": unbound_group,
+                    }}},
+                }
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, [])
+                self.assertEqual(warnings, expected)
+                self.assertEqual(pool_errors, [])
 
     def test_parser_failures_exit_nonzero(self):
         """Keep missing dependencies and malformed YAML distinguishable from a clean preflight result."""

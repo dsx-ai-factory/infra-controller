@@ -17,6 +17,17 @@ tests:
           path: spec.ports[0]
           value: { name: ntp, protocol: UDP, port: 123, targetPort: 123 }
 
+  - it: keeps Local when the key is absent
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+        externalTrafficPolicy: null
+    asserts:
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+
   - it: omits the policy when cleared so Kubernetes applies Cluster
     set:
       replicas: 1

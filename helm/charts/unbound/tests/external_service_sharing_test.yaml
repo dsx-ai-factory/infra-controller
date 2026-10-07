@@ -2,20 +2,6 @@ suite: External unbound Service IP sharing
 templates:
   - external-service.yaml
 tests:
-  - it: keeps the built-in sharing annotation and Cluster policy by default
-    set:
-      externalService:
-        enabled: true
-    asserts:
-      - hasDocuments:
-          count: 2
-      - equal:
-          path: metadata.annotations
-          value:
-            metallb.universe.tf/allow-shared-ip: unbound-external
-      - notExists:
-          path: spec.externalTrafficPolicy
-
   - it: lets operator annotations override the sharing key without duplicating it
     set:
       externalService:

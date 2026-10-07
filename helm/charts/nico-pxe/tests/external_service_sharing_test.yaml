@@ -75,6 +75,24 @@ tests:
           value: { port: 8081, targetPort: 8080, name: http, protocol: TCP }
         documentIndex: 1
 
+  - it: keeps port 80 and the sharing annotation when the keys are absent
+    set:
+      externalService:
+        enabled: true
+        alternatePort: null
+        sharedIpAnnotation: null
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/allow-shared-ip: nico-pxe
+      - equal:
+          path: spec.ports[0].port
+          value: 80
+        documentIndex: 1
+
   - it: omits the second Service when alternatePort is 0
     set:
       externalService:

@@ -1,7 +1,12 @@
 {{- if .Values.externalService.enabled }}
-{{- $annotations := include "nico-pxe.externalAnnotations" . | fromYaml }}
-{{- $alternatePort := int .Values.externalService.alternatePort }}
-{{- if and $alternatePort (eq $alternatePort (int (.Values.externalService.port | default 8080))) }}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" .Values.externalService "group" (include "nico-pxe.name" .) "annotations" .Values.externalService.annotations) | fromYaml }}
+{{- $port := int (.Values.externalService.port | default 8080) }}
+{{- /* An absent alternatePort keeps port 80, which DPU agents use; an explicit 0 omits the Service. */}}
+{{- $alternatePort := 80 }}
+{{- if hasKey .Values.externalService "alternatePort" }}
+{{- $alternatePort = int .Values.externalService.alternatePort }}
+{{- end }}
+{{- if and $alternatePort (eq $alternatePort $port) }}
 {{- fail (printf "nico-pxe: externalService.port and externalService.alternatePort are both %d; use different ports or set alternatePort to 0" $alternatePort) }}
 {{- end }}
 apiVersion: v1
@@ -32,7 +37,7 @@ spec:
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:
-    - port: {{ .Values.externalService.port | default 8080 }}
+    - port: {{ $port }}
       targetPort: 8080
       name: http
       protocol: TCP

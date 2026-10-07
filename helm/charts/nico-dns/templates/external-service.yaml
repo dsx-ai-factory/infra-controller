@@ -1,7 +1,12 @@
 {{- if .Values.externalService.enabled }}
 {{- $replicas := int .Values.replicas }}
 {{- range $i := until $replicas }}
-{{- $annotations := include "nico-dns.externalAnnotations" (dict "root" $ "index" $i) | fromYaml }}
+{{- $perPod := $.Values.externalService.perPodAnnotations }}
+{{- $podAnnotations := dict }}
+{{- if and $perPod (gt (len $perPod) $i) }}
+{{- $podAnnotations = index $perPod $i }}
+{{- end }}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" $.Values.externalService "group" (printf "%s-instance-%d" (include "nico-dns.name" $) $i) "annotations" $podAnnotations) | fromYaml }}
 ---
 apiVersion: v1
 kind: Service
